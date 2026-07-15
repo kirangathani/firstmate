@@ -1,0 +1,87 @@
+# treehouse.toml: config for the treehouse worktree pool (github.com/kunchenguid/treehouse).
+# treehouse maintains a pool of reusable git worktrees under {root}/.treehouse/ so several
+# AI agents can work on this repo in parallel. firstmate acquires one per task via
+# `treehouse get --lease` - including for tasks on firstmate ITSELF, which is why this
+# repo has a pool of its own: the primary checkout must stay on the default branch while
+# an agent branches and commits inside a pooled worktree.
+#
+# IMPORTANT (verified against treehouse v2.0.0, 2026-07-15): a [hooks] table in this
+# repo-level file is IGNORED by design ("Hooks in repo-level treehouse.toml are ignored
+# for safety", treehouse README). Worktree pre-warm hooks therefore live in the
+# machine-local user-level config at ~/.config/treehouse/config.toml, guarded by this
+# repo's origin URL so they no-op for other repos. The hook installed there is mirrored
+# verbatim at the bottom of this file so it can be reproduced on a new machine.
+#
+# This is a Bash project: no package manager, no lockfile, no per-worktree dependency
+# tree to install. So there is almost nothing to pre-warm, and the hook is deliberately
+# minimal.
+#
+# What the post_create hook warms, and why:
+#   - ShellCheck : the ONE pinned version bin/fm-lint.sh demands (it reads
+#                `command -v shellcheck` and hard-fails on a version mismatch, exit 127
+#                when absent). bin/fm-lint.sh is the single owner of the lint definition
+#                and is what BOTH gates run - .github/workflows/ci.yml and the
+#                .no-mistakes.yaml pre-push lint - so a worktree without ShellCheck
+#                cannot run the lint gate that CI will apply to its work. The hook
+#                installs the exact pinned build by delegating to the repo's own
+#                bin/fm-install-shellcheck.sh (which verifies the release tarball's
+#                SHA-256), targeting $HOME/.local/bin, which is already on PATH.
+#                It is version-guarded: it downloads only when the resolved `shellcheck`
+#                is not the version bin/fm-lint.sh --required-version prints, so it is a
+#                no-op on every subsequent worktree create, and it follows the pin
+#                automatically if the pinned version is bumped.
+#                NOTE this is the one hook here that writes OUTSIDE the worktree: the
+#                tool is machine-global by nature (fm-lint.sh resolves it from PATH), so
+#                it cannot be warmed per-worktree. It writes nothing into the worktree,
+#                which therefore stays clean.
+# Deliberately NOT warmed:
+#   - tmux, jq, tasks-axi : the other tools the CI test job needs. These are machine
+#                provisioning, not worktree setup, and no pooled worktree can fix them:
+#                tmux and tasks-axi are already installed on this machine; jq currently
+#                is NOT (verified 2026-07-15: `command -v jq` finds nothing), which makes
+#                the snapshot tests print "skip: jq not found" rather than fail, and
+#                installing it needs apt/sudo. ShellCheck is the one exception warmed
+#                above because the repo pins an exact version - a missing or mismatched
+#                ShellCheck hard-fails bin/fm-lint.sh, so the lint gate simply cannot run
+#                without it, whereas jq's absence only downgrades tests to skips.
+#   - projects/, state/, data/, config/, .no-mistakes/ : the captain's personal fleet
+#                paths. All gitignored, and CI has an explicit invariant that they must
+#                never be tracked (`git ls-files -- data state config projects
+#                .no-mistakes` must be empty). They are per-fleet runtime state, not
+#                setup: the test suite creates its own temp state and passes in a fresh
+#                worktree without them. Copying them in would give a worktree agent a
+#                live view of the running fleet's state, which is exactly what pooled
+#                isolation is for.
+#   - nothing else : no npm/pip/cargo manifest exists in this repo, so there is no
+#                dependency tree to install.
+
+# Pool size cap: treehouse default. Comfortably above the number of concurrent agents.
+max_trees = 16
+
+# Worktree root: empty = treehouse default ($HOME), i.e. pools live under
+# ~/.treehouse/. The existing pool for this repo already lives there.
+root = ""
+
+# --- Mirror of this repo's entry in the post_create list of
+# --- ~/.config/treehouse/config.toml (documentation only; treehouse does not read hooks
+# --- from this file). post_create is a LIST: treehouse runs each entry sequentially via
+# --- its own `/bin/sh -c` in the worktree dir, so each repo contributes ONE guarded
+# --- entry that exits 0 immediately for any other repo. The guard matches ONLY the
+# --- captain's fork (origin, github.com/kirangathani/firstmate); a clone whose origin is
+# --- the read-only upstream github.com/kunchenguid/firstmate is deliberately not
+# --- matched, so this never fires against an upstream checkout. To set up a new machine,
+# --- add this entry to the [hooks] post_create list of ~/.config/treehouse/config.toml:
+#
+# '''
+# set -u
+# case "$(git remote get-url origin 2>/dev/null)" in
+#   *kirangathani/firstmate|*kirangathani/firstmate.git|*kirangathani/firstmate/) ;;
+#   *) exit 0 ;;
+# esac
+# want="$(bin/fm-lint.sh --required-version)"
+# have="$(shellcheck --version 2>/dev/null | awk '/^version:/ {print $2; exit}')"
+# if [ -n "$want" ] && [ "$want" != "$have" ]; then
+#   echo "treehouse post_create: installing pinned ShellCheck $want into ~/.local/bin" 1>&2
+#   bin/fm-install-shellcheck.sh "$HOME/.local/bin" 1>&2
+# fi
+# '''
