@@ -24,6 +24,13 @@
 # Extra args must not include --repo or -R because the repo is parsed from the
 # PR URL.
 #
+# Test-keep gate: after recording and before merging, bin/fm-assert-tests-kept.sh
+# must confirm every test identifier present on the authoritative base is still
+# present on the PR branch. A missing identifier is a hard refusal with no
+# override flag, and a check that cannot run at all also refuses, because a
+# merge that cannot be verified must not proceed silently. This gate is
+# firstmate-side, so it protects every repo including ones with no PR CI.
+#
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -81,6 +88,24 @@ reject_repo_overrides "$@" || exit 1
 
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || { echo "error: fm-pr-check did not record pr=$URL in $META; refusing to merge" >&2; exit 1; }
+
+set +e
+"$SCRIPT_DIR/fm-assert-tests-kept.sh" "$ID"
+kept_rc=$?
+set -e
+case "$kept_rc" in
+  0) ;;
+  1)
+    echo "error: test identifiers present on the base are missing from the PR branch (listed above); refusing to merge" >&2
+    echo "error: restore or re-add those tests on the PR branch (a rename must keep the old assertion or land with the base updated first), then re-run fm-pr-merge.sh" >&2
+    exit 1
+    ;;
+  *)
+    echo "error: could not verify the base's tests are kept (fm-assert-tests-kept.sh exit $kept_rc, see above); refusing to merge unverified" >&2
+    echo "error: repair the task's worktree/project so the check can run, then re-run fm-pr-merge.sh" >&2
+    exit 1
+    ;;
+esac
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then
