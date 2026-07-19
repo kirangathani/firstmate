@@ -14,6 +14,10 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) a branch missing a test identifier the base already had is refused
+#       before gh-axi pr merge (bin/fm-assert-tests-kept.sh gate); the clean
+#       branch in (a)/(c)/(e)/(g) passing through that same gate covers the
+#       merge-normally side
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -23,22 +27,35 @@ fm_git_identity fmtest fmtest@example.invalid
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
 
-# Build a fresh sandbox for one test case: a state dir with a task meta and a
-# fakebin with a gh-axi mock that records how it was invoked. Echoes the case dir.
+# Build a fresh sandbox for one test case: a state dir with a task meta, a
+# fakebin with a gh-axi mock that records how it was invoked, and a real
+# project repo plus fm/task-x1 worktree (identical to main, one baseline shell
+# test) so the bin/fm-assert-tests-kept.sh merge gate can resolve and pass.
+# Echoes the case dir.
 make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$fakebin"
+  touch "$case_dir/state/.last-watcher-beat"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=no-mistakes"
-  # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
-  # stat and simply skips the pr_head lookup via `gh` in that case, so give it
-  # one that resolves for cases that want pr_head recorded.
+  git init -q -b main "$case_dir/project" 2>/dev/null || {
+    git init -q "$case_dir/project"
+    git -C "$case_dir/project" checkout -q -b main
+  }
+  mkdir -p "$case_dir/project/tests"
+  cat > "$case_dir/project/tests/app.test.sh" <<'EOF'
+#!/usr/bin/env bash
+pass "alpha holds"
+EOF
+  git -C "$case_dir/project" add -A
+  git -C "$case_dir/project" commit -qm baseline
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
   printf '%s\n' "$case_dir"
 }
 
@@ -280,6 +297,36 @@ test_method_equals_merge_method_not_overridden() {
   pass "fm-pr-merge respects --method=<value> as an explicit merge method"
 }
 
+test_missing_base_test_refuses_before_merge() {
+  local case_dir rc
+  case_dir=$(make_case test-keep-refuses)
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  : > "$case_dir/gh-axi.log"
+
+  cat > "$case_dir/wt/tests/app.test.sh" <<'EOF'
+#!/usr/bin/env bash
+EOF
+  git -C "$case_dir/wt" add -A
+  git -C "$case_dir/wt" commit -qm "drop alpha"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "test-keep-refuses: fm-pr-merge should refuse"
+  assert_grep 'missing: tests/app.test.sh::alpha holds' "$case_dir/stdout" \
+    "test-keep-refuses: the vanished assertion was not reported by name"
+  assert_grep 'refusing to merge' "$case_dir/stderr" \
+    "test-keep-refuses: refusal did not explain itself"
+  assert_grep 'pr=https://github.com/example/repo/pull/31' "$case_dir/state/task-x1.meta" \
+    "test-keep-refuses: pr= should still be recorded before the gate refuses"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "test-keep-refuses: gh-axi pr merge was invoked despite a missing base test"
+  pass "fm-pr-merge refuses to merge when a base test identifier is missing from the branch"
+}
+
 test_parses_pr_url_for_gh_axi() {
   local case_dir
   case_dir=$(make_case url-parsing)
@@ -304,4 +351,5 @@ test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
+test_missing_base_test_refuses_before_merge
 test_parses_pr_url_for_gh_axi
