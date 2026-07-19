@@ -88,6 +88,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
+  supersessions/<project>.md  captain-approved test-assertion supersessions consumed by bin/fm-pr-merge.sh's test-keep gate (entry format in its header); LOCAL, gitignored; created lazily by captain approval only, never auto-generated, absent means no approvals
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
@@ -463,6 +464,8 @@ This do-not-fight rule does not license evidence commits in firstmate's own repo
 With `yolo=on`, firstmate makes those calls itself without asking - decide ask-user findings on your judgment under the Validate ownership contract below, and run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain.
 Never merge a red PR even under yolo.
 `bin/fm-pr-merge.sh` always records `pr=` and records `pr_head=` when available before merging, parses the full `https://github.com/<owner>/<repo>/pull/<n>` URL into `gh-axi pr merge <n> --repo <owner>/<repo>`, and defaults to `--squash` unless an explicit merge method is forwarded after `--`; this holds even on a repo with no PR CI where the "checks green" signal that normally triggers `bin/fm-pr-check.sh` never fires - do not call `gh-axi pr merge` directly for a task's PR, or the recording step can be silently skipped and a later `fm-teardown.sh` has nothing to verify a squash merge against.
+`bin/fm-pr-merge.sh` also gates every merge on `bin/fm-assert-tests-kept.sh`: a test assertion the base already had that is missing or failing on the PR branch is a hard refusal, even under yolo.
+On that refusal, rebase damage is the crewmate's to fix (redo the conflict resolution and the gate clears itself), while a deliberate supersession of the base's asserted behavior is a product decision that is never the crewmate's or firstmate's to make - relay it to the captain, and only a captain-approved entry in `data/supersessions/<project>.md` (entry format in `bin/fm-pr-merge.sh`'s header) lets that merge proceed.
 After any merge you perform without asking the captain, post a one-line "merged <full PR URL or local main> after checks passed" FYI so the captain keeps a trail.
 
 ### Validate
