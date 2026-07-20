@@ -393,8 +393,23 @@ EOF
 
 # --- output ordering ----------------------------------------------------------
 
+# write_node_mask <dir>: emit a BASH_ENV file making `command -v node` fail so
+# node reads as missing even where the host installed it under BASE_PATH.
+write_node_mask() {
+  local mask="$1/mask-node.bash"
+  cat > "$mask" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = node ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
+  printf '%s\n' "$mask"
+}
+
 test_output_ordering_diagnostics_lead() {
-  local rec root home fakebin out lock_line boot_line wake_line context_line fleet_line next_line
+  local rec root home fakebin mask out lock_line boot_line wake_line context_line fleet_line next_line
   rec=$(new_world ordering)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -402,11 +417,15 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
+  # Removing the fakebin stub is not enough on hosts where apt/nodesource put
+  # node under BASE_PATH (/usr/bin/node), so also mask command -v like the
+  # tmux mask in test_herdr_backend_diagnostics_follow_real_session_start.
   rm -f "$fakebin/node"
+  mask=$(write_node_mask "$home")
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -578,19 +597,21 @@ EOF
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
-  local rec root home fakebin out
+  local rec root home fakebin mask out
   rec=$(new_world composition)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  # Mask node beyond the fakebin removal; see test_output_ordering_diagnostics_lead.
   rm -f "$fakebin/node"
+  mask=$(write_node_mask "$home")
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
