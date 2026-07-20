@@ -95,6 +95,28 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
+# fm-pr-merge.sh gates every merge on fm-assert-tests-kept.sh, which needs a
+# real project repo and task worktree resolvable from the task meta. Give a
+# case that expects a SUCCESSFUL merge a minimal green baseline the gate can
+# verify: a project on main with one test file and a task worktree on fm/<id>.
+# Args: case_dir task_id [worktree_path (default case_dir/wt)]
+write_gate_project() {
+  local dir=$1 id=$2 wt=${3:-$1/wt}
+  git init -q -b main "$dir/project" 2>/dev/null || {
+    git init -q "$dir/project"
+    git -C "$dir/project" checkout -q -b main
+  }
+  mkdir -p "$dir/project/tests"
+  cat > "$dir/project/tests/app.test.sh" <<'EOF'
+#!/usr/bin/env bash
+pass "alpha holds"
+EOF
+  git -C "$dir/project" add -A
+  git -C "$dir/project" commit -qm baseline
+  rmdir "$wt" 2>/dev/null || true
+  git -C "$dir/project" worktree add -q -b "fm/$id" "$wt" main
+}
+
 write_poll_meta() {
   local state=$1 id=$2 url=$3
   fm_write_meta "$state/$id.meta" \
@@ -466,6 +488,7 @@ test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count
   dir=$(make_case valid-recording)
   write_task_meta "$dir"
+  write_gate_project "$dir" task-a
   expected=0123456789abcdef0123456789abcdef01234567
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
     > "$dir/stdout" 2> "$dir/stderr" || fail "valid direct check failed"
@@ -511,6 +534,7 @@ test_valid_recording_and_merge_derivation() {
 
   dir=$(make_case lifecycle-compatible-id)
   write_task_meta "$dir" Task_A.1
+  write_gate_project "$dir" Task_A.1
   run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 \
     > "$dir/stdout" 2> "$dir/stderr" \
     || fail "safe lifecycle-compatible task ID could not use the PR merge flow"
@@ -531,9 +555,11 @@ SH
 
   for id in _noncanonical aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
     dir=$(make_case "legacy-teardown-${id:0:12}")
+    # The gate worktree exists only around the merge step below, so both
+    # teardown invocations still exercise the missing-worktree path.
     fm_write_meta "$dir/home/state/$id.meta" \
       "window=fm-$id" \
-      "worktree=$dir/missing-worktree" \
+      "worktree=$dir/gate-wt" \
       "project=$dir/project" \
       'kind=ship' \
       'mode=local-only'
@@ -564,11 +590,13 @@ SH
       --carry-count 0 --carry-ts 1700000000 --carry-platform x --carry-max 280 \
       > "$dir/x-link.out" 2> "$dir/x-link.err" \
       || fail "path-safe legacy task ID could not link an X request"
+    write_gate_project "$dir" "$id" "$dir/gate-wt"
     run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
       > "$dir/merge.out" 2> "$dir/merge.err" \
       || fail "path-safe legacy task ID could not use the PR merge flow"
     fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
       || fail "path-safe legacy task ID did not publish an authenticated poll"
+    rm -rf "$dir/gate-wt"
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
       "$TEARDOWN" "$id" --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
       || fail "legacy path-safe task ID could not be torn down"
