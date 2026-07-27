@@ -32,6 +32,8 @@
 # shell files whose baseline run is not green (fixtures or imports that do not
 # resolve), are LOUDLY reported on stderr as verified by name only - check 2
 # falls back to check 1 for them rather than silently reporting success.
+# The per-language detect/run/parse mechanics of check 2 are owned by
+# bin/fm-test-exec-lib.sh; this script orchestrates them.
 #
 # Report only: a legitimately renamed or intentionally removed test IS reported,
 # because removing an assertion main already had must be justified, not silent.
@@ -72,6 +74,9 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
+
+# shellcheck source=bin/fm-test-exec-lib.sh
+. "$SCRIPT_DIR/fm-test-exec-lib.sh"
 
 # Deterministic collation for sort/comm regardless of the host locale.
 export LC_ALL=C
@@ -299,27 +304,8 @@ enumerate_tests "$COMPARE_REF" > "$TMPD/branch"
 comm -23 "$TMPD/base" "$TMPD/branch" > "$TMPD/missing"
 
 # --- check 2: run the base's own test files against the branch's code --------
-
-TIMEOUT_CMD=()
-if command -v timeout >/dev/null 2>&1; then
-  TIMEOUT_CMD=(timeout "${FM_ASSERT_TESTS_TIMEOUT:-300}")
-fi
-
-# run_test_file <tree> <file> <out>: run one test file from the tree root with
-# firstmate's own env overrides stripped, stdout to <out>, stderr discarded.
-run_test_file() {
-  local tree=$1 f=$2 out=$3
-  (
-    cd "$tree" || exit 125
-    FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_HOME='' \
-      ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} bash "$f"
-  ) > "$out" 2>/dev/null
-}
-
-# ok_names <run-output> <out>: the sorted unique `ok - <name>` set of one run.
-ok_names() {
-  sed -n 's/^ok - //p' "$1" | sort -u > "$2"
-}
+# The runner interface (runner_for_file / run_base_test_file / passing_idents)
+# is owned by bin/fm-test-exec-lib.sh, sourced above.
 
 : > "$TMPD/failing"
 : > "$TMPD/nameonly"
@@ -343,7 +329,8 @@ if [ -s "$TMPD/shellfiles" ]; then
       printf '%s (absent from the materialized base tree)\n' "$f" >> "$TMPD/nameonly"
       continue
     fi
-    if run_test_file "$TMPD/base-tree" "$f" "$TMPD/run-base"; then :; else
+    runner=$(runner_for_file "$WT" "$f")
+    if run_base_test_file "$runner" "$TMPD/base-tree" "$f" "$TMPD/run-base" "$TMPD/run-base.err"; then :; else
       printf '%s (fails on the base itself, exit %s)\n' "$f" "$?" >> "$TMPD/nameonly"
       continue
     fi
@@ -353,9 +340,9 @@ if [ -s "$TMPD/shellfiles" ]; then
     mkdir -p "$TMPD/branch-tree/$(dirname "$f")"
     cp "$TMPD/base-tree/$f" "$TMPD/branch-tree/$f"
     branch_rc=0
-    run_test_file "$TMPD/branch-tree" "$f" "$TMPD/run-branch" || branch_rc=$?
-    ok_names "$TMPD/run-base" "$TMPD/ok-base"
-    ok_names "$TMPD/run-branch" "$TMPD/ok-branch"
+    run_base_test_file "$runner" "$TMPD/branch-tree" "$f" "$TMPD/run-branch" "$TMPD/run-branch.err" || branch_rc=$?
+    passing_idents "$runner" "$TMPD/run-base" > "$TMPD/ok-base"
+    passing_idents "$runner" "$TMPD/run-branch" > "$TMPD/ok-branch"
     comm -23 "$TMPD/ok-base" "$TMPD/ok-branch" > "$TMPD/ok-delta"
     delta_seen=0
     while IFS= read -r name; do
