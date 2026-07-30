@@ -248,6 +248,7 @@ Fleet state lives in each task's session-provider backend (tmux by hard default,
 For herdr, respawning after a server-restored layout closes and replaces confirmed no-agent or dead task-tab husks instead of requiring manual tab cleanup.
 At session start, confirmed-dead secondmate agent endpoints are closed and relaunched through the same secondmate spawn path, while ambiguous liveness reads are left untouched to avoid duplicate supervisors.
 Use `/stow` before an intentional reset when the conversation may hold durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.
+What reconciliation cannot rebuild is the session's own reasoning, so `/handoff` writes that volatile half to a `data/HANDOFF-*.md` document and arms a `SessionStart` pickup that points the next session at it, whether the reset was a deliberate `/clear` or a crash; [handoff.md](handoff.md) owns the mechanism and its verification evidence.
 
 ## Development notes
 
