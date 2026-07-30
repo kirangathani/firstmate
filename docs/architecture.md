@@ -173,6 +173,12 @@ The firstmate repo itself is the exception: its `.no-mistakes/` directory is loc
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state.
 Between recording and merging it also runs `bin/fm-assert-tests-kept.sh`, refusing the merge when a test identifier present on the authoritative base is missing from the PR branch, when a base assertion no longer passes against the branch's code, when a base test file could not be executed at all, or when the check cannot run at all; the check's own header owns the finding classes, output contract, and exit codes.
+
+INTERIM UNEXECUTED-CLASS EXCEPTION (delete this paragraph when PR4 of the kept-exec series lands the finding-class contract in `bin/fm-pr-merge.sh`'s own header): today an `unexecuted:` finding refuses a merge only when the run carries no supersession-excused finding.
+`bin/fm-pr-merge.sh`'s exit-1 handler parses only `missing:` and `failing:` lines and skips `unexecuted:` ones, so on a project whose `data/supersessions/<project>.md` already holds a captain-approved entry covering one of that run's `missing:`/`failing:` identifiers the excused path is taken (excused greater than zero, unexcused zero) and the merge proceeds even though `unexecuted:` findings were reported.
+That is the current interim behavior and not the intended contract.
+`bin/fm-assert-tests-kept.sh` itself still exits 1 on any missing, failing, or unexecuted finding, so the gap is in this consumer's handling of the classes, not in the detector.
+
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
