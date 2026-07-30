@@ -33,6 +33,17 @@
 #       never by truncating the branch or the 26-char ULID run id
 #   (r) a worktree that disappears mid-watch reads as teardown, never as the
 #       detached HEAD an empty symbolic-ref answer would otherwise imply
+#   (s) a probe killed by a signal renders pending, never a green that means
+#       nothing ran, and the perl bounding arm reports 128+signal like timeout
+#   (t) a frame is bounded to the row budget the way it is bounded to columns:
+#       the 24-line worst case fits a plain pane whole, a smaller budget drops
+#       only legend lines and says how many, and the header always survives
+#   (u) the probe's scratch dir is removed even when a watch frame is interrupted
+#   (v) --watch takes a task id or a numeric interval in either order, and names
+#       a unit-suffixed interval as the mistyped interval it is
+#   (w) a no-CI-checks marker gets its own banner, never CI GREEN
+#   (x) a parked run with no resolvable gate name says so, and never invents a
+#       findings breakdown it could not read
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -136,6 +147,25 @@ run:
     r1,warning,a.go,,auto-fix,ignored error
     r2,error,b.go,,ask-user,changes product behavior
 gate: review
+EOF
+}
+
+# Parked, but nothing in the answer names a gate: no `gate:` scalar, no gate
+# block, and no steps row parked at awaiting_approval/fix_review. The steps
+# table still says which step is being worked, which is the only highlight the
+# diagram can honestly carry here.
+run_parked_unnamed() {  # <branch> [findings-line]
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "abc1234"
+${2:+  $2}
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,fixing,0,0
 EOF
 }
 
@@ -769,6 +799,273 @@ test_header_keeps_task_id() {
   pass "task identity outranks the fixed header prefix"
 }
 
+# (s) a signal-killed probe is not a result. The bounding ladder must report the
+# signal death, and the gate must land on pending: run_bounded's rc IS the
+# merge-gate verdict, so an rc that swallowed the signal renders "missing 0 /
+# failing 0 ok" over a suite that never ran.
+test_perl_bounding_arm_reports_signals() {
+  reset_fakes
+  local prog rc=0
+  prog=$(sed -n "s/^PERL_BOUND_PROG='\\(.*\\)'\$/\\1/p" "$NM_FLOW")
+  [ -n "$prog" ] || fail "could not extract PERL_BOUND_PROG from $NM_FLOW"
+  case "$prog" in
+    *'& 127'*) : ;;
+    *) fail "the perl bounding arm no longer inspects the signal bits: $prog" ;;
+  esac
+  if ! command -v perl >/dev/null 2>&1; then
+    pass "perl bounding arm preserves the signal case (static check, no perl here)"
+    return
+  fi
+  perl -e "$prog" 10 bash -c 'kill -9 $$' >/dev/null 2>&1 || rc=$?
+  expect_code 137 "$rc" "a SIGKILLed child is reported as 128+9, never as 0"
+  rc=0
+  perl -e "$prog" 10 bash -c 'exit 3' >/dev/null 2>&1 || rc=$?
+  expect_code 3 "$rc" "an ordinary non-zero exit is still passed through"
+  rc=0
+  perl -e "$prog" 1 sleep 30 >/dev/null 2>&1 || rc=$?
+  expect_code 124 "$rc" "expiry is still reported as 124"
+  pass "the perl bounding arm reports 128+signal like timeout does"
+}
+
+test_tests_gate_signal_killed_probe() {
+  reset_fakes
+  local d out
+  d=$(new_case tests-gate-signal)
+  make_fakebin "$d" >/dev/null
+  # A copy of the viewer with a sibling probe that dies by SIGKILL: SCRIPT_DIR
+  # resolves the probe next to the script, so this is the only way to make the
+  # real invocation come back signal-killed rather than merely non-zero.
+  mkdir -p "$d/bin"
+  cp "$NM_FLOW" "$d/bin/fm-nm-flow.sh"
+  cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
+#!/usr/bin/env bash
+kill -9 $$
+SH
+  chmod +x "$d/bin/fm-nm-flow.sh" "$d/bin/fm-assert-tests-kept.sh"
+  mkdir -p "$d/wt/tests"
+  git -C "$d/wt" init -q
+  printf 'base\n' > "$d/wt/README.md"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm base
+  git -C "$d/wt" branch -M main
+  git -C "$d/wt" checkout -qb fm/change
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    "$d/bin/fm-nm-flow.sh" --worktree "$d/wt" --tests-gate)
+  assert_contains "$out" "prior-tests: pending (check could not run, exit 137)" \
+    "a signal-killed probe lands on pending and names the exit"
+  assert_not_contains "$out" "failing 0 ok" \
+    "a signal-killed probe never renders a green result"
+  assert_not_contains "$out" "compared against base" \
+    "a signal-killed probe claims no comparison"
+  assert_not_contains "$out" "verified by name only" \
+    "a signal-killed probe carries no stale name-only count"
+  pass "a signal-killed probe renders pending, never a false green"
+}
+
+# (t) the frame is bounded to the pane's rows the way it is bounded to columns.
+# The worst case is the ordinary one: every conditional line present at once -
+# the PR line, the compared base, the name-only count and the det|LLM legend.
+test_frame_height_bounded() {
+  reset_fakes
+  local d out lines hdr box
+  d=$(new_case frame-height)
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/wt/tests"
+  git -C "$d/wt" init -q
+  cat > "$d/wt/tests/demo.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+pass "alpha"
+SH
+  chmod +x "$d/wt/tests/demo.test.sh"
+  # Never executed by check 2, so it is verified by name only -> legend line.
+  cat > "$d/wt/tests/test_demo.py" <<'PY'
+def test_alpha():
+    assert True
+PY
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm base
+  git -C "$d/wt" branch -M main
+  git -C "$d/wt" checkout -qb fm/change
+  printf 'note\n' > "$d/wt/README.md"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm "unrelated change"
+  # Task-id mode with a PR in the meta: that is what puts the PR line in the
+  # frame without a run to read one from. No .no-mistakes.yaml -> det|LLM.
+  fm_write_meta "$d/state/height-task.meta" \
+    "window=firstmate:fm-height-task" \
+    "worktree=$d/wt" \
+    "project=$d/projects/demo" \
+    "pr=https://github.com/o/r/pull/7"
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+
+  out=$(run_flow "$d" height-task --tests-gate)
+  assert_contains "$out" "PR: https://github.com/o/r/pull/7" "the PR line is present"
+  assert_contains "$out" "prior-tests: compared against base main" "the base legend is present"
+  assert_contains "$out" "verified by name only" "the name-only legend is present"
+  assert_contains "$out" "det|LLM: commands.<step>" "the det|LLM legend is present"
+  lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+  [ "$lines" = 24 ] || fail "the worst-case frame is $lines lines, expected the 24-line case"
+  assert_not_contains "$out" "legend line" "nothing is dropped inside a 24-row budget"
+  hdr=$(strip_sgr "$(printf '%s\n' "$out" | head -1)")
+  assert_contains "$hdr" "height-task" "the header survives at the default budget"
+
+  # A genuinely smaller pane: only legend lines go, the drop is stated, and the
+  # run-specific base claim outlives the fixed explanatory legends.
+  out=$(FM_NM_FLOW_ROWS=20 run_flow "$d" height-task --tests-gate)
+  lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+  [ "$lines" -le 20 ] || fail "frame is $lines lines against a 20-row budget"
+  assert_contains "$out" "legend lines dropped to fit a 20-row pane" "the drop is stated explicitly"
+  hdr=$(strip_sgr "$(printf '%s\n' "$out" | head -1)")
+  assert_contains "$hdr" "height-task" "the header is never dropped"
+  assert_contains "$out" "IDLE: no run for branch" "the banner is never dropped"
+  for box in intent rebase review test document lint push "open PR" "CI monitor" "merge gate" captain teardown; do
+    assert_contains "$out" "[ $box" "step row $box is never dropped"
+  done
+  assert_contains "$out" "prior-tests: compared against base main" \
+    "the base claim outranks the fixed legends"
+  assert_not_contains "$out" "outcomes: checks-passed" "the lowest-value legend goes first"
+
+  # A bogus override falls back to the same hard 24-row default.
+  out=$(FM_NM_FLOW_ROWS=not-a-number run_flow "$d" height-task --tests-gate)
+  lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+  [ "$lines" = 24 ] || fail "a non-numeric row override did not fall back to 24: $lines lines"
+  assert_not_contains "$out" "legend line" "the fallback budget drops nothing"
+  pass "frame height is bounded without losing the header, banner or a step row"
+}
+
+# (u) the probe's scratch dir is the only thing this viewer writes, and an
+# interrupt lands the moment the bounded probe returns - before any cleanup on
+# the return path could run.
+test_tests_gate_tmpdir_cleanup_on_interrupt() {
+  reset_fakes
+  local d pid i leftover
+  d=$(new_case tests-gate-tmpdir)
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/tmp" "$d/wt/tests"
+  git -C "$d/wt" init -q
+  cat > "$d/wt/tests/slow.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+sleep 30
+pass "alpha"
+SH
+  chmod +x "$d/wt/tests/slow.test.sh"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm base
+  git -C "$d/wt" branch -M main
+  git -C "$d/wt" checkout -qb fm/change
+  printf 'note\n' > "$d/wt/README.md"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm "unrelated change"
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+
+  # The viewer is launched directly rather than through run_flow: a backgrounded
+  # shell function makes $! the subshell, and the signal would never reach the
+  # script it wraps.
+  TMPDIR="$d/tmp" PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_NM_FLOW_TESTS_TIMEOUT=5 \
+    "$NM_FLOW" --worktree "$d/wt" --tests-gate --watch 1 >/dev/null 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 200 ]; do
+    set -- "$d"/tmp/fm-nm-flow.*
+    [ -d "$1" ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  set -- "$d"/tmp/fm-nm-flow.*
+  [ -d "$1" ] || fail "the probe never created its scratch dir under TMPDIR"
+  # TERM, not INT: a background job of a non-interactive shell starts with
+  # SIGINT ignored, and bash cannot re-trap a signal that was ignored on entry,
+  # so an INT here would be a no-op. Both land on the same handler, and the
+  # signal is delivered while the probe holds the foreground - so the handler
+  # runs the moment the probe returns, ahead of its own cleanup line.
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  leftover=$(find "$d/tmp" -maxdepth 1 -name 'fm-nm-flow.*' 2>/dev/null | head -1)
+  [ -z "$leftover" ] || fail "an interrupted probe leaked its scratch dir: $leftover"
+  pass "the probe's scratch dir is removed even when the frame is interrupted"
+}
+
+# (v) --watch before the task id must work: task ids are 26-char ULIDs, and a
+# ULID is not an interval. Only an all-digits argument is eaten as the interval,
+# and the one genuinely ambiguous shape is named rather than left to fail later.
+test_watch_argument_shapes() {
+  reset_fakes
+  local d out err rc=0 rid
+  d=$(new_case watch-args)
+  rid=01KYSAKNFRDXWKD0DF48ME438R
+  make_repo_on_branch "$d/wt" fm/watch-args
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/$rid.meta" \
+    "window=firstmate:fm-watch-args" \
+    "worktree=$d/wt" \
+    "project=$d/projects/demo"
+  FM_FAKE_AXI_STATUS="$(run_running fm/watch-args)"
+
+  out=$(FM_NM_FLOW_WATCH_MAX=1 run_flow "$d" --watch "$rid")
+  assert_contains "$out" "branch fm/watch-args" "--watch <task-id> resolves the task"
+  assert_contains "$out" "state: running @ review" "flag-first invocation renders the run"
+
+  out=$(FM_NM_FLOW_WATCH_MAX=1 run_flow "$d" --watch 2 "$rid")
+  assert_contains "$out" "branch fm/watch-args" "a numeric interval is still consumed as one"
+
+  err=$(FM_NM_FLOW_WATCH_MAX=1 run_flow "$d" --watch 5s "$rid" 2>&1 >/dev/null) || rc=$?
+  expect_code 2 "$rc" "a unit-suffixed interval is a usage error"
+  assert_contains "$err" "interval must be a whole number of seconds" \
+    "the mistyped interval is named, not left to a bare usage block"
+  assert_contains "$err" "5s" "the offending argument is quoted back"
+  pass "--watch accepts a task id or an interval in either order"
+}
+
+# (w) nothing verified must never read as a green.
+test_ci_no_checks_banner() {
+  reset_fakes
+  local d out
+  d=$(new_case ci-no-checks)
+  make_repo_on_branch "$d/wt" fm/feat-nochecks
+  make_fakebin "$d" >/dev/null
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-nochecks)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  out=$(run_flow "$d" --worktree "$d/wt")
+  assert_contains "$out" "CI: no checks reported - nothing verified" \
+    "a no-checks marker gets its own banner"
+  assert_not_contains "$out" "CI GREEN" \
+    "a no-checks marker never renders as a CI green"
+  assert_contains "$out" ">> [ merge gate  det     ]" \
+    "the run is still on its way to the merge gate"
+  pass "no CI checks reported is not rendered as CI GREEN"
+}
+
+# (x) a parked run whose gate nothing names must say exactly that, and must not
+# report a findings breakdown it never read.
+test_parked_unnamed_gate() {
+  reset_fakes
+  local d out
+  d=$(new_case parked-unnamed)
+  make_repo_on_branch "$d/wt" fm/feat-unnamed
+  make_fakebin "$d" >/dev/null
+
+  FM_FAKE_AXI_STATUS="$(run_parked_unnamed fm/feat-unnamed)"
+  out=$(run_flow "$d" --worktree "$d/wt")
+  assert_contains "$out" "PARKED at an unnamed gate: findings not readable from status" \
+    "an unresolvable gate name is stated, not invented"
+  assert_not_contains "$out" "PARKED at gate gate" "no literal gate-named-gate banner"
+  assert_not_contains "$out" "0 findings" "unknown counts are never reported as zeros"
+  assert_contains "$out" ">> [ review      LLM     ]" \
+    "the diagram keeps the highlight the steps table supports"
+
+  # The same state with findings the answer DOES report: then the breakdown is
+  # a fact and is printed.
+  FM_FAKE_AXI_STATUS="$(run_parked_unnamed fm/feat-unnamed 'findings: none')"
+  out=$(run_flow "$d" --worktree "$d/wt")
+  assert_contains "$out" "PARKED at an unnamed gate: 0 findings (0 ask-user, 0 auto-fix, 0 no-op)" \
+    "an explicit findings:none is a fact worth printing"
+  pass "an unnamed parked gate is honest about both the gate and the counts"
+}
+
 test_usage_error
 test_missing_meta
 test_task_id_resolution
@@ -791,5 +1088,12 @@ test_tests_gate_first_frame
 test_worktree_removed_mid_watch
 test_header_width_bounded
 test_header_keeps_task_id
+test_perl_bounding_arm_reports_signals
+test_tests_gate_signal_killed_probe
+test_frame_height_bounded
+test_tests_gate_tmpdir_cleanup_on_interrupt
+test_watch_argument_shapes
+test_ci_no_checks_banner
+test_parked_unnamed_gate
 
 echo "all fm-nm-flow tests passed"

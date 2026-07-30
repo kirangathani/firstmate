@@ -23,6 +23,9 @@
 #   --watch [seconds]  Clear and re-render in a loop (default every 5s) until
 #                      interrupted; without it, render once and exit. The test
 #                      hook FM_NM_FLOW_WATCH_MAX=<n> bounds the loop to n frames.
+#                      The next argument is taken as the interval only when it
+#                      is all digits, so `--watch <task-id>` works too; a
+#                      digits-plus-unit interval (5s, 10m) is refused by name.
 #   --tests-gate       Also run bin/fm-assert-tests-kept.sh ONCE (cached across
 #                      watch frames) in its explicit --worktree/--base mode and
 #                      show missing:/failing: counts in the merge-gate box.
@@ -50,6 +53,13 @@
 # partial ULID still reads as a run id while being useless to paste back into
 # the CLI - so an extreme width lets the header wrap rather than mutilating
 # either.
+#
+# Height: a frame is bounded the same way, to FM_NM_FLOW_ROWS when it is a sane
+# number, else the detected terminal height on a tty, else a hard 24 rows. Over
+# budget, only legend lines are dropped - lowest value first, never the header,
+# the banner or a step row - and the count dropped is printed where they were.
+# An unbounded frame scrolls its own header off the top of an 80x24 pane, which
+# is the one line that says which task the pane is showing.
 #
 # Step kinds: the test and lint boxes are deterministic only when the target
 # project defines commands.test / commands.lint in its .no-mistakes.yaml;
@@ -107,15 +117,33 @@ usage_error() {
 }
 
 ID="" WT_ARG="" WATCH=0 INTERVAL=5 TESTS_GATE=0
+W_NEXT="" W_DIGITS="" W_SUFFIX=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --worktree) shift; WT_ARG=${1:-}; [ -n "$WT_ARG" ] || usage_error ;;
     --watch)
       WATCH=1
-      case "${2:-}" in
+      # The interval is consumed ONLY when it is all digits, so `--watch
+      # <task-id>` works in either order (task ids are 26-char ULIDs, which
+      # begin with digits). A digits-plus-time-unit shape is the one ambiguous
+      # case worth naming: it is a mistyped interval, not a task id, and saying
+      # so beats both a bare usage block and a later "no metadata" error.
+      W_NEXT=${2:-}
+      W_DIGITS=${W_NEXT%%[!0-9]*}
+      W_SUFFIX=${W_NEXT#"$W_DIGITS"}
+      case "$W_NEXT" in
         ''|-*) : ;;
-        *[!0-9]*) usage_error ;;
-        *) INTERVAL=$2; shift ;;
+        *[!0-9]*)
+          if [ -n "$W_DIGITS" ]; then
+            case "$W_SUFFIX" in
+              s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours)
+                echo "fm-nm-flow.sh: --watch interval must be a whole number of seconds, not '$W_NEXT'" >&2
+                exit 2
+                ;;
+            esac
+          fi
+          ;;
+        *) INTERVAL=$W_NEXT; shift ;;
       esac
       [ "$INTERVAL" -ge 1 ] || INTERVAL=1
       ;;
@@ -173,15 +201,24 @@ fi
 # none of timeout/gtimeout/perl on the host it REFUSES to run the command rather
 # than falling back to an unbounded call: a single hung child would freeze a
 # watch pane forever, so callers degrade to a pending display instead. Expiry is
-# reported as 124 by all three arms.
+# reported as 124 by all three arms, and a signal death as 128+signal by all
+# three: the perl arm must reconstruct that from the wait status itself, because
+# a bare `$? >> 8` reports a SIGKILLed child as a clean exit 0 - and this rc is
+# the merge-gate verdict, so that would render a green meaning nothing ran.
 BOUND_REFUSED_RC=125
+# Held in a variable so the exit-status contract of the arm that has no
+# `timeout` to inherit it from - the only arm stock macOS takes - can be
+# exercised directly by the tests. The single quotes are the point: every $ in
+# it is perl's, not the shell's.
+# shellcheck disable=SC2016
+PERL_BOUND_PROG='my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; my $sig = $? & 127; exit($sig ? 128 + $sig : $? >> 8)'
 run_bounded() {  # <seconds> <cmd...>
   local secs=$1
   shift
   case "$HAVE_TIMEOUT" in
     timeout)  timeout "$secs" "$@" ;;
     gtimeout) gtimeout "$secs" "$@" ;;
-    perl)     perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$secs" "$@" ;;
+    perl)     perl -e "$PERL_BOUND_PROG" "$secs" "$@" ;;
     *)        return "$BOUND_REFUSED_RC" ;;
   esac
 }
@@ -245,8 +282,14 @@ nm_running_step() {
 # CI-monitor phase: `axi status` reports "waiting on checks", "checks red" and
 # "checks green, waiting on merge" all as a running ci step; the ci step's own
 # log is the only place the distinction shows (marker list verified in
-# fm-crew-state.sh). Sets CI_PHASE to green, red-failed, red-issues, waiting,
-# or empty when no marker could be read at all.
+# fm-crew-state.sh). Sets CI_PHASE to green, no-checks, red-failed, red-issues,
+# waiting, or empty when no marker could be read at all.
+#
+# The no-checks marker gets its own phase rather than folding into green: the
+# pipeline moves on the same way, but nothing was verified, and a green that
+# means nothing ran is the one thing this display must never show. The marker
+# text cannot tell a repo with no CI from checks that have yet to report, so the
+# banner asserts neither - only that no checks have been reported.
 CI_PHASE=""
 nm_ci_phase() {
   local run_id log_tail marker
@@ -260,7 +303,8 @@ nm_ci_phase() {
     | tail -1)
   [ -n "$marker" ] || return 0
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) CI_PHASE=green ;;
+    *"no CI checks reported - still monitoring"*) CI_PHASE=no-checks ;;
+    *"checks passed"*)    CI_PHASE=green ;;
     *"checks failed"*)    CI_PHASE=red-failed ;;
     *"issues detected"*)  CI_PHASE=red-issues ;;
     *)                    CI_PHASE=waiting ;;
@@ -310,6 +354,17 @@ tests_gate_base() {
 MGATE_ANN="prior-tests: pending (checked at merge)"
 MGATE_NAMEONLY=0
 MGATE_BASE=""
+# The probe's scratch dir is the only thing this viewer ever writes, so its
+# removal is registered rather than left on the return paths: in watch mode an
+# interrupt is delivered the moment the bounded probe returns, which would
+# otherwise exit past the cleanup and leak a directory per interrupted run.
+MGATE_TMPD=""
+clean_tmpd() {
+  [ -n "$MGATE_TMPD" ] && rm -rf "$MGATE_TMPD"
+  MGATE_TMPD=""
+}
+trap clean_tmpd EXIT
+trap 'clean_tmpd; exit 130' INT TERM
 run_tests_gate() {
   local base out_file missing failing
   MGATE_BASE=""
@@ -330,6 +385,7 @@ run_tests_gate() {
     MGATE_ANN="prior-tests: pending (tmp unavailable)"
     return
   }
+  MGATE_TMPD=$tmpd
   out_file="$tmpd/kept.out"
   local rc=0
   run_bounded "$TESTS_TIMEOUT" "$SCRIPT_DIR/fm-assert-tests-kept.sh" \
@@ -337,7 +393,7 @@ run_tests_gate() {
   if [ "$rc" -eq 124 ]; then
     MGATE_ANN="prior-tests: pending (probe timed out after ${TESTS_TIMEOUT}s)"
     MGATE_NAMEONLY=0
-    rm -rf "$tmpd"
+    clean_tmpd
     return
   fi
   missing=$(grep -c '^missing: ' "$out_file" || true)
@@ -348,22 +404,24 @@ run_tests_gate() {
   # lines (never the fixed WARNING header lines) keeps the number a file count,
   # and it is reported on its own legend line so the box stays inside 80 cols.
   MGATE_NAMEONLY=$(grep -c '^WARNING:[[:space:]]*name-check only: ' "$tmpd/kept.err" || true)
-  # Exit 0 = clean, exit 1 = reported missing/failing lines; anything else
-  # means the check itself did not run, so never render a false "ok". The row
-  # carries the counts alone and the base ref goes on its own legend line whole:
-  # a long default branch would otherwise push the row past 80 columns, and an
-  # elided ref would read as real while naming no ref that exists.
-  if [ "$rc" -eq 0 ] && [ "$missing" -eq 0 ] && [ "$failing" -eq 0 ]; then
-    MGATE_BASE=$base
-    MGATE_ANN="prior-tests: missing 0 / failing 0 ok"
-  elif [ "$rc" -le 1 ]; then
-    MGATE_BASE=$base
-    MGATE_ANN="prior-tests: missing $missing / failing $failing !!"
-  else
+  # Exit 0 = clean, exit 1 = reported missing/failing lines. ANY other rc - a
+  # signal death (128+n), the refusal arm, an unforeseen code - means the check
+  # itself did not run, so it lands on pending and never on a false "ok",
+  # whatever counts an empty output happens to grep to. The row carries the
+  # counts alone and the base ref goes on its own legend line whole: a long
+  # default branch would otherwise push the row past 80 columns, and an elided
+  # ref would read as real while naming no ref that exists.
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
     MGATE_ANN="prior-tests: pending (check could not run, exit $rc)"
     MGATE_NAMEONLY=0
+  elif [ "$rc" -eq 0 ] && [ "$missing" -eq 0 ] && [ "$failing" -eq 0 ]; then
+    MGATE_BASE=$base
+    MGATE_ANN="prior-tests: missing 0 / failing 0 ok"
+  else
+    MGATE_BASE=$base
+    MGATE_ANN="prior-tests: missing $missing / failing $failing !!"
   fi
-  rm -rf "$tmpd"
+  clean_tmpd
 }
 # The probe executes the base's own test files, so it is deferred past the
 # first frame: a watch pane shows the diagram immediately with the box marked
@@ -491,13 +549,35 @@ probe() {
   local awaiting
   awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
   if [ -n "$GATE" ] || [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ]; then
-    [ -n "$GATE" ] || GATE=gate
-    CURRENT=$GATE
+    local where breakdown
     F_TOTAL=$(nm_findings_total)
     F_ASK=$(nm_action_count ask-user)
     F_FIX=$(nm_action_count auto-fix)
     F_NOOP=$(nm_action_count no-op)
-    BANNER="PARKED at $GATE gate: ${F_TOTAL:-0} findings ($F_ASK ask-user, $F_FIX auto-fix, $F_NOOP no-op)"
+    # A parked run whose gate name nothing resolves is named as such: an invented
+    # "gate" would both claim a gate that does not exist and set a CURRENT that
+    # matches no box, dropping the diagram's highlight in the very state the
+    # captain most needs it. The highlight is simply left where the steps table
+    # put it instead.
+    if [ -n "$GATE" ]; then
+      CURRENT=$GATE
+      where="PARKED at $GATE gate"
+    else
+      CURRENT=$(nm_running_step)
+      where="PARKED at an unnamed gate"
+    fi
+    # Zeros here would assert there are no findings when the truth is that none
+    # could be read; only a findings[N] header or an explicit `findings: none`
+    # makes the breakdown a fact worth printing.
+    if [ -z "$F_TOTAL" ] && [ "$(strip_quotes "$(nm_field findings)")" = none ]; then
+      F_TOTAL=0
+    fi
+    if [ -n "$F_TOTAL" ]; then
+      breakdown="$F_TOTAL findings ($F_ASK ask-user, $F_FIX auto-fix, $F_NOOP no-op)"
+    else
+      breakdown="findings not readable from status"
+    fi
+    BANNER="$where: $breakdown"
     return
   fi
 
@@ -509,6 +589,11 @@ probe() {
       green)
         CURRENT=mgate
         BANNER="CI GREEN: monitoring until merge/close - merge gate + captain next"
+        return
+        ;;
+      no-checks)
+        CURRENT=mgate
+        BANNER="CI: no checks reported - nothing verified - merge gate + captain next"
         return
         ;;
       red-failed)
@@ -559,17 +644,60 @@ elif [ "$TTY" = 1 ]; then
   esac
 fi
 
+# Render height, bounded exactly the way width is: an explicit override, else
+# the detected terminal height when stdout is a tty, else the hard 24-row
+# default of a plain pane, so a non-tty frame is deterministic. A frame that
+# overflows its pane scrolls its own header - the line naming the task, branch
+# and run id - off the top, which is the one line the pane exists to show.
+ROWS=24
+if [ -n "${FM_NM_FLOW_ROWS:-}" ]; then
+  case "$FM_NM_FLOW_ROWS" in
+    *[!0-9]*) : ;;
+    *) if [ "$FM_NM_FLOW_ROWS" -ge 10 ] && [ "$FM_NM_FLOW_ROWS" -le 1000 ]; then
+         ROWS=$FM_NM_FLOW_ROWS
+       fi ;;
+  esac
+elif [ "$TTY" = 1 ]; then
+  TPUT_LINES=$(tput lines 2>/dev/null || true)
+  case "$TPUT_LINES" in
+    ''|*[!0-9]*) : ;;
+    *) if [ "$TPUT_LINES" -ge 10 ] && [ "$TPUT_LINES" -le 1000 ]; then
+         ROWS=$TPUT_LINES
+       fi ;;
+  esac
+fi
+
 RULE="------------------------------------------------------------------------------"
+
+# A frame is assembled line by line before any of it is printed, because fitting
+# it to the pane is a decision about the whole frame. Every line carries a rank:
+# rank 0 is structure - the header, the banner, the PR line, the rules, the step
+# rows, the fail loop - and is never dropped. A positive rank marks a legend
+# line, and the lowest-ranked legends go first when the frame genuinely will not
+# fit, so the run-specific claims (which base was compared, how much of it was
+# name-only) outlive the fixed explanatory text. Any drop is stated on its own
+# line: a legend that silently vanished would read as a legend that had nothing
+# to say.
+FRAME_LINES=()
+FRAME_RANK=()
+core_line() {  # <text>
+  FRAME_LINES+=("$1")
+  FRAME_RANK+=(0)
+}
+legend_line() {  # <rank> <text>
+  FRAME_LINES+=("$2")
+  FRAME_RANK+=("$1")
+}
 
 step_line() {  # <key> <label> <kind> <annotation>
   local key=$1 label=$2 kind=$3 ann=$4 rail=' | ' line
   line=$(printf '[ %-11s %-7s ]' "$label" "$kind")
   [ -n "$ann" ] && line="$line $ann"
   if [ "$key" = "$CURRENT" ]; then
-    printf '%s%s%s%s\n' ">> " "$REV" "$line" "$SGR0"
+    core_line ">> $REV$line$SGR0"
   else
     [ "$key" = teardown ] && rail=' v '
-    printf '%s%s\n' "$rail" "$line"
+    core_line "$rail$line"
   fi
 }
 
@@ -600,11 +728,13 @@ header_line() {
 }
 
 render() {
-  printf '%s\n' "$(header_line)"
-  printf '%s%s%s\n' "$BOLD" "$BANNER" "$SGR0"
+  FRAME_LINES=()
+  FRAME_RANK=()
+  core_line "$(header_line)"
+  core_line "$BOLD$BANNER$SGR0"
   local pr="${RUN_PR:-$PR_URL}"
-  [ -n "$pr" ] && printf 'PR: %s\n' "$pr"
-  printf '%s\n' "$RULE"
+  [ -n "$pr" ] && core_line "PR: $pr"
+  core_line "$RULE"
   step_line intent   intent       det       "goal the review judges against"
   step_line rebase   rebase       LLM       "!! LLM merge can drop base code; merge gate catches"
   step_line review   review       LLM       "gate: findings park run <--+"
@@ -617,26 +747,75 @@ render() {
   step_line mgate    "merge gate" det       "$MGATE_ANN"
   step_line captain  captain      human     "explicit approval (or standing yolo)"
   step_line teardown teardown     det       "after landing confirmed"
-  printf '%s\n' "$RULE"
-  printf 'outcomes: checks-passed=CI green, PR ready | passed=merged | failed | cancelled\n'
+  core_line "$RULE"
+  legend_line 1 'outcomes: checks-passed=CI green, PR ready | passed=merged | failed | cancelled'
   if [ "$FAILED_LOOP" = 1 ]; then
-    printf '%s%s%s%s\n' ">> " "$REV" "fail loop: failed/cancelled -> commit fix on same branch -> rerun at intent" "$SGR0"
+    core_line ">> ${REV}fail loop: failed/cancelled -> commit fix on same branch -> rerun at intent$SGR0"
   else
-    printf '   fail loop: failed/cancelled -> commit fix on same branch -> rerun at intent\n'
+    core_line '   fail loop: failed/cancelled -> commit fix on same branch -> rerun at intent'
   fi
-  printf 'merge gate: check 1 base test names kept; check 2 base assertions vs branch\n'
-  printf 'supersessions: captain-approved entries in data/supersessions/<project>.md\n'
+  legend_line 2 'merge gate: check 1 base test names kept; check 2 base assertions vs branch'
+  legend_line 3 'supersessions: captain-approved entries in data/supersessions/<project>.md'
   if [ -n "$MGATE_BASE" ]; then
-    printf 'prior-tests: compared against base %s\n' "$MGATE_BASE"
+    legend_line 6 "prior-tests: compared against base $MGATE_BASE"
   fi
   if [ "$MGATE_NAMEONLY" -gt 0 ]; then
     local noun=files
     [ "$MGATE_NAMEONLY" -eq 1 ] && noun='file'
-    printf 'prior-tests: %s base %s verified by name only, not by assertion\n' \
-      "$MGATE_NAMEONLY" "$noun"
+    legend_line 5 "prior-tests: $MGATE_NAMEONLY base $noun verified by name only, not by assertion"
   fi
   if [ "$KIND_TEST" = 'det|LLM' ] || [ "$KIND_LINT" = 'det|LLM' ]; then
-    printf 'det|LLM: commands.<step> not readable in .no-mistakes.yaml; det when it is set\n'
+    legend_line 4 'det|LLM: commands.<step> not readable in .no-mistakes.yaml; det when it is set'
+  fi
+  emit_frame
+}
+
+# Print the assembled frame, dropping the lowest-ranked legend lines (and only
+# legend lines) when it would otherwise overflow the pane. Kept lines stay in
+# assembly order, and the count of dropped lines is stated where they were.
+emit_frame() {
+  local n=${#FRAME_LINES[@]} i ncore=0 nleg=0 keep dropped=0 best bi taken
+  local -a drop_flag=()
+  for ((i = 0; i < n; i++)); do
+    drop_flag[i]=0
+    if [ "${FRAME_RANK[$i]}" -eq 0 ]; then
+      ncore=$((ncore + 1))
+    else
+      nleg=$((nleg + 1))
+    fi
+  done
+  if [ "$n" -gt "$ROWS" ]; then
+    # One row is spent saying what was dropped, so nothing disappears silently.
+    keep=$(( ROWS - ncore - 1 ))
+    [ "$keep" -ge 0 ] || keep=0
+    [ "$keep" -le "$nleg" ] || keep=$nleg
+    dropped=$(( nleg - keep ))
+    taken=0
+    for ((i = 0; i < n; i++)); do
+      [ "${FRAME_RANK[$i]}" -eq 0 ] || drop_flag[i]=1
+    done
+    while [ "$taken" -lt "$keep" ]; do
+      best=0
+      bi=-1
+      for ((i = 0; i < n; i++)); do
+        [ "${drop_flag[$i]}" -eq 1 ] || continue
+        if [ "${FRAME_RANK[$i]}" -gt "$best" ]; then
+          best=${FRAME_RANK[$i]}
+          bi=$i
+        fi
+      done
+      [ "$bi" -ge 0 ] || break
+      drop_flag[bi]=0
+      taken=$((taken + 1))
+    done
+  fi
+  for ((i = 0; i < n; i++)); do
+    [ "${drop_flag[$i]}" -eq 0 ] && printf '%s\n' "${FRAME_LINES[$i]}"
+  done
+  if [ "$dropped" -gt 0 ]; then
+    local noun=lines
+    [ "$dropped" -eq 1 ] && noun=line
+    printf '... %s legend %s dropped to fit a %s-row pane\n' "$dropped" "$noun" "$ROWS"
   fi
 }
 
@@ -658,7 +837,10 @@ case "$MAX_FRAMES" in ''|*[!0-9]*) MAX_FRAMES=0 ;; esac
 while :; do
   OUT=$(frame)
   if [ "$TTY" = 1 ]; then
-    printf '\033[H\033[2J%s\n' "$OUT"
+    # No trailing newline: it would advance past the last row and scroll a frame
+    # that exactly fills the pane. The non-tty branch keeps its blank-line frame
+    # separator, which is what the tests read frames back through.
+    printf '\033[H\033[2J%s' "$OUT"
   else
     printf '%s\n\n' "$OUT"
   fi
