@@ -404,11 +404,11 @@ test_teardown_removes_the_record() {
 
   # fm-teardown's own state sweep is the contract under test; drive just that
   # line's effect the way teardown does, then assert both artifacts are named.
-  assert_grep '$ID.acted' "$ROOT/bin/fm-teardown.sh" \
+  assert_grep "\$ID.acted" "$ROOT/bin/fm-teardown.sh" \
     "fm-teardown must remove the per-task ack record with the rest of the task's state"
-  assert_grep '.unactioned-$ID' "$ROOT/bin/fm-teardown.sh" \
+  assert_grep ".unactioned-\$ID" "$ROOT/bin/fm-teardown.sh" \
     "fm-teardown must remove the per-task confirm cache with the rest of the task's state"
-  assert_grep '$child_id.acted' "$ROOT/bin/fm-teardown.sh" \
+  assert_grep "\$child_id.acted" "$ROOT/bin/fm-teardown.sh" \
     "secondmate teardown must remove each child's ack record too"
   pass "fm-teardown: the ack record and confirm cache are cleaned up with the task's other state"
 }
@@ -423,7 +423,7 @@ test_teardown_removes_the_record() {
 # bin/fm-pr-merge.sh deliberately has no ack: bin/fm-pr-check.sh already acked
 # the PR-ready state before it, and teardown removes the record after.
 test_merge_local_acks() {
-  assert_grep 'fm_ack_record "$STATE" "$ID"' "$ROOT/bin/fm-merge-local.sh" \
+  assert_grep "fm_ack_record \"\$STATE\" \"\$ID\"" "$ROOT/bin/fm-merge-local.sh" \
     "the approved local-only merge must ack the state it just satisfied"
   assert_grep 'fm-ack-lib.sh' "$ROOT/bin/fm-merge-local.sh" \
     "fm-merge-local must source the ack library it calls"

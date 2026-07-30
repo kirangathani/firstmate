@@ -91,6 +91,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   supersessions/<project>.md  captain-approved test-assertion supersessions consumed by bin/fm-pr-merge.sh's test-keep gate (entry format in its header); LOCAL, gitignored; created lazily by captain approval only, never auto-generated, absent means no approvals
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  HANDOFF-<date>[-sessionN].md  volatile working state written by /handoff for the next session in this home; LOCAL, gitignored; path allocated by bin/fm-handoff.sh, read once and then consumed (section 6)
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
@@ -106,6 +107,7 @@ state/               volatile runtime signals; gitignored
   x-poll.error       generated X-mode relay diagnostic dedupe marker
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
+  .handoff-unread    path of a handoff document no session has read yet; armed by bin/fm-handoff.sh, announced by its SessionStart pickup hook, cleared only by consume
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .unactioned-*      short-lived unactioned-alarm confirm cache; never touch; removed by teardown
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
@@ -335,6 +337,10 @@ Route each piece of durable knowledge to its most specific home:
 
 When the captain invokes `/stow`, load the `stow` skill.
 It sweeps the current session for uncaptured durable knowledge, routes findings with this table, files undone next steps to the backlog, and reports whether the session is safe to reset.
+
+When the captain invokes `/handoff`, or this session is degraded enough to be worth resetting, load the `handoff` skill.
+It runs `/stow` for the durable half, then writes the volatile working state this table deliberately does not keep - in-flight reasoning, session decisions, live traps - to a `data/HANDOFF-*.md` document, arms it so the next session start in this home is pointed at that exact file, and hands the captain the reset.
+`/clear` is a harness built-in you cannot execute; the captain types it.
 
 **Delivery mode (choose at add).** `<mode>` is how a finished change reaches `main`, picked per project when you add it and recorded in the registry line (`fm-project-mode.sh` parses it; `fm-spawn` records it into each task's meta):
 

@@ -21,6 +21,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, stale watcher liveness, and unactioned direct reports |
 | `fm-ack.sh`              | Record that firstmate acted on a direct report's terminal or firstmate-owed state    |
 | `fm-ack-lib.sh`          | Shared ack record, owed-state sets, and the unactioned-direct-report predicate       |
+| `fm-handoff.sh`          | Own the handoff document's path, its unread marker, and the post-`/clear` SessionStart pickup (docs/handoff.md) |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |
 | `fm-arm-pretool-check.sh` | Stable PreToolUse transport for the watcher-arm command policy (docs/arm-pretool-check.md) |
