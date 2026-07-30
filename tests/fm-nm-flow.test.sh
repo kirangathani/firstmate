@@ -20,8 +20,9 @@
 #       shows missing/failing counts; rendering leaves the worktree clean
 #   (k) --watch honors the FM_NM_FLOW_WATCH_MAX test hook and re-renders
 #   (l) --help prints usage on stdout and exits 0
-#   (m) a name-check-only base file qualifies the merge-gate annotation with
-#       the file count instead of reading as a clean verified pass
+#   (m) a name-check-only base file is reported on its own legend line instead
+#       of reading as a clean verified pass, and the merge-gate row stays
+#       inside 80 columns
 #   (n) a red ci log marker surfaces CI RED instead of a healthy-wait banner
 #   (o) test/lint kinds come from the worktree's .no-mistakes.yaml, and fall
 #       back to det|LLM when no config is readable
@@ -84,6 +85,13 @@ new_case() {  # <name> -> echoes case dir with an empty state/
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/state"
   printf '%s\n' "$d"
+}
+
+# Reverse-video highlighting emits SGR escapes; drop them before measuring a
+# rendered row's width so the count is characters, never escape bytes.
+ESC=$(printf '\033')
+strip_sgr() {  # <text>
+  printf '%s' "$1" | sed "s/$ESC\\[[0-9;]*m//g"
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -420,9 +428,16 @@ PY
   git -C "$d/wt" commit -qm "unrelated change"
   FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
   out=$(run_flow "$d" --worktree "$d/wt" --tests-gate)
-  assert_contains "$out" "prior-tests vs main: missing 0 / failing 0 ok (1 file name-check only)" \
-    "clean result is qualified by the name-only file count"
-  pass "name-check-only files qualify the merge-gate annotation"
+  assert_contains "$out" "prior-tests vs main: missing 0 / failing 0 ok" \
+    "merge-gate box keeps its own annotation"
+  assert_contains "$out" "prior-tests: 1 base file verified by name only, not by assertion" \
+    "the name-only file count is reported on its own legend line"
+  local row width
+  row=$(printf '%s\n' "$out" | grep 'prior-tests vs main' | head -1)
+  row=$(strip_sgr "$row")
+  width=${#row}
+  [ "$width" -le 80 ] || fail "merge-gate row is $width columns: $row"
+  pass "name-check-only files get a legend line, not an overflowing row"
 }
 
 # (n) a red ci marker is surfaced, not collapsed into a healthy wait
@@ -457,7 +472,8 @@ test_step_kinds_from_config() {
   out=$(run_flow "$d" --worktree "$d/wt")
   assert_contains "$out" "[ test        det|LLM ]" "no config leaves the test kind conditional"
   assert_contains "$out" "[ lint        det|LLM ]" "no config leaves the lint kind conditional"
-  assert_contains "$out" "det|LLM: no readable .no-mistakes.yaml here" "conditional label is explained"
+  assert_contains "$out" "det|LLM: commands.<step> not readable in .no-mistakes.yaml" \
+    "conditional label is explained"
 
   cat > "$d/wt/.no-mistakes.yaml" <<'YAML'
 commands:
@@ -467,6 +483,20 @@ YAML
   assert_contains "$out" "[ test        det     ]" "commands.test makes the test step det"
   assert_contains "$out" "[ lint        LLM     ]" "absent commands.lint makes the lint step LLM"
   assert_not_contains "$out" "det|LLM" "a readable config drops the conditional label"
+
+  # A key that IS present but whose value is not readable inline must not be
+  # asserted as agent-driven; it is exactly the unknown case.
+  cat > "$d/wt/.no-mistakes.yaml" <<'YAML'
+commands:
+  test:
+    - bash tests/run.sh
+  lint: 'bin/lint.sh'
+YAML
+  out=$(run_flow "$d" --worktree "$d/wt")
+  assert_contains "$out" "[ test        det|LLM ]" "a non-inline commands.test value stays conditional"
+  assert_contains "$out" "[ lint        det     ]" "an inline commands.lint value is still det"
+  assert_contains "$out" "det|LLM: commands.<step> not readable in .no-mistakes.yaml" \
+    "the legend names what could not be read"
   pass "step kinds follow the worktree's .no-mistakes.yaml"
 }
 

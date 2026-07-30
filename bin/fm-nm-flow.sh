@@ -30,10 +30,10 @@
 #                      it executes the base's own shell test files (check 2), so
 #                      it costs real time - that is why it is opt-in, why the
 #                      first watch frame renders the box as "checking..." and
-#                      only frame 2 carries the result, and why the annotation
-#                      names how many base files that run could verify by name
-#                      only. Without the flag the merge-gate box renders as
-#                      pending.
+#                      only frame 2 carries the result, and why a legend line
+#                      under the diagram names how many base files that run
+#                      could verify by name only. Without the flag the
+#                      merge-gate box renders as pending.
 #   -h, --help         Print this usage on stdout and exit 0.
 #
 # Step kinds: the test and lint boxes are deterministic only when the target
@@ -277,8 +277,9 @@ tests_gate_base() {
 }
 
 MGATE_ANN="prior-tests: pending (checked at merge)"
+MGATE_NAMEONLY=0
 run_tests_gate() {
-  local base out_file missing failing nameonly noun qual=""
+  local base out_file missing failing
   if ! base=$(tests_gate_base); then
     MGATE_ANN="prior-tests: pending (no base ref found)"
     return
@@ -297,21 +298,18 @@ run_tests_gate() {
   # One `name-check only: <file>` line per base test file check 2 could not
   # execute; those files are verified by NAME ONLY, so a kept-name test whose
   # assertion body was rewritten would not be caught. Counting the per-file
-  # lines (never the fixed WARNING header lines) keeps the number a file count.
-  nameonly=$(grep -c '^WARNING:[[:space:]]*name-check only: ' "$tmpd/kept.err" || true)
-  if [ "$nameonly" -gt 0 ]; then
-    noun=files
-    [ "$nameonly" -eq 1 ] && noun='file'
-    qual=" ($nameonly $noun name-check only)"
-  fi
+  # lines (never the fixed WARNING header lines) keeps the number a file count,
+  # and it is reported on its own legend line so the box stays inside 80 cols.
+  MGATE_NAMEONLY=$(grep -c '^WARNING:[[:space:]]*name-check only: ' "$tmpd/kept.err" || true)
   # Exit 0 = clean, exit 1 = reported missing/failing lines; anything else
   # means the check itself did not run, so never render a false "ok".
   if [ "$rc" -eq 0 ] && [ "$missing" -eq 0 ] && [ "$failing" -eq 0 ]; then
-    MGATE_ANN="prior-tests vs $base: missing 0 / failing 0 ok$qual"
+    MGATE_ANN="prior-tests vs $base: missing 0 / failing 0 ok"
   elif [ "$rc" -le 1 ]; then
-    MGATE_ANN="prior-tests vs $base: missing $missing / failing $failing !!$qual"
+    MGATE_ANN="prior-tests vs $base: missing $missing / failing $failing !!"
   else
     MGATE_ANN="prior-tests: pending (check could not run, exit $rc)"
+    MGATE_NAMEONLY=0
   fi
   rm -rf "$tmpd"
 }
@@ -330,12 +328,13 @@ fi
 # project defines commands.test / commands.lint; without them it delegates the
 # step to an agent. Read that from the worktree's .no-mistakes.yaml with the
 # shell tools already used here (no YAML dependency): a top-level `commands:`
-# block key with a non-empty value means det, an absent `commands:` key means
-# LLM, and anything this cannot read confidently (no config, unreadable config,
-# an inline/flow `commands:` mapping) stays the conditional `det|LLM` rather
-# than asserting either.
+# block key with an inline non-empty value means det, and a key genuinely
+# absent from that block means LLM. Everything else - no config, an unreadable
+# config, an inline/flow `commands:` mapping, or a key whose value is not
+# readable inline (a nested list or mapping, or a trailing comment) - stays the
+# conditional `det|LLM` rather than asserting either.
 step_kind_from_config() {  # <commands key>
-  local cfg="" c
+  local cfg="" c block
   for c in "$WT/.no-mistakes.yaml" "$WT/.no-mistakes.yml"; do
     if [ -f "$c" ] && [ -r "$c" ]; then cfg=$c; break; fi
   done
@@ -345,9 +344,11 @@ step_kind_from_config() {  # <commands key>
     printf 'det|LLM'
     return
   fi
-  if sed -n '/^commands:[[:space:]]*\(#.*\)\{0,1\}$/,/^[^[:space:]#]/p' "$cfg" 2>/dev/null \
-      | grep -qE "^[[:space:]]+$1:[[:space:]]*[^[:space:]#]"; then
+  block=$(sed -n '/^commands:[[:space:]]*\(#.*\)\{0,1\}$/,/^[^[:space:]#]/p' "$cfg" 2>/dev/null)
+  if printf '%s\n' "$block" | grep -qE "^[[:space:]]+$1:[[:space:]]*[^[:space:]#]"; then
     printf 'det'
+  elif printf '%s\n' "$block" | grep -qE "^[[:space:]]+$1:([[:space:]]|$)"; then
+    printf 'det|LLM'
   else
     printf 'LLM'
   fi
@@ -516,8 +517,14 @@ render() {
   fi
   printf 'merge gate: check 1 base test names kept; check 2 base assertions vs branch\n'
   printf 'supersessions: captain-approved entries in data/supersessions/<project>.md\n'
+  if [ "$MGATE_NAMEONLY" -gt 0 ]; then
+    local noun=files
+    [ "$MGATE_NAMEONLY" -eq 1 ] && noun='file'
+    printf 'prior-tests: %s base %s verified by name only, not by assertion\n' \
+      "$MGATE_NAMEONLY" "$noun"
+  fi
   if [ "$KIND_TEST" = 'det|LLM' ] || [ "$KIND_LINT" = 'det|LLM' ]; then
-    printf 'det|LLM: no readable .no-mistakes.yaml here; det when commands.<step> is set\n'
+    printf 'det|LLM: commands.<step> not readable in .no-mistakes.yaml; det when it is set\n'
   fi
 }
 
