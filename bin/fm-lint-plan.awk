@@ -12,11 +12,21 @@
 # The parity invariant this planner rests on is that a file's findings depend
 # only on its own bytes plus the transitively sourced files present as input.
 # Any resolution mechanism the planner fails to model breaks that invariant
-# SILENTLY, and a silently-wrong lint gate is far worse than a slow one. Hence
-# the scan below models both mechanisms, and for any source statement or
-# shellcheck directive key it cannot confidently classify it exits non-zero so
-# bin/fm-lint.sh falls back to the whole-set reference implementation instead
-# of guessing.
+# SILENTLY, and a silently-wrong lint gate is far worse than a slow one. This
+# planner therefore does NOT parse source statements out of shell code itself:
+# successive review rounds proved that chasing shell grammar in awk keeps
+# leaking (line starts, separators, `then`/subshell positions, `function`
+# bodies, redirection prefixes). Instead, bin/fm-lint.sh runs a discovery pass
+# that asks ShellCheck itself: each file is checked ALONE, and every SC1091
+# "was not specified as input" note names exactly one followable literal
+# source target, in every syntactic position, with no parsing on our side.
+# Those discovered edges arrive here via EDGES. This file still reads each
+# script, but only its `# shellcheck` directive lines: a `source=<path>` key
+# is an edge (it can name the target of a variable-path statement, which
+# discovery also surfaces but the directive states outright), and any
+# directive key or disable= item that could change resolution in a way the
+# discovery pass cannot see makes this planner exit non-zero so bin/fm-lint.sh
+# falls back to the whole-set reference implementation instead of guessing.
 #
 # The findings ShellCheck reports for a file therefore depend on exactly two
 # things: the file's own contents, and the contents of the files it transitively
@@ -27,6 +37,9 @@
 #
 # This planner emits such closed shards. Reading:
 #   FILES  - newline-delimited canonical file list (repo-relative, cwd = repo root)
+#   EDGES  - pre-discovered source edges, one per line: "<from><TAB><target>",
+#            the target exactly as ShellCheck named it in the SC1091 note.
+#            Unset or empty means "no discovered edges".
 #   WORK   - newline-delimited subset that still needs linting (cache misses).
 #            Empty or unset means "all of FILES".
 #   JOBS   - how many shards to emit
@@ -53,29 +66,8 @@ function addedge(from, to,   key) {
 }
 
 function tripwire(f, ln, line, what) {
-  if (what == "") what = "unclassifiable source statement"
   printf "%s at %s:%d: %s\n", what, f, ln, trim(line) > "/dev/stderr"
   exit 3
-}
-
-# Classify one detected source/`.` statement (stmt starts at the keyword) and
-# record its edge, or tripwire if it fits no bucket. An unquoted target word
-# ends at the first shell metacharacter, exactly as the shell would end it.
-function srcedge(f, ln, line, stmt, fdir,   tgt) {
-  sub(/^(source|\.)[ \t]+/, "", stmt)
-  tgt = stmt
-  sub(/[ \t].*$/, "", tgt)
-  if (tgt == "" || tgt ~ /[$`]/) return
-  if (tgt ~ /\\/) tripwire(f, ln, line)
-  if (tgt ~ /^"[^"]*"$/ || tgt ~ /^'[^']*'$/)
-    tgt = substr(tgt, 2, length(tgt) - 2)
-  else if (tgt ~ /["']/) tripwire(f, ln, line)
-  else sub(/[;&|<>()].*$/, "", tgt)
-  if (tgt == "") return
-  if (tgt ~ /[]{}*?~[]/) tripwire(f, ln, line)
-  sub(/^(\.\/)+/, "", tgt)
-  addedge(f, tgt)
-  addedge(f, fdir tgt)
 }
 
 # Cost model for bin packing. ShellCheck's runtime grows faster than the line
@@ -113,105 +105,69 @@ BEGIN {
     close(WORK)
   }
 
-  # --- scan each file for source edges and count its lines ------------------
-  # Every source/`.` statement must land in one of three buckets: (1) covered
-  # by a `# shellcheck source=` directive, which then owns resolution; (2) a
-  # target containing a shell expansion ($var, ${...}, $(...), backticks),
-  # which ShellCheck cannot resolve either, so both modes agree there is no
-  # edge; (3) a variable-free literal path, an edge exactly when it names a
-  # canonical input (tried both repo-root-relative and script-dir-relative;
-  # over-inclusion is safe under the parity invariant, a missed edge is not).
-  # Anything else hits the tripwire above. ShellCheck follows a literal source
-  # wherever it sits in command position, so the scan tracks command position
-  # across the whole line: a statement is detected at the start of a line,
-  # after `;`, `&`, `&&`, `|`, `||`, `(` or `)`, after the reserved words
-  # if/elif/then/else/while/until/do/in and the `{`/`!` words, and past
-  # assignment prefixes (`VAR=x . lib`). A separator inside quotes is not a
-  # statement boundary, and scanning inside strings/heredocs stays out of
-  # scope because it would drown the tripwire in false alarms.
-  # Directive lines get the same policy: a `# shellcheck` line carrying a key
-  # this planner does not model (e.g. source-path=, which changes how a later
-  # source statement resolves) is itself a tripwire, so no unmodelled
-  # resolution mechanism can be silently guessed around. Keys that cannot
-  # affect resolution (disable=, shell=, enable=, external-sources=) pass.
+  # --- read the discovered source edges --------------------------------------
+  # bin/fm-lint.sh ran every canonical file through ShellCheck alone and
+  # harvested the target named by each SC1091 "was not specified as input"
+  # note. A target counts as an edge when it names a canonical input, tried
+  # both as ShellCheck spelled it and script-dir-relative; over-inclusion is
+  # safe under the parity invariant, a missed edge is not.
+  if (EDGES != "") {
+    while ((getline line < EDGES) > 0) {
+      ti = index(line, "\t")
+      if (ti == 0) continue
+      from = substr(line, 1, ti - 1)
+      tgt = trim(substr(line, ti + 1))
+      if (!(from in inset) || tgt == "") continue
+      sub(/^(\.\/)+/, "", tgt)
+      fdir = ""
+      if (from ~ /\//) { fdir = from; sub(/\/[^\/]*$/, "/", fdir) }
+      addedge(from, tgt)
+      addedge(from, fdir tgt)
+    }
+    close(EDGES)
+  }
+
+  # --- scan each file for directive edges and count its lines ----------------
+  # Only `# shellcheck` directive lines are inspected; statement edges come
+  # pre-discovered via EDGES. A `source=` key is an edge. Directive keys this
+  # planner does not model (e.g. source-path=, which changes how a later
+  # source statement resolves) are tripwires, so no unmodelled resolution
+  # mechanism can be silently guessed around; keys that cannot affect
+  # resolution (disable=, shell=, enable=, external-sources=) pass. One
+  # nuance makes disable= safe to pass: an in-file disable of SC1091 would
+  # blind the discovery pass, so bin/fm-lint.sh neutralizes SC1091 inside
+  # directive lines before each discovery run and the note still surfaces.
+  # That neutralization only recognises plain SCnnnn items, so a disable=
+  # item in any other spelling ("all", SCnnnn-SCnnnn ranges, or anything
+  # unrecognised) could still suppress SC1091 unseen - those tripwire here.
   for (i = 1; i <= n; i++) {
     f = files[i]
-    fdir = ""
-    if (f ~ /\//) { fdir = f; sub(/\/[^\/]*$/, "/", fdir) }
     lc = 0
-    covered = 0
     while ((getline line < f) > 0) {
       lc++
-      # A `# shellcheck` directive line; keys may come in any order and a
-      # trailing `# comment` is ignored. A source= key governs the next
-      # command, whose own target must then not be re-read.
-      if (line ~ /^[ \t]*#[ \t]*shellcheck[ \t]/) {
-        rest = line
-        sub(/^[ \t]*#[ \t]*shellcheck[ \t]+/, "", rest)
-        nt = split(rest, toks, /[ \t]+/)
-        for (t = 1; t <= nt; t++) {
-          if (toks[t] ~ /^#/) break
-          if (toks[t] !~ /=/) continue
-          dkey = toks[t]
-          sub(/=.*$/, "", dkey)
-          if (dkey == "source") {
-            tail = toks[t]
-            sub(/^source=/, "", tail)
-            addedge(f, tail)
-            covered = 1
-          } else if (dkey != "disable" && dkey != "shell" && dkey != "enable" &&
-                     dkey != "external-sources")
-            tripwire(f, lc, line, "unmodelled shellcheck directive")
-        }
-        continue
+      if (line !~ /^[ \t]*#[ \t]*shellcheck[ \t]/) continue
+      rest = line
+      sub(/^[ \t]*#[ \t]*shellcheck[ \t]+/, "", rest)
+      nt = split(rest, toks, /[ \t]+/)
+      for (t = 1; t <= nt; t++) {
+        if (toks[t] ~ /^#/) break
+        if (toks[t] !~ /=/) continue
+        dkey = toks[t]
+        sub(/=.*$/, "", dkey)
+        if (dkey == "source") {
+          tail = toks[t]
+          sub(/^source=/, "", tail)
+          addedge(f, tail)
+        } else if (dkey == "disable") {
+          tail = toks[t]
+          sub(/^disable=/, "", tail)
+          nv = split(tail, items, ",")
+          for (v = 1; v <= nv; v++)
+            if (items[v] !~ /^SC[0-9]+$/)
+              tripwire(f, lc, line, "unclassifiable disable= item")
+        } else if (dkey != "shell" && dkey != "enable" && dkey != "external-sources")
+          tripwire(f, lc, line, "unmodelled shellcheck directive")
       }
-      if (line ~ /^[ \t]*(#|$)/) continue
-      wascov = covered
-      covered = 0
-      if (index(line, "source") == 0 && line !~ /\.[ \t]/) continue
-      nseg = 0
-      len = length(line); insq = 0; indq = 0; esc = 0
-      expect = 1
-      word = ""; wstart = 0
-      for (p = 1; p <= len + 1; p++) {
-        c = p <= len ? substr(line, p, 1) : " "
-        if (esc) { esc = 0; word = word c; continue }
-        if (insq) { if (c == "'") insq = 0; word = word c; continue }
-        if (indq) {
-          if (c == "\\") esc = 1
-          else if (c == "\"") indq = 0
-          word = word c
-          continue
-        }
-        if (c == "\\" || c == "'" || c == "\"") {
-          if (c == "\\") esc = 1
-          else if (c == "'") insq = 1
-          else indq = 1
-          if (word == "") wstart = p
-          word = word c
-          continue
-        }
-        if (c == "#" && word == "" && (p == 1 || substr(line, p - 1, 1) ~ /[ \t;&|(]/)) break
-        if (c ~ /[ \t;&|()]/) {
-          if (word != "") {
-            if (expect && (word == "source" || word == ".")) {
-              segs[++nseg] = substr(line, wstart)
-              expect = 0
-            } else if (word != "if" && word != "elif" && word != "then" &&
-                       word != "else" && word != "while" && word != "until" &&
-                       word != "do" && word != "in" && word != "{" && word != "!" &&
-                       word !~ /^[A-Za-z_][A-Za-z0-9_]*=/)
-              expect = 0
-            word = ""
-          }
-          if (c != " " && c != "\t") expect = 1
-          continue
-        }
-        if (word == "") wstart = p
-        word = word c
-      }
-      if (nseg > 0 && !wascov)
-        for (q = 1; q <= nseg; q++) srcedge(f, lc, line, segs[q], fdir)
     }
     close(f)
     lines[f] = lc

@@ -282,10 +282,12 @@ test_source_in_any_command_position_is_a_closure_edge() {
   fi
   # ShellCheck follows a literal source wherever it sits in command position,
   # not just at line start or after ';', '&&', '||'. Verified on the pinned
-  # version: 'then . lib' and a subshell '( . lib' are both followed when the
+  # version: 'then . lib', a subshell '( . lib', a 'function f { . lib; }'
+  # body and a redirection-prefixed '>file . lib' are all followed when the
   # target is an input, so each must be a closure edge - otherwise a shard
   # split emits an SC1091 the whole-set run does not, and editing the library
-  # never invalidates the importer's cached clean result.
+  # never invalidates the importer's cached clean result. The discovery pass
+  # harvests these from ShellCheck itself, so no position list is maintained.
   local tmp fx out rc
   tmp=$(fm_test_tmproot fm-lint-anypos)
   fx="$tmp/repo"
@@ -301,6 +303,18 @@ SH
 set -eu
 ( . bin/lib-core.sh; core_ready )
 SH
+  cat > "$fx/bin/fn-app.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+function fn_ready { . bin/lib-core.sh; }
+fn_ready
+SH
+  cat > "$fx/bin/redir-app.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+>/dev/null . bin/lib-core.sh
+core_ready
+SH
   rc=0
   out=$(FM_LINT_CACHE_DIR="$tmp/cache-parity" "$fx/bin/fm-lint.sh" --verify-parity 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "a keyword- or subshell-position source broke fast-path parity"$'\n'"$out"
@@ -312,11 +326,74 @@ SH
   rc=0
   out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "command-position source re-lint failed unexpectedly (exit $rc)"$'\n'"$out"
-  # bin/lib-core.sh itself plus all three importers: bin/app.sh (directive),
-  # bin/then-app.sh and bin/sub-app.sh (command-position literals).
-  assert_contains "$out" "linting 4 of" \
+  # bin/lib-core.sh itself plus all five importers: bin/app.sh (directive),
+  # bin/then-app.sh, bin/sub-app.sh, bin/fn-app.sh and bin/redir-app.sh
+  # (command-position literals).
+  assert_contains "$out" "linting 6 of" \
     "editing the library did not invalidate its command-position importers"
   pass "a literal source in any command position is a closure edge"
+}
+
+test_disabled_sc1091_source_is_still_a_closure_edge() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): suppressed-SC1091 closure check"
+    return
+  fi
+  # An in-file disable of SC1091 suppresses the very note the discovery pass
+  # reads. Discovery therefore rewrites SC1091 inside directive lines on its
+  # input stream, so the note still surfaces and the edge is still found:
+  # no whole-set fallback, and editing the library re-lints the suppressing
+  # importer. The directive is assembled at runtime so this test file never
+  # carries a file-wide suppression itself.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-dis1091)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '# shellcheck %s\n' 'disable=SC1091'
+    printf 'set -eu\n. bin/lib-core.sh\ncore_ready\n'
+  } > "$fx/bin/dis-app.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "suppressed-SC1091 fixture failed its first lint (exit $rc)"$'\n'"$out"
+  assert_not_contains "$out" "falling back to the canonical command" \
+    "a plain disable=SC1091 must not force the whole-set fallback"
+  printf '\nCORE_EXTRA=2\nexport CORE_EXTRA\n' >> "$fx/bin/lib-core.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "suppressed-SC1091 re-lint failed unexpectedly (exit $rc)"$'\n'"$out"
+  # bin/lib-core.sh itself plus both importers: bin/app.sh (directive) and
+  # bin/dis-app.sh (literal source under a file-wide SC1091 suppression).
+  assert_contains "$out" "linting 3 of" \
+    "a disable=SC1091 importer was not re-linted after its library changed"
+  pass "a source suppressed by disable=SC1091 is still a closure edge"
+}
+
+test_unclassifiable_disable_falls_back_to_whole_set() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): unclassifiable-disable fallback check"
+    return
+  fi
+  # 'disable=all' (or an SCnnnn-SCnnnn range) can suppress SC1091 in a form
+  # the discovery rewrite does not recognise, which would hide edges silently;
+  # the planner must force the whole-set fallback instead.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-disall)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  {
+    printf '#!/usr/bin/env bash\nset -eu\n'
+    printf '# shellcheck %s\n' 'disable=all'
+    printf 'true\n'
+  } > "$fx/bin/da-app.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "whole-set fallback run failed on a clean fixture (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "falling back to the canonical command" \
+    "an unclassifiable disable= item did not trigger the whole-set fallback"
+  assert_contains "$out" "da-app.sh" "the fallback message did not name the offending file"
+  pass "an unclassifiable disable= item falls back to the whole-set command"
 }
 
 test_verify_parity_fails_when_fast_path_falls_back() {
@@ -557,6 +634,8 @@ test_cache_key_covers_the_source_closure
 test_literal_source_path_is_a_closure_edge
 test_guarded_literal_source_is_a_closure_edge
 test_source_in_any_command_position_is_a_closure_edge
+test_disabled_sc1091_source_is_still_a_closure_edge
+test_unclassifiable_disable_falls_back_to_whole_set
 test_verify_parity_fails_when_fast_path_falls_back
 test_exec_lines_carry_exactly_lint_flags
 test_unmodelled_directive_falls_back_to_whole_set

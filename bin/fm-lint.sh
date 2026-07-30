@@ -50,8 +50,10 @@
 # list yields precisely the findings the whole-set run gives it.
 #
 # So this script:
-#   1. builds the source graph from the `source=` directives and literal
-#      source statements (bin/fm-lint-plan.awk),
+#   1. discovers the source graph by checking each file ALONE with ShellCheck
+#      and harvesting the target named by every SC1091 "was not specified as
+#      input" note, unioned with the `source=` directive edges parsed by
+#      bin/fm-lint-plan.awk,
 #   2. skips files whose own contents AND whose entire transitive source closure
 #      are byte-identical to a previously recorded clean result under this exact
 #      ShellCheck version and flags,
@@ -228,11 +230,151 @@ if [ -z "$JOBS" ]; then
 fi
 [ "$JOBS" -ge 1 ] || JOBS=1
 
+# --- source-edge discovery --------------------------------------------------
+# The planner does not parse source statements out of shell code; ShellCheck
+# itself is asked. Checking a file ALONE (no other inputs) makes every
+# followable literal source emit an SC1091 "was not specified as input" note
+# that names the resolved target, in every syntactic position - the resolver
+# enumerates its own edges, so no shell grammar is re-implemented here. Two
+# properties matter:
+#   - A file's discovery result depends only on its own bytes, because no
+#     other input is supplied, so it caches on the single-file digest and an
+#     unchanged tree pays nothing for this pass.
+#   - An in-file disable of SC1091 would blind this pass, so SC1091 is
+#     rewritten to an inert code inside ShellCheck directive lines on the
+#     stream fed to each discovery run; the note then still surfaces. Only
+#     the discovery input is rewritten - the shard and whole-set runs always
+#     see the original bytes, and only SC1091 notes are harvested, so
+#     disabling a different code on those lines changes nothing. disable=
+#     items the rewrite cannot recognise (anything but plain SCnnnn) are a
+#     planner tripwire instead.
+DISC_CACHE="$CACHE_DIR/discovery"
+: >"$TMP/edges"
+: >"$TMP/disc.keep"
+if [ "$USE_CACHE" = 1 ]; then
+  mkdir -p "$CACHE_DIR"
+  # shellcheck disable=SC2046
+  $HASHER $(cat "$TMP/files") >"$TMP/hashes" 2>/dev/null || : >"$TMP/hashes"
+  [ -f "$DISC_CACHE" ] || : >"$DISC_CACHE"
+  awk -v VER="$REQUIRED_SHELLCHECK" -v FLAGS="$LINT_FLAGS" -v HASHES="$TMP/hashes" \
+      -v CACHE="$DISC_CACHE" -v EDGES="$TMP/edges" -v KEEP="$TMP/disc.keep" '
+    BEGIN {
+      while ((getline hl < HASHES) > 0) { split(hl, hf, " "); digest[hf[2]] = hf[1] }
+      close(HASHES)
+      while ((getline cl < CACHE) > 0) {
+        ti = index(cl, "\t")
+        if (ti == 0) continue
+        ck = substr(cl, 1, ti - 1)
+        seen[ck] = 1
+        val[ck] = substr(cl, ti + 1)
+      }
+      close(CACHE)
+    }
+    {
+      d = digest[$0]
+      ck = VER " " FLAGS " " d
+      if (d != "" && (ck in seen)) {
+        m = split(val[ck], ee, " ")
+        for (e = 1; e <= m; e++) if (ee[e] != "") printf "%s\t%s\n", $0, ee[e] >> EDGES
+        printf "%s\t%s\n", ck, val[ck] >> KEEP
+        next
+      }
+      print
+    }
+  ' "$TMP/files" >"$TMP/disc.todo"
+else
+  cp "$TMP/files" "$TMP/disc.todo"
+fi
+
+if [ -s "$TMP/disc.todo" ]; then
+  djobs="$JOBS"
+  dn=$(wc -l <"$TMP/disc.todo" | tr -d ' ')
+  [ "$djobs" -le "$dn" ] || djobs="$dn"
+  awk -v N="$djobs" -v PFX="$TMP/disc.chunk." '{ print > (PFX (((NR - 1) % N) + 1)) }' "$TMP/disc.todo"
+  dpids=
+  ci=0
+  while [ "$ci" -lt "$djobs" ]; do
+    ci=$((ci + 1))
+    (
+      : >"$TMP/disc.out.$ci"
+      while IFS= read -r df; do
+        drc=0
+        # shellcheck disable=SC2086
+        sed '/^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]/ s/SC1091/SC2317/g' "$df" \
+          | shellcheck $LINT_FLAGS --format=gcc - \
+          >"$TMP/disc.raw.$ci" 2>>"$TMP/disc.err.$ci" || drc=$?
+        if [ "$drc" -gt 1 ]; then
+          printf '%s %s\n' "$drc" "$df" >"$TMP/disc.rc.$ci"
+          exit 0
+        fi
+        awk -v F="$df" '/ \[SC1091\]$/ && match($0, / note: Not following: .* was not specified as input/) {
+          printf "%s\t%s\n", F, substr($0, RSTART + 22, RLENGTH - 49)
+        }' "$TMP/disc.raw.$ci" >>"$TMP/disc.out.$ci"
+      done <"$TMP/disc.chunk.$ci"
+      printf '0 -\n' >"$TMP/disc.rc.$ci"
+    ) &
+    dpids="$dpids $!"
+  done
+  for p in $dpids; do
+    wait "$p" || true
+  done
+  ci=0
+  while [ "$ci" -lt "$djobs" ]; do
+    ci=$((ci + 1))
+    if [ -f "$TMP/disc.rc.$ci" ]; then
+      read -r drc dfile <"$TMP/disc.rc.$ci" || { drc=1; dfile='(unreadable)'; }
+    else
+      drc=1; dfile='(worker died)'
+    fi
+    if [ "$drc" != 0 ]; then
+      printf 'fm-lint.sh: could not discover source edges (ShellCheck exited %s on %s); falling back to the canonical command.\n' \
+        "$drc" "$dfile" >&2
+      rm -rf "$TMP"
+      exec "$ROOT/bin/fm-lint.sh" --whole-set
+    fi
+  done
+  cat "$TMP"/disc.out.* >>"$TMP/edges"
+fi
+
+# Discovery results are a pure function of a file's own bytes, so unlike the
+# clean-run manifest they are recorded even when the tree has findings. The
+# rewrite below keeps only entries for the current digests, so the cache
+# cannot grow without bound.
+if [ "$USE_CACHE" = 1 ]; then
+  awk -v VER="$REQUIRED_SHELLCHECK" -v FLAGS="$LINT_FLAGS" -v HASHES="$TMP/hashes" \
+      -v TODO="$TMP/disc.todo" -v KEEP="$TMP/disc.keep" '
+    BEGIN {
+      while ((getline hl < HASHES) > 0) { split(hl, hf, " "); digest[hf[2]] = hf[1] }
+      close(HASHES)
+      nn = 0
+      while ((getline tf < TODO) > 0) if (tf != "") { order[++nn] = tf; disc[tf] = "" }
+      close(TODO)
+      while ((getline kl < KEEP) > 0) print kl
+      close(KEEP)
+    }
+    {
+      ti = index($0, "\t")
+      if (ti == 0) next
+      f = substr($0, 1, ti - 1)
+      if (!(f in disc)) next
+      t = substr($0, ti + 1)
+      disc[f] = disc[f] == "" ? t : disc[f] " " t
+    }
+    END {
+      for (e = 1; e <= nn; e++) {
+        f = order[e]
+        if (digest[f] == "") continue
+        printf "%s %s %s\t%s\n", VER, FLAGS, digest[f], disc[f]
+      }
+    }
+  ' "$TMP/edges" >"$DISC_CACHE.new" && mv "$DISC_CACHE.new" "$DISC_CACHE"
+fi
+
 # --- closures ---------------------------------------------------------------
 # One shard per file gives each file's own transitive closure, which is both the
 # exact input set ShellCheck reads for it and therefore the exact thing its
 # cache key has to cover.
-if ! awk -v FILES="$TMP/files" -v WORK="" -v JOBS=1 -v MODE=closures \
+if ! awk -v FILES="$TMP/files" -v EDGES="$TMP/edges" -v WORK="" -v JOBS=1 -v MODE=closures \
   -f "$ROOT/bin/fm-lint-plan.awk" >"$TMP/closures" 2>"$TMP/plan.err"; then
   # Never silently lint less than the canonical set: if planning fails for any
   # reason, fall back to the reference implementation rather than guessing.
@@ -254,9 +396,6 @@ fi
 MANIFEST="$CACHE_DIR/manifest"
 
 if [ "$USE_CACHE" = 1 ]; then
-  mkdir -p "$CACHE_DIR"
-  # shellcheck disable=SC2046
-  $HASHER $(cat "$TMP/files") >"$TMP/hashes" 2>/dev/null || : >"$TMP/hashes"
   # Both passes below load their lookup table in BEGIN rather than with the
   # usual NR==FNR two-file idiom. That idiom silently inverts when the first
   # file is empty - every record of the SECOND file is then read as a lookup
@@ -326,7 +465,7 @@ fi
 printf 'fm-lint.sh: linting %s of %s files in %s shards (%s cached clean).\n' \
   "$todo" "$total" "$JOBS" "$cached" >&2
 
-if ! awk -v FILES="$TMP/files" -v WORK="$TMP/work" -v JOBS="$JOBS" \
+if ! awk -v FILES="$TMP/files" -v EDGES="$TMP/edges" -v WORK="$TMP/work" -v JOBS="$JOBS" \
   -f "$ROOT/bin/fm-lint-plan.awk" >"$TMP/plan" 2>"$TMP/plan.err"; then
   printf 'fm-lint.sh: could not plan the lint (%s); falling back to the canonical command.\n' \
     "$(tr -d '\n' <"$TMP/plan.err")" >&2
