@@ -23,17 +23,128 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
-fm_pid_identity() {
-  local pid=$1 out
+# Identity marker for the /proc start-tick format, so a recorded identity can be
+# told apart from the older lstart format without re-deriving anything.
+FM_PID_IDENTITY_PROC_PREFIX='proc-starttime:'
+
+# Parse field 22 (starttime, clock ticks since boot) out of one /proc/<pid>/stat
+# line. Field 2 (comm) is parenthesized and may itself contain spaces or
+# parentheses, which shifts every positional field, so counting from the left is
+# unsafe. Split on the LAST ')' instead: the remainder is field 3 onward, which
+# makes field 22 that remainder's 20th whitespace-separated token.
+fm_pid_parse_start_ticks() {
+  local line=$1 rest fields
+  [ -n "$line" ] || return 1
+  rest=${line##*)}
+  [ "$rest" != "$line" ] || return 1
+  IFS=' ' read -r -a fields <<< "$rest"
+  [ "${#fields[@]}" -ge 20 ] || return 1
+  case "${fields[19]}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "${fields[19]}"
+}
+
+fm_pid_start_ticks() {
+  local pid=$1 line=
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
-  # written under one locale but re-read under the machine's ambient locale, which
-  # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
+  # stderr is redirected BEFORE the input redirect so that a dead pid's missing
+  # stat file fails silently: redirections apply left to right, so the usual
+  # trailing 2>/dev/null would arrive too late to swallow the open failure.
+  # The trailing `|| true` keeps a missing stat file from tripping a caller's
+  # errexit; the parser's own validation is what actually gates the result.
+  IFS= read -r line 2>/dev/null < "/proc/$pid/stat" || true
+  fm_pid_parse_start_ticks "$line"
+}
+
+# The command half of a /proc-derived identity, read from /proc/<pid>/cmdline so
+# the common path forks nothing at all. argv is NUL-separated there, so it is
+# collected with read -d '' rather than a tr pipeline. A zombie or kernel thread
+# has an empty cmdline; those fall back to ps so the identity is never blank.
+fm_pid_command() {
+  local pid=$1 arg='' out=''
+  if [ -r "/proc/$pid/cmdline" ]; then
+    while :; do
+      if IFS= read -r -d '' arg; then
+        out="${out:+$out }$arg"
+      else
+        # A final unterminated element still lands in arg; Linux always NUL-
+        # terminates cmdline, so this only guards a malformed read.
+        [ -n "$arg" ] && out="${out:+$out }$arg"
+        break
+      fi
+    done 2>/dev/null < "/proc/$pid/cmdline"
+  fi
+  if [ -z "$out" ]; then
+    out=$(LC_ALL=C ps -p "$pid" -o command= 2>/dev/null) || return 1
+    out=$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//')
+  fi
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# The pre-/proc identity form, kept as the non-Linux fallback and as the shape a
+# lock written before this format change still holds. Pin LC_ALL=C so lstart's
+# date format is locale-invariant: the identity is written under one locale but
+# re-read under the machine's ambient locale, which would otherwise mismatch on a
+# non-C locale (e.g. ko_KR) and reject a live watcher.
+fm_pid_identity_lstart() {
+  local pid=$1 out
   out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+}
+
+# Identify a process by a start marker that cannot drift while it is alive.
+# `ps -o lstart=` is derived, not stored: ps computes it as boot time plus the
+# process's start ticks. WSL2 continually re-syncs its boot-time estimate against
+# the Windows host clock, so the SAME live process yields DIFFERENT lstart strings
+# seconds apart, and every identity check rejects a healthy watcher as dead.
+# Linux's /proc/<pid>/stat field 22 is the kernel's own start time in clock ticks
+# since boot, which never drifts however the wall clock moves. macOS has no /proc,
+# so lstart stays the fallback there.
+fm_pid_identity() {
+  local pid=$1 ticks command
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if ticks=$(fm_pid_start_ticks "$pid"); then
+    command=$(fm_pid_command "$pid") || return 1
+    printf '%s%s %s\n' "$FM_PID_IDENTITY_PROC_PREFIX" "$ticks" "$command"
+    return 0
+  fi
+  fm_pid_identity_lstart "$pid"
+}
+
+# Compare a live pid against a RECORDED identity string. Callers that persist an
+# identity must go through this rather than a bare string equality, because a lock
+# written before the format change above holds an lstart-format identity: a bare
+# equality would reject a genuinely live watcher on format alone. Both branches are
+# exact comparisons, so this is never more permissive than the check it replaces -
+# a dead pid, a recycled pid, and a changed command are all still rejected.
+fm_pid_identity_matches() {
+  local pid=$1 recorded=$2 current legacy
+  [ -n "$recorded" ] || return 1
+  current=$(fm_pid_identity "$pid") || return 1
+  # Spelled as a full `if` rather than `[ ... ] && return 0`, so a mismatch here
+  # cannot trip errexit in the callers that run under `set -e`.
+  if [ "$current" = "$recorded" ]; then
+    return 0
+  fi
+  case "$recorded" in
+    # A new-format record already failed its exact comparison; nothing to retry.
+    "$FM_PID_IDENTITY_PROC_PREFIX"*) return 1 ;;
+  esac
+  case "$current" in
+    # Only a /proc-derived current identity can be facing a legacy record.
+    "$FM_PID_IDENTITY_PROC_PREFIX"*) ;;
+    # No /proc here, so current is already the legacy form and was just compared.
+    *) return 1 ;;
+  esac
+  legacy=$(fm_pid_identity_lstart "$pid") || return 1
+  [ "$legacy" = "$recorded" ]
 }
 
 fm_path_mtime() {
@@ -51,7 +162,7 @@ fm_path_age() {
 }
 
 fm_watcher_lock_matches_pid() {
-  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
@@ -59,8 +170,7 @@ fm_watcher_lock_matches_pid() {
   [ "$lock_home" = "$home" ] || return 1
   [ "$lock_path" = "$watch_path" ] || return 1
   [ -n "$lock_identity" ] || return 1
-  current_identity=$(fm_pid_identity "$pid") || return 1
-  [ "$current_identity" = "$lock_identity" ]
+  fm_pid_identity_matches "$pid" "$lock_identity"
 }
 
 FM_WATCHER_HEALTHY_PID=
