@@ -311,6 +311,12 @@ TMPD=$(mktemp -d "${TMPDIR:-/tmp}/fm-assert-tests-kept.XXXXXX")
 # never traverse one into the live worktree's real dependency dirs.
 trap 'cleanup_scratch_env "$TMPD/base-tree"; cleanup_scratch_env "$TMPD/branch-tree"; rm -rf "$TMPD"' EXIT
 
+# The library's probes are reached through command substitution (a subshell), so
+# they memoize to files rather than to variables; give them somewhere to write
+# that this run's cleanup already owns.
+FM_TEST_EXEC_CACHE_DIR="$TMPD/probe-cache"
+mkdir -p "$FM_TEST_EXEC_CACHE_DIR"
+
 # --- check 1: every base test identifier still present by name ---------------
 
 enumerate_tests "$BASE" > "$TMPD/base"
@@ -398,7 +404,7 @@ if [ -s "$TMPD/execfiles" ]; then
     prepare_scratch_env "$spec" "$TMPD/branch-tree" "$WT"
     untrusted=
     for tree in base-tree branch-tree; do
-      untrusted=$(scratch_untrusted_reason "$spec" "$TMPD/$tree" "$WT")
+      untrusted=$(scratch_untrusted_reason "$spec" "$TMPD/$tree" "$WT" "$f")
       [ -z "$untrusted" ] || break
     done
     if [ -n "$untrusted" ]; then

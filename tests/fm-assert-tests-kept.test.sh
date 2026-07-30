@@ -27,6 +27,9 @@
 #       safe failure cannot quietly become "every editable project is skipped"
 #   (o) the `summary:` line is always printed and counts every class
 #   (p) a run never mutates the live worktree
+#   (q) a tests/ dir whose test imports a sibling helper by bare name still
+#       executes under --import-mode=importlib, so the layout prepend mode used
+#       to carry is not silently reported unexecuted
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -528,14 +531,27 @@ test_pytest_editable_shadow_is_unexecuted() {
 # editable artifact never leaks into the shared one), borrowing pytest from the
 # shared venv through a bare-path .pth, and install a second .pth pointing at
 # <extra-path> - exactly the shape an editable install leaves behind.
+#
+# The borrowed directory is where pytest ACTUALLY lives under the shared venv's
+# interpreter, not that venv's sysconfig purelib: ensure_pytest_venv builds the
+# shared venv with --system-site-packages whenever the host already has pytest,
+# and in that branch its own purelib is EMPTY, so borrowing it would hand the
+# case venv a directory containing nothing. That failure is invisible on a host
+# without pytest, and on a host with one it silently degrades the cases below to
+# "no supported test runner resolves", which is not what they claim to test - so
+# the borrow is asserted to work before any case relies on it.
 link_borrowed_pytest_venv() {
   local dir=$1 extra=$2 site shared_site
   python3 -m venv "$dir/.venv" >/dev/null 2>&1 \
     || fail "could not create the case's own venv at $dir/.venv"
   site=$("$dir/.venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
-  shared_site=$("$PYTEST_VENV/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+  shared_site=$("$PYTEST_VENV/bin/python" \
+    -c 'import os, pytest; print(os.path.dirname(os.path.dirname(os.path.abspath(pytest.__file__))))') \
+    || fail "could not locate pytest under the shared venv at $PYTEST_VENV"
   printf '%s\n' "$shared_site" > "$site/borrow-pytest.pth"
   printf '%s\n' "$extra" > "$site/__editable__.demo.pth"
+  "$dir/.venv/bin/python" -m pytest --version >/dev/null 2>&1 \
+    || fail "the case venv at $dir/.venv cannot run pytest borrowed from $shared_site"
 }
 
 test_pytest_editable_that_scratch_shadows_still_runs() {
@@ -562,6 +578,67 @@ test_pytest_editable_that_scratch_shadows_still_runs() {
   assert_not_contains "$out" 'unexecuted:' \
     "pytest-editable-ok: a shadowable editable install must not be refused as untrusted"
   pass "an editable install the scratch tree can shadow is still executed"
+}
+
+# write_py_helper_tree <dir> <behavior>: pkg.mod.greet() returns <behavior>, and
+# tests/test_mod.py asserts it against a constant held in a SIBLING helper module
+# imported by bare name. That is the prepend-mode layout --import-mode=importlib
+# does not put on sys.path by itself, so this tree only collects because the test
+# file's own directory (inside the scratch tree) is a PYTHONPATH root.
+write_py_helper_tree() {
+  local dir=$1 behavior=$2
+  mkdir -p "$dir/pkg" "$dir/tests"
+  cat > "$dir/pyproject.toml" <<'EOF'
+[tool.pytest.ini_options]
+addopts = "--cov=pkg --cov-fail-under=100"
+EOF
+  printf '.venv/\n' > "$dir/.gitignore"
+  : > "$dir/pkg/__init__.py"
+  printf 'def greet():\n    return "%s"\n' "$behavior" > "$dir/pkg/mod.py"
+  printf 'EXPECTED = "Z"\n' > "$dir/tests/helpers.py"
+  cat > "$dir/tests/test_mod.py" <<'EOF'
+from helpers import EXPECTED
+from pkg.mod import greet
+
+
+def test_x_behaves():
+    assert greet() == EXPECTED
+EOF
+}
+
+test_pytest_sibling_helper_layout_executes() {
+  local dir out code
+  require_pytest_venv pytest-helper
+  dir="$TMP_ROOT/pytest-helper"
+  mkdir -p "$dir"
+  git init -q -b main "$dir" 2>/dev/null || {
+    git init -q "$dir"
+    git -C "$dir" checkout -q -b main
+  }
+  write_py_helper_tree "$dir" Z
+  commit_all "$dir" "main: greet returns Z, the test asserts it via a sibling helper"
+  git -C "$dir" checkout -q -b work
+  ln -s "$PYTEST_VENV" "$dir/.venv"
+  # Only the behavior changes; the helper's constant is untouched, so the base's
+  # own test file run against the branch's code must fail.
+  printf 'def greet():\n    return "K"\n' > "$dir/pkg/mod.py"
+  commit_all "$dir" "branch: greet returns K"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "pytest-helper: the changed behavior must be caught"
+  # A `failing:` verdict at all proves the baseline collected and ran, which is
+  # only possible when the sibling helper resolved.
+  assert_contains "$out" 'failing: tests/test_mod.py::test_x_behaves' \
+    "pytest-helper: a sibling-helper layout must execute, not be reported unexecuted"
+  assert_not_contains "$out" 'unexecuted:' \
+    "pytest-helper: importlib mode must not strand a tests/ dir of helper modules"
+  assert_not_contains "$out" 'missing:' \
+    "pytest-helper: the test name survived, so check 1 must stay silent"
+  pass "a test importing a sibling helper by bare name still executes under importlib mode"
 }
 
 test_run_never_mutates_the_live_worktree() {
@@ -604,4 +681,5 @@ test_pytest_rewritten_assertion_caught
 test_pytest_without_interpreter_is_unexecuted
 test_pytest_editable_shadow_is_unexecuted
 test_pytest_editable_that_scratch_shadows_still_runs
+test_pytest_sibling_helper_layout_executes
 test_run_never_mutates_the_live_worktree

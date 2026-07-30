@@ -38,11 +38,13 @@
 #       Link the worktree's ALREADY-PROVISIONED dependency dirs into the scratch
 #       tree. Idempotent, and never writes into <worktree>.
 #
-#   scratch_untrusted_reason <spec> <scratch-dir> <worktree>
+#   scratch_untrusted_reason <spec> <scratch-dir> <worktree> <file>
 #       Print why a run in <scratch-dir> could not be trusted to exercise the
-#       scratch tree's own code, or nothing when it can. A non-empty reason means
-#       the file's verdict is `unexecuted:`, never a pass (see "Trusting the
-#       scratch tree" below).
+#       scratch tree's own code, or nothing when it can. <file> is the test file
+#       the run will execute, so the probe resolves imports through exactly the
+#       PYTHONPATH run_base_test_file will use. A non-empty reason means the
+#       file's verdict is `unexecuted:`, never a pass (see "Trusting the scratch
+#       tree" below).
 #
 #   cleanup_scratch_env <scratch-dir>
 #       Unlink the linked dependency dirs. MUST run before any recursive delete
@@ -70,7 +72,14 @@
 #            --junit-xml=<results> <file>::<name> ...
 # `-o addopts=` neutralizes repo addopts (coverage gates, -x, --strict) that
 # would distort a single-file run; `-p no:cacheprovider` keeps .pytest_cache from
-# being written; `--import-mode=importlib` is the layout-robust import mode.
+# being written; `--import-mode=importlib` is kept because it is the only mode
+# that tolerates the same test basename in two directories without an
+# __init__.py. The trade it makes is that, unlike the default prepend mode, it
+# does NOT insert the test file's own directory into sys.path, so a tests/ dir of
+# sibling helper modules (`from helpers import x`) would stop resolving. That
+# directory is therefore supplied explicitly among the PYTHONPATH roots, resolved
+# inside the SCRATCH tree and never the live worktree, so prepend-mode-dependent
+# suites still execute without weakening the authoritativeness guard.
 # A green exit code from pytest already means every requested nodeid passed, so
 # the shell runner's baseline rule carries over unchanged.
 #
@@ -115,6 +124,14 @@
 # reason, and fm-assert reports the file unexecuted. A false green is the worst
 # possible outcome here, so an unverifiable tree never passes.
 #
+# The probe's VERDICT is keyed on its stdout alone. It deliberately runs with
+# site processing enabled (that is how it sees editable `.pth` entries), and an
+# `import` line in a .pth executes at startup, so a DeprecationWarning or an
+# ambient PYTHONWARNINGS lands on stderr; reading that as shadow evidence would
+# refuse a merge on a tree that is in fact authoritative. Stderr is captured only
+# as human-facing evidence, and a non-zero exit from the probe is still the
+# "could not verify" reason, so failing safe is preserved.
+#
 # Cleanup safety: cleanup_scratch_env deletes each linked dependency dir only
 # after asserting it IS a symlink, and with `rm -f`, never a recursive delete.
 # It must run before the scratch tree's own `rm -rf`, so cleanup can never
@@ -122,6 +139,10 @@
 #
 # FM_ASSERT_TESTS_TIMEOUT caps each run's runtime in seconds (default 300) when a
 # `timeout` binary exists; the cap is applied by run_base_test_file.
+#
+# FM_TEST_EXEC_CACHE_DIR points at a writable directory in which interpreter
+# resolution and trust verdicts are memoized (see "memoization" below). It is
+# optional: with it unset every probe simply recomputes.
 
 # The optional timeout wrapper, resolved once at source time.
 TIMEOUT_CMD=()
@@ -132,6 +153,49 @@ fi
 # The dependency dirs linked into a scratch tree, and the only names
 # cleanup_scratch_env will ever unlink.
 FM_ENV_LINK_NAMES=(.venv venv node_modules)
+
+# --- memoization -------------------------------------------------------------
+# Interpreter resolution and the trust probe each spawn a Python (a pytest import
+# included) and return the same answer for every test file that shares their
+# inputs, so a repo of N Python test files would otherwise pay N times over.
+# Both are reached through command substitution from fm-assert-tests-kept.sh,
+# which is a SUBSHELL, so a shell variable could never persist; results are
+# memoized as files under FM_TEST_EXEC_CACHE_DIR instead. Each slot stores its
+# key verbatim next to its value and is only read back on an EXACT key match, so
+# a checksum collision costs a recomputation and can never yield another key's
+# verdict.
+
+# fm_cache_slot <namespace> <key>: the slot path prefix for <key>, or return 1
+# when no cache directory is configured.
+fm_cache_slot() {
+  local ns=$1 key=$2 sum
+  [ -n "${FM_TEST_EXEC_CACHE_DIR:-}" ] && [ -d "${FM_TEST_EXEC_CACHE_DIR:-}" ] || return 1
+  sum=$(printf '%s' "$key" | cksum | tr -cd '0-9')
+  printf '%s/%s.%s' "$FM_TEST_EXEC_CACHE_DIR" "$ns" "$sum"
+}
+
+# fm_cache_get <namespace> <key>: print the memoized value and return 0 on a
+# hit, return 1 on a miss. An empty value is a legitimate hit.
+fm_cache_get() {
+  local slot
+  slot=$(fm_cache_slot "$1" "$2") || return 1
+  [ -f "$slot.key" ] && [ -f "$slot.val" ] || return 1
+  [ "$(cat "$slot.key")" = "$2" ] || return 1
+  cat "$slot.val"
+}
+
+# fm_cache_put <namespace> <key> <value>: memoize <value>. Never fails the
+# caller; an unwritable cache just means the next call recomputes.
+fm_cache_put() {
+  local slot
+  slot=$(fm_cache_slot "$1" "$2") || return 0
+  # The key is written LAST, so a half-written slot reads as a miss rather than
+  # as some other key's value.
+  rm -f "$slot.key"
+  printf '%s' "$3" > "$slot.val" 2>/dev/null || return 0
+  printf '%s' "$2" > "$slot.key" 2>/dev/null || rm -f "$slot.val"
+  return 0
+}
 
 # --- python helper programs --------------------------------------------------
 # Read by the resolved interpreter, so parsing and import probing use the same
@@ -266,26 +330,36 @@ fm_py_config_dir() {
 # fm_py_interpreter <worktree>: print a python that can run `-m pytest` from the
 # worktree's provisioned env, or return 1. The `.venv/bin/pytest` fallback is
 # honored by reading that script's shebang interpreter, so every pytest run and
-# every result parse goes through one interpreter.
+# every result parse goes through one interpreter. The answer depends only on
+# <worktree>, so it is memoized: an empty memoized value records "none resolves".
 fm_py_interpreter() {
-  local wt=$1 candidate shebang
+  local wt=$1 candidate shebang resolved=
+  if resolved=$(fm_cache_get interpreter "$wt"); then
+    [ -n "$resolved" ] || return 1
+    printf '%s' "$resolved"
+    return 0
+  fi
+  resolved=
   for candidate in "$wt/.venv/bin/python" "$wt/venv/bin/python"; do
     if [ -x "$candidate" ] && "$candidate" -m pytest --version >/dev/null 2>&1; then
-      printf '%s' "$candidate"
-      return 0
+      resolved=$candidate
+      break
     fi
   done
-  candidate="$wt/.venv/bin/pytest"
-  if [ -x "$candidate" ]; then
-    IFS= read -r shebang < "$candidate" || shebang=
-    shebang=${shebang#\#!}
-    shebang=${shebang%% *}
-    if [ -n "$shebang" ] && [ -x "$shebang" ] && "$shebang" -m pytest --version >/dev/null 2>&1; then
-      printf '%s' "$shebang"
-      return 0
+  if [ -z "$resolved" ]; then
+    candidate="$wt/.venv/bin/pytest"
+    if [ -x "$candidate" ]; then
+      IFS= read -r shebang < "$candidate" || shebang=
+      shebang=${shebang#\#!}
+      shebang=${shebang%% *}
+      if [ -n "$shebang" ] && [ -x "$shebang" ] && "$shebang" -m pytest --version >/dev/null 2>&1; then
+        resolved=$shebang
+      fi
     fi
   fi
-  return 1
+  fm_cache_put interpreter "$wt" "$resolved"
+  [ -n "$resolved" ] || return 1
+  printf '%s' "$resolved"
 }
 
 # --- runner interface --------------------------------------------------------
@@ -310,14 +384,23 @@ runner_for_file() {
   return 0
 }
 
-# fm_py_pythonpath <scratch> <config-dir>: the colon-joined scratch source roots
-# a pytest run puts ahead of site-packages. The ambient PYTHONPATH is
-# deliberately NOT inherited: it can point at the live worktree.
+# fm_py_pythonpath <scratch> <config-dir> <file>: the colon-joined scratch source
+# roots a pytest run puts ahead of site-packages. The ambient PYTHONPATH is
+# deliberately NOT inherited: it can point at the live worktree. <file> is the
+# repo-relative test file, whose own directory is appended (resolved INSIDE
+# <scratch>) so the sibling-helper imports prepend mode would have resolved still
+# work under --import-mode=importlib; it goes last so the source roots keep
+# precedence for first-party packages.
 fm_py_pythonpath() {
-  local scratch=$1 configdir=$2 candidate out=
+  local scratch=$1 configdir=$2 f=${3:-} candidate filedir out=
   local roots=("$scratch" "$scratch/src")
   if [ -n "$configdir" ]; then
     roots+=("$scratch/$configdir" "$scratch/$configdir/src")
+  fi
+  if [ -n "$f" ]; then
+    filedir=${f%/*}
+    [ "$filedir" != "$f" ] || filedir=
+    roots+=("$scratch${filedir:+/$filedir}")
   fi
   for candidate in "${roots[@]}"; do
     [ -d "$candidate" ] || continue
@@ -349,7 +432,7 @@ run_base_test_file() {
       # unexecuted rather than reading an empty run as a pass.
       [ $# -gt 0 ] || return 125
       : > "$results"
-      pythonpath=$(fm_py_pythonpath "$scratch" "$configdir")
+      pythonpath=$(fm_py_pythonpath "$scratch" "$configdir" "$f")
       (
         cd "$scratch" || exit 125
         PYTHONPATH="$pythonpath" PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='' \
@@ -403,26 +486,48 @@ prepare_scratch_env() {
   return 0
 }
 
-# scratch_untrusted_reason <spec> <scratch-dir> <worktree>: why a run in the
-# scratch tree could not be trusted to exercise the scratch tree's own code, or
-# nothing when it can. See "Trusting the scratch tree" in this file's header.
+# scratch_untrusted_reason <spec> <scratch-dir> <worktree> <file>: why a run in
+# the scratch tree could not be trusted to exercise the scratch tree's own code,
+# or nothing when it can. The probe uses the IDENTICAL PYTHONPATH
+# run_base_test_file will use for <file>, so it resolves imports the way the run
+# does; its verdict comes from stdout ALONE, never from startup noise on stderr.
+# See "Trusting the scratch tree" in this file's header. The answer depends only
+# on (spec, scratch tree, worktree, the file's directory), so it is memoized.
 scratch_untrusted_reason() {
-  local spec=$1 scratch=$2 wt=$3 runner python configdir out
+  local spec=$1 scratch=$2 wt=$3 f=${4:-} runner python configdir
+  local pythonpath out err reason key rc=0
   IFS=$'\t' read -r runner python configdir <<< "$spec"
   case "$runner" in
     pytest) ;;
     *) return 0 ;;
   esac
+  pythonpath=$(fm_py_pythonpath "$scratch" "$configdir" "$f")
+  key="$spec"$'\n'"$scratch"$'\n'"$wt"$'\n'"$pythonpath"
+  if reason=$(fm_cache_get trust "$key"); then
+    printf '%s' "$reason"
+    return 0
+  fi
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-trust-probe.XXXXXX")
   out=$(
     cd "$scratch" || exit 1
-    PYTHONPATH="$(fm_py_pythonpath "$scratch" "$configdir")" PYTHONDONTWRITEBYTECODE=1 \
-      "$python" -c "$FM_PY_TRUST_SRC" "$wt" "$scratch" 2>&1
-  ) || {
-    printf 'import resolution could not be verified'
-    return 0
-  }
-  [ -n "$out" ] || return 0
-  printf 'the branch worktree shadows the scratch tree: %s' "$(printf '%s' "$out" | tr '\n' ';')"
+    PYTHONPATH="$pythonpath" PYTHONDONTWRITEBYTECODE=1 \
+      "$python" -c "$FM_PY_TRUST_SRC" "$wt" "$scratch" 2>"$err"
+  ) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # The probe itself broke: fail safe, and carry its stderr as the evidence a
+    # human needs, which is the ONLY thing that stream is ever read for.
+    reason="import resolution could not be verified (exit $rc)"
+    if [ -s "$err" ]; then
+      reason="$reason: $(tr '\n' ';' < "$err" | cut -c 1-500)"
+    fi
+  elif [ -n "$out" ]; then
+    reason="the branch worktree shadows the scratch tree: $(printf '%s' "$out" | tr '\n' ';')"
+  else
+    reason=
+  fi
+  rm -f "$err"
+  fm_cache_put trust "$key" "$reason"
+  printf '%s' "$reason"
 }
 
 # cleanup_scratch_env <scratch-dir>: unlink the linked dependency dirs. MUST run
