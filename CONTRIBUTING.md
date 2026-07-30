@@ -78,6 +78,8 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the run-all loop above is always safe.
+`tests/fm-assert-tests-kept.test.sh` is the deliberate exception: it needs `python3` with `venv` plus a `pytest` that is either importable or installable with `pip`, because it builds a venv to prove the kept-tests gate really executes Python assertions, and it fails loudly rather than skipping when it cannot, since a silent skip would drop exactly the coverage that proves assertions ran.
+CI does not add its own guard step for that prerequisite: it relies on the `ubuntu-latest` runner already providing `python3`, `venv`, and `pip`, and on this test failing loudly rather than skipping if that ever stops being true.
 
 ## Questions
 
