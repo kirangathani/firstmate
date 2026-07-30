@@ -684,20 +684,33 @@ test_pid_identity_is_locale_invariant() {
   # The watcher records its process identity under one locale; arm/guard/turn-end
   # re-read it under the machine's ambient locale. ps's lstart date format follows
   # LC_TIME, so an unpinned read on a non-C locale (e.g. ko_KR) would differ only
-  # in the date portion and reject a genuinely live watcher. The fix pins LC_ALL=C
-  # inside fm_pid_identity, so its output must be byte-identical regardless of the
-  # caller's exported LC_ALL/LC_TIME. That invariant holds on any host because the
-  # pin is internal, so this stays deterministic on CI even where an alternate
-  # locale like ko_KR.UTF-8 is not installed (the equality then holds trivially).
-  local live baseline via_lc_all via_lc_time
+  # in the date portion and reject a genuinely live watcher. The pin lives in
+  # fm_pid_identity_lstart, which on Linux is only reached when /proc/<pid>/stat is
+  # unreadable - so the /proc reader is stubbed to fail here, exactly as in
+  # test_pid_identity_falls_back_without_proc_stat, or fm_pid_identity would never
+  # call ps and every sample would be the locale-independent proc form, making the
+  # assertions vacuous. With the fallback forced, the output must be byte-identical
+  # regardless of the caller's exported LC_ALL/LC_TIME. That invariant holds on any
+  # host because the pin is internal, so this stays deterministic on CI even where
+  # an alternate locale like ko_KR.UTF-8 is not installed (the equality then holds
+  # trivially).
+  local live baseline via_lc_all via_lc_time force_lstart
+  force_lstart='
+    . "$1"
+    fm_pid_start_ticks() { return 1; }
+    fm_pid_identity "$2"
+  '
   sleep 300 &
   live=$!
-  baseline=$(LC_ALL=C bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
-  via_lc_all=$(LC_ALL=ko_KR.UTF-8 bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
-  via_lc_time=$(LC_TIME=ko_KR.UTF-8 bash -c 'unset LC_ALL; . "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  baseline=$(LC_ALL=C bash -c "$force_lstart" _ "$LIB" "$live" 2>/dev/null)
+  via_lc_all=$(LC_ALL=ko_KR.UTF-8 bash -c "$force_lstart" _ "$LIB" "$live" 2>/dev/null)
+  via_lc_time=$(LC_TIME=ko_KR.UTF-8 bash -c "unset LC_ALL; $force_lstart" _ "$LIB" "$live" 2>/dev/null)
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
   [ -n "$baseline" ] || fail "fm_pid_identity produced no baseline identity under LC_ALL=C"
+  case "$baseline" in
+    proc-starttime:*) fail "fm_pid_identity took the /proc path despite the stubbed reader, so the LC_ALL=C pin was never exercised" ;;
+  esac
   [ "$via_lc_all" = "$baseline" ] || fail "fm_pid_identity varied with exported LC_ALL (got '$via_lc_all', want '$baseline')"
   [ "$via_lc_time" = "$baseline" ] || fail "fm_pid_identity varied with exported LC_TIME (got '$via_lc_time', want '$baseline')"
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
