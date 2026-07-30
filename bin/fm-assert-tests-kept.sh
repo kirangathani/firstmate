@@ -38,6 +38,29 @@
 # that do not resolve), or when the scratch tree could not be proven
 # authoritative for the code under test.
 #
+# A GREEN baseline run has the same hole one level down: it can exit zero having
+# verified only some of the identifiers it was bounded to, or none of them. So
+# every identifier the run was bounded to is accounted for individually, and the
+# two ways it can fail to be a pass are reported separately:
+#   - `skipped:`     the runner reported an EXPLICIT skip for it. Accounted for,
+#                    and specifically NOT unexecuted.
+#   - `unaccounted:` the run produced no result for it at all - no testcase in
+#                    the report, a report that is missing/empty/unparseable, or
+#                    (shell runner) no `ok - <name>` line.
+# NEITHER class affects this script's exit code in this PR: exit 1 stays driven
+# only by `missing:`, `failing:` and `unexecuted:`. The point of the change is to
+# make a green-but-empty run VISIBLE where it previously read as verified, not to
+# add a merge-refusing condition.
+#
+# Two limits are carried forward here rather than hidden:
+#   (i)  a skipif that is true only because of the SCRATCH environment is
+#        indistinguishable from a deliberate skip in the runner's report, so it
+#        lands in `skipped:`; this change does not close that.
+#   (ii) a missing or unparseable results file lands in `unaccounted:` rather
+#        than `unexecuted:` precisely because that would be a new merge-refusing
+#        condition; mapping finding classes to what blocks a merge is
+#        bin/fm-pr-merge.sh's contract.
+#
 # The per-language detect/run/parse mechanics of check 2, the scratch-tree
 # lifecycle, and the reason a scratch tree can fail to be authoritative are all
 # owned by bin/fm-test-exec-lib.sh; this script orchestrates them.
@@ -59,7 +82,7 @@
 #       Explicit mode: enumerate <base> vs <ref> (default HEAD) in <path>.
 #
 # Output and exit status. stdout is strictly line-oriented so a gate or a viewer
-# can parse it; the human-facing diagnostic blobs go to stderr. Three finding
+# can parse it; the human-facing diagnostic blobs go to stderr. Five finding
 # prefixes and one summary line are the stable contract:
 #   - `missing: <file>::<name>` per identifier present on the base and absent
 #     from the branch (check 1).
@@ -67,11 +90,18 @@
 #     did not pass against the branch's code (check 2).
 #   - `unexecuted: <file>::<name>` per identifier check 2 could not actually
 #     run, with the reason and the verbatim captured output on stderr.
-#   - `summary: missing=<n> failing=<n> unexecuted=<n>` always, as the last
-#     line, whether or not anything was found.
-#   - Exit 1 when ANY of the three finding sets is non-empty, exit 0 when all
-#     three are empty. This script reports; it does not decide which classes
-#     block a merge (that is bin/fm-pr-merge.sh's contract, not this one's).
+#   - `skipped: <file>::<name>` per identifier a green baseline run reported an
+#     explicit skip for.
+#   - `unaccounted: <file>::<name>` per identifier a green baseline run produced
+#     no result for at all.
+#   - `summary: missing=<n> failing=<n> unexecuted=<n> skipped=<n>
+#     unaccounted=<n>` always, as the last line, whether or not anything was
+#     found.
+#   - Exit 1 when ANY of `missing:`, `failing:` or `unexecuted:` is non-empty,
+#     exit 0 when all three are empty. `skipped:` and `unaccounted:` are
+#     reported but do NOT affect the exit code. This script reports; it does not
+#     decide which classes block a merge (that is bin/fm-pr-merge.sh's contract,
+#     not this one's).
 #   - Exit 2 when the check cannot run at all (bad usage, missing meta,
 #     missing worktree or project, unresolvable refs), so a caller gating on
 #     this script can tell "assertions vanished" from "could not verify".
@@ -332,6 +362,8 @@ comm -23 "$TMPD/base" "$TMPD/branch" > "$TMPD/missing"
 : > "$TMPD/unexec"
 : > "$TMPD/unexec-report"
 : > "$TMPD/execfiles"
+: > "$TMPD/skipped"
+: > "$TMPD/unaccounted"
 
 # idents_for_file <file>: the check-1 identifiers the base enumerated for <file>.
 # They are both what a run is bounded to and what an unexecuted file reports.
@@ -340,6 +372,30 @@ idents_for_file() {
   while IFS= read -r ident; do
     case "$ident" in "$f::"*) printf '%s\n' "$ident" ;; esac
   done < "$TMPD/base"
+}
+
+# idents_from_names <file>: read runner-reported test NAMES on stdin and print
+# the <file>::<name> identifiers they compose to, so a runner's own vocabulary
+# can be set against the check-1 identifiers a run was bounded to.
+idents_from_names() {
+  local f=$1 name
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    printf '%s::%s\n' "$f" "$name"
+  done
+}
+
+# record_idents <dest>: append each identifier read on stdin to <dest>, dropping
+# any check 1 already reported as missing so it is never double-reported.
+record_idents() {
+  local dest=$1 ident
+  while IFS= read -r ident; do
+    [ -n "$ident" ] || continue
+    if grep -qxF "$ident" "$TMPD/missing"; then
+      continue
+    fi
+    printf '%s\n' "$ident" >> "$dest"
+  done
 }
 
 # mark_unexecuted <file> <reason> [<captured-output-file>]: report every check-1
@@ -443,11 +499,25 @@ if [ -s "$TMPD/execfiles" ]; then
       printf '%s::(unnamed assertion; base test file exited %s against the branch)\n' \
         "$f" "$branch_rc" >> "$TMPD/failing"
     fi
+    # A green baseline is not the same as a baseline that verified everything it
+    # was bounded to. Account for each requested identifier against what the
+    # BASELINE actually recorded: an explicit skip is accounted for, and anything
+    # the run produced no result for at all was never verified and must not be
+    # counted as one. Neither class changes this script's exit code.
+    idents_for_file "$f" | sort -u > "$TMPD/requested"
+    skipped_idents "$spec" "$TMPD/run-base" | idents_from_names "$f" | sort -u \
+      > "$TMPD/skipped-idents"
+    { idents_from_names "$f" < "$TMPD/ok-base"; cat "$TMPD/skipped-idents"; } \
+      | sort -u > "$TMPD/accounted"
+    comm -12 "$TMPD/requested" "$TMPD/skipped-idents" | record_idents "$TMPD/skipped"
+    comm -23 "$TMPD/requested" "$TMPD/accounted" | record_idents "$TMPD/unaccounted"
   done < "$TMPD/execfiles"
 fi
 
 sort -u "$TMPD/failing" > "$TMPD/failing.sorted"
 sort -u "$TMPD/unexec" > "$TMPD/unexec.sorted"
+sort -u "$TMPD/skipped" > "$TMPD/skipped.sorted"
+sort -u "$TMPD/unaccounted" > "$TMPD/unaccounted.sorted"
 
 if [ -s "$TMPD/unexec-report" ]; then
   {
@@ -468,12 +538,21 @@ done < "$TMPD/failing.sorted"
 while IFS= read -r line; do
   printf 'unexecuted: %s\n' "$line"
 done < "$TMPD/unexec.sorted"
+while IFS= read -r line; do
+  printf 'skipped: %s\n' "$line"
+done < "$TMPD/skipped.sorted"
+while IFS= read -r line; do
+  printf 'unaccounted: %s\n' "$line"
+done < "$TMPD/unaccounted.sorted"
 
 MISSING_COUNT=$(grep -c . "$TMPD/missing" || true)
 FAILING_COUNT=$(grep -c . "$TMPD/failing.sorted" || true)
 UNEXEC_COUNT=$(grep -c . "$TMPD/unexec.sorted" || true)
-printf 'summary: missing=%s failing=%s unexecuted=%s\n' \
-  "$MISSING_COUNT" "$FAILING_COUNT" "$UNEXEC_COUNT"
+SKIPPED_COUNT=$(grep -c . "$TMPD/skipped.sorted" || true)
+UNACCOUNTED_COUNT=$(grep -c . "$TMPD/unaccounted.sorted" || true)
+printf 'summary: missing=%s failing=%s unexecuted=%s skipped=%s unaccounted=%s\n' \
+  "$MISSING_COUNT" "$FAILING_COUNT" "$UNEXEC_COUNT" \
+  "$SKIPPED_COUNT" "$UNACCOUNTED_COUNT"
 
 if [ "$MISSING_COUNT" -eq 0 ] && [ "$FAILING_COUNT" -eq 0 ] && [ "$UNEXEC_COUNT" -eq 0 ]; then
   exit 0

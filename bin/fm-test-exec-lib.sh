@@ -32,6 +32,14 @@
 #       <results-out>. fm-assert composes the full <file>::<name> identifier from
 #       these names; for the shell runner the name is the `ok - <name>` tail.
 #
+#   skipped_idents <spec> <results-out>
+#       Print the sorted, unique set of test names the runner recorded as an
+#       EXPLICIT skip in <results-out>. fm-assert subtracts these AND
+#       passing_idents from the identifiers the run was bounded to; whatever is
+#       left produced no result at all and is reported `unaccounted:`. The shell
+#       runner's TAP protocol has no skip marker, so it never reports one and an
+#       unrun shell name is therefore unaccounted rather than skipped.
+#
 # Scratch-tree lifecycle (same owner, called by fm-assert around the runs):
 #
 #   prepare_scratch_env <spec> <scratch-dir> <worktree>
@@ -85,7 +93,18 @@
 #
 # Results are read from the JUnit XML pytest writes natively (no plugin, unlike
 # --report-log): a <testcase> with no failure/error/skipped child is a pass, and
-# its `name` attribute is the reported name.
+# its `name` attribute is the reported name. A <testcase> carrying a <skipped>
+# child is an EXPLICIT skip - pytest records @pytest.mark.skip, a true skipif and
+# an xfail that way - and skipped_idents reports it, so a green run that verified
+# nothing is visible as a per-identifier skip instead of a bare pass. A report
+# that is missing, empty or unparseable yields neither set, so every requested
+# name comes back unaccounted at the orchestrator; the same is true, per nodeid,
+# of a name the run produced no <testcase> for at all.
+#
+# The report cannot distinguish a deliberate skip from a skipif that is true ONLY
+# because of the scratch environment (a missing optional dependency, a platform
+# guard): both are a <skipped> child, so both land in skipped:. That limit is
+# carried forward deliberately, not closed here.
 #
 # Identifier-scheme reconciliation (checks 1 and 2 do NOT share a namespace):
 # check 1's Python extractor is lexical and yields the bare `def test_*` name, so
@@ -216,6 +235,21 @@ for case in root.iter("testcase"):
         print(name)
 '
 
+# Print each EXPLICITLY skipped testcase name from a pytest JUnit XML report.
+FM_PY_JUNIT_SKIPPED_SRC='
+import sys, xml.etree.ElementTree as ET
+try:
+    root = ET.parse(sys.argv[1]).getroot()
+except Exception:
+    sys.exit(0)
+for case in root.iter("testcase"):
+    if not any(child.tag == "skipped" for child in case):
+        continue
+    name = case.get("name")
+    if name:
+        print(name)
+'
+
 # Print one line per top-level module that still resolves OUTSIDE the scratch
 # tree because the live worktree is reachable from the import system. No output
 # means the scratch tree is authoritative for first-party imports.
@@ -232,7 +266,9 @@ def under(path, root):
 
 # The provisioned env lives under the live worktree and is shared by design, so
 # site-packages itself is never the hazard - only live FIRST-PARTY source is.
-env_roots = [os.path.join(live, name) for name in (".venv", "venv")]
+# Resolved, because every path compared against these is resolved too: a .venv
+# that is itself a symlink would otherwise never match its own contents.
+env_roots = [os.path.realpath(os.path.join(live, name)) for name in (".venv", "venv")]
 
 
 def is_env(path):
@@ -257,9 +293,13 @@ for entry in sys.path:
                     text = handle.read()
             except OSError:
                 continue
+            # The literal match is a PREFIX match, so a sibling worktree whose
+            # path merely starts with <live> would slip through; containment is
+            # re-checked on the RESOLVED path, which also drops an entry spelled
+            # through <live> that resolves out of the live tree entirely.
             for hit in re.findall(re.escape(live) + r"[^\s\x27\"]*", text):
                 hit = os.path.realpath(hit.rstrip("/"))
-                if not is_env(hit):
+                if under(hit, live) and not is_env(hit):
                     live_paths.add(hit)
 
 
@@ -460,6 +500,25 @@ passing_idents() {
     pytest)
       [ -s "$results" ] || return 0
       "$python" -c "$FM_PY_JUNIT_SRC" "$results" 2>/dev/null | sort -u
+      ;;
+  esac
+}
+
+# skipped_idents <spec> <results-out>: the sorted unique test names one run
+# recorded as an EXPLICIT skip. Everything the run was bounded to that appears in
+# neither this set nor passing_idents produced no result at all.
+skipped_idents() {
+  local spec=$1 results=$2 runner python
+  IFS=$'\t' read -r runner python _ <<< "$spec"
+  case "$runner" in
+    shell)
+      # The TAP-style protocol has no skip marker, and inventing one would change
+      # it; a shell name that never emitted `ok - ` is unaccounted, not skipped.
+      return 0
+      ;;
+    pytest)
+      [ -s "$results" ] || return 0
+      "$python" -c "$FM_PY_JUNIT_SKIPPED_SRC" "$results" 2>/dev/null | sort -u
       ;;
   esac
 }

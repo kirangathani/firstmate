@@ -30,6 +30,14 @@
 #   (q) a tests/ dir whose test imports a sibling helper by bare name still
 #       executes under --import-mode=importlib, so the layout prepend mode used
 #       to carry is not silently reported unexecuted
+#   (r) a pytest file whose every test is explicitly skipped reports `skipped:`
+#       per identifier and exits ZERO - visible, not a silent clean pass
+#   (s) a partially-run pytest file reports the identifier that produced no
+#       result as `unaccounted:`, and still exits zero
+#   (t) a pytest file whose results report cannot be read reports every
+#       identifier `unaccounted:`, and still exits zero
+#   (u) a shell name that never emitted `ok - ` is `unaccounted:`, since the TAP
+#       protocol has no skip marker to report instead
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -326,7 +334,7 @@ EOF
   set -e
 
   expect_code 0 "$code" "zk-refactor: a behavior-preserving rewrite must exit zero"
-  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0' \
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0' \
     "zk-refactor: a fully executed clean tree must report zero in every class"
   pass "a behavior-preserving rewrite of code and test body exits zero"
 }
@@ -451,8 +459,8 @@ test_pytest_clean_run_exits_zero() {
   set -e
 
   expect_code 0 "$code" "pytest-clean: the base's Python assertion still passes, so exit must be zero"
-  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0' \
-    "pytest-clean: a real pytest run must report zero unexecuted, proving it executed"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0' \
+    "pytest-clean: a real pytest run must report zero in every class, proving it executed and accounted for its identifier"
   assert_not_contains "$out" 'unexecuted:' \
     "pytest-clean: the Python file must be executed, not name-checked"
   pass "a Python base test that passes against the branch exits zero"
@@ -642,12 +650,14 @@ test_pytest_sibling_helper_layout_executes() {
 }
 
 test_run_never_mutates_the_live_worktree() {
-  local dir before after
+  local dir before after venv_before venv_after
   require_pytest_venv no-mutation
   dir=$(make_py_repo no-mutation)
   ln -s "$PYTEST_VENV" "$dir/.venv"
   before="$TMP_ROOT/no-mutation.before"
   after="$TMP_ROOT/no-mutation.after"
+  venv_before="$TMP_ROOT/no-mutation.venv-before"
+  venv_after="$TMP_ROOT/no-mutation.venv-after"
   # run_explicit puts this harness's own state dir inside the fixture, so create
   # it up front: the snapshot must isolate what the RUN does to the worktree.
   mkdir -p "$dir/.state"
@@ -655,6 +665,12 @@ test_run_never_mutates_the_live_worktree() {
   # find does not traverse the .venv symlink, so this covers the tracked tree
   # and would catch a stray __pycache__, .pytest_cache, or scratch leak.
   find "$dir" -path "$dir/.git" -prune -o -print | sort > "$before"
+  # The linked env is the LIVE shared venv, and `find` above deliberately stops
+  # at the symlink, so the tree snapshot alone cannot see a write INTO it: a
+  # plugin regenerating a .pth or a datafile landing at a sysconfig path would be
+  # invisible. Snapshot the env itself so that class of mutation can actually
+  # fail this case.
+  find "$PYTEST_VENV" | sort > "$venv_before"
 
   set +e
   run_explicit "$dir" > /dev/null 2>&1
@@ -663,8 +679,185 @@ test_run_never_mutates_the_live_worktree() {
   find "$dir" -path "$dir/.git" -prune -o -print | sort > "$after"
   diff -u "$before" "$after" > "$TMP_ROOT/no-mutation.diff" \
     || fail "no-mutation: the run must not add or remove anything in the live worktree"$'\n'"$(cat "$TMP_ROOT/no-mutation.diff")"
-  assert_absent "$PYTEST_VENV/../.venv" "no-mutation: the run must not create env dirs outside the worktree"
+  find "$PYTEST_VENV" | sort > "$venv_after"
+  diff -u "$venv_before" "$venv_after" > "$TMP_ROOT/no-mutation.venv-diff" \
+    || fail "no-mutation: the run must not write into the provisioned environment it borrows"$'\n'"$(cat "$TMP_ROOT/no-mutation.venv-diff")"
   pass "a check-2 run never mutates the live worktree"
+}
+
+# --- accounting fixtures: a green run that verified less than it was asked to --
+
+# init_repo_at <dir>: an empty repo on main, for fixtures that write their own
+# tree rather than one of the shared corpora. Echoes nothing.
+init_repo_at() {
+  local dir=$1
+  mkdir -p "$dir"
+  git init -q -b main "$dir" 2>/dev/null || {
+    git init -q "$dir"
+    git -C "$dir" checkout -q -b main
+  }
+}
+
+# write_py_accounting_tree <dir> <test-body> [<conftest-body>]: a minimal pytest
+# tree whose repo addopts is the same uninstalled coverage gate the other Python
+# fixtures use, so a run that failed to neutralize addopts errors out loudly
+# instead of quietly reporting one of the accounting classes under test.
+write_py_accounting_tree() {
+  local dir=$1 test_body=$2 conftest_body=${3:-}
+  mkdir -p "$dir"
+  cat > "$dir/pyproject.toml" <<'EOF'
+[tool.pytest.ini_options]
+addopts = "--cov=pkg --cov-fail-under=100"
+EOF
+  printf '.venv/\n' > "$dir/.gitignore"
+  printf '%s' "$test_body" > "$dir/test_mod.py"
+  if [ -n "$conftest_body" ]; then
+    printf '%s' "$conftest_body" > "$dir/conftest.py"
+  fi
+}
+
+test_pytest_all_skipped_is_visible_not_a_silent_pass() {
+  local dir out code
+  require_pytest_venv pytest-all-skipped
+  dir="$TMP_ROOT/pytest-all-skipped"
+  init_repo_at "$dir"
+  write_py_accounting_tree "$dir" 'import pytest
+
+
+@pytest.mark.skip(reason="not runnable in this environment")
+def test_x_behaves():
+    assert False
+
+
+@pytest.mark.skip(reason="not runnable in this environment")
+def test_y_behaves():
+    assert False
+'
+  commit_all "$dir" "main: every test carries an explicit skip"
+  git -C "$dir" checkout -q -b work
+  ln -s "$PYTEST_VENV" "$dir/.venv"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "pytest-all-skipped: a skip-only run must not become a new merge-refusing condition"
+  assert_contains "$out" 'skipped: test_mod.py::test_x_behaves' \
+    "pytest-all-skipped: an explicitly skipped identifier must be reported by name"
+  assert_contains "$out" 'skipped: test_mod.py::test_y_behaves' \
+    "pytest-all-skipped: every skipped identifier must be reported, not just the first"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=2 unaccounted=0' \
+    "pytest-all-skipped: a green run that verified nothing must not read as a clean pass"
+  assert_not_contains "$out" 'unexecuted:' \
+    "pytest-all-skipped: an explicit skip is accounted for, so it is not unexecuted"
+  assert_not_contains "$out" 'unaccounted:' \
+    "pytest-all-skipped: a reported skip IS a result, so nothing here is unaccounted"
+  pass "a pytest file whose tests are all skipped is reported per identifier, not silently passed"
+}
+
+test_pytest_partially_run_file_reports_the_unrun_identifier() {
+  local dir out code
+  require_pytest_venv pytest-partial
+  dir="$TMP_ROOT/pytest-partial"
+  init_repo_at "$dir"
+  # A deselecting conftest, the ordinary way a suite drops a case at collection:
+  # the run still exits green, but produces no result at all for test_b.
+  write_py_accounting_tree "$dir" 'def test_a():
+    assert True
+
+
+def test_b():
+    assert True
+' 'def pytest_collection_modifyitems(config, items):
+    dropped = [item for item in items if item.name == "test_b"]
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+        items[:] = [item for item in items if item.name != "test_b"]
+'
+  commit_all "$dir" "main: two tests, one deselected at collection"
+  git -C "$dir" checkout -q -b work
+  ln -s "$PYTEST_VENV" "$dir/.venv"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "pytest-partial: reporting an unaccounted identifier must not change the exit code"
+  assert_contains "$out" 'unaccounted: test_mod.py::test_b' \
+    "pytest-partial: an identifier the run produced no result for must not be counted as verified"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=1' \
+    "pytest-partial: only the unrun identifier is unaccounted; the one that ran is not"
+  assert_not_contains "$out" 'unaccounted: test_mod.py::test_a' \
+    "pytest-partial: an identifier that really ran must stay out of the unaccounted class"
+  pass "a partially-run pytest file reports the identifier that produced no result"
+}
+
+test_pytest_unreadable_report_is_unaccounted_not_a_pass() {
+  local dir out code
+  require_pytest_venv pytest-bad-report
+  dir="$TMP_ROOT/pytest-bad-report"
+  init_repo_at "$dir"
+  # pytest_unconfigure runs after the junitxml plugin has written its report, so
+  # this leaves a green run whose results file cannot be parsed at all.
+  write_py_accounting_tree "$dir" 'def test_a():
+    assert True
+' 'def pytest_unconfigure(config):
+    path = getattr(config.option, "xmlpath", None)
+    if not path:
+        return
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("<<< this is not a parseable report")
+'
+  commit_all "$dir" "main: a green run whose report is unreadable"
+  git -C "$dir" checkout -q -b work
+  ln -s "$PYTEST_VENV" "$dir/.venv"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "pytest-bad-report: an unreadable report must not become a new merge-refusing condition"
+  assert_contains "$out" 'unaccounted: test_mod.py::test_a' \
+    "pytest-bad-report: a report that cannot be read verifies nothing, so its identifiers are unaccounted"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=1' \
+    "pytest-bad-report: the summary must count the unaccounted identifier"
+  assert_not_contains "$out" 'unexecuted:' \
+    "pytest-bad-report: this PR maps an unreadable report to unaccounted, deliberately not to unexecuted"
+  pass "a pytest file whose results report cannot be read reports unaccounted and still exits zero"
+}
+
+test_shell_name_that_never_ran_is_unaccounted() {
+  local dir out code
+  dir="$TMP_ROOT/shell-unaccounted"
+  init_repo_at "$dir"
+  mkdir -p "$dir/tests"
+  cat > "$dir/tests/x.test.sh" <<'EOF'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+pass "always runs"
+if [ -n "${FM_NEVER_SET:-}" ]; then
+  pass "conditional case"
+fi
+EOF
+  commit_all "$dir" "main: one assertion the file's own guard never reaches"
+  git -C "$dir" checkout -q -b work
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "shell-unaccounted: the TAP protocol and its green-exit trust rule are unchanged"
+  assert_contains "$out" 'unaccounted: tests/x.test.sh::conditional case' \
+    "shell-unaccounted: a name the run never emitted 'ok - ' for was not verified"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=1' \
+    "shell-unaccounted: the shell runner has no skip marker, so an unrun name is unaccounted, never skipped"
+  assert_not_contains "$out" 'unaccounted: tests/x.test.sh::always runs' \
+    "shell-unaccounted: the assertion that did run must not be reported"
+  pass "a shell assertion that never emitted 'ok - ' is reported unaccounted, not passed"
 }
 
 test_removed_shell_test_reported_via_meta
@@ -683,3 +876,7 @@ test_pytest_editable_shadow_is_unexecuted
 test_pytest_editable_that_scratch_shadows_still_runs
 test_pytest_sibling_helper_layout_executes
 test_run_never_mutates_the_live_worktree
+test_pytest_all_skipped_is_visible_not_a_silent_pass
+test_pytest_partially_run_file_reports_the_unrun_identifier
+test_pytest_unreadable_report_is_unaccounted_not_a_pass
+test_shell_name_that_never_ran_is_unaccounted
