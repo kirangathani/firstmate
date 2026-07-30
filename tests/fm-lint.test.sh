@@ -197,6 +197,48 @@ test_cache_key_covers_the_source_closure() {
   pass "a cached result is invalidated by a change anywhere in its source closure"
 }
 
+test_literal_source_path_is_a_closure_edge() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): literal-source closure check"
+    return
+  fi
+  # ShellCheck (without -x) also follows a plain `source <path>` whose target
+  # is a variable-free literal path naming another input file - no source=
+  # directive involved. The planner must model that edge too, or the sharded
+  # path would emit an SC1091 the whole-set command does not, and a change to
+  # the sourced library would not invalidate its importer's cached result.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-litsrc)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  cat > "$fx/bin/lit-lib.sh" <<'SH'
+#!/usr/bin/env bash
+LIT_READY=1
+export LIT_READY
+SH
+  cat > "$fx/bin/lit-app.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+source bin/lit-lib.sh
+printf '%s\n' "$LIT_READY"
+SH
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache-parity" "$fx/bin/fm-lint.sh" --verify-parity 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a literal source path broke fast-path parity"$'\n'"$out"
+  assert_contains "$out" "PARITY OK" "--verify-parity did not confirm parity with a literal source edge"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "literal-source fixture failed its first lint (exit $rc)"$'\n'"$out"
+  printf '\nLIT_EXTRA=2\nexport LIT_EXTRA\n' >> "$fx/bin/lit-lib.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "literal-source re-lint failed unexpectedly (exit $rc)"$'\n'"$out"
+  # bin/lit-lib.sh itself plus its only importer, bin/lit-app.sh.
+  assert_contains "$out" "linting 2 of" \
+    "editing a literal-sourced library did not invalidate its importer's cached result"
+  pass "a literal source path is a closure edge for parity and cache invalidation"
+}
+
 test_owner_exists_and_executable() {
   assert_present "$LINT" "bin/fm-lint.sh is missing"
   [ -x "$LINT" ] || fail "bin/fm-lint.sh must be executable so CI/gate can run it directly"
@@ -358,3 +400,4 @@ test_fast_path_matches_the_canonical_command
 test_cold_cache_never_reports_a_false_clean
 test_cache_hit_does_not_hide_a_later_defect
 test_cache_key_covers_the_source_closure
+test_literal_source_path_is_a_closure_edge

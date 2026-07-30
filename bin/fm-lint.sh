@@ -50,7 +50,8 @@
 # list yields precisely the findings the whole-set run gives it.
 #
 # So this script:
-#   1. builds the source graph from the `source=` directives (bin/fm-lint-plan.awk),
+#   1. builds the source graph from the `source=` directives and literal
+#      source statements (bin/fm-lint-plan.awk),
 #   2. skips files whose own contents AND whose entire transitive source closure
 #      are byte-identical to a previously recorded clean result under this exact
 #      ShellCheck version and flags,
@@ -86,6 +87,14 @@ set -eu
 # The single source of the pinned ShellCheck version. Bump here and CI follows
 # automatically via `--required-version`; the test suite reads it the same way.
 REQUIRED_SHELLCHECK=0.11.0
+
+# The behavior-affecting ShellCheck flags. The cache key embeds this exact
+# string, so the sharded invocations below must take their flags from here and
+# nowhere else: a flag added to an invocation but not to the key would serve
+# stale clean results recorded under a different effective lint. The canonical
+# --whole-set command spells the same flags literally because the test suite
+# pins that command string; --verify-parity keeps the two in agreement.
+LINT_FLAGS='--norc'
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
@@ -147,8 +156,8 @@ ls -1 bin/*.sh bin/backends/*.sh tests/*.sh >"$TMP/files"
 
 if [ "$MODE" = verify-parity ]; then
   printf 'fm-lint.sh: running the canonical whole-set command (this is the slow one)...\n' >&2
-  # shellcheck disable=SC2046
-  shellcheck --norc --format=gcc $(cat "$TMP/files") 2>/dev/null | sort -u >"$TMP/ref" || true
+  # shellcheck disable=SC2046,SC2086
+  shellcheck $LINT_FLAGS --format=gcc $(cat "$TMP/files") 2>/dev/null | sort -u >"$TMP/ref" || true
   printf 'fm-lint.sh: running the sharded fast path...\n' >&2
   FM_LINT_NO_CACHE=1 FM_LINT_EMIT_FINDINGS="$TMP/fast" "$ROOT/bin/fm-lint.sh" >/dev/null 2>&1 || true
   [ -f "$TMP/fast" ] || : >"$TMP/fast"
@@ -204,6 +213,7 @@ if ! awk -v FILES="$TMP/files" -v WORK="" -v JOBS=1 -v MODE=closures \
   # reason, fall back to the reference implementation rather than guessing.
   printf 'fm-lint.sh: could not plan the lint (%s); falling back to the canonical command.\n' \
     "$(tr -d '\n' <"$TMP/plan.err")" >&2
+  rm -rf "$TMP"
   exec "$ROOT/bin/fm-lint.sh" --whole-set
 fi
 
@@ -229,7 +239,7 @@ if [ "$USE_CACHE" = 1 ]; then
   # made the work set come out empty, which reported all 152 files clean
   # without running ShellCheck at all. A lint gate that passes everything is
   # far worse than a slow one, so neither pass may depend on that idiom.
-  awk -v VER="$REQUIRED_SHELLCHECK" -v HASHES="$TMP/hashes" '
+  awk -v VER="$REQUIRED_SHELLCHECK" -v FLAGS="$LINT_FLAGS" -v HASHES="$TMP/hashes" '
     BEGIN {
       while ((getline hl < HASHES) > 0) {
         split(hl, hf, " ")
@@ -249,7 +259,7 @@ if [ "$USE_CACHE" = 1 ]; then
       for (i = 2; i <= n; i++) { v = h[i]; j = i - 1
         while (j >= 1 && h[j] > v) { h[j+1] = h[j]; j-- }
         h[j+1] = v }
-      line = VER " --norc"
+      line = VER " " FLAGS
       for (i = 1; i <= n; i++) line = line " " h[i]
       # A file whose digest is missing is never treated as cacheable.
       if (bad) { bad = 0; next }
@@ -291,8 +301,13 @@ fi
 printf 'fm-lint.sh: linting %s of %s files in %s shards (%s cached clean).\n' \
   "$todo" "$total" "$JOBS" "$cached" >&2
 
-awk -v FILES="$TMP/files" -v WORK="$TMP/work" -v JOBS="$JOBS" \
-  -f "$ROOT/bin/fm-lint-plan.awk" >"$TMP/plan"
+if ! awk -v FILES="$TMP/files" -v WORK="$TMP/work" -v JOBS="$JOBS" \
+  -f "$ROOT/bin/fm-lint-plan.awk" >"$TMP/plan" 2>"$TMP/plan.err"; then
+  printf 'fm-lint.sh: could not plan the lint (%s); falling back to the canonical command.\n' \
+    "$(tr -d '\n' <"$TMP/plan.err")" >&2
+  rm -rf "$TMP"
+  exec "$ROOT/bin/fm-lint.sh" --whole-set
+fi
 
 # --- run the shards in parallel ---------------------------------------------
 # --format=gcc emits one finding per line, which is what makes shard outputs
@@ -308,7 +323,7 @@ while IFS="$TAB" read -r sid owned members; do
   (
     rc=0
     # shellcheck disable=SC2086
-    shellcheck --norc --format=gcc $members >"$TMP/out.$idx" 2>"$TMP/err.$idx" || rc=$?
+    shellcheck $LINT_FLAGS --format=gcc $members >"$TMP/out.$idx" 2>"$TMP/err.$idx" || rc=$?
     printf '%s\n' "$rc" >"$TMP/rc.$idx"
   ) &
   pids="$pids $!"
@@ -352,8 +367,8 @@ if [ -s "$TMP/findings" ]; then
     grep -Fxq "$owner" "$TMP/failed" || continue
     for m in $shard; do printf '%s\n' "$m"; done
   done <"$TMP/closures" | sort -u >"$TMP/replay"
-  # shellcheck disable=SC2046
-  shellcheck --norc $(cat "$TMP/replay") || true
+  # shellcheck disable=SC2046,SC2086
+  shellcheck $LINT_FLAGS $(cat "$TMP/replay") || true
   printf 'fm-lint.sh: %s finding(s) across %s file(s).\n' \
     "$(wc -l <"$TMP/findings" | tr -d ' ')" "$(wc -l <"$TMP/failed" | tr -d ' ')" >&2
   exit 1

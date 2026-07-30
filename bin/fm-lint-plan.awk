@@ -1,10 +1,21 @@
 # fm-lint-plan.awk - closure + shard planner for bin/fm-lint.sh.
 #
-# ShellCheck (without -x) follows a `# shellcheck source=<path>` directive ONLY
-# when the target is also given as an input file on the same command line. That
-# is the entire reason the canonical whole-set run is slow: every importer gets
-# its sourced files inlined and re-analysed, and ShellCheck's analysis is
-# superlinear in the size of the script it ends up analysing.
+# ShellCheck (without -x) follows a sourced file ONLY when the target is also
+# given as an input file on the same command line, and it resolves that target
+# two ways: from a `# shellcheck source=<path>` directive, or from a plain
+# `source <path>` / `. <path>` statement whose target is a variable-free
+# literal path. That following is the entire reason the canonical whole-set run
+# is slow: every importer gets its sourced files inlined and re-analysed, and
+# ShellCheck's analysis is superlinear in the size of the script it ends up
+# analysing.
+#
+# The parity invariant this planner rests on is that a file's findings depend
+# only on its own bytes plus the transitively sourced files present as input.
+# Any resolution mechanism the planner fails to model breaks that invariant
+# SILENTLY, and a silently-wrong lint gate is far worse than a slow one. Hence
+# the scan below models both mechanisms, and for any source statement it cannot
+# confidently classify it exits non-zero so bin/fm-lint.sh falls back to the
+# whole-set reference implementation instead of guessing.
 #
 # The findings ShellCheck reports for a file therefore depend on exactly two
 # things: the file's own contents, and the contents of the files it transitively
@@ -29,6 +40,20 @@
 
 function trim(s) {
   sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s
+}
+
+# Record a source edge from -> to. Only targets that are themselves canonical
+# inputs are followed by ShellCheck; anything else stays unresolved in both
+# modes alike, so it contributes no edge.
+function addedge(from, to,   key) {
+  if (to == "" || to == from || !(to in inset)) return
+  key = from SUBSEP to
+  if (!(key in edge)) { edge[key] = 1; deps[from] = deps[from] " " to }
+}
+
+function tripwire(f, ln, line) {
+  printf "unclassifiable source statement at %s:%d: %s\n", f, ln, trim(line) > "/dev/stderr"
+  exit 3
 }
 
 # Cost model for bin packing. ShellCheck's runtime grows faster than the line
@@ -66,25 +91,58 @@ BEGIN {
     close(WORK)
   }
 
-  # --- scan each file for source directives and count its lines -------------
+  # --- scan each file for source edges and count its lines ------------------
+  # Every source/`.` statement must land in one of three buckets: (1) covered
+  # by a `# shellcheck source=` directive, which then owns resolution; (2) a
+  # target containing a shell expansion ($var, ${...}, $(...), backticks),
+  # which ShellCheck cannot resolve either, so both modes agree there is no
+  # edge; (3) a variable-free literal path, an edge exactly when it names a
+  # canonical input (tried both repo-root-relative and script-dir-relative;
+  # over-inclusion is safe under the parity invariant, a missed edge is not).
+  # Anything else hits the tripwire above. Detection is statement-initial
+  # only: a mid-line `source` reaching ShellCheck as a real statement is not
+  # a shape this repo uses, and scanning inside strings/heredocs would drown
+  # the tripwire in false alarms.
   for (i = 1; i <= n; i++) {
     f = files[i]
+    fdir = ""
+    if (f ~ /\//) { fdir = f; sub(/\/[^\/]*$/, "/", fdir) }
     lc = 0
+    covered = 0
     while ((getline line < f) > 0) {
       lc++
       # Match `# shellcheck ... source=<path>`; the directive may carry other
-      # keys (disable=..., shell=...) before or after the source= key.
+      # keys (disable=..., shell=...) before or after the source= key. It
+      # governs the next command, whose own target must then not be re-read.
       if (line ~ /^[ \t]*#[ \t]*shellcheck[ \t]/ && line ~ /source=/) {
         tail = line
         sub(/^.*source=/, "", tail)
         sub(/[ \t].*$/, "", tail)
-        # Only targets that are themselves canonical inputs are followed by
-        # ShellCheck; anything else stays unresolved in both modes alike.
-        if (tail in inset && tail != f) {
-          key = f SUBSEP tail
-          if (!(key in edge)) { edge[key] = 1; deps[f] = deps[f] " " tail }
-        }
+        addedge(f, tail)
+        covered = 1
+        continue
       }
+      if (line ~ /^[ \t]*(#|$)/) continue
+      stmt = line
+      sub(/^[ \t]+/, "", stmt)
+      if (stmt ~ /^(source|\.)[ \t]/) {
+        if (covered) { covered = 0; continue }
+        covered = 0
+        sub(/^(source|\.)[ \t]+/, "", stmt)
+        tgt = stmt
+        sub(/[ \t].*$/, "", tgt)
+        if (tgt == "" || tgt ~ /[$`]/) continue
+        if (tgt ~ /\\/) tripwire(f, lc, line)
+        if (tgt ~ /^"[^"]*"$/ || tgt ~ /^'[^']*'$/)
+          tgt = substr(tgt, 2, length(tgt) - 2)
+        else if (tgt ~ /["']/) tripwire(f, lc, line)
+        if (tgt ~ /[];&|<>(){}*?~[]/) tripwire(f, lc, line)
+        sub(/^(\.\/)+/, "", tgt)
+        addedge(f, tgt)
+        addedge(f, fdir tgt)
+        continue
+      }
+      covered = 0
     }
     close(f)
     lines[f] = lc
