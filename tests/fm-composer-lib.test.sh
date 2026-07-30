@@ -13,6 +13,17 @@
 #      agent composer either way, bordered or bare.
 #   4. Real unsubmitted text reads `pending`; a known idle placeholder reads
 #      `empty`.
+#
+# Task fm-send-falseneg adds the UNICODE BLANK PADDING contract:
+#   5. A Unicode blank (U+00A0 and the rest of FM_COMPOSER_BLANKS) is normalized
+#      to an ASCII space before the verdict, so a blank-padded empty composer
+#      reads `empty`, not `pending`. claude pads its prompt glyph with a U+00A0
+#      NO-BREAK SPACE, which the shell's `[[:space:]]` trims leave behind. Every
+#      fixture here had been hand-written with an ASCII space, so the suite was
+#      green while every real claude composer classified as pending input.
+#   6. The other direction is unchanged: real text after the blank still reads
+#      `pending`, a blank-padded bare shell glyph is still `unknown`, and a
+#      zero-width/format character still counts as content.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -125,6 +136,55 @@ test_real_text_is_pending() {
   pass "fm_composer_classify_content: real unsubmitted text reads pending (including a popup argument-hint fill)"
 }
 
+# --- Unicode blank padding (task fm-send-falseneg) --------------------------
+
+# The exact bytes hex-dumped from a live claude pane's cursor row on 2026-07-30:
+# e2 9d af (❯) c2 a0 (U+00A0 NO-BREAK SPACE). Built with printf so this file stays
+# readable ASCII - a literal U+00A0 in source is invisible and unmaintainable.
+NBSP=$(printf '\302\240')
+GLYPH=$(printf '\342\235\257')
+
+test_blank_padded_empty_composer_is_empty() {
+  local out
+  out=$(classify 0 "$GLYPH$NBSP")
+  [ "$out" = empty ] \
+    || fail "a live claude row (glyph + U+00A0) must read empty, got '$out'"
+  out=$(classify 1 "$NBSP")
+  [ "$out" = empty ] || fail "a blank-only bordered composer row should read empty, got '$out'"
+  # The bare-glyph fallback (ghost stripping emptied the content) must land too.
+  out=$(classify 0 '' '' sensitive "$GLYPH$NBSP")
+  [ "$out" = empty ] || fail "a blank-padded plain_content fallback should read empty, got '$out'"
+  pass "fm_composer_classify_content: a U+00A0-padded empty composer reads empty, not pending"
+}
+
+test_every_normalized_blank_reads_empty() {
+  local ch out
+  for ch in "${FM_COMPOSER_BLANKS[@]}"; do
+    out=$(classify 0 "$GLYPH$ch")
+    [ "$out" = empty ] \
+      || fail "glyph padded with a normalized blank should read empty, got '$out'"
+  done
+  pass "fm_composer_classify_content: every FM_COMPOSER_BLANKS character reads as blank padding"
+}
+
+test_blank_padding_preserves_pending_and_unknown() {
+  local out zwj
+  # The dangerous direction: real unsubmitted text after the blank is still pending.
+  out=$(classify 0 "$GLYPH$NBSP fix findings 1 and 3")
+  [ "$out" = pending ] || fail "real text after a U+00A0 must stay pending, got '$out'"
+  out=$(classify 0 "$GLYPH$NBSP$NBSP a captain decision")
+  [ "$out" = pending ] || fail "real text after repeated blanks must stay pending, got '$out'"
+  # The dead-shell safety rule survives blank padding.
+  out=$(classify 0 "\$$NBSP")
+  [ "$out" = unknown ] || fail "a blank-padded bare shell glyph must stay unknown, got '$out'"
+  # Zero-width and format characters are NOT normalized: U+2063 INVISIBLE
+  # SEPARATOR is firstmate's own from-firstmate marker, so it counts as content.
+  zwj=$(printf '\342\201\243')
+  out=$(classify 0 "$GLYPH$NBSP$zwj")
+  [ "$out" = pending ] || fail "a zero-width marker character must count as content, got '$out'"
+  pass "fm_composer_classify_content: blank normalization preserves the pending and unknown verdicts"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -134,3 +194,6 @@ test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
+test_blank_padded_empty_composer_is_empty
+test_every_normalized_blank_reads_empty
+test_blank_padding_preserves_pending_and_unknown

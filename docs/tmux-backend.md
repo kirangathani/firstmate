@@ -76,6 +76,7 @@ It reads tmux's own `#{pane_current_command}`, which reports the pane's live for
 
 Agent liveness and composer safety are separate checks.
 During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shell glyph on an unbordered row to the shared composer classifier as `unknown`, and the daemon injects only into an affirmatively `empty` composer; see [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends).
+The 2026-07-30 U+00A0 composer incident was reproduced and fixed on this backend but is owned by [Incident (2026-07-30): claude pads its prompt glyph with U+00A0](herdr-backend.md#incident-2026-07-30-claude-pads-its-prompt-glyph-with-u00a0-so-every-empty-claude-composer-read-as-pending-input).
 
 Verified empirically with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-07:
 
