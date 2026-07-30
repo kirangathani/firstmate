@@ -59,11 +59,15 @@
 #     Fields:
 #       id      an exact <file>::<name>, matched by string equality. Exactly one
 #               of id or ids must be present, and it must be the entry's first
-#               field so a line is recognizable as an entry at all.
+#               field so a line is recognizable as an entry at all. Its value may
+#               not contain " | ", because that is this grammar's own field
+#               separator, so an identifier holding it is inherently ambiguous;
+#               such an entry is refused rather than guessed at.
 #       ids     a glob matched against the identifier with bash pattern matching
 #               ([[ "$ident" == $glob ]]), e.g. `src/legacy/*::*` or `*`. This is
 #               the batch form: one entry covers many identifiers arising from a
-#               single cause, such as a dependency bump.
+#               single cause, such as a dependency bump. Its value carries the
+#               same " | " restriction as id.
 #       project must equal <project> (the record's own project).
 #       kind    OPTIONAL, restricting which finding class the entry excuses:
 #               missing, failing, unexecuted, or any. An ABSENT kind means any,
@@ -75,15 +79,24 @@
 #               recognized field written after reason is refused rather than
 #               parsed loosely: that field would be swallowed into the reason
 #               text, and a swallowed kind would silently widen the entry to any.
+#               The after-reason check matches the field marker without requiring
+#               a space after its colon, so a one-character typo like
+#               `reason: bumped runner | kind:unexecuted` is refused too.
 #     Field order is otherwise free (id/ids first, reason last).
 #     An entry is NOT honored - warned about and ignored - when it carries both
 #     id and ids, is missing project, date, or reason, has an empty field, has a
 #     malformed date, names a different project, carries an unparseable or
-#     unrecognized field name, or names a kind outside the four above. A "- "
-#     bullet holding pipe-delimited `key: value` fields but not starting with
-#     id: or ids: is warned about too, so a forgotten identifier is visible
-#     rather than silently skipped. Any other line (a heading, prose, a blank
-#     line) is ignored without comment.
+#     unrecognized field name, repeats a recognized field, or names a kind
+#     outside the four above. A "- " bullet holding pipe-delimited `key: value`
+#     fields but not starting with id: or ids: is warned about too, so a
+#     forgotten identifier is visible rather than silently skipped. Any other
+#     line (a heading, prose, a blank line) is ignored without comment.
+#     Why those last cases refuse instead of taking a best guess: every other
+#     malformed case in this grammar fails closed, and this file governs what is
+#     permitted to BYPASS the merge gate, so silent scope-widening is the one
+#     behavior it must never have. A repeated field taking its last value and a
+#     typo'd field swallowed into reason both widen an entry past what the
+#     captain wrote, which is exactly that failure.
 #   - SAFETY: kind is a safety feature, not a convenience. A batch written
 #     `ids: * | kind: unexecuted` excuses only unexecuted findings, so it can
 #     never silently excuse a genuinely deleted (missing) or rewritten (failing)
@@ -192,7 +205,7 @@ EXEC_GATE_FILE="$FM_HOME/data/exec-gate/$PROJ_NAME"
 # honored.
 supersession_approved() {
   local ident=$1 finding_class=$2
-  local line head field key val bad req kind_seen
+  local line head field key val bad req kind_seen seen_keys
   local entry_id entry_ids entry_proj entry_date entry_reason entry_kind
   [ -n "$PROJ_NAME" ] || return 1
   [ -f "$SUPERSESSIONS_FILE" ] || return 1
@@ -225,7 +238,7 @@ supersession_approved() {
     # reason text, and a swallowed `kind:` silently widens the entry to any.
     for req in id ids project date kind; do
       case "$entry_reason" in
-        *" | $req: "*) bad="a field after reason (reason must be the last field)" ; break ;;
+        *" | $req:"*) bad="a field after reason (reason must be the last field)" ; break ;;
       esac
     done
     if [ -n "$bad" ]; then
@@ -233,6 +246,7 @@ supersession_approved() {
       continue
     fi
     entry_id='' entry_ids='' entry_proj='' entry_date='' entry_kind='' kind_seen=0
+    seen_keys=' '
     while :; do
       case "$head" in
         *" | "*) field=${head%% | *} ; head=${head#* | } ;;
@@ -242,6 +256,9 @@ supersession_approved() {
         *": "*) key=${field%%:*} ; val=${field#*: } ;;
         *) bad="an unparseable field '$field'" ; break ;;
       esac
+      case "$seen_keys" in
+        *" $key "*) bad="a duplicated field '$key' (a repeat would silently take the last value)" ; break ;;
+      esac
       case "$key" in
         id) entry_id=$val ;;
         ids) entry_ids=$val ;;
@@ -250,6 +267,7 @@ supersession_approved() {
         kind) entry_kind=$val ; kind_seen=1 ;;
         *) bad="an unrecognized field '$key'" ; break ;;
       esac
+      seen_keys="$seen_keys$key "
       [ -n "$head" ] || break
     done
     if [ -n "$bad" ]; then
@@ -341,7 +359,7 @@ parsed=0
 excused=0
 unexcused=0
 unexcused_unexecuted=0
-while IFS= read -r line; do
+while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
     'missing: '*) finding_class=missing ; ident=${line#missing: } ;;
     'failing: '*) finding_class=failing ; ident=${line#failing: } ;;

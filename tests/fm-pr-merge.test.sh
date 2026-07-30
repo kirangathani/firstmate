@@ -858,6 +858,121 @@ test_field_after_reason_not_honored() {
   pass "a supersession entry with a field written after reason is warned about and never honored"
 }
 
+test_no_space_field_after_reason_not_honored() {
+  local case_dir rc
+  # The same swallowing as field-after-reason, one character narrower: without
+  # the space after the colon the entry would parse as ids: * with kind: any and
+  # excuse a missing finding the captain meant to scope to unexecuted.
+  case_dir=$(make_stub_case field-after-reason-no-space 1 'missing: tests/y.test.sh::Y behaves')
+  write_supersessions "$case_dir" \
+    '- ids: * | project: project | date: 2026-08-01 | reason: bumped the runner | kind:unexecuted'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/65 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "field-after-reason-no-space: a no-space field after reason must not excuse the merge"
+  assert_grep 'reason must be the last field' "$case_dir/stderr" \
+    "field-after-reason-no-space: the misordered entry was not warned about"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "field-after-reason-no-space: gh-axi pr merge was invoked despite a misordered entry"
+  pass "a field written after reason with no space after its colon is warned about and never honored"
+}
+
+test_duplicated_kind_field_not_honored() {
+  local case_dir rc
+  # Taking the last value would widen kind: unexecuted to kind: any and excuse a
+  # genuinely missing assertion.
+  case_dir=$(make_stub_case duplicate-kind 1 'missing: tests/x.test.sh::X behaves')
+  write_supersessions "$case_dir" \
+    '- ids: * | project: project | kind: unexecuted | kind: any | date: 2026-08-01 | reason: a repeat must not widen the entry'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/66 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "duplicate-kind: a duplicated kind must not excuse the merge"
+  assert_grep "ignoring supersession entry with a duplicated field 'kind'" "$case_dir/stderr" \
+    "duplicate-kind: the duplicated field was not warned about"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "duplicate-kind: gh-axi pr merge was invoked despite a duplicated field"
+  pass "a supersession entry repeating kind: is warned about and never honored"
+}
+
+test_duplicated_ids_field_not_honored() {
+  local case_dir rc
+  # The finding matches the second glob but not the first, so a last-wins parse
+  # would excuse it and merge.
+  case_dir=$(make_stub_case duplicate-ids 1 'failing: tests/x.test.sh::X behaves')
+  write_supersessions "$case_dir" \
+    '- ids: tests/legacy/* | ids: * | project: project | date: 2026-08-01 | reason: a repeat must not widen the glob'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/67 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "duplicate-ids: a duplicated ids must not excuse the merge"
+  assert_grep "ignoring supersession entry with a duplicated field 'ids'" "$case_dir/stderr" \
+    "duplicate-ids: the duplicated field was not warned about"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "duplicate-ids: gh-axi pr merge was invoked despite a duplicated field"
+  pass "a supersession entry repeating ids: is warned about and never honored"
+}
+
+test_entry_with_both_id_and_ids_not_honored() {
+  local case_dir rc
+  case_dir=$(make_stub_case both-id-and-ids 1 'failing: tests/x.test.sh::X behaves')
+  write_supersessions "$case_dir" \
+    '- id: tests/x.test.sh::X behaves | ids: * | project: project | date: 2026-08-01 | reason: exactly one identifier field is allowed'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/68 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "both-id-and-ids: an entry carrying both identifier fields must not excuse the merge"
+  assert_grep "carrying both 'id:' and 'ids:' (use exactly one)" "$case_dir/stderr" \
+    "both-id-and-ids: the two-identifier entry was not warned about"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "both-id-and-ids: gh-axi pr merge was invoked despite an entry carrying both id: and ids:"
+  pass "a supersession entry carrying both id: and ids: is warned about and never honored"
+}
+
+test_unparseable_or_unrecognized_field_not_honored() {
+  local case_dir rc
+  # Two shapes of the same fail-closed branch: a field with no `key: value`
+  # structure at all, and a well-formed field naming a key this grammar has no
+  # meaning for. Neither may be skipped over into a partially parsed entry.
+  case_dir=$(make_stub_case unrecognized-field 1 \
+    'failing: tests/x.test.sh::X behaves' \
+    'failing: tests/y.test.sh::Y behaves')
+  write_supersessions "$case_dir" \
+    '- id: tests/x.test.sh::X behaves | project: project | scope: everything | date: 2026-08-01 | reason: an unknown key must refuse' \
+    '- id: tests/y.test.sh::Y behaves | project: project | oops | date: 2026-08-01 | reason: a structureless field must refuse'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/69 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unrecognized-field: neither malformed entry may excuse the merge"
+  assert_grep "ignoring supersession entry with an unrecognized field 'scope'" "$case_dir/stderr" \
+    "unrecognized-field: the unrecognized key was not warned about"
+  assert_grep "ignoring supersession entry with an unparseable field 'oops'" "$case_dir/stderr" \
+    "unrecognized-field: the structureless field was not warned about"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unrecognized-field: gh-axi pr merge was invoked despite unparseable supersession entries"
+  pass "a supersession entry with an unparseable or unrecognized field is warned about and never honored"
+}
+
 test_entry_without_id_or_ids_not_honored() {
   local case_dir rc
   case_dir=$(make_stub_case no-id-field 1 'failing: tests/x.test.sh::X behaves')
@@ -940,6 +1055,11 @@ test_kind_restricted_batch_does_not_excuse_missing
 test_wildcard_ids_without_kind_excuses_every_class
 test_invalid_kind_entry_not_honored
 test_field_after_reason_not_honored
+test_no_space_field_after_reason_not_honored
+test_duplicated_kind_field_not_honored
+test_duplicated_ids_field_not_honored
+test_entry_with_both_id_and_ids_not_honored
+test_unparseable_or_unrecognized_field_not_honored
 test_entry_without_id_or_ids_not_honored
 test_findings_exit_with_no_parseable_line_refuses
 test_unverifiable_exit_refuses
