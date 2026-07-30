@@ -703,8 +703,171 @@ test_pid_identity_is_locale_invariant() {
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_pid_identity_is_stable_across_repeated_reads() {
+  # The WSL2 regression. ps computes lstart as boot time plus the process's start
+  # ticks; WSL2 continually re-syncs its boot-time estimate against the Windows
+  # host clock, so the SAME live pid yielded a DIFFERENT lstart string seconds
+  # apart and every identity check rejected a healthy watcher as dead. The kernel
+  # start-tick counter cannot move for a live process, so repeated reads of one
+  # live pid must be byte-identical on every host.
+  local live i seen count
+  sleep 300 &
+  live=$!
+  seen="$TMP_ROOT/identity-samples"
+  : > "$seen"
+  for i in 1 2 3 4 5 6; do
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" >> "$seen" 2>/dev/null
+    sleep 1
+  done
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  count=$(sort -u "$seen" | wc -l | tr -d ' ')
+  [ "$(wc -l < "$seen" | tr -d ' ')" -eq 6 ] || fail "fm_pid_identity did not produce an identity on every read"
+  [ "$count" -eq 1 ] || fail "fm_pid_identity drifted for one live pid across 6 reads ($count distinct values: $(sort -u "$seen" | tr '\n' '|'))"
+  pass "fm_pid_identity is stable across repeated reads of one live pid"
+}
+
+test_pid_identity_parses_odd_proc_stat_comm() {
+  # /proc/<pid>/stat field 2 (comm) is parenthesized and may itself contain
+  # spaces or parentheses, which shifts every positional field, so a naive
+  # awk '{print $22}' reads the wrong number. These synthetic lines pin the
+  # split-on-last-')' parse against exactly that. Each line carries fields 3..52
+  # after the comm, with field 22 (the 20th of those) set to 4242.
+  local tail_fields got comm
+  tail_fields="S 1 1 1 0 -1 4194560 100 0 0 0 5 6 0 0 20 0 1 0 4242"
+  tail_fields="$tail_fields 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+  for comm in 'sleep' 'we ird' 'pa)ren' 'od) d (one'; do
+    got=$(bash -c '. "$1"; fm_pid_parse_start_ticks "$2"' _ "$LIB" "77 ($comm) $tail_fields") \
+      || fail "fm_pid_parse_start_ticks failed on comm '$comm'"
+    [ "$got" = 4242 ] || fail "fm_pid_parse_start_ticks read '$got' for comm '$comm', want 4242"
+  done
+  bash -c '. "$1"; fm_pid_parse_start_ticks "$2"' _ "$LIB" "77 (sleep) S 1 1" >/dev/null 2>&1 \
+    && fail "fm_pid_parse_start_ticks accepted a truncated stat line"
+  bash -c '. "$1"; fm_pid_parse_start_ticks "$2"' _ "$LIB" "77 sleep $tail_fields" >/dev/null 2>&1 \
+    && fail "fm_pid_parse_start_ticks accepted a stat line with no comm parenthesis"
+  bash -c '. "$1"; fm_pid_parse_start_ticks "$2"' _ "$LIB" "" >/dev/null 2>&1 \
+    && fail "fm_pid_parse_start_ticks accepted an empty stat line"
+  pass "fm_pid_parse_start_ticks handles comm containing spaces and parentheses"
+}
+
+test_pid_identity_parses_real_process_with_odd_comm() {
+  # The synthetic parse above, against a genuine kernel-written stat line: comm is
+  # the executable's basename, so a copy named 'a b)c' reproduces both hazards at
+  # once. Skipped off Linux, where there is no /proc for the parse to run against.
+  local dir odd live identity ticks
+  if [ ! -r /proc/self/stat ]; then
+    pass "real-process odd-comm parse skipped: host has no /proc/<pid>/stat"
+    return
+  fi
+  dir=$(make_case odd-comm)
+  odd="$dir/a b)c"
+  cp "$(command -v sleep)" "$odd" || fail "could not stage an odd-comm executable"
+  "$odd" 300 &
+  live=$!
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  ticks=$(bash -c '. "$1"; fm_pid_start_ticks "$2"' _ "$LIB" "$live" 2>/dev/null)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ -n "$ticks" ] || fail "fm_pid_start_ticks read nothing for a process whose comm holds a space and a paren"
+  case "$ticks" in ''|*[!0-9]*) fail "fm_pid_start_ticks returned a non-numeric value '$ticks'" ;; esac
+  [ "$identity" = "proc-starttime:$ticks $odd 300" ] || fail "fm_pid_identity built '$identity', want 'proc-starttime:$ticks $odd 300'"
+  pass "fm_pid_identity parses a real process whose comm holds a space and a paren"
+}
+
+test_pid_identity_falls_back_without_proc_stat() {
+  # macOS has no /proc, so the lstart form stays the fallback there. Simulate an
+  # unreadable /proc/<pid>/stat by making the reader fail, and require the result
+  # to be the legacy form rather than an error.
+  local live identity legacy
+  sleep 300 &
+  live=$!
+  identity=$(bash -c '
+    . "$1"
+    fm_pid_start_ticks() { return 1; }
+    fm_pid_identity "$2"
+  ' _ "$LIB" "$live" 2>/dev/null)
+  legacy=$(bash -c '. "$1"; fm_pid_identity_lstart "$2"' _ "$LIB" "$live" 2>/dev/null)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ -n "$identity" ] || fail "fm_pid_identity produced nothing when /proc/<pid>/stat is unreadable"
+  case "$identity" in
+    proc-starttime:*) fail "fm_pid_identity used the /proc format when /proc/<pid>/stat is unreadable" ;;
+  esac
+  [ "$identity" = "$legacy" ] || fail "fallback identity '$identity' is not the lstart form '$legacy'"
+  pass "fm_pid_identity falls back to the lstart form when /proc/<pid>/stat is unreadable"
+}
+
+test_pid_identity_matches_legacy_record() {
+  # A lock written before the format change holds an lstart-format identity, so a
+  # bare string equality would declare a genuinely live watcher dead exactly once.
+  # fm_pid_identity_matches re-derives the legacy form and compares it exactly.
+  # fm_pid_identity_lstart is stubbed so the assertion cannot itself be defeated by
+  # the WSL2 clock drift this whole change exists to survive.
+  local live legacy verdict
+  legacy='Thu Jul 30 10:00:00 2026 sleep 300'
+  sleep 300 &
+  live=$!
+  verdict=$(bash -c '
+    . "$1"
+    fm_test_stub_lstart=$3
+    fm_pid_identity_lstart() { printf "%s\n" "$fm_test_stub_lstart"; }
+    if fm_pid_identity_matches "$2" "$3"; then echo MATCH; else echo NOMATCH; fi
+  ' _ "$LIB" "$live" "$legacy")
+  [ "$verdict" = MATCH ] || fail "fm_pid_identity_matches rejected a live pid on a legacy-format record"
+  verdict=$(bash -c '
+    . "$1"
+    fm_pid_identity_lstart() { printf "%s\n" "Thu Jul 30 09:00:00 2026 some other process"; }
+    if fm_pid_identity_matches "$2" "$3"; then echo MATCH; else echo NOMATCH; fi
+  ' _ "$LIB" "$live" "$legacy")
+  [ "$verdict" = NOMATCH ] || fail "fm_pid_identity_matches accepted a legacy record that does not describe this pid"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "fm_pid_identity_matches accepts a live pid's legacy record and rejects a foreign one"
+}
+
+test_pid_identity_matches_rejects_dead_and_other_processes() {
+  # The safety property: the drift fix must not make the check more permissive. A
+  # dead pid, a pid now running a different process, and a same-command record
+  # carrying a different start time must all still be rejected.
+  local live other identity forged dead_pid
+  sleep 300 &
+  live=$!
+  sleep 301 &
+  other=$!
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  [ -n "$identity" ] || fail "could not identify the live pid"
+  bash -c '. "$1"; fm_pid_identity_matches "$2" "$3"' _ "$LIB" "$live" "$identity" \
+    || fail "fm_pid_identity_matches rejected a pid against its own identity"
+  bash -c '. "$1"; fm_pid_identity_matches "$2" "$3"' _ "$LIB" "$other" "$identity" \
+    && fail "fm_pid_identity_matches accepted a different process at a recycled pid"
+  # Same command, different start marker: the start time alone must reject it.
+  case "$identity" in
+    proc-starttime:*) forged="proc-starttime:1 ${identity#proc-starttime:* }" ;;
+    *) forged="Thu Jan 1 00:00:00 2001 ${identity#* 20[0-9][0-9] }" ;;
+  esac
+  bash -c '. "$1"; fm_pid_identity_matches "$2" "$3"' _ "$LIB" "$live" "$forged" \
+    && fail "fm_pid_identity_matches accepted a record whose start marker differs"
+  bash -c '. "$1"; fm_pid_identity_matches "$2" ""' _ "$LIB" "$live" \
+    && fail "fm_pid_identity_matches accepted an empty recorded identity"
+  kill "$live" "$other" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  dead_pid=$live
+  bash -c '. "$1"; fm_pid_identity_matches "$2" "$3"' _ "$LIB" "$dead_pid" "$identity" \
+    && fail "fm_pid_identity_matches accepted a dead pid"
+  bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$dead_pid" >/dev/null 2>&1 \
+    && fail "fm_pid_identity produced an identity for a dead pid"
+  pass "fm_pid_identity_matches still rejects dead, recycled, and start-marker-mismatched pids"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_pid_identity_is_stable_across_repeated_reads
+test_pid_identity_parses_odd_proc_stat_comm
+test_pid_identity_parses_real_process_with_odd_comm
+test_pid_identity_falls_back_without_proc_stat
+test_pid_identity_matches_legacy_record
+test_pid_identity_matches_rejects_dead_and_other_processes
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings

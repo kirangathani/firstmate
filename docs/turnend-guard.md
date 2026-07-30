@@ -28,6 +28,7 @@ For an in-scope primary checkout, it counts in-flight work from `state/*.meta`.
 If no task is in flight, it exits silently.
 If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
+The process-identity primitive behind that match must not drift for a live process; see the 2026-07-30 WSL2 entry below for why, and `bin/fm-wake-lib.sh` for the format itself.
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
 
@@ -143,6 +144,37 @@ The re-invocation arrived as a `<task-notification>` whose accompanying system n
 So the model was re-invoked solely by the background task's completion while idle, which is Mechanism A - the same background-notify wake the Claude supervision protocol relies on for the main primary.
 This matches the harness tool contract that a `run_in_background` task "keeps running across turns and re-invokes you when it exits", and reproduces the 11s latency the task audit measured independently on the same harness version.
 No Herdr command was issued and no fleet state was touched; the experiment wrote only to the session scratchpad, which was discarded.
+
+### 2026-07-30: the WSL2 lstart drift that made the guard cry wolf every turn
+
+The guard's identity check used to identify a process by `ps -p <pid> -o lstart= -o command=`.
+`lstart` is not stored by the kernel; `ps` computes it as boot time plus the process's start ticks.
+WSL2 continually re-syncs its boot-time estimate against the Windows host clock, so the same live process yields a different `lstart` string on successive reads.
+`fm_watcher_lock_matches_pid` then rejected a healthy live watcher, and this guard printed `TURN WOULD END BLIND - SUPERVISION IS OFF` on every turn while supervision was in fact running.
+That is worse than a missing guard: a genuine supervision failure was indistinguishable from the constant noise.
+
+Measured first-hand on 2026-07-30, on Linux 6.6.87.2-microsoft-standard-WSL2, against a real `bin/fm-watch.sh` started in an isolated state dir and never restarted.
+Procedure: sample the watcher's identity 40 times at 1.5s intervals in both forms, then run `fm_watcher_lock_matches_pid` against the lock file the watcher itself wrote.
+
+```
+lab watcher pid=2537409
+recorded pid-identity: [proc-starttime:759812 bash .../bin/fm-watch.sh]
+--- OLD lstart form, 40 samples over 60s ---
+     18 Thu Jul 30 11:23:31 2026 bash .../bin/fm-watch.sh
+     21 Thu Jul 30 11:23:33 2026 bash .../bin/fm-watch.sh
+      1 Thu Jul 30 11:23:36 2026 bash .../bin/fm-watch.sh
+--- NEW /proc start-tick form, 40 samples over 60s ---
+     40 proc-starttime:759812 bash .../bin/fm-watch.sh
+--- fm_watcher_lock_matches_pid against the recorded lock file ---
+LIVE WATCHER RECOGNISED
+```
+
+An earlier run of the same harness the same morning produced the same shape with a different split (5/20/15 across three lstart values, 40/40 identical on the new form).
+
+Three distinct identities for one unchanging process, against one for the fix.
+The identity is now derived from field 22 of `/proc/<pid>/stat`, the kernel's own start time in clock ticks since boot, which cannot drift however the wall clock moves.
+`bin/fm-wake-lib.sh` owns that format, its non-Linux `lstart` fallback, and the `fm_pid_identity_matches` comparison every persisted identity must go through.
+The command half of the identity comes from `/proc/<pid>/cmdline` rather than a `ps` fork, so computing an identity on Linux forks nothing; that matters because `bin/fm-afk-launch.sh` computes one inside its lock-acquire window, before its cleanup trap is installed.
 
 ## Tests
 
