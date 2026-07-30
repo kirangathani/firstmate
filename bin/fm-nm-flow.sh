@@ -30,10 +30,14 @@
 #                      it executes the base's own shell test files (check 2), so
 #                      it costs real time - that is why it is opt-in, why the
 #                      first watch frame renders the box as "checking..." and
-#                      only frame 2 carries the result, and why a legend line
-#                      under the diagram names how many base files that run
-#                      could verify by name only. Without the flag the
-#                      merge-gate box renders as pending.
+#                      only frame 2 carries the result, why the probe is bounded
+#                      by FM_NM_FLOW_TESTS_TIMEOUT (default 300s) and refuses to
+#                      run at all when nothing on the host can bound it, and why
+#                      two legend lines under the diagram name the base the run
+#                      compared against and how many of its files that run could
+#                      verify by name only. The box row itself carries only the
+#                      counts, so no base ref length can push it past 80
+#                      columns. Without the flag the box renders as pending.
 #   -h, --help         Print this usage on stdout and exit 0.
 #
 # Width: the diagram is drawn for a plain 80-column pane and the header line is
@@ -67,7 +71,10 @@
 #
 # Degradation: no active run for the branch -> the branch's last run (coarse);
 # no run at all -> the static diagram with an IDLE banner; an empty or
-# unparseable status answer -> a STATUS UNREADABLE banner, never a guess.
+# unparseable status answer -> a STATUS UNREADABLE banner, never a guess; a
+# worktree that disappears mid-watch -> a TORN DOWN banner, because teardown is
+# the last box in this flow and an empty `symbolic-ref` answer for a directory
+# that no longer exists must not be reported as a detached HEAD.
 #
 # Read-only guarantee: this viewer only ever runs `no-mistakes axi status`,
 # `no-mistakes axi logs`, `no-mistakes runs`, git ref reads, and (opt-in) the
@@ -84,7 +91,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 NM_TIMEOUT=${FM_NM_FLOW_NM_TIMEOUT:-10}
-case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
+case "$NM_TIMEOUT" in ''|*[!0-9]*|0) NM_TIMEOUT=10 ;; esac
+TESTS_TIMEOUT=${FM_NM_FLOW_TESTS_TIMEOUT:-300}
+case "$TESTS_TIMEOUT" in ''|*[!0-9]*|0) TESTS_TIMEOUT=300 ;; esac
 
 usage() {
   cat <<'EOF'
@@ -160,13 +169,24 @@ if command -v timeout >/dev/null 2>&1; then HAVE_TIMEOUT=timeout
 elif command -v gtimeout >/dev/null 2>&1; then HAVE_TIMEOUT=gtimeout
 elif command -v perl >/dev/null 2>&1; then HAVE_TIMEOUT=perl
 fi
-nm_run() {  # <args...>
+# The one bounded-command primitive every external call here goes through. With
+# none of timeout/gtimeout/perl on the host it REFUSES to run the command rather
+# than falling back to an unbounded call: a single hung child would freeze a
+# watch pane forever, so callers degrade to a pending display instead. Expiry is
+# reported as 124 by all three arms.
+BOUND_REFUSED_RC=125
+run_bounded() {  # <seconds> <cmd...>
+  local secs=$1
+  shift
   case "$HAVE_TIMEOUT" in
-    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    *)        true ;;
+    timeout)  timeout "$secs" "$@" ;;
+    gtimeout) gtimeout "$secs" "$@" ;;
+    perl)     perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$secs" "$@" ;;
+    *)        return "$BOUND_REFUSED_RC" ;;
   esac
+}
+nm_run() {  # <args...>
+  ( cd "$WT" && run_bounded "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true
 }
 
 trim() {
@@ -289,8 +309,18 @@ tests_gate_base() {
 
 MGATE_ANN="prior-tests: pending (checked at merge)"
 MGATE_NAMEONLY=0
+MGATE_BASE=""
 run_tests_gate() {
   local base out_file missing failing
+  MGATE_BASE=""
+  # The probe executes the base's own test files, so it must be time-bounded.
+  # Nothing to bound it with means it does not run: a viewer that hangs is
+  # worse than one that says the answer is still pending.
+  if [ "$HAVE_TIMEOUT" = none ]; then
+    MGATE_ANN="prior-tests: pending (no timeout tool to bound it)"
+    MGATE_NAMEONLY=0
+    return
+  fi
   if ! base=$(tests_gate_base); then
     MGATE_ANN="prior-tests: pending (no base ref found)"
     return
@@ -302,8 +332,14 @@ run_tests_gate() {
   }
   out_file="$tmpd/kept.out"
   local rc=0
-  "$SCRIPT_DIR/fm-assert-tests-kept.sh" --worktree "$WT" --base "$base" \
-    > "$out_file" 2>"$tmpd/kept.err" || rc=$?
+  run_bounded "$TESTS_TIMEOUT" "$SCRIPT_DIR/fm-assert-tests-kept.sh" \
+    --worktree "$WT" --base "$base" > "$out_file" 2>"$tmpd/kept.err" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    MGATE_ANN="prior-tests: pending (probe timed out after ${TESTS_TIMEOUT}s)"
+    MGATE_NAMEONLY=0
+    rm -rf "$tmpd"
+    return
+  fi
   missing=$(grep -c '^missing: ' "$out_file" || true)
   failing=$(grep -c '^failing: ' "$out_file" || true)
   # One `name-check only: <file>` line per base test file check 2 could not
@@ -313,11 +349,16 @@ run_tests_gate() {
   # and it is reported on its own legend line so the box stays inside 80 cols.
   MGATE_NAMEONLY=$(grep -c '^WARNING:[[:space:]]*name-check only: ' "$tmpd/kept.err" || true)
   # Exit 0 = clean, exit 1 = reported missing/failing lines; anything else
-  # means the check itself did not run, so never render a false "ok".
+  # means the check itself did not run, so never render a false "ok". The row
+  # carries the counts alone and the base ref goes on its own legend line whole:
+  # a long default branch would otherwise push the row past 80 columns, and an
+  # elided ref would read as real while naming no ref that exists.
   if [ "$rc" -eq 0 ] && [ "$missing" -eq 0 ] && [ "$failing" -eq 0 ]; then
-    MGATE_ANN="prior-tests vs $base: missing 0 / failing 0 ok"
+    MGATE_BASE=$base
+    MGATE_ANN="prior-tests: missing 0 / failing 0 ok"
   elif [ "$rc" -le 1 ]; then
-    MGATE_ANN="prior-tests vs $base: missing $missing / failing $failing !!"
+    MGATE_BASE=$base
+    MGATE_ANN="prior-tests: missing $missing / failing $failing !!"
   else
     MGATE_ANN="prior-tests: pending (check could not run, exit $rc)"
     MGATE_NAMEONLY=0
@@ -370,12 +411,24 @@ KIND_LINT=$(step_kind_from_config lint)
 # --- probe: classify the run state for one frame -----------------------------
 
 # Globals set per frame for the renderer.
-CURRENT="" BANNER="" OUTCOME="" GATE="" RUN_ID="" RUN_PR="" BRANCH=""
+CURRENT="" BANNER="" OUTCOME="" GATE="" RUN_ID="" RUN_PR="" BRANCH="" WT_GONE=0
 F_TOTAL="" F_ASK=0 F_FIX=0 F_NOOP=0 FAILED_LOOP=0
 
 probe() {
-  CURRENT="" BANNER="" OUTCOME="" GATE="" RUN_ID="" RUN_PR=""
+  CURRENT="" BANNER="" OUTCOME="" GATE="" RUN_ID="" RUN_PR="" WT_GONE=0
   F_TOTAL="" F_ASK=0 F_FIX=0 F_NOOP=0 FAILED_LOOP=0
+
+  # Teardown is the last box in this very flow, so a worktree that disappears
+  # mid-watch is an expected end state, not an anomaly. It has to be re-checked
+  # per frame: `symbolic-ref` also answers empty for a directory that is gone,
+  # which would otherwise be misreported as a detached HEAD. The header says so
+  # too, rather than naming a HEAD state nothing ever observed.
+  if [ ! -d "$WT" ]; then
+    BRANCH=""
+    WT_GONE=1
+    BANNER="TORN DOWN: worktree removed - task cleaned up, static flow shown"
+    return
+  fi
   BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
   if ! command -v no-mistakes >/dev/null 2>&1; then
@@ -528,6 +581,7 @@ step_line() {  # <key> <label> <kind> <annotation>
 # a partial branch or ULID reads as real while being useless to paste back.
 header_line() {
   local tail=" | branch ${BRANCH:-<detached>}" p avail t
+  [ "$WT_GONE" = 1 ] && tail=" | worktree removed"
   [ -n "$RUN_ID" ] && tail="$tail | run $RUN_ID"
   for p in 'no-mistakes flow: ' ''; do
     if [ $(( ${#p} + ${#TITLE} + ${#tail} )) -le "$COLS" ]; then
@@ -572,6 +626,9 @@ render() {
   fi
   printf 'merge gate: check 1 base test names kept; check 2 base assertions vs branch\n'
   printf 'supersessions: captain-approved entries in data/supersessions/<project>.md\n'
+  if [ -n "$MGATE_BASE" ]; then
+    printf 'prior-tests: compared against base %s\n' "$MGATE_BASE"
+  fi
   if [ "$MGATE_NAMEONLY" -gt 0 ]; then
     local noun=files
     [ "$MGATE_NAMEONLY" -eq 1 ] && noun='file'

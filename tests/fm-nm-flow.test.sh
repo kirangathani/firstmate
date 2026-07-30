@@ -22,13 +22,17 @@
 #   (l) --help prints usage on stdout and exits 0
 #   (m) a name-check-only base file is reported on its own legend line instead
 #       of reading as a clean verified pass, and the merge-gate row stays
-#       inside 80 columns
+#       inside 80 columns; an origin/-prefixed base with two-digit counts keeps
+#       every rendered line inside 80 columns with the base ref named whole,
+#       and an over-running probe degrades to pending rather than hanging
 #   (n) a red ci log marker surfaces CI RED instead of a healthy-wait banner
 #   (o) test/lint kinds come from the worktree's .no-mistakes.yaml, and fall
 #       back to det|LLM when no config is readable
 #   (p) --tests-gate --watch renders frame 1 as checking... before the probe
 #   (q) the header is bounded to the render width by shortening the title, and
 #       never by truncating the branch or the 26-char ULID run id
+#   (r) a worktree that disappears mid-watch reads as teardown, never as the
+#       detached HEAD an empty symbolic-ref answer would otherwise imply
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -54,6 +58,11 @@ make_fakebin() {  # <dir> -> echoes fakebin path
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Test hook for the teardown case: delete the worktree once it has been read,
+# so the NEXT watch frame observes a worktree that vanished mid-run.
+if [ -n "${FM_FAKE_RM_WT:-}" ] && [ -d "$FM_FAKE_RM_WT" ]; then
+  rm -rf "$FM_FAKE_RM_WT"
+fi
 case "${1:-}" in
   axi)
     shift
@@ -74,7 +83,8 @@ reset_fakes() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_CI_LOGS=""
-  export FM_FAKE_AXI_STATUS FM_FAKE_RUNS_LIST FM_FAKE_CI_LOGS
+  FM_FAKE_RM_WT=""
+  export FM_FAKE_AXI_STATUS FM_FAKE_RUNS_LIST FM_FAKE_CI_LOGS FM_FAKE_RM_WT
 }
 
 run_flow() {  # <case-dir> <args...>
@@ -380,8 +390,10 @@ SH
   git -C "$d/wt" commit -qam "drop beta"
   FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
   out=$(run_flow "$d" --worktree "$d/wt" --tests-gate)
-  assert_contains "$out" "prior-tests vs main: missing 1 / failing 0 !!" \
+  assert_contains "$out" "prior-tests: missing 1 / failing 0 !!" \
     "merge-gate box shows the missing count"
+  assert_contains "$out" "prior-tests: compared against base main" \
+    "the compared base is named in full on its own legend line"
   [ -z "$(git -C "$d/wt" status --porcelain)" ] || fail "tests-gate render dirtied the worktree"
 
   out=$(run_flow "$d" --worktree "$d/wt")
@@ -445,16 +457,120 @@ PY
   git -C "$d/wt" commit -qm "unrelated change"
   FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
   out=$(run_flow "$d" --worktree "$d/wt" --tests-gate)
-  assert_contains "$out" "prior-tests vs main: missing 0 / failing 0 ok" \
+  assert_contains "$out" "prior-tests: missing 0 / failing 0 ok" \
     "merge-gate box keeps its own annotation"
+  assert_contains "$out" "prior-tests: compared against base main" \
+    "the compared base is named in full on its own legend line"
   assert_contains "$out" "prior-tests: 1 base file verified by name only, not by assertion" \
     "the name-only file count is reported on its own legend line"
   local row width
-  row=$(printf '%s\n' "$out" | grep 'prior-tests vs main' | head -1)
+  row=$(printf '%s\n' "$out" | grep 'missing 0 / failing 0' | head -1)
   row=$(strip_sgr "$row")
   width=${#row}
   [ "$width" -le 80 ] || fail "merge-gate row is $width columns: $row"
   pass "name-check-only files get a legend line, not an overflowing row"
+}
+
+# The merge-gate row must survive the widest realistic inputs: an origin/-
+# prefixed default branch AND two-digit missing/failing counts. The other
+# fixtures here have no remote, so tests_gate_base falls through to the LOCAL
+# `main` - the shortest base there is - and never exercises this.
+test_tests_gate_long_base_and_wide_counts() {
+  reset_fakes
+  local d out line width n base_line
+  d=$(new_case tests-gate-long-base)
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/wt/tests"
+  git -C "$d/wt" init -q
+
+  # 12 literal pass names the branch deletes outright -> 12 missing (check 1).
+  cat > "$d/wt/tests/gone.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+SH
+  for n in 01 02 03 04 05 06 07 08 09 10 11 12; do
+    printf 'pass "gone %s"\n' "$n" >> "$d/wt/tests/gone.test.sh"
+  done
+  # 10 names the branch KEEPS while removing the code they assert on, so the
+  # base file runs green on the base and emits nothing on the branch -> 10
+  # failing (check 2). The file itself is byte-identical on both sides.
+  cat > "$d/wt/tests/broken.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+. ./lib.sh
+if type feature_present >/dev/null 2>&1; then
+SH
+  for n in 01 02 03 04 05 06 07 08 09 10; do
+    printf '  pass "kept %s"\n' "$n" >> "$d/wt/tests/broken.test.sh"
+  done
+  printf 'fi\n' >> "$d/wt/tests/broken.test.sh"
+  chmod +x "$d/wt/tests/gone.test.sh" "$d/wt/tests/broken.test.sh"
+  printf 'feature_present() { return 0; }\n' > "$d/wt/lib.sh"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm base
+  git -C "$d/wt" branch -M master
+  # A remote-tracking ref with no remote configured: enough for tests_gate_base
+  # to resolve an origin/-prefixed base, and explicit mode never fetches.
+  git -C "$d/wt" update-ref refs/remotes/origin/master refs/heads/master
+  git -C "$d/wt" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/master
+
+  git -C "$d/wt" checkout -qb fm/change
+  rm "$d/wt/tests/gone.test.sh"
+  printf '# feature removed\n' > "$d/wt/lib.sh"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm "drop tests and the feature they assert on"
+
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+  out=$(run_flow "$d" --worktree "$d/wt" --tests-gate)
+  assert_contains "$out" "prior-tests: missing 12 / failing 10 !!" \
+    "two-digit missing and failing counts both land in the box row"
+  base_line=$(printf '%s\n' "$out" | grep 'compared against base' | head -1)
+  assert_contains "$base_line" "prior-tests: compared against base origin/master" \
+    "the origin/-prefixed base is named whole and un-elided"
+  assert_not_contains "$base_line" "..." "the base ref is never ellipsis-elided"
+
+  # Every rendered line, box rows and legend lines alike, inside 80 columns.
+  while IFS= read -r line; do
+    line=$(strip_sgr "$line")
+    width=${#line}
+    [ "$width" -le 80 ] || fail "rendered line is $width columns: $line"
+  done <<< "$out"
+  pass "an origin/ base with two-digit counts still fits 80 columns"
+}
+
+# The probe runs the base's own test files, so it must be time-bounded and must
+# degrade to pending - never to a green that means nothing actually ran.
+test_tests_gate_probe_timeout() {
+  reset_fakes
+  local d out
+  d=$(new_case tests-gate-timeout)
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/wt/tests"
+  git -C "$d/wt" init -q
+  cat > "$d/wt/tests/slow.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+sleep 30
+pass "alpha"
+SH
+  chmod +x "$d/wt/tests/slow.test.sh"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm base
+  git -C "$d/wt" branch -M main
+  git -C "$d/wt" checkout -qb fm/change
+  printf 'note\n' > "$d/wt/README.md"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm "unrelated change"
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+  out=$(FM_NM_FLOW_TESTS_TIMEOUT=1 run_flow "$d" --worktree "$d/wt" --tests-gate)
+  assert_contains "$out" "prior-tests: pending (probe timed out after 1s)" \
+    "an over-running probe degrades to pending"
+  assert_not_contains "$out" "failing 0 ok" "a timed-out probe never renders a green result"
+  assert_not_contains "$out" "compared against base" \
+    "a timed-out probe claims no comparison"
+  assert_not_contains "$out" "verified by name only" \
+    "a timed-out probe carries no stale name-only count"
+  pass "the tests-gate probe is bounded and fails to pending"
 }
 
 # (n) a red ci marker is surfaced, not collapsed into a healthy wait
@@ -546,7 +662,9 @@ SH
   out=$(FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" --worktree "$d/wt" --tests-gate --watch 1)
   first=$(printf '%s\n' "$out" | sed -n '1,/^$/p')
   assert_contains "$first" "prior-tests: checking..." "frame 1 renders before the probe runs"
-  assert_contains "$out" "prior-tests vs main: missing 1 / failing 0 !!" \
+  assert_not_contains "$first" "compared against base" \
+    "frame 1 claims no comparison before the probe has run"
+  assert_contains "$out" "prior-tests: missing 1 / failing 0 !!" \
     "frame 2 carries the computed result"
   pass "--tests-gate --watch never blanks the first frame"
 }
@@ -604,6 +722,31 @@ test_header_width_bounded() {
   pass "header is bounded by width without truncating branch or run id"
 }
 
+# (r) a worktree that disappears mid-watch is teardown, not a detached HEAD
+test_worktree_removed_mid_watch() {
+  reset_fakes
+  local d out second
+  d=$(new_case torn-down)
+  make_repo_on_branch "$d/wt" fm/feat-gone
+  make_fakebin "$d" >/dev/null
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-gone)"
+  # The fake removes the worktree as it answers frame 1, so frame 2 probes a
+  # worktree that is gone - exactly the state teardown leaves behind.
+  FM_FAKE_RM_WT="$d/wt"
+  out=$(FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" --worktree "$d/wt" --watch 1)
+  second=$(printf '%s\n' "$out" | sed -n '/^$/,$p')
+  assert_contains "$second" "TORN DOWN: worktree removed - task cleaned up" \
+    "a removed worktree is reported as teardown"
+  assert_not_contains "$second" "detached HEAD" \
+    "a removed worktree is never reported as a HEAD state nothing observed"
+  assert_not_contains "$second" "<detached>" \
+    "the header does not claim a detached HEAD either"
+  assert_contains "$second" "| worktree removed" \
+    "the header says what was actually observed"
+  assert_contains "$second" "[ teardown" "the static diagram is still rendered"
+  pass "a worktree removed mid-watch reads as teardown, not a detached HEAD"
+}
+
 # The real task-id-mode header: the whole task id must survive at 80 columns.
 test_header_keeps_task_id() {
   reset_fakes
@@ -640,9 +783,12 @@ test_tests_gate_counts
 test_watch_mode_frames
 test_help_exits_zero
 test_tests_gate_name_check_only
+test_tests_gate_long_base_and_wide_counts
+test_tests_gate_probe_timeout
 test_ci_red_banner
 test_step_kinds_from_config
 test_tests_gate_first_frame
+test_worktree_removed_mid_watch
 test_header_width_bounded
 test_header_keeps_task_id
 
