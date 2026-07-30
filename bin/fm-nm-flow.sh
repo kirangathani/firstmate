@@ -39,11 +39,13 @@
 # Width: the diagram is drawn for a plain 80-column pane and the header line is
 # bounded to the render width, which is FM_NM_FLOW_COLS when it is a sane
 # number, else the detected terminal width when stdout is a tty and that width
-# is wider than 80, else 80. Only the title segment is shortened, with an
-# ellipsis; if that is not enough the fixed "no-mistakes flow: " prefix is
-# dropped too. The branch and the run id are NEVER truncated - a partial ULID
-# still reads as a run id while being useless to paste back into the CLI - so
-# an extreme width lets the header wrap rather than mutilating either.
+# is wider than 80, else 80. Only the title segment is shortened, always with
+# an ellipsis marking the elision, and the fixed "no-mistakes flow: " prefix is
+# dropped before the title shrinks further, because which task the pane shows
+# outranks decoration. The branch and the run id are NEVER truncated - a
+# partial ULID still reads as a run id while being useless to paste back into
+# the CLI - so an extreme width lets the header wrap rather than mutilating
+# either.
 #
 # Step kinds: the test and lint boxes are deterministic only when the target
 # project defines commands.test / commands.lint in its .no-mistakes.yaml;
@@ -518,10 +520,14 @@ step_line() {  # <key> <label> <kind> <annotation>
   fi
 }
 
-# Header bounded to COLS by shortening the title only, then by dropping the
-# fixed prefix; the branch and run id segments are always emitted whole.
+# Header bounded to COLS. The title says which task's flow the pane is showing,
+# so it outranks the fixed prefix: the title is shortened first, then the
+# prefix is sacrificed to keep more of it, and only when even the prefix-less
+# form leaves no room does the title reduce to a bare ellipsis. An elision is
+# always marked, and the branch and run id segments are always emitted whole -
+# a partial branch or ULID reads as real while being useless to paste back.
 header_line() {
-  local tail=" | branch ${BRANCH:-<detached>}" p avail
+  local tail=" | branch ${BRANCH:-<detached>}" p avail t
   [ -n "$RUN_ID" ] && tail="$tail | run $RUN_ID"
   for p in 'no-mistakes flow: ' ''; do
     if [ $(( ${#p} + ${#TITLE} + ${#tail} )) -le "$COLS" ]; then
@@ -530,15 +536,13 @@ header_line() {
     fi
     avail=$(( COLS - ${#p} - ${#tail} ))
     if [ "$avail" -ge 4 ]; then
-      printf '%s%s...%s' "$p" "${TITLE:0:$((avail - 3))}" "$tail"
-      return
-    fi
-    if [ $(( ${#p} + ${#tail} )) -le "$COLS" ]; then
-      printf '%s%s' "$p" "${tail# | }"
+      t=${TITLE:0:$((avail - 3))}
+      t=${t%"${t##*[![:space:]]}"}
+      printf '%s%s...%s' "$p" "$t" "$tail"
       return
     fi
   done
-  printf '%s' "${tail# | }"
+  printf '...%s' "$tail"
 }
 
 render() {

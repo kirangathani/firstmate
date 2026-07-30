@@ -569,7 +569,8 @@ test_header_width_bounded() {
   [ ${#hdr} -le 80 ] || fail "header is ${#hdr} columns at the 80-col default: $hdr"
   assert_contains "$hdr" "$rid" "the full run id survives at 80 columns"
   assert_contains "$hdr" "branch fm/header-branch" "the branch survives whole"
-  assert_contains "$hdr" "no-mistakes flow: " "the prefix is kept while the title can still be shortened"
+  assert_not_contains "$hdr" "no-mistakes flow: " "the prefix is dropped before the title shrinks further"
+  assert_contains "$hdr" "..." "the shortened title is ellipsis-marked at 80 columns"
 
   # Room for part of the title: it is shortened with an ellipsis, prefix intact.
   out=$(FM_NM_FLOW_COLS=100 run_flow "$d" --worktree "$wt")
@@ -598,9 +599,31 @@ test_header_width_bounded() {
   out=$(FM_NM_FLOW_COLS=40 run_flow "$d" --worktree "$wt")
   hdr=$(strip_sgr "$(printf '%s\n' "$out" | head -1)")
   assert_not_contains "$hdr" "no-mistakes flow: " "the prefix is dropped before anything is mutilated"
+  assert_contains "$hdr" "... | branch fm/header-branch" "a dropped title is still ellipsis-marked"
   assert_contains "$hdr" "$rid" "the full run id survives a narrow pane"
-  assert_contains "$hdr" "branch fm/header-branch" "the branch survives a narrow pane"
   pass "header is bounded by width without truncating branch or run id"
+}
+
+# The real task-id-mode header: the whole task id must survive at 80 columns.
+test_header_keeps_task_id() {
+  reset_fakes
+  local d out hdr rid
+  d=$(new_case header-task-id)
+  make_repo_on_branch "$d/wt" fm/nm-flow-view-r7
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/nm-flow-view-r7.meta" \
+    "window=firstmate:fm-nm-flow-view-r7" \
+    "worktree=$d/wt" \
+    "project=$d/projects/firstmate"
+  rid=01KYSAKNFRDXWKD0DF48ME438R
+  FM_FAKE_AXI_STATUS="$(run_running_with_id fm/nm-flow-view-r7 "$rid")"
+  out=$(run_flow "$d" nm-flow-view-r7)
+  hdr=$(strip_sgr "$(printf '%s\n' "$out" | head -1)")
+  [ ${#hdr} -le 80 ] || fail "task-id header is ${#hdr} columns: $hdr"
+  assert_contains "$hdr" "nm-flow-view-r7..." "the whole task id survives, ellipsis-marked and unpadded"
+  assert_contains "$hdr" "branch fm/nm-flow-view-r7" "the branch survives whole"
+  assert_contains "$hdr" "$rid" "the full run id survives"
+  pass "task identity outranks the fixed header prefix"
 }
 
 test_usage_error
@@ -621,5 +644,6 @@ test_ci_red_banner
 test_step_kinds_from_config
 test_tests_gate_first_frame
 test_header_width_bounded
+test_header_keeps_task_id
 
 echo "all fm-nm-flow tests passed"
