@@ -55,8 +55,13 @@ make_case() {
     git -C "$case_dir/project" checkout -q -b main
   }
   mkdir -p "$case_dir/project/tests"
+  # Self-contained (pass/fail helpers inline) so the merge gate's check 2 can
+  # actually execute it. An unexecutable base test file is a finding in its own
+  # right, which would refuse every merge these cases are trying to exercise.
   cat > "$case_dir/project/tests/app.test.sh" <<'EOF'
 #!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass "alpha holds"
 EOF
   git -C "$case_dir/project" add -A

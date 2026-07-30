@@ -47,6 +47,22 @@ jobs:
             exit 1
           }
           tmux -V
+      - name: Require python3 with venv for the pytest runner tests
+        run: |
+          set -eu
+          # The kept-tests gate's pytest runner is proven by fixtures that build
+          # their own venv, the same way a pipeline-provisioned worktree does.
+          # Without one those cases fail loudly rather than silently skipping the
+          # coverage that proves assertions really execute.
+          command -v python3 >/dev/null || {
+            echo "::error::python3 is required for the kept-tests pytest runner coverage"
+            exit 1
+          }
+          python3 -c 'import venv, ensurepip' || {
+            echo "::error::python3 needs venv and ensurepip for the pytest fixtures"
+            exit 1
+          }
+          python3 --version
       - name: Install tasks-axi for backlog-handoff delegation
         run: |
           set -eu
