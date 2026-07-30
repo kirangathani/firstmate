@@ -65,6 +65,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-pr-check.sh`         | Record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll   |
 | `fm-pr-merge.sh`         | Record PR metadata, gate on `fm-assert-tests-kept.sh`, then merge a task's PR from its full GitHub URL |
 | `fm-assert-tests-kept.sh` | Report every test identifier present on the base and missing from the branch under review |
+| `fm-test-exec-lib.sh`   | Shared per-language runner interface (`runner_for_file`/`run_base_test_file`/`passing_idents`) that `fm-assert-tests-kept.sh` check 2 drives |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require scout reports, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
