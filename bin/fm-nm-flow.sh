@@ -28,8 +28,19 @@
 #                      show missing:/failing: counts in the merge-gate box.
 #                      Explicit mode never fetches, so the base may lag origin;
 #                      it executes the base's own shell test files (check 2), so
-#                      it costs real time - that is why it is opt-in. Without
-#                      the flag the merge-gate box renders as pending.
+#                      it costs real time - that is why it is opt-in, why the
+#                      first watch frame renders the box as "checking..." and
+#                      only frame 2 carries the result, and why the annotation
+#                      names how many base files that run could verify by name
+#                      only. Without the flag the merge-gate box renders as
+#                      pending.
+#   -h, --help         Print this usage on stdout and exit 0.
+#
+# Step kinds: the test and lint boxes are deterministic only when the target
+# project defines commands.test / commands.lint in its .no-mistakes.yaml;
+# without them no-mistakes delegates that step to an agent. Those two boxes are
+# labeled from the worktree's own config, and fall back to `det|LLM` when no
+# config is readable or its `commands:` block cannot be read confidently.
 #
 # Run-state source: `no-mistakes axi status` executed in the target worktree
 # (bounded by FM_NM_FLOW_NM_TIMEOUT, default 10s), attributed to the worktree's
@@ -65,35 +76,38 @@ NM_TIMEOUT=${FM_NM_FLOW_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 
 usage() {
-  cat >&2 <<'EOF'
+  cat <<'EOF'
 usage: fm-nm-flow.sh <task-id> [--watch [seconds]] [--tests-gate]
        fm-nm-flow.sh --worktree <path> [--watch [seconds]] [--tests-gate]
 EOF
+}
+usage_error() {
+  usage >&2
   exit 2
 }
 
 ID="" WT_ARG="" WATCH=0 INTERVAL=5 TESTS_GATE=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --worktree) shift; WT_ARG=${1:-}; [ -n "$WT_ARG" ] || usage ;;
+    --worktree) shift; WT_ARG=${1:-}; [ -n "$WT_ARG" ] || usage_error ;;
     --watch)
       WATCH=1
       case "${2:-}" in
         ''|-*) : ;;
-        *[!0-9]*) usage ;;
+        *[!0-9]*) usage_error ;;
         *) INTERVAL=$2; shift ;;
       esac
       [ "$INTERVAL" -ge 1 ] || INTERVAL=1
       ;;
     --tests-gate) TESTS_GATE=1 ;;
-    -h|--help) usage ;;
-    -*) usage ;;
-    *) [ -z "$ID" ] || usage; ID=$1 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) usage_error ;;
+    *) [ -z "$ID" ] || usage_error; ID=$1 ;;
   esac
   shift
 done
-{ [ -n "$ID" ] || [ -n "$WT_ARG" ]; } || usage
-{ [ -n "$ID" ] && [ -n "$WT_ARG" ]; } && usage
+{ [ -n "$ID" ] || [ -n "$WT_ARG" ]; } || usage_error
+{ [ -n "$ID" ] && [ -n "$WT_ARG" ]; } && usage_error
 
 # --- target resolution (task-id via meta, or explicit worktree) -------------
 
@@ -140,7 +154,7 @@ nm_run() {  # <args...>
     timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
     gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
     perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    *)        ( cd "$WT" && no-mistakes "$@" ) 2>/dev/null || true ;;
+    *)        true ;;
   esac
 }
 
@@ -197,21 +211,28 @@ nm_running_step() {
   trim "${row%%,*}"
 }
 
-# CI-monitor phase: `axi status` reports both "waiting on checks" and "checks
-# green, waiting on merge" as a running ci step; the ci step's own log is the
-# only place the transition shows (marker list verified in fm-crew-state.sh).
-nm_ci_checks_green() {
+# CI-monitor phase: `axi status` reports "waiting on checks", "checks red" and
+# "checks green, waiting on merge" all as a running ci step; the ci step's own
+# log is the only place the distinction shows (marker list verified in
+# fm-crew-state.sh). Sets CI_PHASE to green, red-failed, red-issues, waiting,
+# or empty when no marker could be read at all.
+CI_PHASE=""
+nm_ci_phase() {
   local run_id log_tail marker
+  CI_PHASE=""
   run_id=$(strip_quotes "$(nm_field id)")
-  [ -n "$run_id" ] || return 1
+  [ -n "$run_id" ] || return 0
   log_tail=$(nm_run axi logs --step ci --run "$run_id")
-  [ -n "$log_tail" ] || return 1
+  [ -n "$log_tail" ] || return 0
   marker=$(printf '%s\n' "$log_tail" \
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
+  [ -n "$marker" ] || return 0
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) return 0 ;;
-    *) return 1 ;;
+    *"checks passed"*|*"no CI checks reported - still monitoring"*) CI_PHASE=green ;;
+    *"checks failed"*)    CI_PHASE=red-failed ;;
+    *"issues detected"*)  CI_PHASE=red-issues ;;
+    *)                    CI_PHASE=waiting ;;
   esac
 }
 
@@ -257,7 +278,7 @@ tests_gate_base() {
 
 MGATE_ANN="prior-tests: pending (checked at merge)"
 run_tests_gate() {
-  local base out_file missing failing
+  local base out_file missing failing nameonly noun qual=""
   if ! base=$(tests_gate_base); then
     MGATE_ANN="prior-tests: pending (no base ref found)"
     return
@@ -273,18 +294,66 @@ run_tests_gate() {
     > "$out_file" 2>"$tmpd/kept.err" || rc=$?
   missing=$(grep -c '^missing: ' "$out_file" || true)
   failing=$(grep -c '^failing: ' "$out_file" || true)
+  # One `name-check only: <file>` line per base test file check 2 could not
+  # execute; those files are verified by NAME ONLY, so a kept-name test whose
+  # assertion body was rewritten would not be caught. Counting the per-file
+  # lines (never the fixed WARNING header lines) keeps the number a file count.
+  nameonly=$(grep -c '^WARNING:[[:space:]]*name-check only: ' "$tmpd/kept.err" || true)
+  if [ "$nameonly" -gt 0 ]; then
+    noun=files
+    [ "$nameonly" -eq 1 ] && noun='file'
+    qual=" ($nameonly $noun name-check only)"
+  fi
   # Exit 0 = clean, exit 1 = reported missing/failing lines; anything else
   # means the check itself did not run, so never render a false "ok".
   if [ "$rc" -eq 0 ] && [ "$missing" -eq 0 ] && [ "$failing" -eq 0 ]; then
-    MGATE_ANN="prior-tests vs $base: missing 0 / failing 0 ok"
+    MGATE_ANN="prior-tests vs $base: missing 0 / failing 0 ok$qual"
   elif [ "$rc" -le 1 ]; then
-    MGATE_ANN="prior-tests vs $base: missing $missing / failing $failing !!"
+    MGATE_ANN="prior-tests vs $base: missing $missing / failing $failing !!$qual"
   else
     MGATE_ANN="prior-tests: pending (check could not run, exit $rc)"
   fi
   rm -rf "$tmpd"
 }
-[ "$TESTS_GATE" = 1 ] && run_tests_gate
+# The probe executes the base's own test files, so it is deferred past the
+# first frame: a watch pane shows the diagram immediately with the box marked
+# as still checking, and frame 2 carries the real result.
+TESTS_GATE_PENDING=0
+if [ "$TESTS_GATE" = 1 ]; then
+  TESTS_GATE_PENDING=1
+  MGATE_ANN="prior-tests: checking... (running the base suite)"
+fi
+
+# --- step kinds derived from the target project's own config -----------------
+
+# no-mistakes runs the test and lint steps deterministically only when the
+# project defines commands.test / commands.lint; without them it delegates the
+# step to an agent. Read that from the worktree's .no-mistakes.yaml with the
+# shell tools already used here (no YAML dependency): a top-level `commands:`
+# block key with a non-empty value means det, an absent `commands:` key means
+# LLM, and anything this cannot read confidently (no config, unreadable config,
+# an inline/flow `commands:` mapping) stays the conditional `det|LLM` rather
+# than asserting either.
+step_kind_from_config() {  # <commands key>
+  local cfg="" c
+  for c in "$WT/.no-mistakes.yaml" "$WT/.no-mistakes.yml"; do
+    if [ -f "$c" ] && [ -r "$c" ]; then cfg=$c; break; fi
+  done
+  if [ -z "$cfg" ]; then printf 'det|LLM'; return; fi
+  if ! grep -qE '^commands:' "$cfg" 2>/dev/null; then printf 'LLM'; return; fi
+  if ! grep -qE '^commands:[[:space:]]*(#.*)?$' "$cfg" 2>/dev/null; then
+    printf 'det|LLM'
+    return
+  fi
+  if sed -n '/^commands:[[:space:]]*\(#.*\)\{0,1\}$/,/^[^[:space:]#]/p' "$cfg" 2>/dev/null \
+      | grep -qE "^[[:space:]]+$1:[[:space:]]*[^[:space:]#]"; then
+    printf 'det'
+  else
+    printf 'LLM'
+  fi
+}
+KIND_TEST=$(step_kind_from_config test)
+KIND_LINT=$(step_kind_from_config lint)
 
 # --- probe: classify the run state for one frame -----------------------------
 
@@ -369,10 +438,23 @@ probe() {
 
   CURRENT=$(nm_running_step)
   [ -n "$CURRENT" ] || { [ "$status" = ci ] && CURRENT=ci; }
-  if [ "$CURRENT" = ci ] && [ "$status" != fixing ] && nm_ci_checks_green; then
-    CURRENT=mgate
-    BANNER="CI GREEN: monitoring until merge/close - merge gate + captain next"
-    return
+  if [ "$CURRENT" = ci ] && [ "$status" != fixing ]; then
+    nm_ci_phase
+    case "$CI_PHASE" in
+      green)
+        CURRENT=mgate
+        BANNER="CI GREEN: monitoring until merge/close - merge gate + captain next"
+        return
+        ;;
+      red-failed)
+        BANNER="CI RED: checks failed - pipeline fixing"
+        return
+        ;;
+      red-issues)
+        BANNER="CI RED: issues detected - pipeline fixing"
+        return
+        ;;
+    esac
   fi
   if [ -n "$CURRENT" ]; then
     BANNER="state: $status @ $CURRENT"
@@ -416,9 +498,9 @@ render() {
   step_line intent   intent       det       "goal the review judges against"
   step_line rebase   rebase       LLM       "!! LLM merge can drop base code; merge gate catches"
   step_line review   review       LLM       "gate: findings park run <--+"
-  step_line test     test         det       "gate$(printf '%23s' '')|  fix round: pipeline"
+  step_line test     test         "$KIND_TEST" "gate$(printf '%23s' '')|  fix round: pipeline"
   step_line document document     LLM       "gate$(printf '%23s' '')|  fixes, re-reviews step"
-  step_line lint     lint         det       "gate ----------------------+"
+  step_line lint     lint         "$KIND_LINT" "gate ----------------------+"
   step_line push     push         det       ""
   step_line pr       "open PR"    det       ""
   step_line ci       "CI monitor" det+LLM   "!! LLM auto-rebase can drop base code; gate catches"
@@ -434,6 +516,9 @@ render() {
   fi
   printf 'merge gate: check 1 base test names kept; check 2 base assertions vs branch\n'
   printf 'supersessions: captain-approved entries in data/supersessions/<project>.md\n'
+  if [ "$KIND_TEST" = 'det|LLM' ] || [ "$KIND_LINT" = 'det|LLM' ]; then
+    printf 'det|LLM: no readable .no-mistakes.yaml here; det when commands.<step> is set\n'
+  fi
 }
 
 frame() {
@@ -442,6 +527,7 @@ frame() {
 }
 
 if [ "$WATCH" = 0 ]; then
+  [ "$TESTS_GATE_PENDING" = 1 ] && run_tests_gate
   frame
   exit 0
 fi
@@ -460,6 +546,11 @@ while :; do
   FRAMES=$((FRAMES + 1))
   if [ "$MAX_FRAMES" -gt 0 ] && [ "$FRAMES" -ge "$MAX_FRAMES" ]; then
     exit 0
+  fi
+  if [ "$TESTS_GATE_PENDING" = 1 ]; then
+    TESTS_GATE_PENDING=0
+    run_tests_gate
+    continue
   fi
   sleep "$INTERVAL"
 done

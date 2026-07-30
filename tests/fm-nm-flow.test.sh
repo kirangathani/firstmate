@@ -19,6 +19,13 @@
 #   (j) --tests-gate runs the real fm-assert-tests-kept.sh explicit mode and
 #       shows missing/failing counts; rendering leaves the worktree clean
 #   (k) --watch honors the FM_NM_FLOW_WATCH_MAX test hook and re-renders
+#   (l) --help prints usage on stdout and exits 0
+#   (m) a name-check-only base file qualifies the merge-gate annotation with
+#       the file count instead of reading as a clean verified pass
+#   (n) a red ci log marker surfaces CI RED instead of a healthy-wait banner
+#   (o) test/lint kinds come from the worktree's .no-mistakes.yaml, and fall
+#       back to det|LLM when no config is readable
+#   (p) --tests-gate --watch renders frame 1 as checking... before the probe
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -372,6 +379,131 @@ test_watch_mode_frames() {
   pass "watch mode re-renders and exits at the frame bound"
 }
 
+# (l) explicit help request is not a usage error
+test_help_exits_zero() {
+  reset_fakes
+  local out err rc=0
+  out=$("$NM_FLOW" --help 2>/dev/null) || rc=$?
+  expect_code 0 "$rc" "--help exit status"
+  assert_contains "$out" "usage: fm-nm-flow.sh" "--help prints usage on stdout"
+  err=$("$NM_FLOW" -h 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "-h wrote to stderr: $err"
+  pass "--help prints usage on stdout and exits 0"
+}
+
+# (m) a base file check 2 could not execute qualifies the annotation
+test_tests_gate_name_check_only() {
+  reset_fakes
+  local d out
+  d=$(new_case tests-gate-nameonly)
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/wt/tests"
+  git -C "$d/wt" init -q
+  cat > "$d/wt/tests/demo.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+pass "alpha"
+SH
+  chmod +x "$d/wt/tests/demo.test.sh"
+  # A python test file is enumerated by name but never executed by check 2, so
+  # the run is a name-only verification for that file while still exiting 0.
+  cat > "$d/wt/tests/test_demo.py" <<'PY'
+def test_alpha():
+    assert True
+PY
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm base
+  git -C "$d/wt" branch -M main
+  git -C "$d/wt" checkout -qb fm/change
+  printf 'note\n' > "$d/wt/README.md"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm "unrelated change"
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+  out=$(run_flow "$d" --worktree "$d/wt" --tests-gate)
+  assert_contains "$out" "prior-tests vs main: missing 0 / failing 0 ok (1 file name-check only)" \
+    "clean result is qualified by the name-only file count"
+  pass "name-check-only files qualify the merge-gate annotation"
+}
+
+# (n) a red ci marker is surfaced, not collapsed into a healthy wait
+test_ci_red_banner() {
+  reset_fakes
+  local d out
+  d=$(new_case ci-red)
+  make_repo_on_branch "$d/wt" fm/feat-red
+  make_fakebin "$d" >/dev/null
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-red)"
+  FM_FAKE_CI_LOGS="CI checks failed on the PR - pipeline will fix"
+  out=$(run_flow "$d" --worktree "$d/wt")
+  assert_contains "$out" "CI RED: checks failed - pipeline fixing" "red checks surfaced"
+  assert_contains "$out" ">> [ CI monitor  det+LLM ]" "red CI keeps the ci box highlighted"
+  assert_not_contains "$out" "state: running @ ci" "red CI is not rendered as a healthy wait"
+
+  FM_FAKE_CI_LOGS="review issues detected on the PR"
+  out=$(run_flow "$d" --worktree "$d/wt")
+  assert_contains "$out" "CI RED: issues detected - pipeline fixing" "issues marker surfaced"
+  pass "red CI markers reach the banner"
+}
+
+# (o) test/lint kinds come from the target project's own config
+test_step_kinds_from_config() {
+  reset_fakes
+  local d out
+  d=$(new_case step-kinds)
+  make_repo_on_branch "$d/wt" fm/feat-kinds
+  make_fakebin "$d" >/dev/null
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+
+  out=$(run_flow "$d" --worktree "$d/wt")
+  assert_contains "$out" "[ test        det|LLM ]" "no config leaves the test kind conditional"
+  assert_contains "$out" "[ lint        det|LLM ]" "no config leaves the lint kind conditional"
+  assert_contains "$out" "det|LLM: no readable .no-mistakes.yaml here" "conditional label is explained"
+
+  cat > "$d/wt/.no-mistakes.yaml" <<'YAML'
+commands:
+  test: 'make test'
+YAML
+  out=$(run_flow "$d" --worktree "$d/wt")
+  assert_contains "$out" "[ test        det     ]" "commands.test makes the test step det"
+  assert_contains "$out" "[ lint        LLM     ]" "absent commands.lint makes the lint step LLM"
+  assert_not_contains "$out" "det|LLM" "a readable config drops the conditional label"
+  pass "step kinds follow the worktree's .no-mistakes.yaml"
+}
+
+# (p) the tests-gate probe never blanks the first watch frame
+test_tests_gate_first_frame() {
+  reset_fakes
+  local d out first
+  d=$(new_case tests-gate-frame)
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/wt/tests"
+  git -C "$d/wt" init -q
+  cat > "$d/wt/tests/demo.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+pass "alpha"
+pass "beta"
+SH
+  chmod +x "$d/wt/tests/demo.test.sh"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm base
+  git -C "$d/wt" branch -M main
+  git -C "$d/wt" checkout -qb fm/change
+  cat > "$d/wt/tests/demo.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+pass "alpha"
+SH
+  git -C "$d/wt" commit -qam "drop beta"
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+  out=$(FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" --worktree "$d/wt" --tests-gate --watch 1)
+  first=$(printf '%s\n' "$out" | sed -n '1,/^$/p')
+  assert_contains "$first" "prior-tests: checking..." "frame 1 renders before the probe runs"
+  assert_contains "$out" "prior-tests vs main: missing 1 / failing 0 !!" \
+    "frame 2 carries the computed result"
+  pass "--tests-gate --watch never blanks the first frame"
+}
+
 test_usage_error
 test_missing_meta
 test_task_id_resolution
@@ -384,5 +516,10 @@ test_unreadable_status
 test_coarse_fallback
 test_tests_gate_counts
 test_watch_mode_frames
+test_help_exits_zero
+test_tests_gate_name_check_only
+test_ci_red_banner
+test_step_kinds_from_config
+test_tests_gate_first_frame
 
 echo "all fm-nm-flow tests passed"
