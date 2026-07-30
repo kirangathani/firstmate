@@ -115,9 +115,22 @@
 # what the runner calls the test for it to be actionable and for a supersession
 # entry to reference it. The two checks are independent signals; fm-assert's
 # de-dup of a check-2 finding against a check-1 `missing:` line is exact-string
-# and stays best-effort. The practical consequence: a class method or
-# parametrized case that check 1 named bare cannot be run as a nodeid, so pytest
-# exits non-zero on collection and the file is reported unexecuted, never passed.
+# and stays best-effort.
+#
+# The two schemes diverge differently for the two cases, verified against a real
+# pytest, and conflating them was a live bug:
+#   - CLASS METHOD: the bare nodeid `test_mod.py::test_method` does NOT resolve,
+#     pytest exits 4 having collected nothing, and the base_rc path reports the
+#     file unexecuted. Correct, and unchanged.
+#   - PARAMETRIZED: the bare nodeid `test_mod.py::test_x` IS accepted. pytest
+#     exits 0, runs every case, and emits the JUnit names `test_x[1]`,
+#     `test_x[2]` - so the run really did verify the requested name under names
+#     check 1 never produces.
+# fm-assert therefore accounts a requested bare name against runner names by
+# equality OR by the name followed IMMEDIATELY by a literal `[`, never by a bare
+# string prefix (`test_xy[a]` must not account for a requested `test_x`). Passing
+# takes precedence over skipped, so one passing case of a parametrized name means
+# that name was verified.
 #
 # --- The provisioned environment and the scratch tree ------------------------
 #
@@ -372,6 +385,10 @@ fm_py_config_dir() {
 # honored by reading that script's shebang interpreter, so every pytest run and
 # every result parse goes through one interpreter. The answer depends only on
 # <worktree>, so it is memoized: an empty memoized value records "none resolves".
+# The probe imports pytest with the LIVE worktree's interpreter, so like every
+# other Python this library starts it runs with PYTHONDONTWRITEBYTECODE=1: a cold
+# __pycache__ would otherwise have the probe write .pyc files into the live
+# worktree's provisioned env, which this gate promises never to mutate.
 fm_py_interpreter() {
   local wt=$1 candidate shebang resolved=
   if resolved=$(fm_cache_get interpreter "$wt"); then
@@ -381,7 +398,8 @@ fm_py_interpreter() {
   fi
   resolved=
   for candidate in "$wt/.venv/bin/python" "$wt/venv/bin/python"; do
-    if [ -x "$candidate" ] && "$candidate" -m pytest --version >/dev/null 2>&1; then
+    if [ -x "$candidate" ] \
+      && PYTHONDONTWRITEBYTECODE=1 "$candidate" -m pytest --version >/dev/null 2>&1; then
       resolved=$candidate
       break
     fi
@@ -392,7 +410,8 @@ fm_py_interpreter() {
       IFS= read -r shebang < "$candidate" || shebang=
       shebang=${shebang#\#!}
       shebang=${shebang%% *}
-      if [ -n "$shebang" ] && [ -x "$shebang" ] && "$shebang" -m pytest --version >/dev/null 2>&1; then
+      if [ -n "$shebang" ] && [ -x "$shebang" ] \
+        && PYTHONDONTWRITEBYTECODE=1 "$shebang" -m pytest --version >/dev/null 2>&1; then
         resolved=$shebang
       fi
     fi
@@ -499,7 +518,7 @@ passing_idents() {
       ;;
     pytest)
       [ -s "$results" ] || return 0
-      "$python" -c "$FM_PY_JUNIT_SRC" "$results" 2>/dev/null | sort -u
+      PYTHONDONTWRITEBYTECODE=1 "$python" -c "$FM_PY_JUNIT_SRC" "$results" 2>/dev/null | sort -u
       ;;
   esac
 }
@@ -518,7 +537,7 @@ skipped_idents() {
       ;;
     pytest)
       [ -s "$results" ] || return 0
-      "$python" -c "$FM_PY_JUNIT_SKIPPED_SRC" "$results" 2>/dev/null | sort -u
+      PYTHONDONTWRITEBYTECODE=1 "$python" -c "$FM_PY_JUNIT_SKIPPED_SRC" "$results" 2>/dev/null | sort -u
       ;;
   esac
 }

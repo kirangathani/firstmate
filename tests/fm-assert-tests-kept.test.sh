@@ -38,6 +38,11 @@
 #       identifier `unaccounted:`, and still exits zero
 #   (u) a shell name that never emitted `ok - ` is `unaccounted:`, since the TAP
 #       protocol has no skip marker to report instead
+#   (v) parametrization: check 1's bare `def test_*` name and the runner's
+#       `test_x[param]` names are different namespaces, so a green parametrized
+#       test must NOT be reported unaccounted, an all-skipped one must be
+#       `skipped:`, one passing case outweighs its skipped cases, and a near-name
+#       pair (test_x beside test_xy) must not cross-match
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -829,6 +834,140 @@ test_pytest_unreadable_report_is_unaccounted_not_a_pass() {
   pass "a pytest file whose results report cannot be read reports unaccounted and still exits zero"
 }
 
+# make_py_accounting_repo <name> <test-body> [<conftest-body>]: an accounting
+# fixture committed on main with a work branch checked out and the shared venv
+# linked in. Echoes the dir.
+make_py_accounting_repo() {
+  local dir="$TMP_ROOT/$1"
+  init_repo_at "$dir"
+  write_py_accounting_tree "$dir" "$2" "${3:-}"
+  commit_all "$dir" "main: $1"
+  git -C "$dir" checkout -q -b work
+  ln -s "$PYTEST_VENV" "$dir/.venv"
+  printf '%s\n' "$dir"
+}
+
+test_parametrized_green_test_is_not_unaccounted() {
+  local dir out code
+  require_pytest_venv pytest-parametrized
+  # check 1 requests the bare nodeid `test_x`; pytest ACCEPTS it, runs both cases
+  # green, and reports them as `test_x[1]` / `test_x[2]`. Reading that as "no
+  # result" would make the class say the opposite of the truth for the most
+  # common pytest idiom.
+  dir=$(make_py_accounting_repo pytest-parametrized 'import pytest
+
+
+@pytest.mark.parametrize("v", [1, 2])
+def test_x(v):
+    assert v > 0
+')
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "pytest-parametrized: a green parametrized test must exit zero"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0' \
+    "pytest-parametrized: a bare name the runner reports only as parametrized cases is still accounted for"
+  assert_not_contains "$out" 'unaccounted:' \
+    "pytest-parametrized: a test that fully ran must never be reported as producing no result"
+  pass "a parametrized test that runs green is accounted for, not reported unaccounted"
+}
+
+test_parametrized_all_skipped_is_skipped_not_unaccounted() {
+  local dir out code
+  require_pytest_venv pytest-param-skipped
+  dir=$(make_py_accounting_repo pytest-param-skipped 'import pytest
+
+
+@pytest.mark.skip(reason="not runnable in this environment")
+@pytest.mark.parametrize("v", [1, 2])
+def test_x(v):
+    assert False
+')
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "pytest-param-skipped: a skip-only run must still exit zero"
+  assert_contains "$out" 'skipped: test_mod.py::test_x' \
+    "pytest-param-skipped: an explicit skip reported only under parametrized names is still a skip"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=1 unaccounted=0' \
+    "pytest-param-skipped: the same reconciliation rule must apply to the skipped set"
+  assert_not_contains "$out" 'unaccounted:' \
+    "pytest-param-skipped: a reported skip IS a result, so it is not unaccounted"
+  pass "an all-skipped parametrized test is reported skipped, not unaccounted"
+}
+
+test_parametrized_one_passing_case_counts_as_passing() {
+  local dir out code
+  require_pytest_venv pytest-param-mixed
+  # One case runs green, the other is explicitly skipped. Passing wins: the
+  # baseline did verify this name, so it is neither skipped nor unaccounted.
+  dir=$(make_py_accounting_repo pytest-param-mixed 'import pytest
+
+
+@pytest.mark.parametrize(
+    "v",
+    [1, pytest.param(2, marks=pytest.mark.skip(reason="one case only"))],
+)
+def test_x(v):
+    assert v > 0
+')
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "pytest-param-mixed: a partly skipped parametrized test must exit zero"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0' \
+    "pytest-param-mixed: one passing case means the name was verified, so passing outranks skipped"
+  assert_not_contains "$out" 'skipped:' \
+    "pytest-param-mixed: a name with a passing case must not be reported skipped"
+  pass "a parametrized test with at least one passing case counts as passing"
+}
+
+test_parametrized_near_name_does_not_cross_match() {
+  local dir out code
+  require_pytest_venv pytest-param-nearname
+  # test_xy's parametrized names begin with the string `test_x`, so a bare prefix
+  # test would let them account for test_x, which produced no result at all.
+  dir=$(make_py_accounting_repo pytest-param-nearname 'import pytest
+
+
+@pytest.mark.parametrize("v", [1, 2])
+def test_xy(v):
+    assert v > 0
+
+
+def test_x():
+    assert True
+' 'def pytest_collection_modifyitems(config, items):
+    dropped = [item for item in items if item.name == "test_x"]
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+        items[:] = [item for item in items if item.name != "test_x"]
+')
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "pytest-param-nearname: reporting an unaccounted identifier must not change the exit code"
+  assert_contains "$out" 'unaccounted: test_mod.py::test_x' \
+    "pytest-param-nearname: test_xy[1] must not account for a requested test_x"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=1' \
+    "pytest-param-nearname: only the name that really produced no result is unaccounted"
+  assert_not_contains "$out" 'unaccounted: test_mod.py::test_xy' \
+    "pytest-param-nearname: the parametrized name that did run must stay accounted for"
+  pass "a near-name pair does not cross-match: the bracket must follow the name immediately"
+}
+
 test_shell_name_that_never_ran_is_unaccounted() {
   local dir out code
   dir="$TMP_ROOT/shell-unaccounted"
@@ -880,3 +1019,7 @@ test_pytest_all_skipped_is_visible_not_a_silent_pass
 test_pytest_partially_run_file_reports_the_unrun_identifier
 test_pytest_unreadable_report_is_unaccounted_not_a_pass
 test_shell_name_that_never_ran_is_unaccounted
+test_parametrized_green_test_is_not_unaccounted
+test_parametrized_all_skipped_is_skipped_not_unaccounted
+test_parametrized_one_passing_case_counts_as_passing
+test_parametrized_near_name_does_not_cross_match

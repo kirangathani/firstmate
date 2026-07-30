@@ -47,6 +47,10 @@
 #   - `unaccounted:` the run produced no result for it at all - no testcase in
 #                    the report, a report that is missing/empty/unparseable, or
 #                    (shell runner) no `ok - <name>` line.
+# A requested identifier and a runner's own names are two different namespaces,
+# so accounting matches a bare name against `<name>` and `<name>[...]` alike and
+# lets passing win over skipped; bin/fm-test-exec-lib.sh's identifier-scheme note
+# owns that rule.
 # NEITHER class affects this script's exit code in this PR: exit 1 stays driven
 # only by `missing:`, `failing:` and `unexecuted:`. The point of the change is to
 # make a green-but-empty run VISIBLE where it previously read as verified, not to
@@ -374,28 +378,31 @@ idents_for_file() {
   done < "$TMPD/base"
 }
 
-# idents_from_names <file>: read runner-reported test NAMES on stdin and print
-# the <file>::<name> identifiers they compose to, so a runner's own vocabulary
-# can be set against the check-1 identifiers a run was bounded to.
-idents_from_names() {
-  local f=$1 name
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    printf '%s::%s\n' "$f" "$name"
-  done
+# name_accounted <name> <names-file>: succeed when <names-file> holds a runner
+# name that accounts for check 1's bare <name>. The two namespaces are not the
+# same (see bin/fm-test-exec-lib.sh's identifier-scheme note), so the match is
+# equality OR <name> followed IMMEDIATELY by a literal `[`, which is how a runner
+# spells the parametrized cases of one bare name. The bracket must be the very
+# next character: a bare prefix test would let `test_xy[a]` account for a
+# requested `test_x`.
+name_accounted() {
+  local name=$1 file=$2 reported
+  while IFS= read -r reported; do
+    [ -n "$reported" ] || continue
+    [ "$reported" != "$name" ] || return 0
+    case "$reported" in "${name}["*) return 0 ;; esac
+  done < "$file"
+  return 1
 }
 
-# record_idents <dest>: append each identifier read on stdin to <dest>, dropping
-# any check 1 already reported as missing so it is never double-reported.
-record_idents() {
-  local dest=$1 ident
-  while IFS= read -r ident; do
-    [ -n "$ident" ] || continue
-    if grep -qxF "$ident" "$TMPD/missing"; then
-      continue
-    fi
-    printf '%s\n' "$ident" >> "$dest"
-  done
+# record_ident <dest> <ident>: append <ident> to <dest>, dropping one check 1
+# already reported as missing so it is never double-reported.
+record_ident() {
+  local dest=$1 ident=$2
+  if grep -qxF "$ident" "$TMPD/missing"; then
+    return 0
+  fi
+  printf '%s\n' "$ident" >> "$dest"
 }
 
 # mark_unexecuted <file> <reason> [<captured-output-file>]: report every check-1
@@ -504,13 +511,24 @@ if [ -s "$TMPD/execfiles" ]; then
     # BASELINE actually recorded: an explicit skip is accounted for, and anything
     # the run produced no result for at all was never verified and must not be
     # counted as one. Neither class changes this script's exit code.
+    # Matching is a PREDICATE across two namespaces, not line equality, so this
+    # classifies each requested identifier in turn rather than using comm.
+    # Passing wins outright: one passing case of a parametrized name means the
+    # baseline verified that name, whatever its other cases did.
     idents_for_file "$f" | sort -u > "$TMPD/requested"
-    skipped_idents "$spec" "$TMPD/run-base" | idents_from_names "$f" | sort -u \
-      > "$TMPD/skipped-idents"
-    { idents_from_names "$f" < "$TMPD/ok-base"; cat "$TMPD/skipped-idents"; } \
-      | sort -u > "$TMPD/accounted"
-    comm -12 "$TMPD/requested" "$TMPD/skipped-idents" | record_idents "$TMPD/skipped"
-    comm -23 "$TMPD/requested" "$TMPD/accounted" | record_idents "$TMPD/unaccounted"
+    skipped_idents "$spec" "$TMPD/run-base" > "$TMPD/skip-base"
+    while IFS= read -r ident; do
+      [ -n "$ident" ] || continue
+      name=${ident#"$f::"}
+      if name_accounted "$name" "$TMPD/ok-base"; then
+        continue
+      fi
+      if name_accounted "$name" "$TMPD/skip-base"; then
+        record_ident "$TMPD/skipped" "$ident"
+      else
+        record_ident "$TMPD/unaccounted" "$ident"
+      fi
+    done < "$TMPD/requested"
   done < "$TMPD/execfiles"
 fi
 
