@@ -53,6 +53,17 @@ Its `--restart` mode signals only the watcher recorded in the current home's `st
 A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, or if tasks are in flight and that watcher stops running or queued wakes are waiting to be drained.
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.
+A third bordered banner covers the gap those two leave: a wake that was delivered and then dropped.
+Both existing guards assert that supervision machinery is alive, and event-driven supervision means exactly one actionable wake carries each terminal or firstmate-owed state, so a mishandled one has no backstop and draining the queue is what destroys its evidence.
+`bin/fm-ack-lib.sh` closes that by recording the fact neither guard had: whether firstmate did what the state owes.
+`state/<id>.acted` stores the crew's last status verb plus the append-only log's byte count, so an ack covers exactly one reported situation and the crew's next append re-arms the alarm rather than the ack becoming a permanent mute.
+Two independent silencers keep it from crying wolf, and neither is elapsed time.
+A current ack means firstmate did its part, which is what lets a `needs-decision` already relayed sit for as long as the captain needs without alarming.
+A `bin/fm-crew-state.sh` confirm clears a candidate whose crew has provably moved past the state, which is what stops a stale `needs-decision` or `blocked` log line alarming after its gate resolved and the run resumed.
+Only `working` and `paused` clear a candidate; `unknown` is inconclusive rather than exoneration, because a crew whose pane died after reporting `done:` reads exactly that and is the abandoned-work case the alarm exists for.
+Cost stays proportionate because the cheap filter is pure file reads and the confirm subprocess runs only for a task already past grace and unacked, bounded per invocation and briefly cached in `state/.unactioned-<id>`.
+`bin/fm-send.sh` and `bin/fm-pr-check.sh` record the ack themselves, so the common actions need no separate discipline, while `bin/fm-ack.sh` covers relays to the captain that leave no other trace.
+The alarm has one surface, `bin/fm-guard.sh`, which is also the one that runs mid-turn on ordinary fleet commands rather than only at a turn boundary.
 On every verified primary harness, tracked hook integration gives the primary session a push-based backstop: when work is in flight and no identity-matched watcher lock with a fresh beacon is live, direct Stop hooks block and passive turn-end hooks force one bounded follow-up.
 The guard covers the main primary and genuinely marked secondmate homes, exempts child crewmate/scout worktrees, is loop-safe per harness, and is documented in [turnend-guard.md](turnend-guard.md).
 

@@ -413,6 +413,23 @@ test_teardown_removes_the_record() {
   pass "fm-teardown: the ack record and confirm cache are cleaned up with the task's other state"
 }
 
+# --- the remaining ack site --------------------------------------------------
+
+# The local-only merge is the action a `done: ready in branch` owes. It is
+# asserted at the source level rather than driven end to end: exercising it needs
+# a real project repo, worktree, and fast-forwardable branch, which
+# tests/fm-teardown.test.sh already owns, and the ack behavior itself is proven
+# functionally by the fm-send and fm-pr-check cases above.
+# bin/fm-pr-merge.sh deliberately has no ack: bin/fm-pr-check.sh already acked
+# the PR-ready state before it, and teardown removes the record after.
+test_merge_local_acks() {
+  assert_grep 'fm_ack_record "$STATE" "$ID"' "$ROOT/bin/fm-merge-local.sh" \
+    "the approved local-only merge must ack the state it just satisfied"
+  assert_grep 'fm-ack-lib.sh' "$ROOT/bin/fm-merge-local.sh" \
+    "fm-merge-local must source the ack library it calls"
+  pass "fm-merge-local: an approved local merge acks the ready-in-branch state"
+}
+
 test_incident_reproduction
 test_captain_wait_never_alarms
 test_ack_rearms_on_new_status
@@ -425,3 +442,4 @@ test_read_only_mode
 test_confirm_is_gated_by_the_cheap_filter
 test_ack_cli
 test_teardown_removes_the_record
+test_merge_local_acks

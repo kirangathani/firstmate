@@ -96,6 +96,7 @@ state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
+  <id>.acted           written by bin/fm-ack.sh, bin/fm-send.sh, and bin/fm-pr-check.sh: firstmate acted on this task's reported state; silences the unactioned alarm until the crew's next status append (bin/fm-ack-lib.sh); removed by teardown
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
@@ -106,6 +107,7 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
+  .unactioned-*      short-lived unactioned-alarm confirm cache; never touch; removed by teardown
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
@@ -619,6 +621,15 @@ If a guard warning says watcher liveness is stale, drain any queued wakes and th
 If a crewmate sent to work firstmate-on-itself branches or commits in the primary checkout instead of its own isolated worktree, the primary is stranded on a feature branch (the failure this guards against); the guard names the offending branch and prints the non-destructive restore (`git -C <root> checkout <default>`), so the tangle surfaces on the very next fleet action.
 Only a named non-default branch checked out in the primary alarms: detached HEAD (the legitimate resting state of crewmate worktrees and secondmate homes) and the default branch never do.
 The same assertion runs at session start as the bootstrap `TANGLE:` line (handled via `bootstrap-diagnostics`), and two upstream guards prevent the tangle: `fm-spawn`'s isolated-worktree assertion and the ship brief's opening isolation check (section 11).
+
+`fm-guard.sh` carries a third, independent alarm in the same bordered style: the **unactioned direct report**.
+A live watcher and an empty queue prove supervision is running; they prove nothing about whether the terminal or firstmate-owed states it already delivered were acted on, and draining a wake is exactly what destroys that evidence.
+So the guard names any direct report that has sat in `done`, `failed`, `needs-decision`, or `blocked` past its grace window without firstmate doing what that state owes.
+Two things silence it, and neither is elapsed time: firstmate acting, or the crew provably moving past the state.
+`bin/fm-send.sh` and `bin/fm-pr-check.sh` record the action themselves, so steering a crew, triggering validation, and arming a merge poll need no extra step.
+Record the rest with `bin/fm-ack.sh <id> "<what you did>"` - above all after relaying a `needs-decision` or a `failed` to the captain, which leaves no other trace and after which the task is legitimately waiting on them.
+An ack covers one reported situation, not the task: the crew's next status append re-arms the alarm.
+`bin/fm-ack-lib.sh` owns the record format, the owed-state sets, the grace window, and the confirm mechanics.
 
 On every verified primary harness, "no turn ends blind" has a structural backstop beyond the pull-based banner: `bin/fm-turnend-guard.sh` blocks the turn end (or forces one bounded follow-up on passive harnesses) when tasks are in flight without a live identity-matched watcher lock and fresh beacon, guards both the main primary and a secondmate's own primary session, and stays silent when supervision is healthy.
 `docs/turnend-guard.md` owns the per-harness hook mechanisms, empirical validation, scoping details, and documented fail-open tradeoffs.
