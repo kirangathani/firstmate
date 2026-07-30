@@ -180,10 +180,13 @@ fm_composer_strip_ghost() {
 # FM_COMPOSER_BLANKS: the Unicode SPACE-SEPARATOR characters a harness may draw
 # in otherwise-empty composer chrome, which the shell's `[[:space:]]` trims and
 # the exact-glyph matches below would otherwise read as real typed content. Each
-# is built from its UTF-8 bytes with `printf %b` so this file stays ASCII-only
+# is built from its UTF-8 bytes with `printf %b` so THE TABLE stays ASCII-only
 # (no \u escapes, no multibyte literals, no locale-dependent character classes)
-# and bash 3.2 safe. U+00A0 is the empirically observed one (claude's composer);
-# the rest are the same Unicode category and cost nothing to cover.
+# and bash 3.2 safe. The claim is about the table, not the whole file: the
+# exact-glyph `case` patterns further down carry literal `❯`/`›`, and their `?`
+# globs are locale-dependent (under LC_ALL=C a `?` matches one BYTE).
+# U+00A0 is the empirically observed one (claude's composer); the rest are the
+# same Unicode category and cost nothing to cover.
 #
 # Zero-width and format characters (U+200B, U+200C, U+200D, U+2060, U+2063,
 # U+FEFF) are DELIBERATELY excluded: U+2063 INVISIBLE SEPARATOR is firstmate's own
@@ -211,17 +214,23 @@ fm_composer_blanks_init() {
 }
 fm_composer_blanks_init
 
-# fm_composer_normalize_blanks: replace every FM_COMPOSER_BLANKS character in
-# <text> with an ASCII space and assign the result to <out-var>, so the caller's
-# ordinary `[[:space:]]` trim can then reduce a blank-only row to the empty
-# string. Assigns rather than echoing (the bin/fm-marker-lib.sh idiom) so the
-# classifier stays subshell-free on the per-poll path.
-fm_composer_normalize_blanks() {  # <text> <out-var>
-  local _fmcnb_text=$1 _fmcnb_out=$2 _fmcnb_ch
-  for _fmcnb_ch in "${FM_COMPOSER_BLANKS[@]}"; do
-    _fmcnb_text=${_fmcnb_text//"$_fmcnb_ch"/ }
+# fm_composer_normalize_trim: replace every FM_COMPOSER_BLANKS character in
+# <text> with an ASCII space, trim leading/trailing `[[:space:]]` from the
+# result, and assign it to <out-var>, so a blank-only row reduces to the empty
+# string. Normalizing and trimming are ONE step on purpose: a caller that
+# normalized without re-trimming would leave the blank-turned-space in place and
+# silently reintroduce the defect this owner exists to fix. Assigns rather than
+# echoing (the bin/fm-marker-lib.sh idiom) so the classifier stays subshell-free
+# on the per-poll path. Idempotent, so a site that only needs the trim (after
+# the leading-glyph strip below) can call it too.
+fm_composer_normalize_trim() {  # <text> <out-var>
+  local _fmcnt_text=$1 _fmcnt_out=$2 _fmcnt_ch
+  for _fmcnt_ch in "${FM_COMPOSER_BLANKS[@]}"; do
+    _fmcnt_text=${_fmcnt_text//"$_fmcnt_ch"/ }
   done
-  printf -v "$_fmcnb_out" '%s' "$_fmcnb_text"
+  _fmcnt_text=${_fmcnt_text#"${_fmcnt_text%%[![:space:]]*}"}
+  _fmcnt_text=${_fmcnt_text%"${_fmcnt_text##*[![:space:]]}"}
+  printf -v "$_fmcnt_out" '%s' "$_fmcnt_text"
 }
 
 # fm_composer_classify_content: the single shared composer-content verdict.
@@ -253,12 +262,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   # pending input (see UNICODE BLANK PADDING in this file's header). Both the
   # ghost-stripped content and the structural plain row are normalized, so the
   # bare-glyph fallback below also lands on a blank-padded row.
-  fm_composer_normalize_blanks "$content" content
-  content="${content#"${content%%[![:space:]]*}"}"
-  content="${content%"${content##*[![:space:]]}"}"
-  fm_composer_normalize_blanks "$plain_content" plain_content
-  plain_content="${plain_content#"${plain_content%%[![:space:]]*}"}"
-  plain_content="${plain_content%"${plain_content##*[![:space:]]}"}"
+  fm_composer_normalize_trim "$content" content
+  fm_composer_normalize_trim "$plain_content" plain_content
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;
@@ -287,8 +292,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
     '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
   esac
-  content="${content#"${content%%[![:space:]]*}"}"
-  content="${content%"${content##*[![:space:]]}"}"
+  fm_composer_normalize_trim "$content" content
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched again after the leading glyph was stripped,
   # e.g. "❯ Type a message...").
