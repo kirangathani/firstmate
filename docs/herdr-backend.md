@@ -828,6 +828,9 @@ Fixing the one shared classifier lands for all four adapters and both consumers 
 Zero-width and format characters (U+200B, U+200C, U+200D, U+2060, U+2063, U+FEFF) are deliberately NOT normalized: U+2063 is firstmate's own from-firstmate marker (`bin/fm-marker-lib.sh`), and unknown invisible content should count as content, which keeps the safe bias.
 `bin/fm-spawn.sh`'s launch-prompt path was checked and needs no change: it types into a plain shell prompt and performs no composer verification, so it never shared the defect.
 
+**Known remaining gap, deliberately outside this fix and filed as its own follow-up task.** The four adapter row-shape and border-strip sites still run their own `[[:space:]]` trims BEFORE delegating to the shared classifier (`bin/fm-tmux-lib.sh`, `fm_backend_herdr_composer_state`, `bin/backends/orca.sh`, `bin/backends/cmux.sh`), so those trims remain U+00A0-blind and a row whose blank padding sits OUTSIDE the shape being matched (NBSP indentation before a border glyph or before a bare prompt glyph) could still fail row recognition before the classifier ever sees it.
+This fix was kept to the verified shared-classifier change because there is no live evidence any harness emits a blank outside the border, and widening it would ship a change verified only against unit fixtures.
+
 **Both directions verified against real panes, not only fixtures.**
 Success: the real `bin/fm-send.sh` against a live claude agent exits 0 with no error and the agent answers the message (pre-fix, the identical call exited 1 while the agent answered it anyway - the false negative reproduced exactly).
 Failure: a pane running a composer that renders the SAME `❯`+U+00A0 row but drops every Enter it receives still exits 1 with `Enter swallowed; text left in composer`, and the text is left visibly unsubmitted on the row.

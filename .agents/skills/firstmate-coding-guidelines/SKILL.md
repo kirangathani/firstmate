@@ -75,6 +75,7 @@ Firstmate adds this skill's load instruction to firstmate-repo briefs by hand in
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
+- Commit a new `tests/*.test.sh` with its executable bit set (mode 100755), like every sibling: CI's behavior-tests job invokes `tests/*.test.sh` directly under `set -eu`, so a 100644 file exits 126 and aborts the whole loop.
 - A fixture standing in for real terminal or tool output must be the exact bytes captured from the real thing, never a hand-written approximation of them, and the test should say where the capture came from.
 - A hand-written approximation tests a shape the real tool may not emit, so the suite goes green while the real path fails: every composer fixture had been written with an ASCII space where claude actually emits a U+00A0, which hid a 100%-reproducible `bin/fm-send.sh` failure behind a green suite (evidence 2026-07-30, `docs/herdr-backend.md`).
 - A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.
