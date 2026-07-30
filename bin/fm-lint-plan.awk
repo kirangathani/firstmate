@@ -121,9 +121,12 @@ BEGIN {
   # edge; (3) a variable-free literal path, an edge exactly when it names a
   # canonical input (tried both repo-root-relative and script-dir-relative;
   # over-inclusion is safe under the parity invariant, a missed edge is not).
-  # Anything else hits the tripwire above. A statement is detected at the
-  # start of a line and after a top-level `;`, `&&` or `||` on it (guarded
-  # forms like `[ -f x ] && . x`); a separator inside quotes is not a
+  # Anything else hits the tripwire above. ShellCheck follows a literal source
+  # wherever it sits in command position, so the scan tracks command position
+  # across the whole line: a statement is detected at the start of a line,
+  # after `;`, `&`, `&&`, `|`, `||`, `(` or `)`, after the reserved words
+  # if/elif/then/else/while/until/do/in and the `{`/`!` words, and past
+  # assignment prefixes (`VAR=x . lib`). A separator inside quotes is not a
   # statement boundary, and scanning inside strings/heredocs stays out of
   # scope because it would drown the tripwire in false alarms.
   # Directive lines get the same policy: a `# shellcheck` line carrying a key
@@ -163,32 +166,50 @@ BEGIN {
         continue
       }
       if (line ~ /^[ \t]*(#|$)/) continue
-      nseg = 0
-      stmt = line
-      sub(/^[ \t]+/, "", stmt)
-      if (stmt ~ /^(source|\.)[ \t]/) segs[++nseg] = stmt
-      if (line ~ /(;|&&|\|\|)[ \t]*(source|\.)[ \t]/) {
-        len = length(line); insq = 0; indq = 0; esc = 0
-        for (p = 1; p <= len; p++) {
-          c = substr(line, p, 1)
-          if (esc) { esc = 0; continue }
-          if (!insq && c == "\\") { esc = 1; continue }
-          if (insq) { if (c == "'") insq = 0; continue }
-          if (indq) { if (c == "\"") indq = 0; continue }
-          if (c == "'") { insq = 1; continue }
-          if (c == "\"") { indq = 1; continue }
-          if (c == "#" && (p == 1 || substr(line, p - 1, 1) ~ /[ \t;&|(]/)) break
-          sep = 0
-          if (c == ";") sep = 1
-          else if ((c == "&" || c == "|") && substr(line, p + 1, 1) == c) { sep = 1; p++ }
-          if (!sep) continue
-          seg = substr(line, p + 1)
-          sub(/^[ \t]+/, "", seg)
-          if (seg ~ /^(source|\.)[ \t]/) segs[++nseg] = seg
-        }
-      }
       wascov = covered
       covered = 0
+      if (index(line, "source") == 0 && line !~ /\.[ \t]/) continue
+      nseg = 0
+      len = length(line); insq = 0; indq = 0; esc = 0
+      expect = 1
+      word = ""; wstart = 0
+      for (p = 1; p <= len + 1; p++) {
+        c = p <= len ? substr(line, p, 1) : " "
+        if (esc) { esc = 0; word = word c; continue }
+        if (insq) { if (c == "'") insq = 0; word = word c; continue }
+        if (indq) {
+          if (c == "\\") esc = 1
+          else if (c == "\"") indq = 0
+          word = word c
+          continue
+        }
+        if (c == "\\" || c == "'" || c == "\"") {
+          if (c == "\\") esc = 1
+          else if (c == "'") insq = 1
+          else indq = 1
+          if (word == "") wstart = p
+          word = word c
+          continue
+        }
+        if (c == "#" && word == "" && (p == 1 || substr(line, p - 1, 1) ~ /[ \t;&|(]/)) break
+        if (c ~ /[ \t;&|()]/) {
+          if (word != "") {
+            if (expect && (word == "source" || word == ".")) {
+              segs[++nseg] = substr(line, wstart)
+              expect = 0
+            } else if (word != "if" && word != "elif" && word != "then" &&
+                       word != "else" && word != "while" && word != "until" &&
+                       word != "do" && word != "in" && word != "{" && word != "!" &&
+                       word !~ /^[A-Za-z_][A-Za-z0-9_]*=/)
+              expect = 0
+            word = ""
+          }
+          if (c != " " && c != "\t") expect = 1
+          continue
+        }
+        if (word == "") wstart = p
+        word = word c
+      }
       if (nseg > 0 && !wascov)
         for (q = 1; q <= nseg; q++) srcedge(f, lc, line, segs[q], fdir)
     }

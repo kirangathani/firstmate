@@ -93,7 +93,10 @@ REQUIRED_SHELLCHECK=0.11.0
 # nowhere else: a flag added to an invocation but not to the key would serve
 # stale clean results recorded under a different effective lint. The canonical
 # --whole-set command spells the same flags literally because the test suite
-# pins that command string; --verify-parity keeps the two in agreement.
+# pins that command string. --verify-parity cannot detect drift between this
+# variable and those literal exec lines (it re-spells the file set with
+# $LINT_FLAGS and never executes the literal command); the guard is
+# tests/fm-lint.test.sh, which asserts the exec lines' flags equal LINT_FLAGS.
 LINT_FLAGS='--norc'
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -159,8 +162,30 @@ if [ "$MODE" = verify-parity ]; then
   # shellcheck disable=SC2046,SC2086
   shellcheck $LINT_FLAGS --format=gcc $(cat "$TMP/files") 2>/dev/null | sort -u >"$TMP/ref" || true
   printf 'fm-lint.sh: running the sharded fast path...\n' >&2
-  FM_LINT_NO_CACHE=1 FM_LINT_EMIT_FINDINGS="$TMP/fast" "$ROOT/bin/fm-lint.sh" >/dev/null 2>&1 || true
-  [ -f "$TMP/fast" ] || : >"$TMP/fast"
+  # The inner run's status matters as much as its findings: a planner tripwire
+  # execs the whole-set fallback, which never writes FM_LINT_EMIT_FINDINGS, and
+  # a fatal shard error leaves the findings incomplete. Substituting an empty
+  # findings file in either case would let a clean tree report PARITY OK with
+  # the fast path never having run, which is exactly the vacuous confirmation
+  # a developer changing the planner must not receive.
+  fast_rc=0
+  FM_LINT_NO_CACHE=1 FM_LINT_EMIT_FINDINGS="$TMP/fast" "$ROOT/bin/fm-lint.sh" \
+    >/dev/null 2>"$TMP/fast.err" || fast_rc=$?
+  if grep -q 'falling back to the canonical command' "$TMP/fast.err"; then
+    printf 'fm-lint.sh: PARITY BROKEN - the fast path fell back to the whole-set command instead of sharding:\n' >&2
+    cat "$TMP/fast.err" >&2
+    exit 1
+  fi
+  if [ "$fast_rc" -gt 1 ]; then
+    printf 'fm-lint.sh: PARITY BROKEN - the fast path exited %s instead of reaching a verdict:\n' "$fast_rc" >&2
+    cat "$TMP/fast.err" >&2
+    exit 1
+  fi
+  if [ ! -f "$TMP/fast" ]; then
+    printf 'fm-lint.sh: PARITY BROKEN - the fast path never emitted its findings, so there is nothing to compare:\n' >&2
+    cat "$TMP/fast.err" >&2
+    exit 1
+  fi
   if diff -u "$TMP/ref" "$TMP/fast" >"$TMP/diff"; then
     printf 'fm-lint.sh: PARITY OK - %s finding(s), identical in both modes.\n' \
       "$(wc -l <"$TMP/ref" | tr -d ' ')" >&2

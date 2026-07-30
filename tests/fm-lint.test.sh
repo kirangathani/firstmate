@@ -275,6 +275,97 @@ SH
   pass "a guarded literal source is a closure edge for parity and cache invalidation"
 }
 
+test_source_in_any_command_position_is_a_closure_edge() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): command-position source closure check"
+    return
+  fi
+  # ShellCheck follows a literal source wherever it sits in command position,
+  # not just at line start or after ';', '&&', '||'. Verified on the pinned
+  # version: 'then . lib' and a subshell '( . lib' are both followed when the
+  # target is an input, so each must be a closure edge - otherwise a shard
+  # split emits an SC1091 the whole-set run does not, and editing the library
+  # never invalidates the importer's cached clean result.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-anypos)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  cat > "$fx/bin/then-app.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if true; then . bin/lib-core.sh; fi
+core_ready
+SH
+  cat > "$fx/bin/sub-app.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+( . bin/lib-core.sh; core_ready )
+SH
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache-parity" "$fx/bin/fm-lint.sh" --verify-parity 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a keyword- or subshell-position source broke fast-path parity"$'\n'"$out"
+  assert_contains "$out" "PARITY OK" "--verify-parity did not confirm parity with command-position source edges"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "command-position source fixture failed its first lint (exit $rc)"$'\n'"$out"
+  printf '\nCORE_EXTRA=2\nexport CORE_EXTRA\n' >> "$fx/bin/lib-core.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "command-position source re-lint failed unexpectedly (exit $rc)"$'\n'"$out"
+  # bin/lib-core.sh itself plus all three importers: bin/app.sh (directive),
+  # bin/then-app.sh and bin/sub-app.sh (command-position literals).
+  assert_contains "$out" "linting 4 of" \
+    "editing the library did not invalidate its command-position importers"
+  pass "a literal source in any command position is a closure edge"
+}
+
+test_verify_parity_fails_when_fast_path_falls_back() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): vacuous-parity regression check"
+    return
+  fi
+  # Regression: the inner fast-path run's output was discarded, so a planner
+  # tripwire made it fall back to the whole-set command, no findings file was
+  # emitted, and verify-parity compared the reference against a fabricated
+  # empty file - reporting PARITY OK without the fast path ever executing.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-vacuous)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  {
+    printf '#!/usr/bin/env bash\nset -eu\n'
+    printf '# shellcheck %s\n' 'source-path=bin'
+    printf 'true\n'
+  } > "$fx/bin/sp-app.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" --verify-parity 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "--verify-parity reported success without a sharded fast-path run"$'\n'"$out"
+  assert_contains "$out" "PARITY BROKEN" "--verify-parity did not report the vacuous run as a failure"
+  assert_contains "$out" "falling back to the canonical command" \
+    "--verify-parity hid the inner run's stderr naming the cause"
+  assert_not_contains "$out" "PARITY OK" "--verify-parity claimed parity it never measured"
+  pass "--verify-parity fails when the fast path falls back instead of sharding"
+}
+
+test_exec_lines_carry_exactly_lint_flags() {
+  # --verify-parity re-spells the file set with $LINT_FLAGS and never executes
+  # the literal `exec shellcheck` commands, so it cannot detect drift between
+  # the two. This assertion is the actual guard: every literal exec line must
+  # carry exactly the flags LINT_FLAGS holds.
+  local flags mismatch
+  flags=$(sed -n "s/^LINT_FLAGS='\(.*\)'$/\1/p" "$LINT")
+  [ -n "$flags" ] || fail "could not read LINT_FLAGS from bin/fm-lint.sh"
+  mismatch=$(awk -v want="$flags" '
+    /exec shellcheck/ {
+      got = ""
+      for (i = 1; i <= NF; i++) if ($i ~ /^-/) got = got (got == "" ? "" : " ") $i
+      if (got != want) print FNR ": " $0
+    }
+  ' "$LINT")
+  [ -z "$mismatch" ] || fail "exec shellcheck flags drifted from LINT_FLAGS ($flags):"$'\n'"$mismatch"
+  pass "the literal exec shellcheck commands carry exactly LINT_FLAGS"
+}
+
 test_unmodelled_directive_falls_back_to_whole_set() {
   if ! pinned_ready; then
     pass "SKIP (ShellCheck $REQUIRED not resolved): unmodelled-directive fallback check"
@@ -465,4 +556,7 @@ test_cache_hit_does_not_hide_a_later_defect
 test_cache_key_covers_the_source_closure
 test_literal_source_path_is_a_closure_edge
 test_guarded_literal_source_is_a_closure_edge
+test_source_in_any_command_position_is_a_closure_edge
+test_verify_parity_fails_when_fast_path_falls_back
+test_exec_lines_carry_exactly_lint_flags
 test_unmodelled_directive_falls_back_to_whole_set
