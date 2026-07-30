@@ -695,6 +695,7 @@ test_pid_identity_is_locale_invariant() {
   # an alternate locale like ko_KR.UTF-8 is not installed (the equality then holds
   # trivially).
   local live baseline via_lc_all via_lc_time force_lstart
+  # shellcheck disable=SC2016 # Inner-shell script body for 'bash -c'; $1/$2 must stay unexpanded here.
   force_lstart='
     . "$1"
     fm_pid_start_ticks() { return 1; }
