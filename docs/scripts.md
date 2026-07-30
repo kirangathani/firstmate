@@ -64,7 +64,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-pr-check.sh`         | Record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll   |
 | `fm-pr-merge.sh`         | Record PR metadata, gate on `fm-assert-tests-kept.sh`, then merge a task's PR from its full GitHub URL |
-| `fm-assert-tests-kept.sh` | Report the base's test identifiers the branch under review lost (`missing:`), its assertions that no longer pass against the branch (`failing:`), and the base test files that could not be executed at all (`unexecuted:`), plus the non-blocking accounting classes for a green run that verified less than it was asked to (`skipped:`, `unaccounted:`) |
+| `fm-assert-tests-kept.sh` | Report the base's test assertions the branch under review lost, broke, or could not execute at all (its header owns the finding classes and exit codes) |
 | `fm-test-exec-lib.sh`   | Shared per-language test runners (shell, pytest) and scratch-tree environment lifecycle that `fm-assert-tests-kept.sh` check 2 drives |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require scout reports, retire secondmate homes |
