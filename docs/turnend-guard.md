@@ -174,7 +174,7 @@ An earlier run of the same harness the same morning produced the same shape with
 Three distinct identities for one unchanging process, against one for the fix.
 The identity is now derived from field 22 of `/proc/<pid>/stat`, the kernel's own start time in clock ticks since boot, which cannot drift however the wall clock moves.
 `bin/fm-wake-lib.sh` owns that format, its non-Linux `lstart` fallback, and the `fm_pid_identity_matches` comparison every persisted identity must go through.
-The command half of the identity comes from `/proc/<pid>/cmdline` rather than a `ps` fork, so computing an identity on Linux forks nothing; that matters because `bin/fm-afk-launch.sh` computes one inside its lock-acquire window, before its cleanup trap is installed.
+The command half of the identity comes from `/proc/<pid>/cmdline` rather than a `ps` fork, so on Linux the identity helpers execute no external program at all; that matters because `bin/fm-afk-launch.sh` computes one inside its lock-acquire window, before its cleanup trap is installed.
 
 ## Tests
 
