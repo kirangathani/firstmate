@@ -10,6 +10,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-ack-lib.sh
+. "$SCRIPT_DIR/fm-ack-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 URL=$2
@@ -38,3 +40,8 @@ state=\$(gh pr view "$URL" --json state -q .state 2>/dev/null)
 [ "\$state" = "MERGED" ] && echo "merged"
 EOF
 echo "armed: state/$ID.check.sh polls $URL"
+
+# Recording the PR and arming the merge poll IS the action a PR-ready `done:`
+# owes, so ack it here (bin/fm-ack-lib.sh) instead of leaving the task alarming
+# while it legitimately waits on review or merge.
+fm_ack_record "$STATE" "$ID" "fm-pr-check $URL" || true
