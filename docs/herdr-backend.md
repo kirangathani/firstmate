@@ -785,6 +785,59 @@ The luminance rule assumes a dark terminal theme (the fleet reality); the SGR-2 
 **Resolved: backend-independent wedge alarm.** The max-defer wedge alarm (`inject_wedge_alarm`, `bin/fm-supervise-daemon.sh`) formerly alarmed into the void because its only active signal was a tmux client status-line flash, skipped for herdr, leaving only the passive `state/.subsuper-inject-wedged` marker.
 It now also attempts a configurable active alert independent of the supervisor backend; [`wedge-alarm.md`](wedge-alarm.md) owns its channels and verification evidence.
 
+## Incident (2026-07-30): claude pads its prompt glyph with U+00A0, so every empty claude composer read as pending input
+
+`bin/fm-send.sh` reported `error: text not submitted to <target> (Enter swallowed; text left in composer)` and exited 1 on every steer to a live claude crewmate, four times in one session, while the message HAD been delivered every time (the pane showed it accepted as a user turn with the agent already working).
+The failure direction is the dangerous one: a false "not submitted" invites a re-send that double-instructs a live agent, and `AGENTS.md` section 8 treats a failed steer as a trigger for stuck-crewmate recovery, so a healthy agent gets dragged toward an unnecessary interrupt or relaunch.
+
+**Root cause, and it is not a timing race.** The strong prior going in was that the post-Enter verification sampled the pane before the composer had cleared.
+That prior was WRONG, and the instrumented reproduction disproved it before any fix was written: the composer was already clear at the FIRST 0.2s poll and stayed clear for 2.8s while the classifier returned `pending` at every single sample.
+
+claude renders its composer prompt row as `❯` followed by a U+00A0 NO-BREAK SPACE, not an ASCII space.
+The shell's `[[:space:]]` trims (in every adapter, and in `fm_composer_classify_content` itself) do not treat U+00A0 as whitespace, so the blank survived trimming; the trimmed content `❯<U+00A0>` missed the exact-glyph match; and the leading-glyph strip left a lone U+00A0 that classified as real typed content.
+Every empty claude composer therefore read `pending`, unconditionally, with no timing component at all.
+
+Verified 2026-07-30 with real tmux 3.4 and GNU bash 5.2.21(1)-release on Linux (WSL2, 6.6.87.2-microsoft-standard-WSL2), against a live Claude Code 2.1.220 agent, hex-dumping the pane's own cursor row:
+
+```sh
+$ cy=$(tmux display-message -p -t fmtest-k4:agent '#{cursor_y}')
+$ tmux capture-pane -e -p -t fmtest-k4:agent -S "$cy" -E "$cy" | hexdump -C
+00000000  e2 9d af c2 a0 0a                                 |......|
+#          \______/ \___/
+#            U+276F  U+00A0 NO-BREAK SPACE, not 0x20
+
+# and the trims genuinely leave it behind:
+$ s=$(printf '\302\240'); printf '%s' "${s#"${s%%[![:space:]]*}"}" | hexdump -C
+00000000  c2 a0                                             |..|
+```
+
+Instrumented against the live agent, typing once then sending Enter and sampling every 0.2s (pre-fix / post-fix on the identical pane and row bytes):
+
+```
+--- after type, before Enter:   state=pending      (correct: real unsubmitted text)
+t=+0.2s row=^[[38;5;246m<U+276F><U+00A0>^[[39m   pre-fix state=pending   post-fix state=empty
+t=+0.4s ... 2.8s  identical row, identical verdict at every sample
+```
+
+**Why the whole suite stayed green.** Every composer fixture in the suite had been hand-written with an ASCII space (`e2 9d af 20`), never taken from a real capture, so the suite tested a row shape claude does not emit.
+This also silently defeated the 2026-07-08/2026-07-10 ghost-text fixes above for any bare-glyph claude pane: with the ghost run stripped the row reduces to `❯<U+00A0>`, which read `pending` pre-fix and `empty` post-fix (confirmed on the live pane against a real rotating claude prompt suggestion).
+So the away-mode injector was reading every idle claude pane as unsafe to inject, the same shape as the overnight wedge incidents.
+
+**Fix, at the shared owner.** `bin/fm-composer-lib.sh` gains `FM_COMPOSER_BLANKS` (the Unicode space-separator characters, built from their UTF-8 bytes with `printf %b` so the file stays ASCII-only and bash 3.2 safe) and `fm_composer_normalize_blanks`, applied to both the ghost-stripped content and the structural plain row at the top of `fm_composer_classify_content`, before any emptiness test or glyph match.
+Fixing the one shared classifier lands for all four adapters and both consumers (`bin/fm-send.sh` and the away-mode injector) at once, rather than patching a single call site.
+Zero-width and format characters (U+200B, U+200C, U+200D, U+2060, U+2063, U+FEFF) are deliberately NOT normalized: U+2063 is firstmate's own from-firstmate marker (`bin/fm-marker-lib.sh`), and unknown invisible content should count as content, which keeps the safe bias.
+`bin/fm-spawn.sh`'s launch-prompt path was checked and needs no change: it types into a plain shell prompt and performs no composer verification, so it never shared the defect.
+
+**Both directions verified against real panes, not only fixtures.**
+Success: the real `bin/fm-send.sh` against a live claude agent exits 0 with no error and the agent answers the message (pre-fix, the identical call exited 1 while the agent answered it anyway - the false negative reproduced exactly).
+Failure: a pane running a composer that renders the SAME `❯`+U+00A0 row but drops every Enter it receives still exits 1 with `Enter swallowed; text left in composer`, and the text is left visibly unsubmitted on the row.
+That second case is the one that matters for the fix's shape - deleting the verification or making it always succeed would trade a noisy false negative for a silent false positive, where firstmate believes an agent was steered when it was not.
+
+**Regression coverage (from the exact captured bytes, both directions).** `tests/fm-composer-lib.test.sh` pins the shared classifier (U+00A0-padded glyph -> `empty`, every `FM_COMPOSER_BLANKS` character -> `empty`, and the preserved verdicts: real text after the blank -> `pending`, blank-padded bare shell glyph -> `unknown`, U+2063 -> content).
+`tests/fm-send-blank-composer.test.sh` drives the real `bin/fm-send.sh` end to end on the live-captured rows: cleared -> exit 0 silent, cleared-with-ghost -> exit 0, genuinely swallowed -> exit non-zero with the swallow diagnostic, plus the unchanged bounded retry budget (text typed exactly once, 3 Enters) and the `fm_tmux_composer_state` verdicts on the same three rows.
+Both files were confirmed to FAIL against the pre-fix `bin/fm-composer-lib.sh` (`git stash` the change and rerun) and pass against the fix.
+`tests/fm-daemon.test.sh`, `tests/fm-backend-herdr.test.sh`, `tests/fm-backend-orca.test.sh`, and `tests/fm-backend-cmux.test.sh` stay green, so no adapter regressed.
+
 ## Native `pane.agent_status_changed` push escalation (immediate blocked wake)
 
 Herdr exposes a native, push-based agent-state event stream, and firstmate folds it into the watcher so a crew entering `blocked` (waiting on the human at a permission/trust dialog, an interactive menu, or a wedged prompt) wakes its supervisor sub-second instead of after the ~240s stale-pane wedge timer.
