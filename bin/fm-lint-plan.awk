@@ -13,9 +13,10 @@
 # only on its own bytes plus the transitively sourced files present as input.
 # Any resolution mechanism the planner fails to model breaks that invariant
 # SILENTLY, and a silently-wrong lint gate is far worse than a slow one. Hence
-# the scan below models both mechanisms, and for any source statement it cannot
-# confidently classify it exits non-zero so bin/fm-lint.sh falls back to the
-# whole-set reference implementation instead of guessing.
+# the scan below models both mechanisms, and for any source statement or
+# shellcheck directive key it cannot confidently classify it exits non-zero so
+# bin/fm-lint.sh falls back to the whole-set reference implementation instead
+# of guessing.
 #
 # The findings ShellCheck reports for a file therefore depend on exactly two
 # things: the file's own contents, and the contents of the files it transitively
@@ -51,9 +52,30 @@ function addedge(from, to,   key) {
   if (!(key in edge)) { edge[key] = 1; deps[from] = deps[from] " " to }
 }
 
-function tripwire(f, ln, line) {
-  printf "unclassifiable source statement at %s:%d: %s\n", f, ln, trim(line) > "/dev/stderr"
+function tripwire(f, ln, line, what) {
+  if (what == "") what = "unclassifiable source statement"
+  printf "%s at %s:%d: %s\n", what, f, ln, trim(line) > "/dev/stderr"
   exit 3
+}
+
+# Classify one detected source/`.` statement (stmt starts at the keyword) and
+# record its edge, or tripwire if it fits no bucket. An unquoted target word
+# ends at the first shell metacharacter, exactly as the shell would end it.
+function srcedge(f, ln, line, stmt, fdir,   tgt) {
+  sub(/^(source|\.)[ \t]+/, "", stmt)
+  tgt = stmt
+  sub(/[ \t].*$/, "", tgt)
+  if (tgt == "" || tgt ~ /[$`]/) return
+  if (tgt ~ /\\/) tripwire(f, ln, line)
+  if (tgt ~ /^"[^"]*"$/ || tgt ~ /^'[^']*'$/)
+    tgt = substr(tgt, 2, length(tgt) - 2)
+  else if (tgt ~ /["']/) tripwire(f, ln, line)
+  else sub(/[;&|<>()].*$/, "", tgt)
+  if (tgt == "") return
+  if (tgt ~ /[]{}*?~[]/) tripwire(f, ln, line)
+  sub(/^(\.\/)+/, "", tgt)
+  addedge(f, tgt)
+  addedge(f, fdir tgt)
 }
 
 # Cost model for bin packing. ShellCheck's runtime grows faster than the line
@@ -99,10 +121,16 @@ BEGIN {
   # edge; (3) a variable-free literal path, an edge exactly when it names a
   # canonical input (tried both repo-root-relative and script-dir-relative;
   # over-inclusion is safe under the parity invariant, a missed edge is not).
-  # Anything else hits the tripwire above. Detection is statement-initial
-  # only: a mid-line `source` reaching ShellCheck as a real statement is not
-  # a shape this repo uses, and scanning inside strings/heredocs would drown
-  # the tripwire in false alarms.
+  # Anything else hits the tripwire above. A statement is detected at the
+  # start of a line and after a top-level `;`, `&&` or `||` on it (guarded
+  # forms like `[ -f x ] && . x`); a separator inside quotes is not a
+  # statement boundary, and scanning inside strings/heredocs stays out of
+  # scope because it would drown the tripwire in false alarms.
+  # Directive lines get the same policy: a `# shellcheck` line carrying a key
+  # this planner does not model (e.g. source-path=, which changes how a later
+  # source statement resolves) is itself a tripwire, so no unmodelled
+  # resolution mechanism can be silently guessed around. Keys that cannot
+  # affect resolution (disable=, shell=, enable=, external-sources=) pass.
   for (i = 1; i <= n; i++) {
     f = files[i]
     fdir = ""
@@ -111,38 +139,58 @@ BEGIN {
     covered = 0
     while ((getline line < f) > 0) {
       lc++
-      # Match `# shellcheck ... source=<path>`; the directive may carry other
-      # keys (disable=..., shell=...) before or after the source= key. It
-      # governs the next command, whose own target must then not be re-read.
-      if (line ~ /^[ \t]*#[ \t]*shellcheck[ \t]/ && line ~ /source=/) {
-        tail = line
-        sub(/^.*source=/, "", tail)
-        sub(/[ \t].*$/, "", tail)
-        addedge(f, tail)
-        covered = 1
+      # A `# shellcheck` directive line; keys may come in any order and a
+      # trailing `# comment` is ignored. A source= key governs the next
+      # command, whose own target must then not be re-read.
+      if (line ~ /^[ \t]*#[ \t]*shellcheck[ \t]/) {
+        rest = line
+        sub(/^[ \t]*#[ \t]*shellcheck[ \t]+/, "", rest)
+        nt = split(rest, toks, /[ \t]+/)
+        for (t = 1; t <= nt; t++) {
+          if (toks[t] ~ /^#/) break
+          if (toks[t] !~ /=/) continue
+          dkey = toks[t]
+          sub(/=.*$/, "", dkey)
+          if (dkey == "source") {
+            tail = toks[t]
+            sub(/^source=/, "", tail)
+            addedge(f, tail)
+            covered = 1
+          } else if (dkey != "disable" && dkey != "shell" && dkey != "enable" &&
+                     dkey != "external-sources")
+            tripwire(f, lc, line, "unmodelled shellcheck directive")
+        }
         continue
       }
       if (line ~ /^[ \t]*(#|$)/) continue
+      nseg = 0
       stmt = line
       sub(/^[ \t]+/, "", stmt)
-      if (stmt ~ /^(source|\.)[ \t]/) {
-        if (covered) { covered = 0; continue }
-        covered = 0
-        sub(/^(source|\.)[ \t]+/, "", stmt)
-        tgt = stmt
-        sub(/[ \t].*$/, "", tgt)
-        if (tgt == "" || tgt ~ /[$`]/) continue
-        if (tgt ~ /\\/) tripwire(f, lc, line)
-        if (tgt ~ /^"[^"]*"$/ || tgt ~ /^'[^']*'$/)
-          tgt = substr(tgt, 2, length(tgt) - 2)
-        else if (tgt ~ /["']/) tripwire(f, lc, line)
-        if (tgt ~ /[];&|<>(){}*?~[]/) tripwire(f, lc, line)
-        sub(/^(\.\/)+/, "", tgt)
-        addedge(f, tgt)
-        addedge(f, fdir tgt)
-        continue
+      if (stmt ~ /^(source|\.)[ \t]/) segs[++nseg] = stmt
+      if (line ~ /(;|&&|\|\|)[ \t]*(source|\.)[ \t]/) {
+        len = length(line); insq = 0; indq = 0; esc = 0
+        for (p = 1; p <= len; p++) {
+          c = substr(line, p, 1)
+          if (esc) { esc = 0; continue }
+          if (!insq && c == "\\") { esc = 1; continue }
+          if (insq) { if (c == "'") insq = 0; continue }
+          if (indq) { if (c == "\"") indq = 0; continue }
+          if (c == "'") { insq = 1; continue }
+          if (c == "\"") { indq = 1; continue }
+          if (c == "#" && (p == 1 || substr(line, p - 1, 1) ~ /[ \t;&|(]/)) break
+          sep = 0
+          if (c == ";") sep = 1
+          else if ((c == "&" || c == "|") && substr(line, p + 1, 1) == c) { sep = 1; p++ }
+          if (!sep) continue
+          seg = substr(line, p + 1)
+          sub(/^[ \t]+/, "", seg)
+          if (seg ~ /^(source|\.)[ \t]/) segs[++nseg] = seg
+        }
       }
+      wascov = covered
       covered = 0
+      if (nseg > 0 && !wascov)
+        for (q = 1; q <= nseg; q++) srcedge(f, lc, line, segs[q], fdir)
     }
     close(f)
     lines[f] = lc

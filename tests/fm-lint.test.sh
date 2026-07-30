@@ -239,6 +239,69 @@ SH
   pass "a literal source path is a closure edge for parity and cache invalidation"
 }
 
+test_guarded_literal_source_is_a_closure_edge() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): guarded-source closure check"
+    return
+  fi
+  # A literal source guarded behind a top-level separator ('[ -f x ] && . x')
+  # is still followed by ShellCheck, so it must still be a closure edge: parity
+  # must hold and editing the library must invalidate the importer.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-guardsrc)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  cat > "$fx/bin/guard-app.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ -f bin/lib-core.sh ] && . bin/lib-core.sh
+core_ready
+SH
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache-parity" "$fx/bin/fm-lint.sh" --verify-parity 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a guarded literal source broke fast-path parity"$'\n'"$out"
+  assert_contains "$out" "PARITY OK" "--verify-parity did not confirm parity with a guarded source edge"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "guarded-source fixture failed its first lint (exit $rc)"$'\n'"$out"
+  printf '\nCORE_EXTRA=2\nexport CORE_EXTRA\n' >> "$fx/bin/lib-core.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "guarded-source re-lint failed unexpectedly (exit $rc)"$'\n'"$out"
+  # bin/lib-core.sh itself plus both importers: bin/app.sh (directive) and
+  # bin/guard-app.sh (guarded literal).
+  assert_contains "$out" "linting 3 of" \
+    "editing a guarded-sourced library did not invalidate its importer's cached result"
+  pass "a guarded literal source is a closure edge for parity and cache invalidation"
+}
+
+test_unmodelled_directive_falls_back_to_whole_set() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): unmodelled-directive fallback check"
+    return
+  fi
+  # The planner does not model ShellCheck's search-path resolution, so a
+  # directive key it does not understand must force the whole-set fallback
+  # rather than risk a silently wrong shard plan. The directive line is
+  # assembled at runtime so this test file never carries it verbatim.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-srcpath)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  {
+    printf '#!/usr/bin/env bash\nset -eu\n'
+    printf '# shellcheck %s\n' 'source-path=bin'
+    printf 'true\n'
+  } > "$fx/bin/sp-app.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "whole-set fallback run failed on a clean fixture (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "falling back to the canonical command" \
+    "an unmodelled shellcheck directive did not trigger the whole-set fallback"
+  assert_contains "$out" "sp-app.sh" "the fallback message did not name the offending file"
+  pass "an unmodelled shellcheck directive falls back to the whole-set command"
+}
+
 test_owner_exists_and_executable() {
   assert_present "$LINT" "bin/fm-lint.sh is missing"
   [ -x "$LINT" ] || fail "bin/fm-lint.sh must be executable so CI/gate can run it directly"
@@ -401,3 +464,5 @@ test_cold_cache_never_reports_a_false_clean
 test_cache_hit_does_not_hide_a_later_defect
 test_cache_key_covers_the_source_closure
 test_literal_source_path_is_a_closure_edge
+test_guarded_literal_source_is_a_closure_edge
+test_unmodelled_directive_falls_back_to_whole_set
