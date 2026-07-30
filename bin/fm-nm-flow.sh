@@ -36,6 +36,15 @@
 #                      merge-gate box renders as pending.
 #   -h, --help         Print this usage on stdout and exit 0.
 #
+# Width: the diagram is drawn for a plain 80-column pane and the header line is
+# bounded to the render width, which is FM_NM_FLOW_COLS when it is a sane
+# number, else the detected terminal width when stdout is a tty and that width
+# is wider than 80, else 80. Only the title segment is shortened, with an
+# ellipsis; if that is not enough the fixed "no-mistakes flow: " prefix is
+# dropped too. The branch and the run id are NEVER truncated - a partial ULID
+# still reads as a run id while being useless to paste back into the CLI - so
+# an extreme width lets the header wrap rather than mutilating either.
+#
 # Step kinds: the test and lint boxes are deterministic only when the target
 # project defines commands.test / commands.lint in its .no-mistakes.yaml;
 # without them no-mistakes delegates that step to an agent. Those two boxes are
@@ -474,6 +483,27 @@ if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
   SGR0=$(tput sgr0 2>/dev/null || true)
 fi
 
+# Render width: explicit override, else a tty wider than the 80-column baseline
+# the diagram is drawn for, else 80. Anything non-numeric, absurd, or narrower
+# than a sane floor falls back to 80 rather than a degenerate header.
+COLS=80
+if [ -n "${FM_NM_FLOW_COLS:-}" ]; then
+  case "$FM_NM_FLOW_COLS" in
+    *[!0-9]*) : ;;
+    *) if [ "$FM_NM_FLOW_COLS" -ge 40 ] && [ "$FM_NM_FLOW_COLS" -le 1000 ]; then
+         COLS=$FM_NM_FLOW_COLS
+       fi ;;
+  esac
+elif [ "$TTY" = 1 ]; then
+  TPUT_COLS=$(tput cols 2>/dev/null || true)
+  case "$TPUT_COLS" in
+    ''|*[!0-9]*) : ;;
+    *) if [ "$TPUT_COLS" -gt 80 ] && [ "$TPUT_COLS" -le 1000 ]; then
+         COLS=$TPUT_COLS
+       fi ;;
+  esac
+fi
+
 RULE="------------------------------------------------------------------------------"
 
 step_line() {  # <key> <label> <kind> <annotation>
@@ -488,10 +518,31 @@ step_line() {  # <key> <label> <kind> <annotation>
   fi
 }
 
+# Header bounded to COLS by shortening the title only, then by dropping the
+# fixed prefix; the branch and run id segments are always emitted whole.
+header_line() {
+  local tail=" | branch ${BRANCH:-<detached>}" p avail
+  [ -n "$RUN_ID" ] && tail="$tail | run $RUN_ID"
+  for p in 'no-mistakes flow: ' ''; do
+    if [ $(( ${#p} + ${#TITLE} + ${#tail} )) -le "$COLS" ]; then
+      printf '%s%s%s' "$p" "$TITLE" "$tail"
+      return
+    fi
+    avail=$(( COLS - ${#p} - ${#tail} ))
+    if [ "$avail" -ge 4 ]; then
+      printf '%s%s...%s' "$p" "${TITLE:0:$((avail - 3))}" "$tail"
+      return
+    fi
+    if [ $(( ${#p} + ${#tail} )) -le "$COLS" ]; then
+      printf '%s%s' "$p" "${tail# | }"
+      return
+    fi
+  done
+  printf '%s' "${tail# | }"
+}
+
 render() {
-  local hdr="no-mistakes flow: $TITLE | branch ${BRANCH:-<detached>}"
-  [ -n "$RUN_ID" ] && hdr="$hdr | run $RUN_ID"
-  printf '%s\n' "$hdr"
+  printf '%s\n' "$(header_line)"
   printf '%s%s%s\n' "$BOLD" "$BANNER" "$SGR0"
   local pr="${RUN_PR:-$PR_URL}"
   [ -n "$pr" ] && printf 'PR: %s\n' "$pr"

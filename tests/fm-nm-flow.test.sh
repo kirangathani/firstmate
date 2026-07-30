@@ -27,6 +27,8 @@
 #   (o) test/lint kinds come from the worktree's .no-mistakes.yaml, and fall
 #       back to det|LLM when no config is readable
 #   (p) --tests-gate --watch renders frame 1 as checking... before the probe
+#   (q) the header is bounded to the render width by shortening the title, and
+#       never by truncating the branch or the 26-char ULID run id
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -137,6 +139,21 @@ run:
   pr: "${3:-}"
   findings: none
 outcome: $2
+EOF
+}
+
+run_running_with_id() {  # <branch> <run-id>
+  cat <<EOF
+run:
+  id: "$2"
+  branch: $1
+  status: running
+  head: "abc1234"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,running,0,0
 EOF
 }
 
@@ -534,6 +551,58 @@ SH
   pass "--tests-gate --watch never blanks the first frame"
 }
 
+# (q) the header never wraps an 80-column pane, and never at the run id's cost
+test_header_width_bounded() {
+  reset_fakes
+  local d wt out hdr rid
+  d=$(new_case header-width)
+  wt="$d/wt-a-deliberately-long-task-worktree-name-for-the-header"
+  make_repo_on_branch "$wt" fm/header-branch
+  make_fakebin "$d" >/dev/null
+  rid=01JQZX9K7T8V6WQ2E5R3N4M0AB
+  [ ${#rid} -eq 26 ] || fail "fixture run id is ${#rid} chars, expected a 26-char ULID"
+  FM_FAKE_AXI_STATUS="$(run_running_with_id fm/header-branch "$rid")"
+
+  # Not a tty and no override: the hard 80-column default applies.
+  out=$(run_flow "$d" --worktree "$wt")
+  hdr=$(strip_sgr "$(printf '%s\n' "$out" | head -1)")
+  [ ${#hdr} -le 80 ] || fail "header is ${#hdr} columns at the 80-col default: $hdr"
+  assert_contains "$hdr" "$rid" "the full run id survives at 80 columns"
+  assert_contains "$hdr" "branch fm/header-branch" "the branch survives whole"
+  assert_contains "$hdr" "no-mistakes flow: " "the prefix is kept while the title can still be shortened"
+
+  # Room for part of the title: it is shortened with an ellipsis, prefix intact.
+  out=$(FM_NM_FLOW_COLS=100 run_flow "$d" --worktree "$wt")
+  hdr=$(strip_sgr "$(printf '%s\n' "$out" | head -1)")
+  [ ${#hdr} -le 100 ] || fail "header is ${#hdr} columns at 100: $hdr"
+  assert_contains "$hdr" "no-mistakes flow: " "the prefix survives a shortened title"
+  assert_contains "$hdr" "..." "the shortened title carries the ellipsis"
+  assert_contains "$hdr" "$rid" "the full run id survives a shortened title"
+
+  # A non-numeric or absurd override falls back to the same 80 columns.
+  out=$(FM_NM_FLOW_COLS=not-a-number run_flow "$d" --worktree "$wt")
+  hdr=$(strip_sgr "$(printf '%s\n' "$out" | head -1)")
+  [ ${#hdr} -le 80 ] || fail "non-numeric width override did not fall back to 80: $hdr"
+  out=$(FM_NM_FLOW_COLS=5 run_flow "$d" --worktree "$wt")
+  hdr=$(strip_sgr "$(printf '%s\n' "$out" | head -1)")
+  [ ${#hdr} -le 80 ] || fail "below-floor width override did not fall back to 80: $hdr"
+
+  # A wider pane gets the whole header.
+  out=$(FM_NM_FLOW_COLS=140 run_flow "$d" --worktree "$wt")
+  hdr=$(strip_sgr "$(printf '%s\n' "$out" | head -1)")
+  [ ${#hdr} -le 140 ] || fail "header is ${#hdr} columns at 140: $hdr"
+  assert_contains "$hdr" "${wt##*/}" "a wider pane keeps the full title"
+  assert_not_contains "$hdr" "..." "a wider pane needs no ellipsis"
+
+  # Too narrow for any title: the fixed prefix goes before the branch or run id.
+  out=$(FM_NM_FLOW_COLS=40 run_flow "$d" --worktree "$wt")
+  hdr=$(strip_sgr "$(printf '%s\n' "$out" | head -1)")
+  assert_not_contains "$hdr" "no-mistakes flow: " "the prefix is dropped before anything is mutilated"
+  assert_contains "$hdr" "$rid" "the full run id survives a narrow pane"
+  assert_contains "$hdr" "branch fm/header-branch" "the branch survives a narrow pane"
+  pass "header is bounded by width without truncating branch or run id"
+}
+
 test_usage_error
 test_missing_meta
 test_task_id_resolution
@@ -551,5 +620,6 @@ test_tests_gate_name_check_only
 test_ci_red_banner
 test_step_kinds_from_config
 test_tests_gate_first_frame
+test_header_width_bounded
 
 echo "all fm-nm-flow tests passed"
