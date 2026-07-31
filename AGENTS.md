@@ -79,8 +79,10 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   supersessions/<project>.md  captain-approved test-assertion supersessions consumed by bin/fm-pr-merge.sh's test-keep gate (entry format in its header); LOCAL, gitignored; created lazily by captain approval only, never auto-generated, absent means no approvals
+  exec-gate/<project>  per-project marker making the test-keep gate's unexecuted findings block instead of warn (contract in bin/fm-pr-merge.sh's header); LOCAL, gitignored; created lazily by the captain only, never auto-generated, absent means warn-only
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  HANDOFF-<date>[-sessionN].md  volatile working state written by /handoff for the next session in this home; LOCAL, gitignored; path allocated by bin/fm-handoff.sh, read once and then consumed (section 6)
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
@@ -101,6 +103,7 @@ state/               volatile runtime signals; gitignored
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
+  .handoff-unread    path of a handoff document no session has read yet; armed by bin/fm-handoff.sh, announced by its SessionStart pickup hook, cleared only by consume
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
@@ -207,6 +210,8 @@ Firstmate never writes a project's `AGENTS.md` directly.
 A crewmate creates or updates it lazily through the project's selected delivery path, using `bin/fm-ensure-agents-md.sh` and preferring pointers to authoritative sources over copied detail.
 Keep fleet delivery posture and captain-private strategy out of project memory.
 When the captain invokes `/stow`, load the `stow` skill for the complete knowledge-routing and unfinished-work sweep.
+When the captain invokes `/handoff`, or this session is degraded enough to be worth resetting, load the `handoff` skill: it runs `/stow` for the durable half, writes the volatile working state to a `data/HANDOFF-*.md` document, and arms it so the next session start in this home is pointed at that exact file.
+`/clear` is a harness built-in you cannot execute; the captain types it.
 
 ## 7. Task lifecycle
 
@@ -266,6 +271,7 @@ With `yolo` on, firstmate decides those routine gates and merges only green or o
 Never merge a red PR.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 `bin/fm-pr-merge.sh` also gates every merge on `bin/fm-assert-tests-kept.sh`: a test assertion the base already had that is missing or failing on the PR branch is a hard refusal, even under `yolo`.
+A base assertion the gate could not execute at all against the branch is reported as unexecuted, and it refuses only for a project the captain has enabled with a `data/exec-gate/<project>` marker; otherwise it is informational.
 On that refusal, rebase damage is the worker's to fix, while a deliberate supersession of the base's asserted behavior is a product decision that is never the worker's or firstmate's to make - relay it to the captain, and only a captain-approved entry in `data/supersessions/<project>.md` (entry format in `bin/fm-pr-merge.sh`'s header) lets that merge proceed.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 

@@ -178,7 +178,8 @@ For target project repos shipped through their own no-mistakes pipeline, commits
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state.
-Between recording and merging it also runs `bin/fm-assert-tests-kept.sh`, refusing the merge when any test identifier present on the authoritative base is missing from the PR branch, or when that check cannot run at all; the check's own header owns the identifier contract and exit codes.
+Between recording and merging it also runs `bin/fm-assert-tests-kept.sh`, refusing the merge on that check's findings about the authoritative base's test assertions, and refusing unverified when the check cannot run at all; the check's own header owns the identifier contract, its output classes, and its exit codes.
+`bin/fm-pr-merge.sh`'s header owns everything on the consuming side: the three finding classes, the per-project `data/exec-gate/<project>` marker that decides whether an unexecuted finding blocks or only warns, the refuse/proceed decision rule across all three classes, and the supersession entry grammar.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
@@ -249,6 +250,7 @@ Fleet state lives in each task's session-provider backend (tmux by hard default,
 For herdr, respawning after a server-restored layout closes and replaces confirmed no-agent or dead task-tab husks instead of requiring manual tab cleanup.
 At session start, confirmed-dead secondmate agent endpoints are closed and relaunched through the same secondmate spawn path, while ambiguous liveness reads are left untouched to avoid duplicate supervisors.
 Use `/stow` before an intentional reset when the conversation may hold durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.
+What reconciliation cannot rebuild is the session's own reasoning, so `/handoff` writes that volatile half to a `data/HANDOFF-*.md` document and arms a `SessionStart` pickup that points the next session at it, whether the reset was a deliberate `/clear` or a crash; [handoff.md](handoff.md) owns the mechanism and its verification evidence.
 
 ## Development notes
 

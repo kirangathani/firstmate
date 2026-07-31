@@ -24,14 +24,50 @@
 #
 # Check 2 (assertions): run the base's OWN test files against the branch's
 # code, so a silently rewritten test body is caught as well as a deleted one.
-# Both trees are materialized into a temp dir, each base shell test file is
-# first run against the base tree (its baseline must be green for its verdict
-# to mean anything), then copied over the branch tree and run there; every
-# `ok - <name>` the baseline emitted that the branch run does not is a failing
-# assertion. Execution covers shell test files only; non-shell test files, and
-# shell files whose baseline run is not green (fixtures or imports that do not
-# resolve), are LOUDLY reported on stderr as verified by name only - check 2
-# falls back to check 1 for them rather than silently reporting success.
+# Both trees are materialized into a temp dir, each base test file is first run
+# against the base tree (its baseline must be green for its verdict to mean
+# anything), then copied over the branch tree and run there; every assertion the
+# baseline recorded as passing that the branch run does not is a failing
+# assertion.
+#
+# A base test file check 2 could not actually execute is NOT a pass. Each of its
+# identifiers is reported as `unexecuted:`, because a bare green result that
+# means "nothing was run" reads as verified while catching nothing - the precise
+# failure this check exists to prevent. A file is unexecuted when no supported
+# runner resolves for it, when its baseline run is not green (fixtures or imports
+# that do not resolve), or when the scratch tree could not be proven
+# authoritative for the code under test.
+#
+# A GREEN baseline run has the same hole one level down: it can exit zero having
+# verified only some of the identifiers it was bounded to, or none of them. So
+# every identifier the run was bounded to is accounted for individually, and the
+# two ways it can fail to be a pass are reported separately:
+#   - `skipped:`     the runner reported an EXPLICIT skip for it. Accounted for,
+#                    and specifically NOT unexecuted.
+#   - `unaccounted:` the run produced no result for it at all - no testcase in
+#                    the report, a report that is missing/empty/unparseable, or
+#                    (shell runner) no `ok - <name>` line.
+# A requested identifier and a runner's own names are two different namespaces,
+# so accounting matches a bare name against `<name>` and `<name>[...]` alike and
+# lets passing win over skipped; bin/fm-test-exec-lib.sh's identifier-scheme note
+# owns that rule.
+# NEITHER class affects this script's exit code in this PR: exit 1 stays driven
+# only by `missing:`, `failing:` and `unexecuted:`. The point of the change is to
+# make a green-but-empty run VISIBLE where it previously read as verified, not to
+# add a merge-refusing condition.
+#
+# Two limits are carried forward here rather than hidden:
+#   (i)  a skipif that is true only because of the SCRATCH environment is
+#        indistinguishable from a deliberate skip in the runner's report, so it
+#        lands in `skipped:`; this change does not close that.
+#   (ii) a missing or unparseable results file lands in `unaccounted:` rather
+#        than `unexecuted:` precisely because that would be a new merge-refusing
+#        condition; mapping finding classes to what blocks a merge is
+#        bin/fm-pr-merge.sh's contract.
+#
+# The per-language detect/run/parse mechanics of check 2, the scratch-tree
+# lifecycle, and the reason a scratch tree can fail to be authoritative are all
+# owned by bin/fm-test-exec-lib.sh; this script orchestrates them.
 #
 # Report only: a legitimately renamed or intentionally removed test IS reported,
 # because removing an assertion main already had must be justified, not silent.
@@ -49,22 +85,34 @@
 #   fm-assert-tests-kept.sh --worktree <path> --base <ref> [--branch <ref>]
 #       Explicit mode: enumerate <base> vs <ref> (default HEAD) in <path>.
 #
-# Output and exit status:
-#   - One `missing: <file>::<name>` line on stdout per identifier present on
-#     the base and absent from the branch (check 1), and one
-#     `failing: <file>::<name>` line per base assertion that passed on the base
-#     and did not pass against the branch's code (check 2), plus a count line
-#     on stderr; exit 1 when either set is non-empty.
-#   - Nothing on stdout and exit 0 when nothing is missing or failing; loud
-#     name-check-only WARNING lines may still appear on stderr when check 2
-#     could not execute some base test files.
+# Output and exit status. stdout is strictly line-oriented so a gate or a viewer
+# can parse it; the human-facing diagnostic blobs go to stderr. Five finding
+# prefixes and one summary line are the stable contract:
+#   - `missing: <file>::<name>` per identifier present on the base and absent
+#     from the branch (check 1).
+#   - `failing: <file>::<name>` per base assertion that passed on the base and
+#     did not pass against the branch's code (check 2).
+#   - `unexecuted: <file>::<name>` per identifier check 2 could not actually
+#     run, with the reason and the verbatim captured output on stderr.
+#   - `skipped: <file>::<name>` per identifier a green baseline run reported an
+#     explicit skip for.
+#   - `unaccounted: <file>::<name>` per identifier a green baseline run produced
+#     no result for at all.
+#   - `summary: missing=<n> failing=<n> unexecuted=<n> skipped=<n>
+#     unaccounted=<n>` always, as the last line, whether or not anything was
+#     found.
+#   - Exit 1 when ANY of `missing:`, `failing:` or `unexecuted:` is non-empty,
+#     exit 0 when all three are empty. `skipped:` and `unaccounted:` are
+#     reported but do NOT affect the exit code. This script reports; it does not
+#     decide which classes block a merge (that is bin/fm-pr-merge.sh's contract,
+#     not this one's).
 #   - Exit 2 when the check cannot run at all (bad usage, missing meta,
 #     missing worktree or project, unresolvable refs), so a caller gating on
 #     this script can tell "assertions vanished" from "could not verify".
 #
 # FM_ASSERT_TESTS_TIMEOUT caps each executed test file's runtime in seconds
 # (default 300) when a `timeout` binary exists; a timed-out branch run counts
-# as failing, a timed-out baseline run counts as name-check-only fallback.
+# as failing, a timed-out baseline run counts as unexecuted.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,6 +120,9 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
+
+# shellcheck source=bin/fm-test-exec-lib.sh
+. "$SCRIPT_DIR/fm-test-exec-lib.sh"
 
 # Deterministic collation for sort/comm regardless of the host locale.
 export LC_ALL=C
@@ -290,7 +341,15 @@ enumerate_tests() {
 }
 
 TMPD=$(mktemp -d "${TMPDIR:-/tmp}/fm-assert-tests-kept.XXXXXX")
-trap 'rm -rf "$TMPD"' EXIT
+# The env links MUST be unlinked before the recursive delete, so cleanup can
+# never traverse one into the live worktree's real dependency dirs.
+trap 'cleanup_scratch_env "$TMPD/base-tree"; cleanup_scratch_env "$TMPD/branch-tree"; rm -rf "$TMPD"' EXIT
+
+# The library's probes are reached through command substitution (a subshell), so
+# they memoize to files rather than to variables; give them somewhere to write
+# that this run's cleanup already owns.
+FM_TEST_EXEC_CACHE_DIR="$TMPD/probe-cache"
+mkdir -p "$FM_TEST_EXEC_CACHE_DIR"
 
 # --- check 1: every base test identifier still present by name ---------------
 
@@ -299,52 +358,127 @@ enumerate_tests "$COMPARE_REF" > "$TMPD/branch"
 comm -23 "$TMPD/base" "$TMPD/branch" > "$TMPD/missing"
 
 # --- check 2: run the base's own test files against the branch's code --------
-
-TIMEOUT_CMD=()
-if command -v timeout >/dev/null 2>&1; then
-  TIMEOUT_CMD=(timeout "${FM_ASSERT_TESTS_TIMEOUT:-300}")
-fi
-
-# run_test_file <tree> <file> <out>: run one test file from the tree root with
-# firstmate's own env overrides stripped, stdout to <out>, stderr discarded.
-run_test_file() {
-  local tree=$1 f=$2 out=$3
-  (
-    cd "$tree" || exit 125
-    FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_HOME='' \
-      ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} bash "$f"
-  ) > "$out" 2>/dev/null
-}
-
-# ok_names <run-output> <out>: the sorted unique `ok - <name>` set of one run.
-ok_names() {
-  sed -n 's/^ok - //p' "$1" | sort -u > "$2"
-}
+# The runner interface (runner_for_file / run_base_test_file / passing_idents)
+# and the scratch-tree lifecycle (prepare_scratch_env / scratch_untrusted_reason
+# / cleanup_scratch_env) are owned by bin/fm-test-exec-lib.sh, sourced above.
 
 : > "$TMPD/failing"
-: > "$TMPD/nameonly"
+: > "$TMPD/unexec"
+: > "$TMPD/unexec-report"
+: > "$TMPD/execfiles"
+: > "$TMPD/skipped"
+: > "$TMPD/unaccounted"
+
+# idents_for_file <file>: the check-1 identifiers the base enumerated for <file>.
+# They are both what a run is bounded to and what an unexecuted file reports.
+idents_for_file() {
+  local f=$1 ident
+  while IFS= read -r ident; do
+    case "$ident" in "$f::"*) printf '%s\n' "$ident" ;; esac
+  done < "$TMPD/base"
+}
+
+# name_accounted <name> <names-file>: succeed when <names-file> holds a runner
+# name that accounts for check 1's bare <name>. The two namespaces are not the
+# same (see bin/fm-test-exec-lib.sh's identifier-scheme note), so the match is
+# equality OR <name> followed IMMEDIATELY by a literal `[`, which is how a runner
+# spells the parametrized cases of one bare name. The bracket must be the very
+# next character: a bare prefix test would let `test_xy[a]` account for a
+# requested `test_x`.
+name_accounted() {
+  local name=$1 file=$2 reported
+  while IFS= read -r reported; do
+    [ -n "$reported" ] || continue
+    [ "$reported" != "$name" ] || return 0
+    case "$reported" in "${name}["*) return 0 ;; esac
+  done < "$file"
+  return 1
+}
+
+# record_ident <dest> <ident>: append <ident> to <dest>, dropping one check 1
+# already reported as missing so it is never double-reported.
+record_ident() {
+  local dest=$1 ident=$2
+  if grep -qxF "$ident" "$TMPD/missing"; then
+    return 0
+  fi
+  printf '%s\n' "$ident" >> "$dest"
+}
+
+# mark_unexecuted <file> <reason> [<captured-output-file>]: report every check-1
+# identifier in <file> as unexecuted, and record the human-facing reason block.
+mark_unexecuted() {
+  local f=$1 reason=$2 captured=${3:-} ident recorded=0
+  while IFS= read -r ident; do
+    # An identifier check 1 already reported as missing would double-report.
+    if grep -qxF "$ident" "$TMPD/missing"; then
+      continue
+    fi
+    printf '%s\n' "$ident" >> "$TMPD/unexec"
+    recorded=1
+  done < <(idents_for_file "$f")
+  # Nothing left to report means nothing to explain; stay quiet.
+  [ "$recorded" -eq 1 ] || return 0
+  {
+    printf 'UNEXECUTED: %s (%s)\n' "$f" "$reason"
+    if [ -n "$captured" ] && [ -s "$captured" ]; then
+      printf -- '----- captured baseline output -----\n'
+      cat "$captured"
+      printf -- '----- end -----\n'
+    fi
+  } >> "$TMPD/unexec-report"
+}
+
 git -C "$WT" ls-tree -r -z --name-only "$BASE" |
   while IFS= read -r -d '' f; do
     lang=$(lang_for_file "$f")
     [ -n "$lang" ] || continue
-    if [ "$lang" = shell ]; then
-      printf '%s\n' "$f" >> "$TMPD/shellfiles"
-    else
-      printf '%s (non-shell test files are not executed)\n' "$f" >> "$TMPD/nameonly"
+    spec=$(runner_for_file "$WT" "$f")
+    if [ -z "$spec" ]; then
+      mark_unexecuted "$f" 'no supported test runner resolves for this file'
+      continue
     fi
+    # The spec's own fields are tab-separated, so the file goes last.
+    printf '%s\t%s\n' "$spec" "$f" >> "$TMPD/execfiles"
   done
 
-if [ -s "$TMPD/shellfiles" ]; then
+if [ -s "$TMPD/execfiles" ]; then
   mkdir -p "$TMPD/base-tree" "$TMPD/branch-tree"
   git -C "$WT" archive "$BASE" | tar -xf - -C "$TMPD/base-tree"
   git -C "$WT" archive "$COMPARE_REF" | tar -xf - -C "$TMPD/branch-tree"
-  while IFS= read -r f; do
+  while IFS= read -r entry; do
+    spec=${entry%$'\t'*}
+    f=${entry##*$'\t'}
     if [ ! -f "$TMPD/base-tree/$f" ]; then
-      printf '%s (absent from the materialized base tree)\n' "$f" >> "$TMPD/nameonly"
+      mark_unexecuted "$f" 'absent from the materialized base tree'
       continue
     fi
-    if run_test_file "$TMPD/base-tree" "$f" "$TMPD/run-base"; then :; else
-      printf '%s (fails on the base itself, exit %s)\n' "$f" "$?" >> "$TMPD/nameonly"
+    # Bound the run to exactly what check 1 enumerated for this file. An empty
+    # set is passed through rather than skipped: a runner that needs nodeids
+    # refuses (and reports nothing, since there is nothing to report), while the
+    # shell runner still runs the file and can surface an unnamed breakage.
+    idents=()
+    while IFS= read -r ident; do
+      idents+=("$ident")
+    done < <(idents_for_file "$f")
+    # Run against the branch worktree's already-provisioned environment, linked
+    # into the scratch trees so the live worktree is never mutated.
+    prepare_scratch_env "$spec" "$TMPD/base-tree" "$WT"
+    prepare_scratch_env "$spec" "$TMPD/branch-tree" "$WT"
+    untrusted=
+    for tree in base-tree branch-tree; do
+      untrusted=$(scratch_untrusted_reason "$spec" "$TMPD/$tree" "$WT" "$f")
+      [ -z "$untrusted" ] || break
+    done
+    if [ -n "$untrusted" ]; then
+      mark_unexecuted "$f" "$untrusted"
+      continue
+    fi
+    base_rc=0
+    run_base_test_file "$spec" "$TMPD/base-tree" "$f" \
+      "$TMPD/run-base" "$TMPD/run-base.err" ${idents[@]+"${idents[@]}"} || base_rc=$?
+    if [ "$base_rc" -ne 0 ]; then
+      mark_unexecuted "$f" "fails on the base itself, exit $base_rc" "$TMPD/run-base.err"
       continue
     fi
     # Overlay the base's test file over the branch tree, then run the base's
@@ -353,36 +487,65 @@ if [ -s "$TMPD/shellfiles" ]; then
     mkdir -p "$TMPD/branch-tree/$(dirname "$f")"
     cp "$TMPD/base-tree/$f" "$TMPD/branch-tree/$f"
     branch_rc=0
-    run_test_file "$TMPD/branch-tree" "$f" "$TMPD/run-branch" || branch_rc=$?
-    ok_names "$TMPD/run-base" "$TMPD/ok-base"
-    ok_names "$TMPD/run-branch" "$TMPD/ok-branch"
+    run_base_test_file "$spec" "$TMPD/branch-tree" "$f" \
+      "$TMPD/run-branch" "$TMPD/run-branch.err" ${idents[@]+"${idents[@]}"} || branch_rc=$?
+    passing_idents "$spec" "$TMPD/run-base" > "$TMPD/ok-base"
+    passing_idents "$spec" "$TMPD/run-branch" > "$TMPD/ok-branch"
     comm -23 "$TMPD/ok-base" "$TMPD/ok-branch" > "$TMPD/ok-delta"
     delta_seen=0
     while IFS= read -r name; do
       [ -n "$name" ] || continue
       delta_seen=1
       # A file check 1 already reported as missing this name would double-report.
-      grep -qxF "$f::$name" "$TMPD/missing" && continue
+      if grep -qxF "$f::$name" "$TMPD/missing"; then
+        continue
+      fi
       printf '%s::%s\n' "$f" "$name" >> "$TMPD/failing"
     done < "$TMPD/ok-delta"
     if [ "$branch_rc" -ne 0 ] && [ "$delta_seen" -eq 0 ]; then
       printf '%s::(unnamed assertion; base test file exited %s against the branch)\n' \
         "$f" "$branch_rc" >> "$TMPD/failing"
     fi
-  done < "$TMPD/shellfiles"
-fi
-
-if [ -s "$TMPD/nameonly" ]; then
-  {
-    echo "WARNING: check 2 (assertion run) could not execute these base test files;"
-    echo "WARNING: their assertions were verified by NAME ONLY (check 1), which does"
-    echo "WARNING: NOT catch a kept-name test whose assertion body was rewritten:"
-    sed 's/^/WARNING:   name-check only: /' "$TMPD/nameonly"
-  } >&2
+    # A green baseline is not the same as a baseline that verified everything it
+    # was bounded to. Account for each requested identifier against what the
+    # BASELINE actually recorded: an explicit skip is accounted for, and anything
+    # the run produced no result for at all was never verified and must not be
+    # counted as one. Neither class changes this script's exit code.
+    # Matching is a PREDICATE across two namespaces, not line equality, so this
+    # classifies each requested identifier in turn rather than using comm.
+    # Passing wins outright: one passing case of a parametrized name means the
+    # baseline verified that name, whatever its other cases did.
+    idents_for_file "$f" | sort -u > "$TMPD/requested"
+    skipped_idents "$spec" "$TMPD/run-base" > "$TMPD/skip-base"
+    while IFS= read -r ident; do
+      [ -n "$ident" ] || continue
+      name=${ident#"$f::"}
+      if name_accounted "$name" "$TMPD/ok-base"; then
+        continue
+      fi
+      if name_accounted "$name" "$TMPD/skip-base"; then
+        record_ident "$TMPD/skipped" "$ident"
+      else
+        record_ident "$TMPD/unaccounted" "$ident"
+      fi
+    done < "$TMPD/requested"
+  done < "$TMPD/execfiles"
 fi
 
 sort -u "$TMPD/failing" > "$TMPD/failing.sorted"
-[ -s "$TMPD/missing" ] || [ -s "$TMPD/failing.sorted" ] || exit 0
+sort -u "$TMPD/unexec" > "$TMPD/unexec.sorted"
+sort -u "$TMPD/skipped" > "$TMPD/skipped.sorted"
+sort -u "$TMPD/unaccounted" > "$TMPD/unaccounted.sorted"
+
+if [ -s "$TMPD/unexec-report" ]; then
+  {
+    echo "WARNING: check 2 (assertion run) could not execute these base test files."
+    echo "WARNING: Every identifier in them is reported as 'unexecuted:' on stdout,"
+    echo "WARNING: NOT as a pass: a kept name whose assertion body was rewritten is"
+    echo "WARNING: exactly what a name-only check does not catch."
+    cat "$TMPD/unexec-report"
+  } >&2
+fi
 
 while IFS= read -r line; do
   printf 'missing: %s\n' "$line"
@@ -390,7 +553,27 @@ done < "$TMPD/missing"
 while IFS= read -r line; do
   printf 'failing: %s\n' "$line"
 done < "$TMPD/failing.sorted"
+while IFS= read -r line; do
+  printf 'unexecuted: %s\n' "$line"
+done < "$TMPD/unexec.sorted"
+while IFS= read -r line; do
+  printf 'skipped: %s\n' "$line"
+done < "$TMPD/skipped.sorted"
+while IFS= read -r line; do
+  printf 'unaccounted: %s\n' "$line"
+done < "$TMPD/unaccounted.sorted"
+
 MISSING_COUNT=$(grep -c . "$TMPD/missing" || true)
 FAILING_COUNT=$(grep -c . "$TMPD/failing.sorted" || true)
-echo "error: $MISSING_COUNT test identifier(s) present on $BASE are missing from $COMPARE_LABEL, and $FAILING_COUNT of $BASE's assertion(s) do not pass against $COMPARE_LABEL" >&2
+UNEXEC_COUNT=$(grep -c . "$TMPD/unexec.sorted" || true)
+SKIPPED_COUNT=$(grep -c . "$TMPD/skipped.sorted" || true)
+UNACCOUNTED_COUNT=$(grep -c . "$TMPD/unaccounted.sorted" || true)
+printf 'summary: missing=%s failing=%s unexecuted=%s skipped=%s unaccounted=%s\n' \
+  "$MISSING_COUNT" "$FAILING_COUNT" "$UNEXEC_COUNT" \
+  "$SKIPPED_COUNT" "$UNACCOUNTED_COUNT"
+
+if [ "$MISSING_COUNT" -eq 0 ] && [ "$FAILING_COUNT" -eq 0 ] && [ "$UNEXEC_COUNT" -eq 0 ]; then
+  exit 0
+fi
+echo "error: $MISSING_COUNT test identifier(s) present on $BASE are missing from $COMPARE_LABEL, $FAILING_COUNT of $BASE's assertion(s) do not pass against $COMPARE_LABEL, and $UNEXEC_COUNT could not be executed at all" >&2
 exit 1

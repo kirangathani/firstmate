@@ -46,6 +46,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Test scripts and helpers in `tests/` are plain bash too.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, and pinned shellcheck version), and both CI and the no-mistakes pre-push gate run it, so local and CI can never diverge.
   It pins one exact shellcheck version and refuses to run under any other; print it with `bin/fm-lint.sh --required-version` and install that build locally.
+  It shards the file set and caches clean results, so an unchanged tree costs well under a second while a fresh checkout costs about half of what the old single command did.
+  If you change how it plans, shards, or caches, run `bin/fm-lint.sh --verify-parity`: it runs the canonical single-process command (`bin/fm-lint.sh --whole-set`) against the fast path and fails on any difference in findings.
 - Changes to harness adapters (detection in `bin/fm-harness.sh`, launch and hook mechanics in `bin/fm-spawn.sh`, busy signatures in `bin/fm-watch.sh` and `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
 - Changes to runtime session backends (`bin/fm-backend.sh`, `bin/backends/`, and the scripts that dispatch through them) need empirical adapter notes in the relevant backend guide: `docs/tmux-backend.md`, `docs/herdr-backend.md`, `docs/zellij-backend.md`, `docs/orca-backend.md`, `docs/cmux-backend.md`, or `docs/codex-app-backend.md` for blocked Codex App transport work.
 - In Markdown, put each full sentence on its own line.
@@ -78,6 +80,8 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the run-all loop above is always safe.
+`tests/fm-assert-tests-kept.test.sh` is the deliberate exception: it needs `python3` with `venv` plus a `pytest` that is either importable or installable with `pip`, because it builds a venv to prove the kept-tests gate really executes Python assertions, and it fails loudly rather than skipping when it cannot, since a silent skip would drop exactly the coverage that proves assertions ran.
+CI does not add its own guard step for that prerequisite: it relies on the `ubuntu-latest` runner already providing `python3`, `venv`, and `pip`, and on this test failing loudly rather than skipping if that ever stops being true.
 
 ## Questions
 

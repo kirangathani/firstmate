@@ -144,10 +144,12 @@ EOF
 
 test_tracked_harness_registration() {
   local command pi_plugin opencode_plugin
-  jq -e '.hooks.SessionStart | length == 1' "$ROOT/.claude/settings.json" >/dev/null \
-    || fail "Claude SessionStart hook is not registered exactly once"
-  jq -e '.hooks.SessionStart[0].matcher == "startup|resume|clear"' "$ROOT/.claude/settings.json" >/dev/null \
-    || fail "Claude SessionStart matcher must include startup/resume/clear and exclude compact"
+  jq -e '[.hooks.SessionStart[] | select(any(.hooks[]?; .command | contains("fm-sessionstart-nudge.sh")))] | length == 1' \
+    "$ROOT/.claude/settings.json" >/dev/null \
+    || fail "Claude SessionStart nudge hook is not registered exactly once"
+  jq -e '[.hooks.SessionStart[] | select(any(.hooks[]?; .command | contains("fm-sessionstart-nudge.sh")))][0].matcher == "startup|resume|clear"' \
+    "$ROOT/.claude/settings.json" >/dev/null \
+    || fail "Claude SessionStart nudge matcher must include startup/resume/clear and exclude compact"
   jq -e 'any(.hooks.SessionStart[]?.hooks[]?.command?; contains("fm-sessionstart-nudge.sh"))' \
     "$ROOT/.claude/settings.json" >/dev/null || fail "Claude SessionStart hook does not invoke the wrapper"
 
