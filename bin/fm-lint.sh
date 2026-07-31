@@ -78,7 +78,8 @@
 #
 # Environment:
 #   FM_LINT_JOBS       shard count (default: nproc, capped at 8)
-#   FM_LINT_CACHE_DIR  where clean results are recorded (default: .git/fm-lint-cache)
+#   FM_LINT_CACHE_DIR  where clean results and discovered source edges are
+#                       recorded (default: .git/fm-lint-cache)
 #   FM_LINT_NO_CACHE=1 read and write no cache entries
 #
 # Exit status is ShellCheck's own on a lint run, so a caller (CI or the gate)
