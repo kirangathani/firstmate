@@ -12,6 +12,15 @@
 # ShellCheck floated with the runner image and still emitted SC2015, which
 # ShellCheck retired in 0.11.0. fm-lint.sh now pins one exact version and both
 # gates resolve it, so command, file set, config, AND version all match.
+#
+# Second contract, added when fm-lint.sh stopped being one big ShellCheck call:
+# the sharded, cached fast path must report EXACTLY the findings the canonical
+# whole-set command reports. Speed work on a gate is only safe while that holds,
+# so the fixture tests below assert it directly rather than trusting the
+# argument for it. One of them pins a real regression caught during that work:
+# an empty cache manifest inverted an awk NR==FNR lookup, the work set came out
+# empty, and the gate reported all 152 files clean without running ShellCheck at
+# all. A lint gate that silently passes everything is worse than a slow one.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -31,6 +40,434 @@ REQUIRED=$("$LINT" --required-version)
 pinned_ready() {
   command -v shellcheck >/dev/null 2>&1 || return 1
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
+}
+
+# fm_lint_fixture <dir>: build a miniature repo with the canonical layout
+# (bin/*.sh, bin/backends/*.sh, tests/*.sh) and a REAL source graph, so the
+# sharding and closure logic is exercised rather than mocked. fm-lint.sh
+# resolves its root from its own location, so the fixture gets its own copy.
+fm_lint_fixture() {
+  local root=$1
+  mkdir -p "$root/bin/backends" "$root/tests"
+  cp "$LINT" "$root/bin/fm-lint.sh"
+  cp "$ROOT/bin/fm-lint-plan.awk" "$root/bin/fm-lint-plan.awk"
+  chmod +x "$root/bin/fm-lint.sh"
+  cat > "$root/bin/lib-core.sh" <<'SH'
+#!/usr/bin/env bash
+CORE_READY=1
+core_ready() { printf '%s\n' "$CORE_READY"; }
+SH
+  # Sources a library through a variable path, so ShellCheck can only follow it
+  # via the source= directive AND only when the target is also an input.
+  cat > "$root/bin/app.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/lib-core.sh
+. "$SCRIPT_DIR/lib-core.sh"
+core_ready
+SH
+  cat > "$root/bin/backends/be.sh" <<'SH'
+#!/usr/bin/env bash
+be_name() { printf 'be\n'; }
+SH
+  # Exported so the library is clean on its own: an unexported, locally unused
+  # assignment is itself an SC2034 finding, which would make the "clean"
+  # fixture dirty for a reason that has nothing to do with what is being tested.
+  cat > "$root/tests/lib.sh" <<'SH'
+#!/usr/bin/env bash
+TEST_LIB=1
+export TEST_LIB
+SH
+  cat > "$root/tests/a.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+printf '%s\n' "$TEST_LIB"
+SH
+}
+
+# A genuine default-severity finding (SC1007), appended to any fixture file.
+fm_lint_plant_defect() {
+  cat >> "$1" <<'SH'
+
+planted() {
+  local x= y=
+  echo "$x$y"
+}
+planted
+SH
+}
+
+test_fast_path_matches_the_canonical_command() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): fast-path parity check"
+    return
+  fi
+  # The whole justification for sharding is that a file's findings depend only
+  # on itself plus the transitively sourced files present as input. Assert that
+  # on a tree that actually HAS findings, in files with different closure
+  # shapes: a leaf, a sourced library, and an importer of one.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-parity)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  fm_lint_plant_defect "$fx/bin/backends/be.sh"
+  fm_lint_plant_defect "$fx/bin/lib-core.sh"
+  fm_lint_plant_defect "$fx/tests/a.test.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" --verify-parity 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "sharded fast path disagreed with the canonical whole-set command"$'\n'"$out"
+  assert_contains "$out" "PARITY OK" "--verify-parity did not confirm parity"
+  pass "sharded fast path reports exactly the canonical command's findings"
+}
+
+test_cold_cache_never_reports_a_false_clean() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): cold-cache false-clean check"
+    return
+  fi
+  # Regression: with no manifest yet, the cache lookup absorbed every file as a
+  # cache hit, so the gate exited 0 having linted nothing. A cold cache must
+  # lint everything and must still fail on a real defect.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-cold)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  fm_lint_plant_defect "$fx/bin/app.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache-never-written" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "cold-cache run did not fail on a planted defect (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "SC1007" "cold-cache run did not report the planted finding"
+  assert_not_contains "$out" "unchanged since their last clean lint" \
+    "cold-cache run claimed cached results it could not have had"
+  pass "a cold cache lints the whole set instead of reporting a false clean"
+}
+
+test_cache_hit_does_not_hide_a_later_defect() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): cache invalidation check"
+    return
+  fi
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-cache)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "clean fixture failed its first lint (exit $rc)"$'\n'"$out"
+  # Second run must be served from the cache, proving the cache is real.
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "second clean run failed (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "unchanged since their last clean lint" \
+    "an unchanged tree was not served from the cache"
+  # A defect introduced after that clean result must still be caught.
+  fm_lint_plant_defect "$fx/bin/app.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "cached run hid a defect introduced after the cache was written (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "SC1007" "cached run did not report the new finding"
+  pass "a cache hit never hides a defect introduced after it was recorded"
+}
+
+test_cache_key_covers_the_source_closure() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): closure invalidation check"
+    return
+  fi
+  # A file is analysed with its sourced libraries inlined, so its cached result
+  # is only valid while those libraries are byte-identical too. Editing a
+  # library must put its importers back into the work set, not just itself.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-closure)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "clean fixture failed its first lint (exit $rc)"$'\n'"$out"
+  printf '\nTEST_LIB_EXTRA=2\nexport TEST_LIB_EXTRA\n' >> "$fx/tests/lib.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "closure re-lint failed unexpectedly (exit $rc)"$'\n'"$out"
+  # tests/lib.sh itself plus its only importer, tests/a.test.sh.
+  assert_contains "$out" "linting 2 of" \
+    "editing a sourced library did not invalidate its importer's cached result"
+  pass "a cached result is invalidated by a change anywhere in its source closure"
+}
+
+test_literal_source_path_is_a_closure_edge() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): literal-source closure check"
+    return
+  fi
+  # ShellCheck (without -x) also follows a plain `source <path>` whose target
+  # is a variable-free literal path naming another input file - no source=
+  # directive involved. The planner must model that edge too, or the sharded
+  # path would emit an SC1091 the whole-set command does not, and a change to
+  # the sourced library would not invalidate its importer's cached result.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-litsrc)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  cat > "$fx/bin/lit-lib.sh" <<'SH'
+#!/usr/bin/env bash
+LIT_READY=1
+export LIT_READY
+SH
+  cat > "$fx/bin/lit-app.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+source bin/lit-lib.sh
+printf '%s\n' "$LIT_READY"
+SH
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache-parity" "$fx/bin/fm-lint.sh" --verify-parity 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a literal source path broke fast-path parity"$'\n'"$out"
+  assert_contains "$out" "PARITY OK" "--verify-parity did not confirm parity with a literal source edge"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "literal-source fixture failed its first lint (exit $rc)"$'\n'"$out"
+  printf '\nLIT_EXTRA=2\nexport LIT_EXTRA\n' >> "$fx/bin/lit-lib.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "literal-source re-lint failed unexpectedly (exit $rc)"$'\n'"$out"
+  # bin/lit-lib.sh itself plus its only importer, bin/lit-app.sh.
+  assert_contains "$out" "linting 2 of" \
+    "editing a literal-sourced library did not invalidate its importer's cached result"
+  pass "a literal source path is a closure edge for parity and cache invalidation"
+}
+
+test_guarded_literal_source_is_a_closure_edge() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): guarded-source closure check"
+    return
+  fi
+  # A literal source guarded behind a top-level separator ('[ -f x ] && . x')
+  # is still followed by ShellCheck, so it must still be a closure edge: parity
+  # must hold and editing the library must invalidate the importer.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-guardsrc)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  cat > "$fx/bin/guard-app.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ -f bin/lib-core.sh ] && . bin/lib-core.sh
+core_ready
+SH
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache-parity" "$fx/bin/fm-lint.sh" --verify-parity 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a guarded literal source broke fast-path parity"$'\n'"$out"
+  assert_contains "$out" "PARITY OK" "--verify-parity did not confirm parity with a guarded source edge"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "guarded-source fixture failed its first lint (exit $rc)"$'\n'"$out"
+  printf '\nCORE_EXTRA=2\nexport CORE_EXTRA\n' >> "$fx/bin/lib-core.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "guarded-source re-lint failed unexpectedly (exit $rc)"$'\n'"$out"
+  # bin/lib-core.sh itself plus both importers: bin/app.sh (directive) and
+  # bin/guard-app.sh (guarded literal).
+  assert_contains "$out" "linting 3 of" \
+    "editing a guarded-sourced library did not invalidate its importer's cached result"
+  pass "a guarded literal source is a closure edge for parity and cache invalidation"
+}
+
+test_source_in_any_command_position_is_a_closure_edge() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): command-position source closure check"
+    return
+  fi
+  # ShellCheck follows a literal source wherever it sits in command position,
+  # not just at line start or after ';', '&&', '||'. Verified on the pinned
+  # version: 'then . lib', a subshell '( . lib', a 'function f { . lib; }'
+  # body and a redirection-prefixed '>file . lib' are all followed when the
+  # target is an input, so each must be a closure edge - otherwise a shard
+  # split emits an SC1091 the whole-set run does not, and editing the library
+  # never invalidates the importer's cached clean result. The discovery pass
+  # harvests these from ShellCheck itself, so no position list is maintained.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-anypos)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  cat > "$fx/bin/then-app.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if true; then . bin/lib-core.sh; fi
+core_ready
+SH
+  cat > "$fx/bin/sub-app.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+( . bin/lib-core.sh; core_ready )
+SH
+  cat > "$fx/bin/fn-app.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+function fn_ready { . bin/lib-core.sh; }
+fn_ready
+SH
+  cat > "$fx/bin/redir-app.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+>/dev/null . bin/lib-core.sh
+core_ready
+SH
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache-parity" "$fx/bin/fm-lint.sh" --verify-parity 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a keyword- or subshell-position source broke fast-path parity"$'\n'"$out"
+  assert_contains "$out" "PARITY OK" "--verify-parity did not confirm parity with command-position source edges"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "command-position source fixture failed its first lint (exit $rc)"$'\n'"$out"
+  printf '\nCORE_EXTRA=2\nexport CORE_EXTRA\n' >> "$fx/bin/lib-core.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "command-position source re-lint failed unexpectedly (exit $rc)"$'\n'"$out"
+  # bin/lib-core.sh itself plus all five importers: bin/app.sh (directive),
+  # bin/then-app.sh, bin/sub-app.sh, bin/fn-app.sh and bin/redir-app.sh
+  # (command-position literals).
+  assert_contains "$out" "linting 6 of" \
+    "editing the library did not invalidate its command-position importers"
+  pass "a literal source in any command position is a closure edge"
+}
+
+test_disabled_sc1091_source_is_still_a_closure_edge() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): suppressed-SC1091 closure check"
+    return
+  fi
+  # An in-file disable of SC1091 suppresses the very note the discovery pass
+  # reads. Discovery therefore rewrites SC1091 inside directive lines on its
+  # input stream, so the note still surfaces and the edge is still found:
+  # no whole-set fallback, and editing the library re-lints the suppressing
+  # importer. The directive is assembled at runtime so this test file never
+  # carries a file-wide suppression itself.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-dis1091)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '# shellcheck %s\n' 'disable=SC1091'
+    printf 'set -eu\n. bin/lib-core.sh\ncore_ready\n'
+  } > "$fx/bin/dis-app.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "suppressed-SC1091 fixture failed its first lint (exit $rc)"$'\n'"$out"
+  assert_not_contains "$out" "falling back to the canonical command" \
+    "a plain disable=SC1091 must not force the whole-set fallback"
+  printf '\nCORE_EXTRA=2\nexport CORE_EXTRA\n' >> "$fx/bin/lib-core.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "suppressed-SC1091 re-lint failed unexpectedly (exit $rc)"$'\n'"$out"
+  # bin/lib-core.sh itself plus both importers: bin/app.sh (directive) and
+  # bin/dis-app.sh (literal source under a file-wide SC1091 suppression).
+  assert_contains "$out" "linting 3 of" \
+    "a disable=SC1091 importer was not re-linted after its library changed"
+  pass "a source suppressed by disable=SC1091 is still a closure edge"
+}
+
+test_unclassifiable_disable_falls_back_to_whole_set() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): unclassifiable-disable fallback check"
+    return
+  fi
+  # 'disable=all' (or an SCnnnn-SCnnnn range) can suppress SC1091 in a form
+  # the discovery rewrite does not recognise, which would hide edges silently;
+  # the planner must force the whole-set fallback instead.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-disall)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  {
+    printf '#!/usr/bin/env bash\nset -eu\n'
+    printf '# shellcheck %s\n' 'disable=all'
+    printf 'true\n'
+  } > "$fx/bin/da-app.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "whole-set fallback run failed on a clean fixture (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "falling back to the canonical command" \
+    "an unclassifiable disable= item did not trigger the whole-set fallback"
+  assert_contains "$out" "da-app.sh" "the fallback message did not name the offending file"
+  pass "an unclassifiable disable= item falls back to the whole-set command"
+}
+
+test_verify_parity_fails_when_fast_path_falls_back() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): vacuous-parity regression check"
+    return
+  fi
+  # Regression: the inner fast-path run's output was discarded, so a planner
+  # tripwire made it fall back to the whole-set command, no findings file was
+  # emitted, and verify-parity compared the reference against a fabricated
+  # empty file - reporting PARITY OK without the fast path ever executing.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-vacuous)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  {
+    printf '#!/usr/bin/env bash\nset -eu\n'
+    printf '# shellcheck %s\n' 'source-path=bin'
+    printf 'true\n'
+  } > "$fx/bin/sp-app.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" --verify-parity 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "--verify-parity reported success without a sharded fast-path run"$'\n'"$out"
+  assert_contains "$out" "PARITY BROKEN" "--verify-parity did not report the vacuous run as a failure"
+  assert_contains "$out" "falling back to the canonical command" \
+    "--verify-parity hid the inner run's stderr naming the cause"
+  assert_not_contains "$out" "PARITY OK" "--verify-parity claimed parity it never measured"
+  pass "--verify-parity fails when the fast path falls back instead of sharding"
+}
+
+test_exec_lines_carry_exactly_lint_flags() {
+  # --verify-parity re-spells the file set with $LINT_FLAGS and never executes
+  # the literal `exec shellcheck` commands, so it cannot detect drift between
+  # the two. This assertion is the actual guard: every literal exec line must
+  # carry exactly the flags LINT_FLAGS holds.
+  local flags mismatch
+  flags=$(sed -n "s/^LINT_FLAGS='\(.*\)'$/\1/p" "$LINT")
+  [ -n "$flags" ] || fail "could not read LINT_FLAGS from bin/fm-lint.sh"
+  mismatch=$(awk -v want="$flags" '
+    /exec shellcheck/ {
+      got = ""
+      for (i = 1; i <= NF; i++) if ($i ~ /^-/) got = got (got == "" ? "" : " ") $i
+      if (got != want) print FNR ": " $0
+    }
+  ' "$LINT")
+  [ -z "$mismatch" ] || fail "exec shellcheck flags drifted from LINT_FLAGS ($flags):"$'\n'"$mismatch"
+  pass "the literal exec shellcheck commands carry exactly LINT_FLAGS"
+}
+
+test_unmodelled_directive_falls_back_to_whole_set() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): unmodelled-directive fallback check"
+    return
+  fi
+  # The planner does not model ShellCheck's search-path resolution, so a
+  # directive key it does not understand must force the whole-set fallback
+  # rather than risk a silently wrong shard plan. The directive line is
+  # assembled at runtime so this test file never carries it verbatim.
+  local tmp fx out rc
+  tmp=$(fm_test_tmproot fm-lint-srcpath)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  {
+    printf '#!/usr/bin/env bash\nset -eu\n'
+    printf '# shellcheck %s\n' 'source-path=bin'
+    printf 'true\n'
+  } > "$fx/bin/sp-app.sh"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$tmp/cache" "$fx/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "whole-set fallback run failed on a clean fixture (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "falling back to the canonical command" \
+    "an unmodelled shellcheck directive did not trigger the whole-set fallback"
+  assert_contains "$out" "sp-app.sh" "the fallback message did not name the offending file"
+  pass "an unmodelled shellcheck directive falls back to the whole-set command"
 }
 
 test_owner_exists_and_executable() {
@@ -190,3 +627,15 @@ test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
+test_fast_path_matches_the_canonical_command
+test_cold_cache_never_reports_a_false_clean
+test_cache_hit_does_not_hide_a_later_defect
+test_cache_key_covers_the_source_closure
+test_literal_source_path_is_a_closure_edge
+test_guarded_literal_source_is_a_closure_edge
+test_source_in_any_command_position_is_a_closure_edge
+test_disabled_sc1091_source_is_still_a_closure_edge
+test_unclassifiable_disable_falls_back_to_whole_set
+test_verify_parity_fails_when_fast_path_falls_back
+test_exec_lines_carry_exactly_lint_flags
+test_unmodelled_directive_falls_back_to_whole_set

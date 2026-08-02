@@ -1,7 +1,8 @@
 # Primary turn-end supervision guard
 
 This is the authoritative contract for the "no turn ends blind" primary guard referenced from AGENTS.md section 8.
-The shared predicate lives in `bin/fm-turnend-guard.sh`.
+The turn-end supervision predicate lives in `bin/fm-turnend-guard.sh`.
+Its primary-checkout scope lives in `bin/fm-primary-scope-lib.sh`, shared with the native session-start nudge documented in `docs/sessionstart-nudge.md`.
 Harness-specific tracked hook files only adapt each verified harness's real turn-end mechanism to that shared predicate.
 Two related but separate PreToolUse seatbelts deny a bad command shape before it runs rather than detecting a blind turn end afterward: the watcher-arm seatbelt (`bin/fm-arm-pretool-check.sh`, `docs/arm-pretool-check.md`) and the cd-guard (`bin/fm-cd-pretool-check.sh`, `docs/cd-guard.md`).
 Each seatbelt's own document defines its scope; they do not share the turn-end guard's marker-aware primary detection.
@@ -13,11 +14,11 @@ The primary can otherwise end a turn after handling wakes without resuming super
 On 2026-07-04, that exact gap left a parked no-mistakes gate unwatched for about nine hours.
 
 `bin/fm-turnend-guard.sh` closes the gap by checking the primary's own turn-end path.
-When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to resume the session-start supervision protocol for its harness.
+When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to repair the missing or failed watcher cycle using the recovery instruction in its emitted session-start protocol.
 
 ## Shared Predicate
 
-The guard first scopes itself to a real primary checkout.
+The guard first calls the shared primary scope to constrain itself to a real primary checkout.
 A secondmate home runs its own primary firstmate session, so a genuine `.fm-secondmate-home` marker force-includes it whether treehouse leased it as a linked worktree or it is a git-cloned plain checkout.
 The marker must be a regular non-symlink file whose first line, after all whitespace is removed, contains a non-empty identifier made only of letters, digits, dots, underscores, and dashes.
 An unmarked checkout, or one with an invalid marker, falls through to the git-dir check.
@@ -28,6 +29,7 @@ For an in-scope primary checkout, it counts in-flight work from `state/*.meta`.
 If no task is in flight, it exits silently.
 If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
+The process-identity primitive behind that match must not drift for a live process; see the 2026-07-30 WSL2 entry below for why, and `bin/fm-wake-lib.sh` for the format itself.
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
 
@@ -94,6 +96,7 @@ The next no-tool prompt produced exactly one `TURN WOULD END BLIND` follow-up, a
 The three earlier tool turns produced no guard follow-up because no work was in flight.
 Command used to fire the watcher: `printf 'done: pi e2e watcher fire\n' > "$FM_HOME/state/pi-e2e.status"`.
 Observed output after the wake: Pi ran `bin/fm-wake-drain.sh`, read the terminal status, called `fm_watch_arm_pi`, and rendered `watcher: started Pi extension arm child 2`.
+This 2026-07-09 observation predates extension-owned successor continuity; [`watcher-continuity.md`](watcher-continuity.md) owns the current ordinary-wake contract.
 The complete pane contained one guard message and zero foreground `bin/fm-watch-arm.sh` bash calls.
 `/quit` printed `PI_EXIT=0`, and the second arm process plus its watcher child were both gone afterward.
 
@@ -124,7 +127,7 @@ Only unmarked child worktrees fall through to the linked-worktree exemption, and
 
 "No turn ends blind" for a secondmate is delivered by the same two mechanisms the main primary relies on.
 Mechanism B, the turn-end backstop, is this guard; its secondmate-home behavior is covered by hermetic tests in `tests/fm-turnend-guard.test.sh` (`test_hook_blocks_in_secondmate_own_home`, `test_hook_blocks_in_treehouse_leased_secondmate_home`, `test_hook_silent_in_idle_secondmate_home`, `test_hook_secondmate_loop_guard_allows_retry`, `test_hook_secondmate_reinvoke_recovery_loop`, `test_hook_silent_in_secondmate_child_worktree`, and `test_hook_exempts_linked_worktree_with_stray_marker`).
-Mechanism A, the autonomous wake, is a harness property: when a background watcher task exits, the harness re-invokes the model, which drains the wake, advances children, and re-arms a fresh watcher.
+Mechanism A, the autonomous wake, is a harness property; the emitted supervision protocol owns whether the model or an extension/plugin continues the watcher cycle after delivering that wake.
 Mechanism A cannot be a hermetic CI assertion because it requires a live model session, so it is recorded here as a dated first-hand measurement while `test_hook_secondmate_reinvoke_recovery_loop` covers the guard's deterministic half of the same recovery loop.
 
 Autonomous-re-invoke measurement, run first-hand on Claude Code 2.1.207 (Darwin 25.5.0) on 2026-07-12.
@@ -144,8 +147,40 @@ So the model was re-invoked solely by the background task's completion while idl
 This matches the harness tool contract that a `run_in_background` task "keeps running across turns and re-invokes you when it exits", and reproduces the 11s latency the task audit measured independently on the same harness version.
 No Herdr command was issued and no fleet state was touched; the experiment wrote only to the session scratchpad, which was discarded.
 
+### 2026-07-30: the WSL2 lstart drift that made the guard cry wolf every turn
+
+The guard's identity check used to identify a process by `ps -p <pid> -o lstart= -o command=`.
+`lstart` is not stored by the kernel; `ps` computes it as boot time plus the process's start ticks.
+WSL2 continually re-syncs its boot-time estimate against the Windows host clock, so the same live process yields a different `lstart` string on successive reads.
+`fm_watcher_lock_matches_pid` then rejected a healthy live watcher, and this guard printed `TURN WOULD END BLIND - SUPERVISION IS OFF` on every turn while supervision was in fact running.
+That is worse than a missing guard: a genuine supervision failure was indistinguishable from the constant noise.
+
+Measured first-hand on 2026-07-30, on Linux 6.6.87.2-microsoft-standard-WSL2, against a real `bin/fm-watch.sh` started in an isolated state dir and never restarted.
+Procedure: sample the watcher's identity 40 times at 1.5s intervals in both forms, then run `fm_watcher_lock_matches_pid` against the lock file the watcher itself wrote.
+
+```
+lab watcher pid=2537409
+recorded pid-identity: [proc-starttime:759812 bash .../bin/fm-watch.sh]
+--- OLD lstart form, 40 samples over 60s ---
+     18 Thu Jul 30 11:23:31 2026 bash .../bin/fm-watch.sh
+     21 Thu Jul 30 11:23:33 2026 bash .../bin/fm-watch.sh
+      1 Thu Jul 30 11:23:36 2026 bash .../bin/fm-watch.sh
+--- NEW /proc start-tick form, 40 samples over 60s ---
+     40 proc-starttime:759812 bash .../bin/fm-watch.sh
+--- fm_watcher_lock_matches_pid against the recorded lock file ---
+LIVE WATCHER RECOGNISED
+```
+
+An earlier run of the same harness the same morning produced the same shape with a different split (5/20/15 across three lstart values, 40/40 identical on the new form).
+
+Three distinct identities for one unchanging process, against one for the fix.
+The identity is now derived from field 22 of `/proc/<pid>/stat`, the kernel's own start time in clock ticks since boot, which cannot drift however the wall clock moves.
+`bin/fm-wake-lib.sh` owns that format, its non-Linux `lstart` fallback, and the `fm_pid_identity_matches` comparison every persisted identity must go through.
+The command half of the identity comes from `/proc/<pid>/cmdline` rather than a `ps` fork, so on Linux the identity helpers execute no external program at all; that matters because `bin/fm-afk-launch.sh` computes one inside its lock-acquire window, before its cleanup trap is installed.
+
 ## Tests
 
+`tests/fm-watcher-lock.test.sh` owns the regression for the process-identity primitive the match depends on: one live pid yields a byte-identical identity across repeated reads, the `/proc/<pid>/stat` parse survives a `comm` containing a space or a `)` on both synthetic lines and a real process, the `lstart` form stays the fallback when `/proc/<pid>/stat` is unreadable and stays locale-invariant there, a record written in the pre-change `lstart` format still matches its live owner, and dead, recycled, and start-marker-mismatched pids are all still rejected.
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.

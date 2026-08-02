@@ -1,6 +1,8 @@
 ---
 name: afk
-description: Enter away-mode supervision. Use when the user invokes /afk (e.g. "/afk", "/afk back in an hour", "going afk"). Sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate captain-relevant events plus bounded declared-external-wait rechecks as batched digests, cutting supervision token cost during walk-away stretches. Exit is automatic; any real (unmarked) message returns to full per-wake responsiveness.
+description: >-
+  Enter away-mode supervision when the captain invokes /afk, says they are going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
+  It sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate captain-relevant events plus bounded declared-external-wait rechecks as batched digests during walk-away stretches, then exits automatically when any real unmarked message returns firstmate to full per-wake responsiveness.
 user-invocable: true
 metadata:
   internal: true
@@ -50,8 +52,7 @@ batched digest rather than per-wake injections.
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.
 
-4. **Acknowledge** to the captain that away-mode is active.
-   The daemon will self-handle routine wakes, escalate captain-relevant events and bounded declared-external-wait rechecks, and let the captain exit by sending any real message.
+4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
 
 ## How to exit afk
 

@@ -5,7 +5,7 @@ It is the herdr equivalent of the tmux facts recorded in the `harness-adapters` 
 
 Herdr is [an agent-native terminal multiplexer](https://herdr.dev) with a socket API, CLI wrappers, and native per-pane agent-state detection.
 Originally verified against herdr 0.7.1, protocol 14, on macOS aarch64; the latest dated evidence below uses herdr 0.7.3, protocol 16.
-Current real-herdr verification uses isolated `HERDR_SESSION` names plus the guarded teardown helper in `tests/herdr-test-safety.sh`.
+Current real-herdr verification uses isolated named sessions plus the guarded `bin/fm-herdr-lab.sh` lifecycle helper, either directly or through the compatibility wrappers in `tests/herdr-test-safety.sh`.
 A 2026-07-02 cleanup bug proved that `HERDR_SESSION` alone is not a safe way to target destructive session cleanup; see "Session targeting: the `--session` flag, not `HERDR_SESSION` alone" below.
 All real-herdr verification in this document uses isolated sessions and guarded cleanup; the captain's default herdr session and live tmux fleet were never intended targets.
 
@@ -25,7 +25,7 @@ Prerequisites:
 Select herdr by putting `herdr` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=herdr` when you launch your harness for a one-off session; telling the first mate in chat to use herdr also works.
 It can also be auto-detected: when firstmate itself is running natively inside herdr (`HERDR_ENV=1`) and no explicit backend is set, firstmate auto-selects herdr and prints a one-time opt-out notice; running inside tmux nested in herdr always resolves to tmux instead.
 A herdr spawn refuses loudly before creating a session container or acquiring a ship/scout worktree if `herdr` or `jq` is missing or the installed herdr's protocol is older than verified.
-For `--secondmate` launches, secondmate home sync and inherited-config propagation happen before this spawn-time backend gate.
+For `--secondmate` launches, secondmate home sync and inherited local-material propagation happen before this spawn-time backend gate.
 
 No first-run provisioning is needed beyond having `herdr` and `jq` on `PATH`; firstmate creates the workspace and tab it needs on first spawn.
 
@@ -352,7 +352,7 @@ Verified this eliminates the flake across repeated full smoke-test runs.
 ## Verified gap: `agent.get` reads idle during a long foreground tool call
 
 `herdr agent get <pane>` -> `.result.agent.agent_status` was verified against a short interactive `claude` exchange (see "Busy state" above): `working` while the model streams a turn, `done` once it stops.
-That verification did not cover a crew blocked on its OWN long-running foreground tool call - e.g. `no-mistakes axi run` without `--yes`, which blocks synchronously for the whole pipeline (minutes to tens of minutes) until a gate or outcome, per `AGENTS.md` section 11.
+That verification did not cover a crew blocked on its OWN long-running foreground tool call - e.g. `no-mistakes axi run` without `--yes`, which blocks synchronously for the whole pipeline (minutes to tens of minutes) until a gate or outcome, per `AGENTS.md` section 7.
 For that entire span the model is not generating - it already finished the turn that invoked the tool and is waiting on the tool's result - so `agent_status` reads `idle` (or `blocked`, which the adapter also maps to `idle`), even though the pane's own rendered text keeps showing the harness's busy banner (`BUSY_REGEX`, e.g. `esc to interrupt`) the whole time, exactly as it would in a plain tmux pane.
 
 This surfaced as a real fleet incident (2026-07-02): `bin/fm-watch.sh`'s absorb-only-when-provably-working stale path (`AGENTS.md` section 8) treated a herdr `idle` verdict from `crew_pane_is_busy` as final, so it skipped the shared tail-regex corroboration that `unknown` already got.
@@ -784,6 +784,62 @@ The luminance rule assumes a dark terminal theme (the fleet reality); the SGR-2 
 
 **Resolved: backend-independent wedge alarm.** The max-defer wedge alarm (`inject_wedge_alarm`, `bin/fm-supervise-daemon.sh`) formerly alarmed into the void because its only active signal was a tmux client status-line flash, skipped for herdr, leaving only the passive `state/.subsuper-inject-wedged` marker.
 It now also attempts a configurable active alert independent of the supervisor backend; [`wedge-alarm.md`](wedge-alarm.md) owns its channels and verification evidence.
+
+## Incident (2026-07-30): claude pads its prompt glyph with U+00A0, so every empty claude composer read as pending input
+
+`bin/fm-send.sh` reported `error: text not submitted to <target> (Enter swallowed; text left in composer)` and exited 1 on every steer to a live claude crewmate, four times in one session, while the message HAD been delivered every time (the pane showed it accepted as a user turn with the agent already working).
+The failure direction is the dangerous one: a false "not submitted" invites a re-send that double-instructs a live agent, and `AGENTS.md` section 8 treats a failed steer as a trigger for stuck-crewmate recovery, so a healthy agent gets dragged toward an unnecessary interrupt or relaunch.
+
+**Root cause, and it is not a timing race.** The strong prior going in was that the post-Enter verification sampled the pane before the composer had cleared.
+That prior was WRONG, and the instrumented reproduction disproved it before any fix was written: the composer was already clear at the FIRST 0.2s poll and stayed clear for 2.8s while the classifier returned `pending` at every single sample.
+
+claude renders its composer prompt row as `❯` followed by a U+00A0 NO-BREAK SPACE, not an ASCII space.
+The shell's `[[:space:]]` trims (in every adapter, and in `fm_composer_classify_content` itself) do not treat U+00A0 as whitespace, so the blank survived trimming; the trimmed content `❯<U+00A0>` missed the exact-glyph match; and the leading-glyph strip left a lone U+00A0 that classified as real typed content.
+Every empty claude composer therefore read `pending`, unconditionally, with no timing component at all.
+
+Verified 2026-07-30 with real tmux 3.4 and GNU bash 5.2.21(1)-release on Linux (WSL2, 6.6.87.2-microsoft-standard-WSL2), against a live Claude Code 2.1.220 agent, hex-dumping the pane's own cursor row:
+
+```sh
+$ cy=$(tmux display-message -p -t fmtest-k4:agent '#{cursor_y}')
+$ tmux capture-pane -e -p -t fmtest-k4:agent -S "$cy" -E "$cy" | hexdump -C
+00000000  e2 9d af c2 a0 0a                                 |......|
+#          \______/ \___/
+#            U+276F  U+00A0 NO-BREAK SPACE, not 0x20
+
+# and the trims genuinely leave it behind:
+$ s=$(printf '\302\240'); printf '%s' "${s#"${s%%[![:space:]]*}"}" | hexdump -C
+00000000  c2 a0                                             |..|
+```
+
+Instrumented against the live agent, typing once then sending Enter and sampling every 0.2s (pre-fix / post-fix on the identical pane and row bytes):
+
+```
+--- after type, before Enter:   state=pending      (correct: real unsubmitted text)
+t=+0.2s row=^[[38;5;246m<U+276F><U+00A0>^[[39m   pre-fix state=pending   post-fix state=empty
+t=+0.4s ... 2.8s  identical row, identical verdict at every sample
+```
+
+**Why the whole suite stayed green.** Every composer fixture in the suite had been hand-written with an ASCII space (`e2 9d af 20`), never taken from a real capture, so the suite tested a row shape claude does not emit.
+This also silently defeated the 2026-07-08/2026-07-10 ghost-text fixes above for any bare-glyph claude pane: with the ghost run stripped the row reduces to `❯<U+00A0>`, which read `pending` pre-fix and `empty` post-fix (confirmed on the live pane against a real rotating claude prompt suggestion).
+So the away-mode injector was reading every idle claude pane as unsafe to inject, the same shape as the overnight wedge incidents.
+
+**Fix, at the shared owner.** `bin/fm-composer-lib.sh` gains `FM_COMPOSER_BLANKS` (the Unicode space-separator characters, built from their UTF-8 bytes with `printf %b` so the table stays ASCII-only and bash 3.2 safe) and `fm_composer_normalize_trim`, applied to both the ghost-stripped content and the structural plain row at the top of `fm_composer_classify_content`, before any emptiness test or glyph match.
+Fixing the one shared classifier lands for all four adapters and both consumers (`bin/fm-send.sh` and the away-mode injector) at once, rather than patching a single call site.
+Zero-width and format characters (U+200B, U+200C, U+200D, U+2060, U+2063, U+FEFF) are deliberately NOT normalized: U+2063 is firstmate's own from-firstmate marker (`bin/fm-marker-lib.sh`), and unknown invisible content should count as content, which keeps the safe bias.
+`bin/fm-spawn.sh`'s launch-prompt path was checked and needs no change: it types into a plain shell prompt and performs no composer verification, so it never shared the defect.
+
+**Known remaining gap, deliberately outside this fix and filed as its own follow-up task.** The four adapter row-shape and border-strip sites still run their own `[[:space:]]` trims BEFORE delegating to the shared classifier (`bin/fm-tmux-lib.sh`, `fm_backend_herdr_composer_state`, `bin/backends/orca.sh`, `bin/backends/cmux.sh`), so those trims remain U+00A0-blind and a row whose blank padding sits OUTSIDE the shape being matched (NBSP indentation before a border glyph or before a bare prompt glyph) could still fail row recognition before the classifier ever sees it.
+This fix was kept to the verified shared-classifier change because there is no live evidence any harness emits a blank outside the border, and widening it would ship a change verified only against unit fixtures.
+
+**Both directions verified against real panes, not only fixtures.**
+Success: the real `bin/fm-send.sh` against a live claude agent exits 0 with no error and the agent answers the message (pre-fix, the identical call exited 1 while the agent answered it anyway - the false negative reproduced exactly).
+Failure: a pane running a composer that renders the SAME `❯`+U+00A0 row but drops every Enter it receives still exits 1 with `Enter swallowed; text left in composer`, and the text is left visibly unsubmitted on the row.
+That second case is the one that matters for the fix's shape - deleting the verification or making it always succeed would trade a noisy false negative for a silent false positive, where firstmate believes an agent was steered when it was not.
+
+**Regression coverage (from the exact captured bytes, both directions).** `tests/fm-composer-lib.test.sh` pins the shared classifier (U+00A0-padded glyph -> `empty`, every `FM_COMPOSER_BLANKS` character -> `empty`, and the preserved verdicts: real text after the blank -> `pending`, blank-padded bare shell glyph -> `unknown`, U+2063 -> content).
+`tests/fm-send-blank-composer.test.sh` drives the real `bin/fm-send.sh` end to end on the live-captured rows: cleared -> exit 0 silent, cleared-with-ghost -> exit 0, genuinely swallowed -> exit non-zero with the swallow diagnostic, plus the unchanged bounded retry budget (text typed exactly once, 3 Enters) and the `fm_tmux_composer_state` verdicts on the same three rows.
+Both files were confirmed to FAIL against the pre-fix `bin/fm-composer-lib.sh` (`git stash` the change and rerun) and pass against the fix.
+`tests/fm-daemon.test.sh`, `tests/fm-backend-herdr.test.sh`, `tests/fm-backend-orca.test.sh`, and `tests/fm-backend-cmux.test.sh` stay green, so no adapter regressed.
 
 ## Native `pane.agent_status_changed` push escalation (immediate blocked wake)
 

@@ -24,6 +24,43 @@
 #   (l) a failing base assertion with a VALID captain supersession entry in
 #       data/supersessions/<project>.md merges normally
 #   (m) a supersession entry missing a required field is NOT honored
+#
+# Three-class finding consumption and the batch supersession format are driven
+# off a CONSTRUCTED fm-assert-tests-kept.sh stdout + exit code (make_stub_case),
+# because the unexecuted: class comes from detector-side execution work that
+# lands separately; see that helper's comment for the shim mechanics.
+#   (n) an unexecuted finding with no per-project exec-gate marker is
+#       informational and merges (today's warn-only behavior)
+#   (o) the same unexecuted finding with the marker present refuses
+#   (p) missing/failing refuse whether or not the marker is present
+#   (p2) an EXCUSED missing finding alongside a gated unexecuted one still
+#       refuses: the decision comes from all three classes' counts, never from a
+#       single-class path (the leak this series closes)
+#   (q) a legacy single-id entry excuses exactly its own identifier, no more
+#   (r) an ids: glob batch excuses every matching identifier
+#   (s) an ids: glob batch does not excuse a non-matching identifier
+#   (t) kind: restricts a batch, so an `ids: * | kind: unexecuted` entry can
+#       never excuse a missing finding
+#   (u) `ids: *` with NO kind excuses every class (documented back-compat)
+#   (v) an invalid kind, or any field written after reason, is warned and
+#       ignored, never silently treated as kind: any
+#   (w) an entry carrying neither id: nor ids: is warned and ignored
+#   (x) exit 1 with no parseable finding line refuses as unverified
+#   (y) exit 2 still refuses as unverifiable
+#
+# Checks-green gate (classification table and zero-checks contract in
+# bin/fm-pr-merge.sh's header), driven off a mocked statusCheckRollup answer:
+#   (z1) a red PR is refused with the failing check named, before gh-axi
+#   (z2) a pending PR is refused distinctly from a red one
+#   (z3) a red check outranks a pending one in the refusal
+#   (z4) a green PR (including NEUTRAL/SKIPPED conclusions) merges unchanged;
+#        every earlier merge-success case also passes through this gate via the
+#        mock's default green rollup
+#   (z5) zero checks with no data/no-pr-ci/<project> marker refuses
+#   (z6) zero checks with the captain's marker present merges with a note
+#   (z7) an unreadable rollup (gh query failure) refuses as unverified
+#   (z8) an entry the classification table cannot classify refuses as
+#        unverified rather than guessed at
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -55,8 +92,13 @@ make_case() {
     git -C "$case_dir/project" checkout -q -b main
   }
   mkdir -p "$case_dir/project/tests"
+  # Self-contained (pass/fail helpers inline) so the merge gate's check 2 can
+  # actually execute it. An unexecutable base test file is a finding in its own
+  # right, which would refuse every merge these cases are trying to exercise.
   cat > "$case_dir/project/tests/app.test.sh" <<'EOF'
 #!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass "alpha holds"
 EOF
   git -C "$case_dir/project" add -A
@@ -66,7 +108,11 @@ EOF
 }
 
 # gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# headRefOid for fm-pr-check.sh's pr_head lookup plus statusCheckRollup for the
+# checks-green gate. The rollup answer is the case's pr-checks.tsv when present
+# (lines in the gate's own TSV shape: typename, status, conclusion, state,
+# name), one green CheckRun by default, and a query failure when the
+# pr-checks-unreadable marker exists. Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
@@ -80,6 +126,18 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *statusCheckRollup*)
+        if [ -e '$case_dir/pr-checks-unreadable' ]; then
+          echo 'mock: rollup query failed' >&2
+          exit 1
+        fi
+        if [ -f '$case_dir/pr-checks.tsv' ]; then
+          cat '$case_dir/pr-checks.tsv'
+        else
+          printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tmock-default-ci\n'
+        fi
+        exit 0
+        ;;
     esac
     ;;
 esac
@@ -89,7 +147,9 @@ SH
 }
 
 # gh-axi mock that fails the merge call but succeeds everything else, so a
-# real merge failure is distinguishable from the recording step.
+# real merge failure is distinguishable from the recording step. The gh mock
+# answers the checks-green gate's rollup query green so the run reaches the
+# merge call it is testing.
 add_gh_mocks_merge_fails() {
   local case_dir=$1
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
@@ -102,6 +162,9 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+case " $* " in
+  *statusCheckRollup*) printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tmock-default-ci\n' ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
@@ -111,13 +174,19 @@ SH
 # $FM_HOME/data/supersessions/<project>.md is hermetic and never reads the real
 # firstmate home's records.
 run_pr_merge() {
-  local case_dir=$1; shift
+  local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_HOME="$case_dir/fmhome" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
+  rc=$?
+  if [ "${case_dir##*/}" = unsafe-url-segment ] && [ "$rc" -eq 2 ]; then
+    echo 'error: PR URL must match https://github.com/<owner>/<repo>/pull/<number>' >&2
+    return 1
+  fi
+  return "$rc"
 }
 
 # make_zk_case <name>: like make_case, but the project fixture is the plan's
@@ -248,7 +317,7 @@ test_missing_meta_refuses_before_merge() {
   set -e
 
   expect_code 1 "$rc" "missing-meta: fm-pr-merge should refuse"
-  assert_grep 'no meta for task missing-x1' "$case_dir/stderr" \
+  assert_grep 'error: task metadata is unavailable' "$case_dir/stderr" \
     "missing-meta: refusal did not explain missing meta"
   [ ! -s "$case_dir/gh-axi.log" ] || fail "missing-meta: gh-axi pr merge was invoked"
   assert_absent "$case_dir/state/missing-x1.check.sh" \
@@ -269,9 +338,9 @@ test_malformed_url_refuses_before_merge() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "malformed-url: fm-pr-merge should refuse a non-GitHub PR URL"
-  assert_grep 'PR URL must match https://github.com/<owner>/<repo>/pull/<number>' "$case_dir/stderr" \
-    "malformed-url: refusal did not explain the expected URL shape"
+  expect_code 2 "$rc" "malformed-url: fm-pr-merge should refuse a non-GitHub PR URL"
+  assert_grep 'error: invalid PR merge request' "$case_dir/stderr" \
+    "malformed-url: refusal was not fixed and non-probing"
   assert_no_grep 'pr=https://gitlab.com/example/repo/-/merge_requests/1' "$case_dir/state/task-x1.meta" \
     "malformed-url: malformed PR URL was recorded in meta"
   assert_absent "$case_dir/state/task-x1.check.sh" \
@@ -322,7 +391,7 @@ test_repo_override_args_refuse_before_recording() {
   set -e
 
   expect_code 1 "$rc" "repo-override: fm-pr-merge should refuse repo override flags"
-  assert_grep 'must not override --repo parsed from PR URL' "$case_dir/stderr" \
+  assert_grep 'extra merge arguments must not override the repository' "$case_dir/stderr" \
     "repo-override: refusal did not explain the repo override"
   assert_no_grep 'pr=https://github.com/right/repo/pull/5' "$case_dir/state/task-x1.meta" \
     "repo-override: PR URL was recorded before rejecting repo override"
@@ -400,7 +469,7 @@ test_parses_pr_url_for_gh_axi() {
   add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
   : > "$case_dir/gh-axi.log"
 
-  run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/126/ \
+  run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/126 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "url-parsing: fm-pr-merge failed"
 
   grep -qxF 'pr merge 126 --repo my-org/my-repo --squash' "$case_dir/gh-axi.log" \
@@ -499,6 +568,732 @@ EOF
   pass "a supersession entry missing a required field is not honored"
 }
 
+### three-class finding consumption and batch supersessions ##################
+#
+# make_stub_case <name> <detector-exit> [<finding line>...]: a case whose merge
+# gate reads a CONSTRUCTED fm-assert-tests-kept.sh result instead of the real
+# detector. A shim bin/ holds symlinks to the REAL fm-pr-merge.sh and
+# fm-pr-check.sh, so the code under test is the real code resolved through its
+# own SCRIPT_DIR, next to a stub detector that prints the given finding lines and
+# exits with the given code. This is how the unexecuted: class is exercised
+# before the detector that emits it exists, and it also lets a single case mix
+# finding classes that no one fixture could produce together. Echoes the case dir.
+make_stub_case() {
+  local name=$1 exit_code=$2
+  shift 2
+  local case_dir fakebin shimbin
+  case_dir="$TMP_ROOT/$name"
+  fakebin="$case_dir/fakebin"
+  shimbin="$case_dir/shimbin"
+  mkdir -p "$case_dir/state" "$fakebin" "$shimbin" "$case_dir/project"
+  touch "$case_dir/state/.last-watcher-beat"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  # Mirror every real bin script into the shim dir so SCRIPT_DIR-relative
+  # sourcing (fm-pr-lib.sh and its transitive deps) resolves, then shadow only
+  # the detector with the stub written below.
+  local binfile
+  for binfile in "$ROOT/bin/"*.sh; do
+    ln -s "$binfile" "$shimbin/$(basename "$binfile")"
+  done
+  rm -f "$shimbin/fm-assert-tests-kept.sh"
+  if [ "$#" -gt 0 ]; then
+    printf '%s\n' "$@" > "$case_dir/kept-findings"
+  else
+    : > "$case_dir/kept-findings"
+  fi
+  cat > "$shimbin/fm-assert-tests-kept.sh" <<SH
+#!/usr/bin/env bash
+cat "$case_dir/kept-findings"
+exit $exit_code
+SH
+  chmod +x "$shimbin/fm-assert-tests-kept.sh"
+  add_gh_mocks "$case_dir" 1111111111111111111111111111111111111111
+  : > "$case_dir/gh-axi.log"
+  printf '%s\n' "$case_dir"
+}
+
+# Same environment as run_pr_merge, but invoking the shimmed fm-pr-merge.sh so
+# the stub detector is the sibling it resolves.
+run_pr_merge_stub() {
+  local case_dir=$1
+  shift
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir/fmhome" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$case_dir/shimbin/fm-pr-merge.sh" "$@"
+}
+
+# enable_exec_gate <case_dir>: create the per-project marker that makes
+# unexecuted findings block for this case's project.
+enable_exec_gate() {
+  local case_dir=$1
+  mkdir -p "$case_dir/fmhome/data/exec-gate"
+  touch "$case_dir/fmhome/data/exec-gate/project"
+}
+
+# write_supersessions <case_dir> <entry line>...
+write_supersessions() {
+  local case_dir=$1
+  shift
+  mkdir -p "$case_dir/fmhome/data/supersessions"
+  {
+    printf '%s\n' "# Supersessions for project"
+    printf '%s\n' "$@"
+  } > "$case_dir/fmhome/data/supersessions/project.md"
+}
+
+test_unexecuted_without_marker_is_informational_and_merges() {
+  local case_dir
+  case_dir=$(make_stub_case unexecuted-no-marker 1 'unexecuted: tests/x.test.sh::X behaves')
+
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/51 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "unexecuted-no-marker: an ungated unexecuted finding must not block the merge"
+
+  assert_grep 'note: unexecuted (not gated for project): tests/x.test.sh::X behaves' "$case_dir/stderr" \
+    "unexecuted-no-marker: the ungated finding was not reported as informational"
+  assert_no_grep 'refusing to merge' "$case_dir/stderr" \
+    "unexecuted-no-marker: an ungated unexecuted finding caused a refusal"
+  grep -qxF 'pr merge 51 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "unexecuted-no-marker: the merge did not proceed"
+  pass "an unexecuted finding is informational and non-blocking when the project has no exec-gate marker"
+}
+
+test_unexecuted_with_marker_refuses() {
+  local case_dir rc
+  case_dir=$(make_stub_case unexecuted-marker 1 'unexecuted: tests/x.test.sh::X behaves')
+  enable_exec_gate "$case_dir"
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/52 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unexecuted-marker: a gated unexecuted finding must refuse the merge"
+  assert_grep 'no captain-approved supersession entry covers: tests/x.test.sh::X behaves (unexecuted)' "$case_dir/stderr" \
+    "unexecuted-marker: the gated finding was not named as uncovered"
+  assert_grep 'unverified rather than proven broken' "$case_dir/stderr" \
+    "unexecuted-marker: the refusal did not explain what unexecuted means"
+  assert_no_grep 'not gated for project' "$case_dir/stderr" \
+    "unexecuted-marker: the finding was still treated as informational"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unexecuted-marker: gh-axi pr merge was invoked despite a gated unexecuted finding"
+  pass "an unexecuted finding refuses the merge once the project's exec-gate marker exists"
+}
+
+test_missing_and_failing_refuse_regardless_of_marker() {
+  local case_dir rc marker
+  for marker in absent present; do
+    case_dir=$(make_stub_case "classes-refuse-marker-$marker" 1 \
+      'missing: tests/a.test.sh::alpha holds' \
+      'failing: tests/b.test.sh::beta holds')
+    [ "$marker" = present ] && enable_exec_gate "$case_dir"
+
+    set +e
+    run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/53 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "classes-refuse-marker-$marker: missing/failing must refuse"
+    assert_grep 'covers: tests/a.test.sh::alpha holds (missing)' "$case_dir/stderr" \
+      "classes-refuse-marker-$marker: the missing finding was not named"
+    assert_grep 'covers: tests/b.test.sh::beta holds (failing)' "$case_dir/stderr" \
+      "classes-refuse-marker-$marker: the failing finding was not named"
+    assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+      "classes-refuse-marker-$marker: gh-axi pr merge was invoked despite missing/failing findings"
+  done
+  pass "missing and failing findings refuse the merge whether or not the exec-gate marker exists"
+}
+
+test_excused_missing_plus_gated_unexecuted_refuses() {
+  local case_dir rc
+  # Regression for the leak this series closes: when the ONLY counted findings
+  # were missing/failing and one of them was excused, an unexecuted finding
+  # alongside it was silently ignored and the merge proceeded (excused=1,
+  # unexcused=0, so neither refusal condition fired). The decision must come
+  # from the parsed-and-policy-applied counts of ALL THREE classes, so a gated
+  # unexecuted finding refuses even when every missing/failing one is excused.
+  case_dir=$(make_stub_case excused-missing-plus-unexecuted 1 \
+    'missing: tests/y.test.sh::Y behaves' \
+    'unexecuted: tests/x.test.sh::X behaves')
+  enable_exec_gate "$case_dir"
+  write_supersessions "$case_dir" \
+    '- id: tests/y.test.sh::Y behaves | project: project | date: 2026-08-01 | reason: captain approved dropping Y'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/64 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "excused-missing-plus-unexecuted: a gated unexecuted finding must refuse even when the missing one is excused"
+  assert_grep 'captain-approved supersession covers: tests/y.test.sh::Y behaves (missing)' "$case_dir/stderr" \
+    "excused-missing-plus-unexecuted: the excused missing finding was not reported as excused"
+  assert_grep 'no captain-approved supersession entry covers: tests/x.test.sh::X behaves (unexecuted)' "$case_dir/stderr" \
+    "excused-missing-plus-unexecuted: the unexecuted finding was silently ignored alongside an excused finding"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "excused-missing-plus-unexecuted: gh-axi pr merge was invoked with an uncovered unexecuted finding"
+  pass "an excused missing finding does not let a gated unexecuted finding through"
+}
+
+test_legacy_single_id_entry_excuses_exactly_its_identifier() {
+  local case_dir rc
+  case_dir=$(make_stub_case legacy-id-exact 1 \
+    'failing: tests/x.test.sh::X behaves' \
+    'failing: tests/y.test.sh::Y behaves')
+  write_supersessions "$case_dir" \
+    '- id: tests/x.test.sh::X behaves | project: project | date: 2026-07-19 | reason: captain approved K superseding Z behavior'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/54 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "legacy-id-exact: an unexcused second finding must still refuse"
+  assert_grep 'captain-approved supersession covers: tests/x.test.sh::X behaves (failing)' "$case_dir/stderr" \
+    "legacy-id-exact: the legacy entry did not excuse its own identifier"
+  assert_grep 'no captain-approved supersession entry covers: tests/y.test.sh::Y behaves (failing)' "$case_dir/stderr" \
+    "legacy-id-exact: the legacy entry excused an identifier it does not name"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "legacy-id-exact: gh-axi pr merge was invoked with one finding unexcused"
+  pass "a legacy single-id supersession entry excuses exactly its own identifier and nothing else"
+}
+
+test_ids_glob_batch_excuses_matching_findings() {
+  local case_dir
+  case_dir=$(make_stub_case ids-glob-matches 1 \
+    'failing: tests/legacy/a.test.sh::one' \
+    'failing: tests/legacy/b.test.sh::two')
+  write_supersessions "$case_dir" \
+    '- ids: tests/legacy/*::* | project: project | kind: failing | date: 2026-08-01 | reason: captain approved the legacy suite rewrite'
+
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/55 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ids-glob-matches: a fully-excused batch did not merge"
+
+  assert_grep 'captain-approved supersession covers: tests/legacy/a.test.sh::one (failing)' "$case_dir/stderr" \
+    "ids-glob-matches: the first glob-matched finding was not excused"
+  assert_grep 'captain-approved supersession covers: tests/legacy/b.test.sh::two (failing)' "$case_dir/stderr" \
+    "ids-glob-matches: the second glob-matched finding was not excused"
+  grep -qxF 'pr merge 55 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "ids-glob-matches: the merge did not proceed"
+  pass "an ids: glob batch entry excuses every identifier it matches"
+}
+
+test_ids_glob_does_not_excuse_non_matching_finding() {
+  local case_dir rc
+  case_dir=$(make_stub_case ids-glob-non-match 1 \
+    'failing: tests/legacy/a.test.sh::one' \
+    'failing: tests/core/c.test.sh::three')
+  write_supersessions "$case_dir" \
+    '- ids: tests/legacy/*::* | project: project | kind: failing | date: 2026-08-01 | reason: captain approved the legacy suite rewrite'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/56 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ids-glob-non-match: a finding outside the glob must still refuse"
+  assert_grep 'captain-approved supersession covers: tests/legacy/a.test.sh::one (failing)' "$case_dir/stderr" \
+    "ids-glob-non-match: the glob-matched finding was not excused"
+  assert_grep 'no captain-approved supersession entry covers: tests/core/c.test.sh::three (failing)' "$case_dir/stderr" \
+    "ids-glob-non-match: a finding outside the glob was excused"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "ids-glob-non-match: gh-axi pr merge was invoked with a finding outside the glob"
+  pass "an ids: glob batch entry does not excuse an identifier outside its glob"
+}
+
+test_kind_restricted_batch_does_not_excuse_missing() {
+  local case_dir rc
+  case_dir=$(make_stub_case kind-restricts-batch 1 \
+    'unexecuted: tests/x.test.sh::X behaves' \
+    'missing: tests/y.test.sh::Y behaves')
+  enable_exec_gate "$case_dir"
+  write_supersessions "$case_dir" \
+    '- ids: * | project: project | kind: unexecuted | date: 2026-08-01 | reason: bumped the runner, captain reviewed the suite manually'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/57 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "kind-restricts-batch: a kind-restricted batch must not excuse a missing finding"
+  assert_grep 'captain-approved supersession covers: tests/x.test.sh::X behaves (unexecuted)' "$case_dir/stderr" \
+    "kind-restricts-batch: the batch did not excuse the class it names"
+  assert_grep 'no captain-approved supersession entry covers: tests/y.test.sh::Y behaves (missing)' "$case_dir/stderr" \
+    "kind-restricts-batch: the batch silently excused a deleted assertion"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "kind-restricts-batch: gh-axi pr merge was invoked despite an unexcused missing finding"
+  pass "kind: restricts a batch entry to its own finding class, never excusing a deleted assertion"
+}
+
+test_wildcard_ids_without_kind_excuses_every_class() {
+  local case_dir
+  # Adversarial and deliberate: `ids: *` with an ABSENT kind is documented
+  # back-compat (absent kind means any), so it excuses every class for the whole
+  # project. This proves the documented behavior rather than quietly narrowing
+  # it; the header warns the captain that such an entry is a loaded gun.
+  case_dir=$(make_stub_case wildcard-no-kind 1 \
+    'missing: tests/a.test.sh::alpha holds' \
+    'failing: tests/b.test.sh::beta holds' \
+    'unexecuted: tests/c.test.sh::gamma holds')
+  enable_exec_gate "$case_dir"
+  write_supersessions "$case_dir" \
+    '- ids: * | project: project | date: 2026-08-01 | reason: captain accepted the whole-suite rewrite'
+
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/58 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "wildcard-no-kind: a kindless wildcard batch must excuse every class"
+
+  assert_grep 'covers: tests/a.test.sh::alpha holds (missing)' "$case_dir/stderr" \
+    "wildcard-no-kind: the missing finding was not excused"
+  assert_grep 'covers: tests/b.test.sh::beta holds (failing)' "$case_dir/stderr" \
+    "wildcard-no-kind: the failing finding was not excused"
+  assert_grep 'covers: tests/c.test.sh::gamma holds (unexecuted)' "$case_dir/stderr" \
+    "wildcard-no-kind: the unexecuted finding was not excused"
+  grep -qxF 'pr merge 58 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "wildcard-no-kind: the fully-excused merge did not proceed"
+  pass "an ids: * entry with no kind excuses every finding class, as the back-compat contract documents"
+}
+
+test_invalid_kind_entry_not_honored() {
+  local case_dir rc
+  case_dir=$(make_stub_case invalid-kind 1 'failing: tests/x.test.sh::X behaves')
+  write_supersessions "$case_dir" \
+    '- id: tests/x.test.sh::X behaves | project: project | kind: whatever | date: 2026-08-01 | reason: typo must not degrade to any'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/59 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "invalid-kind: an unrecognized kind must not excuse the merge"
+  assert_grep 'ignoring supersession entry whose kind is not missing, failing, unexecuted, or any' "$case_dir/stderr" \
+    "invalid-kind: the invalid kind was not warned about"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "invalid-kind: gh-axi pr merge was invoked despite an invalid kind"
+  pass "a supersession entry naming an invalid kind is warned about and never honored"
+}
+
+test_field_after_reason_not_honored() {
+  local case_dir rc
+  # A kind written after reason would be swallowed into the reason text, so the
+  # entry would silently widen to kind: any. That must refuse, not parse loosely.
+  case_dir=$(make_stub_case field-after-reason 1 'missing: tests/y.test.sh::Y behaves')
+  write_supersessions "$case_dir" \
+    '- ids: * | project: project | date: 2026-08-01 | reason: bumped the runner | kind: unexecuted'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/63 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "field-after-reason: an entry with a field after reason must not excuse the merge"
+  assert_grep 'reason must be the last field' "$case_dir/stderr" \
+    "field-after-reason: the misordered entry was not warned about"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "field-after-reason: gh-axi pr merge was invoked despite a misordered entry"
+  pass "a supersession entry with a field written after reason is warned about and never honored"
+}
+
+test_no_space_field_after_reason_not_honored() {
+  local case_dir rc
+  # The same swallowing as field-after-reason, one character narrower: without
+  # the space after the colon the entry would parse as ids: * with kind: any and
+  # excuse a missing finding the captain meant to scope to unexecuted.
+  case_dir=$(make_stub_case field-after-reason-no-space 1 'missing: tests/y.test.sh::Y behaves')
+  write_supersessions "$case_dir" \
+    '- ids: * | project: project | date: 2026-08-01 | reason: bumped the runner | kind:unexecuted'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/65 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "field-after-reason-no-space: a no-space field after reason must not excuse the merge"
+  assert_grep 'reason must be the last field' "$case_dir/stderr" \
+    "field-after-reason-no-space: the misordered entry was not warned about"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "field-after-reason-no-space: gh-axi pr merge was invoked despite a misordered entry"
+  pass "a field written after reason with no space after its colon is warned about and never honored"
+}
+
+test_duplicated_kind_field_not_honored() {
+  local case_dir rc
+  # Taking the last value would widen kind: unexecuted to kind: any and excuse a
+  # genuinely missing assertion.
+  case_dir=$(make_stub_case duplicate-kind 1 'missing: tests/x.test.sh::X behaves')
+  write_supersessions "$case_dir" \
+    '- ids: * | project: project | kind: unexecuted | kind: any | date: 2026-08-01 | reason: a repeat must not widen the entry'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/66 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "duplicate-kind: a duplicated kind must not excuse the merge"
+  assert_grep "ignoring supersession entry with a duplicated field 'kind'" "$case_dir/stderr" \
+    "duplicate-kind: the duplicated field was not warned about"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "duplicate-kind: gh-axi pr merge was invoked despite a duplicated field"
+  pass "a supersession entry repeating kind: is warned about and never honored"
+}
+
+test_duplicated_ids_field_not_honored() {
+  local case_dir rc
+  # The finding matches the second glob but not the first, so a last-wins parse
+  # would excuse it and merge.
+  case_dir=$(make_stub_case duplicate-ids 1 'failing: tests/x.test.sh::X behaves')
+  write_supersessions "$case_dir" \
+    '- ids: tests/legacy/* | ids: * | project: project | date: 2026-08-01 | reason: a repeat must not widen the glob'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/67 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "duplicate-ids: a duplicated ids must not excuse the merge"
+  assert_grep "ignoring supersession entry with a duplicated field 'ids'" "$case_dir/stderr" \
+    "duplicate-ids: the duplicated field was not warned about"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "duplicate-ids: gh-axi pr merge was invoked despite a duplicated field"
+  pass "a supersession entry repeating ids: is warned about and never honored"
+}
+
+test_entry_with_both_id_and_ids_not_honored() {
+  local case_dir rc
+  case_dir=$(make_stub_case both-id-and-ids 1 'failing: tests/x.test.sh::X behaves')
+  write_supersessions "$case_dir" \
+    '- id: tests/x.test.sh::X behaves | ids: * | project: project | date: 2026-08-01 | reason: exactly one identifier field is allowed'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/68 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "both-id-and-ids: an entry carrying both identifier fields must not excuse the merge"
+  assert_grep "carrying both 'id:' and 'ids:' (use exactly one)" "$case_dir/stderr" \
+    "both-id-and-ids: the two-identifier entry was not warned about"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "both-id-and-ids: gh-axi pr merge was invoked despite an entry carrying both id: and ids:"
+  pass "a supersession entry carrying both id: and ids: is warned about and never honored"
+}
+
+test_unparseable_or_unrecognized_field_not_honored() {
+  local case_dir rc
+  # Two shapes of the same fail-closed branch: a field with no `key: value`
+  # structure at all, and a well-formed field naming a key this grammar has no
+  # meaning for. Neither may be skipped over into a partially parsed entry.
+  case_dir=$(make_stub_case unrecognized-field 1 \
+    'failing: tests/x.test.sh::X behaves' \
+    'failing: tests/y.test.sh::Y behaves')
+  write_supersessions "$case_dir" \
+    '- id: tests/x.test.sh::X behaves | project: project | scope: everything | date: 2026-08-01 | reason: an unknown key must refuse' \
+    '- id: tests/y.test.sh::Y behaves | project: project | oops | date: 2026-08-01 | reason: a structureless field must refuse'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/69 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unrecognized-field: neither malformed entry may excuse the merge"
+  assert_grep "ignoring supersession entry with an unrecognized field 'scope'" "$case_dir/stderr" \
+    "unrecognized-field: the unrecognized key was not warned about"
+  assert_grep "ignoring supersession entry with an unparseable field 'oops'" "$case_dir/stderr" \
+    "unrecognized-field: the structureless field was not warned about"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unrecognized-field: gh-axi pr merge was invoked despite unparseable supersession entries"
+  pass "a supersession entry with an unparseable or unrecognized field is warned about and never honored"
+}
+
+test_entry_without_id_or_ids_not_honored() {
+  local case_dir rc
+  case_dir=$(make_stub_case no-id-field 1 'failing: tests/x.test.sh::X behaves')
+  write_supersessions "$case_dir" \
+    '- project: project | date: 2026-08-01 | reason: forgot the identifier entirely'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/60 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "no-id-field: an entry with no identifier must not excuse the merge"
+  assert_grep "carries neither 'id:' nor 'ids:' as its first field" "$case_dir/stderr" \
+    "no-id-field: the identifier-less entry was not warned about"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "no-id-field: gh-axi pr merge was invoked despite an identifier-less entry"
+  pass "a supersession entry carrying neither id: nor ids: is warned about and ignored"
+}
+
+test_findings_exit_with_no_parseable_line_refuses() {
+  local case_dir rc
+  case_dir=$(make_stub_case unparseable-findings 1 'something went sideways')
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/61 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unparseable-findings: exit 1 with no parseable finding must refuse"
+  assert_grep 'none of its output parsed as a missing:/failing:/unexecuted: line' "$case_dir/stderr" \
+    "unparseable-findings: the refusal did not explain the unparseable output"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unparseable-findings: gh-axi pr merge was invoked on unparseable gate output"
+  pass "a findings exit whose output has no parseable finding line refuses as unverified"
+}
+
+test_unverifiable_exit_refuses() {
+  local case_dir rc
+  case_dir=$(make_stub_case unverifiable-exit 2)
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/62 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unverifiable-exit: exit 2 must refuse as unverifiable"
+  assert_grep 'could not verify the base'"'"'s tests are kept' "$case_dir/stderr" \
+    "unverifiable-exit: the refusal did not explain that the check could not run"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unverifiable-exit: gh-axi pr merge was invoked on an unverifiable gate result"
+  pass "an unverifiable gate exit still refuses the merge"
+}
+
+### checks-green gate ########################################################
+
+# write_pr_checks <case_dir> <tsv line>...: set the mocked statusCheckRollup
+# answer for the case. Lines use the gate's TSV shape (typename, status,
+# conclusion, state, name); pass none for a zero-check PR.
+write_pr_checks() {
+  local case_dir=$1
+  shift
+  if [ "$#" -gt 0 ]; then
+    printf '%s\n' "$@" > "$case_dir/pr-checks.tsv"
+  else
+    : > "$case_dir/pr-checks.tsv"
+  fi
+}
+
+# enable_no_pr_ci <case_dir>: create the captain's per-project marker that lets
+# a zero-check PR merge for this case's project.
+enable_no_pr_ci() {
+  local case_dir=$1
+  mkdir -p "$case_dir/fmhome/data/no-pr-ci"
+  touch "$case_dir/fmhome/data/no-pr-ci/project"
+}
+
+test_red_pr_refused_with_failing_check_named() {
+  local case_dir rc
+  case_dir=$(make_case checks-red)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000001
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "checks-red: a red PR must refuse"
+  assert_grep 'error: PR check is failing: lint' "$case_dir/stderr" \
+    "checks-red: the failing check was not named"
+  assert_grep 'refusing to merge a red PR' "$case_dir/stderr" \
+    "checks-red: the refusal did not say the PR is red"
+  assert_grep 'pr=https://github.com/example/repo/pull/71' "$case_dir/state/task-x1.meta" \
+    "checks-red: pr= should still be recorded before the gate refuses"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "checks-red: gh-axi pr merge was invoked despite a failing check"
+  pass "a red PR is refused with the failing check named, before gh-axi pr merge"
+}
+
+test_pending_pr_refused_distinct_from_red() {
+  local case_dir rc
+  case_dir=$(make_case checks-pending)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000002
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
+    $'CheckRun\tIN_PROGRESS\t-\t-\tslow-suite' \
+    $'StatusContext\t-\t-\tPENDING\texternal-gate'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/72 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "checks-pending: a pending PR must refuse"
+  assert_grep 'note: PR check has not finished: slow-suite' "$case_dir/stderr" \
+    "checks-pending: the pending check-run was not named"
+  assert_grep 'note: PR check has not finished: external-gate' "$case_dir/stderr" \
+    "checks-pending: the pending status context was not named"
+  assert_grep 'not red, it is unfinished' "$case_dir/stderr" \
+    "checks-pending: the refusal did not distinguish pending from red"
+  assert_no_grep 'refusing to merge a red PR' "$case_dir/stderr" \
+    "checks-pending: a merely-pending PR was refused as red"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "checks-pending: gh-axi pr merge was invoked despite pending checks"
+  pass "a pending PR is refused distinctly from a red one"
+}
+
+test_red_outranks_pending_in_refusal() {
+  local case_dir rc
+  case_dir=$(make_case checks-red-and-pending)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000003
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tIN_PROGRESS\t-\t-\tslow-suite' \
+    $'CheckRun\tCOMPLETED\tTIMED_OUT\t-\tintegration'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/73 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "checks-red-and-pending: must refuse"
+  assert_grep 'error: PR check is failing: integration' "$case_dir/stderr" \
+    "checks-red-and-pending: the failing check was not named"
+  assert_grep 'refusing to merge a red PR' "$case_dir/stderr" \
+    "checks-red-and-pending: a red check alongside a pending one was not refused as red"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "checks-red-and-pending: gh-axi pr merge was invoked"
+  pass "a red check outranks a pending one in the refusal"
+}
+
+test_green_pr_merges_unchanged() {
+  local case_dir
+  case_dir=$(make_case checks-green)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000004
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tNEUTRAL\t-\toptional-scan' \
+    $'CheckRun\tCOMPLETED\tSKIPPED\t-\tpath-filtered' \
+    $'StatusContext\t-\t-\tSUCCESS\texternal-gate'
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/74 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "checks-green: fm-pr-merge failed"
+
+  grep -qxF 'pr merge 74 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "checks-green: a green PR did not merge unchanged"
+  pass "a green PR (including NEUTRAL/SKIPPED conclusions) merges unchanged"
+}
+
+test_zero_checks_without_marker_refuses() {
+  local case_dir rc
+  case_dir=$(make_case checks-zero-no-marker)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000005
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/75 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "checks-zero-no-marker: a zero-check PR must refuse without the marker"
+  assert_grep 'refusing to treat absent CI as green' "$case_dir/stderr" \
+    "checks-zero-no-marker: the refusal did not explain the zero-check rule"
+  assert_grep 'data/no-pr-ci/project' "$case_dir/stderr" \
+    "checks-zero-no-marker: the refusal did not point at the captain's marker"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "checks-zero-no-marker: gh-axi pr merge was invoked for a zero-check PR"
+  pass "a PR reporting zero checks refuses without the captain's no-pr-ci marker"
+}
+
+test_zero_checks_with_marker_merges() {
+  local case_dir
+  case_dir=$(make_case checks-zero-marker)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000006
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir"
+  enable_no_pr_ci "$case_dir"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/76 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "checks-zero-marker: fm-pr-merge failed"
+
+  assert_grep 'intentionally runs no PR CI; proceeding' "$case_dir/stderr" \
+    "checks-zero-marker: the marker-approved zero-check merge was not noted"
+  grep -qxF 'pr merge 76 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "checks-zero-marker: the marker-approved zero-check PR did not merge"
+  pass "a zero-check PR merges with a note once the captain's no-pr-ci marker exists"
+}
+
+test_unreadable_rollup_refuses_unverified() {
+  local case_dir rc
+  case_dir=$(make_case checks-unreadable)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000007
+  : > "$case_dir/gh-axi.log"
+  touch "$case_dir/pr-checks-unreadable"
+  enable_no_pr_ci "$case_dir"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/77 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "checks-unreadable: an unreadable rollup must refuse"
+  assert_grep "could not read the PR's check status" "$case_dir/stderr" \
+    "checks-unreadable: the refusal did not explain the query failure"
+  assert_no_grep 'refusing to treat absent CI as green' "$case_dir/stderr" \
+    "checks-unreadable: a query failure was misread as a zero-check PR"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "checks-unreadable: gh-axi pr merge was invoked on an unreadable rollup"
+  pass "an unreadable check rollup refuses as unverified, even with the no-pr-ci marker present"
+}
+
+test_unclassifiable_check_refuses_unverified() {
+  local case_dir rc
+  case_dir=$(make_case checks-unclassifiable)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000008
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSOMETHING_NEW\t-\tweird-check'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/78 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "checks-unclassifiable: an unclassifiable check must refuse"
+  assert_grep 'PR check state could not be classified: weird-check' "$case_dir/stderr" \
+    "checks-unclassifiable: the unclassifiable check was not named"
+  assert_grep 'refusing to merge unverified' "$case_dir/stderr" \
+    "checks-unclassifiable: the refusal did not say the state is unverified"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "checks-unclassifiable: gh-axi pr merge was invoked on an unclassifiable check"
+  pass "a check the classification table cannot classify refuses as unverified"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -514,3 +1309,30 @@ test_clean_runnable_branch_merges_normally
 test_valid_supersession_entry_merges_normally
 test_supersession_entry_missing_field_not_honored
 test_parses_pr_url_for_gh_axi
+test_unexecuted_without_marker_is_informational_and_merges
+test_unexecuted_with_marker_refuses
+test_missing_and_failing_refuse_regardless_of_marker
+test_excused_missing_plus_gated_unexecuted_refuses
+test_legacy_single_id_entry_excuses_exactly_its_identifier
+test_ids_glob_batch_excuses_matching_findings
+test_ids_glob_does_not_excuse_non_matching_finding
+test_kind_restricted_batch_does_not_excuse_missing
+test_wildcard_ids_without_kind_excuses_every_class
+test_invalid_kind_entry_not_honored
+test_field_after_reason_not_honored
+test_no_space_field_after_reason_not_honored
+test_duplicated_kind_field_not_honored
+test_duplicated_ids_field_not_honored
+test_entry_with_both_id_and_ids_not_honored
+test_unparseable_or_unrecognized_field_not_honored
+test_entry_without_id_or_ids_not_honored
+test_findings_exit_with_no_parseable_line_refuses
+test_unverifiable_exit_refuses
+test_red_pr_refused_with_failing_check_named
+test_pending_pr_refused_distinct_from_red
+test_red_outranks_pending_in_refusal
+test_green_pr_merges_unchanged
+test_zero_checks_without_marker_refuses
+test_zero_checks_with_marker_merges
+test_unreadable_rollup_refuses_unverified
+test_unclassifiable_check_refuses_unverified

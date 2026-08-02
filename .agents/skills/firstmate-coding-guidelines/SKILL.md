@@ -66,6 +66,14 @@ Briefs for tasks that touch firstmate's own tracked material should tell the cre
 Firstmate adds this skill's load instruction to firstmate-repo briefs by hand instead.
 `CONTRIBUTING.md`'s "Development" section carries the same instruction as a durable reminder.
 
+## Compatibility and enforcement
+
+Before changing shared tracked behavior, review every affected supported primary harness and runtime backend rather than checking only the adapters active in the current fleet.
+Mark an axis not applicable only after inspecting its integration surface, and update the corresponding verification evidence when behavior changes.
+
+For critical safety, routing, startup, and supervision infrastructure, prefer deterministic and idempotent enforcement over relying on agent memory alone.
+Keep instructions as the authority and discovery layer, but make repeated execution converge safely and make invalid or unsafe states fail closed wherever the runtime can enforce them.
+
 ## Repo style rules
 
 - Put one full sentence per line in tracked Markdown.
@@ -75,6 +83,9 @@ Firstmate adds this skill's load instruction to firstmate-repo briefs by hand in
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
+- Commit a new `tests/*.test.sh` with its executable bit set (mode 100755), like every sibling: CI's behavior-tests job invokes `tests/*.test.sh` directly under `set -eu`, so a 100644 file exits 126 and aborts the whole loop.
+- A fixture standing in for real terminal or tool output must be the exact bytes captured from the real thing, never a hand-written approximation of them, and the test should say where the capture came from.
+- A hand-written approximation tests a shape the real tool may not emit, so the suite goes green while the real path fails: every composer fixture had been written with an ASCII space where claude actually emits a U+00A0, which hid a 100%-reproducible `bin/fm-send.sh` failure behind a green suite (evidence 2026-07-30, `docs/herdr-backend.md`).
 - A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.
 - Include the date, version, exact commands run, and exact output.
 - Write incidents the same way, as evidence, not narrative alone.
