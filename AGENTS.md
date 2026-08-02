@@ -80,6 +80,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   supersessions/<project>.md  captain-approved test-assertion supersessions consumed by bin/fm-pr-merge.sh's test-keep gate (entry format in its header); LOCAL, gitignored; created lazily by captain approval only, never auto-generated, absent means no approvals
   exec-gate/<project>  per-project marker making the test-keep gate's unexecuted findings block instead of warn (contract in bin/fm-pr-merge.sh's header); LOCAL, gitignored; created lazily by the captain only, never auto-generated, absent means warn-only
+  no-pr-ci/<project>  per-project marker confirming the project intentionally runs no PR CI, letting a zero-check PR pass the checks-green merge gate (contract in bin/fm-pr-merge.sh's header); LOCAL, gitignored; created lazily by the captain only, never auto-generated, absent means a zero-check PR is refused
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
   HANDOFF-<date>[-sessionN].md  volatile working state written by /handoff for the next session in this home; LOCAL, gitignored; path allocated by bin/fm-handoff.sh, read once and then consumed (section 6)
@@ -273,6 +274,7 @@ Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, 
 `bin/fm-pr-merge.sh` also gates every merge on `bin/fm-assert-tests-kept.sh`: a test assertion the base already had that is missing or failing on the PR branch is a hard refusal, even under `yolo`.
 A base assertion the gate could not execute at all against the branch is reported as unexecuted, and it refuses only for a project the captain has enabled with a `data/exec-gate/<project>` marker; otherwise it is informational.
 On that refusal, rebase damage is the worker's to fix, while a deliberate supersession of the base's asserted behavior is a product decision that is never the worker's or firstmate's to make - relay it to the captain, and only a captain-approved entry in `data/supersessions/<project>.md` (entry format in `bin/fm-pr-merge.sh`'s header) lets that merge proceed.
+`bin/fm-pr-merge.sh` also enforces "never merge a red PR" in code: it refuses when any PR check is failing, still pending, or unreadable, and treats a PR reporting no checks at all as unverified rather than green - only a captain-created `data/no-pr-ci/<project>` marker (contract in that script's header) lets a genuinely no-CI project's zero-check PR merge.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 ### Validate

@@ -47,6 +47,20 @@
 #   (w) an entry carrying neither id: nor ids: is warned and ignored
 #   (x) exit 1 with no parseable finding line refuses as unverified
 #   (y) exit 2 still refuses as unverifiable
+#
+# Checks-green gate (classification table and zero-checks contract in
+# bin/fm-pr-merge.sh's header), driven off a mocked statusCheckRollup answer:
+#   (z1) a red PR is refused with the failing check named, before gh-axi
+#   (z2) a pending PR is refused distinctly from a red one
+#   (z3) a red check outranks a pending one in the refusal
+#   (z4) a green PR (including NEUTRAL/SKIPPED conclusions) merges unchanged;
+#        every earlier merge-success case also passes through this gate via the
+#        mock's default green rollup
+#   (z5) zero checks with no data/no-pr-ci/<project> marker refuses
+#   (z6) zero checks with the captain's marker present merges with a note
+#   (z7) an unreadable rollup (gh query failure) refuses as unverified
+#   (z8) an entry the classification table cannot classify refuses as
+#        unverified rather than guessed at
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -94,7 +108,11 @@ EOF
 }
 
 # gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# headRefOid for fm-pr-check.sh's pr_head lookup plus statusCheckRollup for the
+# checks-green gate. The rollup answer is the case's pr-checks.tsv when present
+# (lines in the gate's own TSV shape: typename, status, conclusion, state,
+# name), one green CheckRun by default, and a query failure when the
+# pr-checks-unreadable marker exists. Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
@@ -108,6 +126,18 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *statusCheckRollup*)
+        if [ -e '$case_dir/pr-checks-unreadable' ]; then
+          echo 'mock: rollup query failed' >&2
+          exit 1
+        fi
+        if [ -f '$case_dir/pr-checks.tsv' ]; then
+          cat '$case_dir/pr-checks.tsv'
+        else
+          printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tmock-default-ci\n'
+        fi
+        exit 0
+        ;;
     esac
     ;;
 esac
@@ -117,7 +147,9 @@ SH
 }
 
 # gh-axi mock that fails the merge call but succeeds everything else, so a
-# real merge failure is distinguishable from the recording step.
+# real merge failure is distinguishable from the recording step. The gh mock
+# answers the checks-green gate's rollup query green so the run reaches the
+# merge call it is testing.
 add_gh_mocks_merge_fails() {
   local case_dir=$1
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
@@ -130,6 +162,9 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+case " $* " in
+  *statusCheckRollup*) printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tmock-default-ci\n' ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
@@ -1046,6 +1081,219 @@ test_unverifiable_exit_refuses() {
   pass "an unverifiable gate exit still refuses the merge"
 }
 
+### checks-green gate ########################################################
+
+# write_pr_checks <case_dir> <tsv line>...: set the mocked statusCheckRollup
+# answer for the case. Lines use the gate's TSV shape (typename, status,
+# conclusion, state, name); pass none for a zero-check PR.
+write_pr_checks() {
+  local case_dir=$1
+  shift
+  if [ "$#" -gt 0 ]; then
+    printf '%s\n' "$@" > "$case_dir/pr-checks.tsv"
+  else
+    : > "$case_dir/pr-checks.tsv"
+  fi
+}
+
+# enable_no_pr_ci <case_dir>: create the captain's per-project marker that lets
+# a zero-check PR merge for this case's project.
+enable_no_pr_ci() {
+  local case_dir=$1
+  mkdir -p "$case_dir/fmhome/data/no-pr-ci"
+  touch "$case_dir/fmhome/data/no-pr-ci/project"
+}
+
+test_red_pr_refused_with_failing_check_named() {
+  local case_dir rc
+  case_dir=$(make_case checks-red)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000001
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "checks-red: a red PR must refuse"
+  assert_grep 'error: PR check is failing: lint' "$case_dir/stderr" \
+    "checks-red: the failing check was not named"
+  assert_grep 'refusing to merge a red PR' "$case_dir/stderr" \
+    "checks-red: the refusal did not say the PR is red"
+  assert_grep 'pr=https://github.com/example/repo/pull/71' "$case_dir/state/task-x1.meta" \
+    "checks-red: pr= should still be recorded before the gate refuses"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "checks-red: gh-axi pr merge was invoked despite a failing check"
+  pass "a red PR is refused with the failing check named, before gh-axi pr merge"
+}
+
+test_pending_pr_refused_distinct_from_red() {
+  local case_dir rc
+  case_dir=$(make_case checks-pending)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000002
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
+    $'CheckRun\tIN_PROGRESS\t-\t-\tslow-suite' \
+    $'StatusContext\t-\t-\tPENDING\texternal-gate'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/72 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "checks-pending: a pending PR must refuse"
+  assert_grep 'note: PR check has not finished: slow-suite' "$case_dir/stderr" \
+    "checks-pending: the pending check-run was not named"
+  assert_grep 'note: PR check has not finished: external-gate' "$case_dir/stderr" \
+    "checks-pending: the pending status context was not named"
+  assert_grep 'not red, it is unfinished' "$case_dir/stderr" \
+    "checks-pending: the refusal did not distinguish pending from red"
+  assert_no_grep 'refusing to merge a red PR' "$case_dir/stderr" \
+    "checks-pending: a merely-pending PR was refused as red"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "checks-pending: gh-axi pr merge was invoked despite pending checks"
+  pass "a pending PR is refused distinctly from a red one"
+}
+
+test_red_outranks_pending_in_refusal() {
+  local case_dir rc
+  case_dir=$(make_case checks-red-and-pending)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000003
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tIN_PROGRESS\t-\t-\tslow-suite' \
+    $'CheckRun\tCOMPLETED\tTIMED_OUT\t-\tintegration'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/73 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "checks-red-and-pending: must refuse"
+  assert_grep 'error: PR check is failing: integration' "$case_dir/stderr" \
+    "checks-red-and-pending: the failing check was not named"
+  assert_grep 'refusing to merge a red PR' "$case_dir/stderr" \
+    "checks-red-and-pending: a red check alongside a pending one was not refused as red"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "checks-red-and-pending: gh-axi pr merge was invoked"
+  pass "a red check outranks a pending one in the refusal"
+}
+
+test_green_pr_merges_unchanged() {
+  local case_dir
+  case_dir=$(make_case checks-green)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000004
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tNEUTRAL\t-\toptional-scan' \
+    $'CheckRun\tCOMPLETED\tSKIPPED\t-\tpath-filtered' \
+    $'StatusContext\t-\t-\tSUCCESS\texternal-gate'
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/74 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "checks-green: fm-pr-merge failed"
+
+  grep -qxF 'pr merge 74 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "checks-green: a green PR did not merge unchanged"
+  pass "a green PR (including NEUTRAL/SKIPPED conclusions) merges unchanged"
+}
+
+test_zero_checks_without_marker_refuses() {
+  local case_dir rc
+  case_dir=$(make_case checks-zero-no-marker)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000005
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/75 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "checks-zero-no-marker: a zero-check PR must refuse without the marker"
+  assert_grep 'refusing to treat absent CI as green' "$case_dir/stderr" \
+    "checks-zero-no-marker: the refusal did not explain the zero-check rule"
+  assert_grep 'data/no-pr-ci/project' "$case_dir/stderr" \
+    "checks-zero-no-marker: the refusal did not point at the captain's marker"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "checks-zero-no-marker: gh-axi pr merge was invoked for a zero-check PR"
+  pass "a PR reporting zero checks refuses without the captain's no-pr-ci marker"
+}
+
+test_zero_checks_with_marker_merges() {
+  local case_dir
+  case_dir=$(make_case checks-zero-marker)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000006
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir"
+  enable_no_pr_ci "$case_dir"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/76 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "checks-zero-marker: fm-pr-merge failed"
+
+  assert_grep 'intentionally runs no PR CI; proceeding' "$case_dir/stderr" \
+    "checks-zero-marker: the marker-approved zero-check merge was not noted"
+  grep -qxF 'pr merge 76 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "checks-zero-marker: the marker-approved zero-check PR did not merge"
+  pass "a zero-check PR merges with a note once the captain's no-pr-ci marker exists"
+}
+
+test_unreadable_rollup_refuses_unverified() {
+  local case_dir rc
+  case_dir=$(make_case checks-unreadable)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000007
+  : > "$case_dir/gh-axi.log"
+  touch "$case_dir/pr-checks-unreadable"
+  enable_no_pr_ci "$case_dir"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/77 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "checks-unreadable: an unreadable rollup must refuse"
+  assert_grep "could not read the PR's check status" "$case_dir/stderr" \
+    "checks-unreadable: the refusal did not explain the query failure"
+  assert_no_grep 'refusing to treat absent CI as green' "$case_dir/stderr" \
+    "checks-unreadable: a query failure was misread as a zero-check PR"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "checks-unreadable: gh-axi pr merge was invoked on an unreadable rollup"
+  pass "an unreadable check rollup refuses as unverified, even with the no-pr-ci marker present"
+}
+
+test_unclassifiable_check_refuses_unverified() {
+  local case_dir rc
+  case_dir=$(make_case checks-unclassifiable)
+  add_gh_mocks "$case_dir" f000000000000000000000000000000000000008
+  : > "$case_dir/gh-axi.log"
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSOMETHING_NEW\t-\tweird-check'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/78 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "checks-unclassifiable: an unclassifiable check must refuse"
+  assert_grep 'PR check state could not be classified: weird-check' "$case_dir/stderr" \
+    "checks-unclassifiable: the unclassifiable check was not named"
+  assert_grep 'refusing to merge unverified' "$case_dir/stderr" \
+    "checks-unclassifiable: the refusal did not say the state is unverified"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "checks-unclassifiable: gh-axi pr merge was invoked on an unclassifiable check"
+  pass "a check the classification table cannot classify refuses as unverified"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -1080,3 +1328,11 @@ test_unparseable_or_unrecognized_field_not_honored
 test_entry_without_id_or_ids_not_honored
 test_findings_exit_with_no_parseable_line_refuses
 test_unverifiable_exit_refuses
+test_red_pr_refused_with_failing_check_named
+test_pending_pr_refused_distinct_from_red
+test_red_outranks_pending_in_refusal
+test_green_pr_merges_unchanged
+test_zero_checks_without_marker_refuses
+test_zero_checks_with_marker_merges
+test_unreadable_rollup_refuses_unverified
+test_unclassifiable_check_refuses_unverified
