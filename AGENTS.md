@@ -240,6 +240,8 @@ Load `diagnostic-reasoning` before scoping a reported bug and before acting on a
 
 Classify work as dispatchable when it does not overlap work under way, or queued and blocked when it touches the same project subsystem or depends on unlanded work.
 Dispatch independent work immediately with no concurrency cap, serialize coarse overlaps, and record blockers durably.
+A ready queued item is dispatched immediately by default; withholding it requires a tangible reason - an uncleared dependency, a coarse overlap or ordered series that must land first, an unavailable prerequisite, or an explicit captain hold - never mere machine contention or scheduling convenience.
+Whenever a ready item is withheld, tell the captain which item is held and why; a silently idle queue is a failure of this rule even when the reason is valid.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
@@ -304,7 +306,7 @@ For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary sin
 Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
-After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
+After successful teardown, record completion, retain only the configured recent Done history, re-evaluate queued work, and dispatch newly cleared items immediately under the intake dispatch rule.
 
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.
