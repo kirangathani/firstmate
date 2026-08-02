@@ -853,7 +853,29 @@ test_perl_bounding_arm_reports_signals() {
   rc=0
   perl -e "$prog" 1 sleep 30 >/dev/null 2>&1 || rc=$?
   expect_code 124 "$rc" "expiry is still reported as 124"
-  pass "the perl bounding arm reports 128+signal like timeout does"
+
+  # An interrupted parent must not orphan the detached child pgroup: TERM to
+  # the perl parent forwards to the group, so the probe dies with the viewer
+  # instead of running the base suite unbounded after the viewer is gone.
+  local pidfile ppid child i=0
+  pidfile=$TMP_ROOT/perl-arm-child-pid
+  rm -f "$pidfile"
+  perl -e "$prog" 30 bash -c "echo \$\$ > '$pidfile'; sleep 30" >/dev/null 2>&1 &
+  ppid=$!
+  while [ ! -s "$pidfile" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -s "$pidfile" ] || fail "the bounded child never started"
+  child=$(cat "$pidfile")
+  kill -TERM "$ppid" 2>/dev/null || true
+  rc=0
+  wait "$ppid" 2>/dev/null || rc=$?
+  expect_code 143 "$rc" "TERM to the perl parent is reported as 128+15 like timeout"
+  i=0
+  while kill -0 "$child" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  if kill -0 "$child" 2>/dev/null; then
+    kill -9 "$child" 2>/dev/null || true
+    fail "the perl parent orphaned its child pgroup on TERM"
+  fi
+  pass "the perl bounding arm reports 128+signal and never orphans the probe"
 }
 
 test_tests_gate_signal_killed_probe() {

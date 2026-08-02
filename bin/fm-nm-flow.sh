@@ -226,9 +226,13 @@ BOUND_REFUSED_RC=125
 # Held in a variable so the exit-status contract of the arm that has no
 # `timeout` to inherit it from - the only arm stock macOS takes - can be
 # exercised directly by the tests. The single quotes are the point: every $ in
-# it is perl's, not the shell's.
+# it is perl's, not the shell's. The child runs detached in its own process
+# group so the alarm can kill the whole tree - which also means a terminal
+# Ctrl-C never reaches it on its own, so the parent must forward INT/TERM to
+# the group the way timeout(1) does; without that the probe would outlive an
+# interrupted viewer and keep running the base suite unbounded.
 # shellcheck disable=SC2016
-PERL_BOUND_PROG='my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; my $sig = $? & 127; exit($sig ? 128 + $sig : $? >> 8)'
+PERL_BOUND_PROG='my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } my $reap = sub { my ($sig, $rc) = @_; kill $sig, -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit $rc }; $SIG{INT} = sub { $reap->("INT", 130) }; $SIG{TERM} = sub { $reap->("TERM", 143) }; $SIG{ALRM} = sub { $reap->("TERM", 124) }; alarm $t; waitpid $pid, 0; my $sig = $? & 127; exit($sig ? 128 + $sig : $? >> 8)'
 run_bounded() {  # <seconds> <cmd...>
   local secs=$1
   shift
