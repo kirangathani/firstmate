@@ -28,9 +28,10 @@
 #                      digits-plus-unit interval (5s, 10m) is refused by name.
 #   --tests-gate       Also run bin/fm-assert-tests-kept.sh ONCE (cached across
 #                      watch frames) in its explicit --worktree/--base mode and
-#                      show missing:/failing: counts in the merge-gate box.
+#                      show missing/failing counts in the merge-gate box, read
+#                      from its `summary:` stdout line (per-line grep fallback).
 #                      Explicit mode never fetches, so the base may lag origin;
-#                      it executes the base's own shell test files (check 2), so
+#                      it executes the base's own test files (check 2), so
 #                      it costs real time - that is why it is opt-in, why the
 #                      first watch frame renders the box as "checking..." and
 #                      only frame 2 carries the result, why the probe is bounded
@@ -38,9 +39,14 @@
 #                      run at all when nothing on the host can bound it, and why
 #                      two legend lines under the diagram name the base the run
 #                      compared against and how many of its files that run could
-#                      verify by name only. The box row itself carries only the
-#                      counts, so no base ref length can push it past 80
-#                      columns. Without the flag the box renders as pending.
+#                      verify by name only. A base assertion the probe reports
+#                      as `unexecuted:` was verified by NAME ONLY, so the row
+#                      then reads "(N unexecuted)" and NEVER a bare "ok": a
+#                      green that means nothing ran reads as verified, which is
+#                      the one thing this display must never show. The box row
+#                      itself carries only the counts, so no base ref length can
+#                      push it past 80 columns. Without the flag the box renders
+#                      as pending.
 #   -h, --help         Print this usage on stdout and exit 0.
 #
 # Width: the diagram is drawn for a plain 80-column pane and the header line is
@@ -54,12 +60,22 @@
 # the CLI - so an extreme width lets the header wrap rather than mutilating
 # either.
 #
-# Height: a frame is bounded the same way, to FM_NM_FLOW_ROWS when it is a sane
-# number, else the detected terminal height on a tty, else a hard 24 rows. Over
+# Height: in watch mode a frame is bounded the way width is, to FM_NM_FLOW_ROWS
+# when it is a sane number, else the detected terminal height on a tty, else a
+# hard 24 rows; an unbounded frame scrolls its own header - the line naming the
+# task - off the top of an 80x24 pane. The one-shot render is never bounded:
+# scrollback makes trimming pointless there, so it always emits the complete
+# frame. The budget counts terminal ROWS, not frame lines: a line longer than
+# the render width (the PR URL, which is never truncated) wraps, and each line
+# is charged ceil(len/width) rows after stripping display attributes. Over
 # budget, only legend lines are dropped - lowest value first, never the header,
 # the banner or a step row - and the count dropped is printed where they were.
-# An unbounded frame scrolls its own header off the top of an 80x24 pane, which
-# is the one line that says which task the pane is showing.
+# Two qualifiers are structurally undroppable whenever the merge-gate box shows
+# a result: the compared-base legend and the name-only legend rank as core, and
+# when a pane is too short to carry them the box itself degrades to a pending
+# form, so a green can never appear separated from its qualifiers at any pane
+# size. When even the core lines cannot fit, the frame says so plainly instead
+# of claiming it was made to fit.
 #
 # Step kinds: the test and lint boxes are deterministic only when the target
 # project defines commands.test / commands.lint in its .no-mistakes.yaml;
@@ -92,7 +108,8 @@
 # gates, never writes outside its own mktemp dir, and never mutates task state.
 #
 # Exit status: 0 on a successful render (any state), 1 when the task/worktree
-# cannot be resolved, 2 on a usage error.
+# cannot be resolved, 2 on a usage error, 130 when interrupted (INT/TERM, both
+# modes - one handler, so no reader has to wonder which of two traps ran).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -355,18 +372,23 @@ MGATE_ANN="prior-tests: pending (checked at merge)"
 MGATE_NAMEONLY=0
 MGATE_BASE=""
 # The probe's scratch dir is the only thing this viewer ever writes, so its
-# removal is registered rather than left on the return paths: in watch mode an
-# interrupt is delivered the moment the bounded probe returns, which would
-# otherwise exit past the cleanup and leak a directory per interrupted run.
+# removal is owned by the EXIT trap alone: in watch mode an interrupt is
+# delivered the moment the bounded probe returns, which would otherwise exit
+# past any cleanup left on the return paths and leak a directory per
+# interrupted run. INT/TERM has exactly one handler for the whole script, set
+# here once - a second, mode-specific trap would shadow this one and leave a
+# dead handler a future reader assumes still runs. It only converts the signal
+# into an exit so the EXIT trap fires; 130 is the conventional interrupted
+# status either mode reports.
 MGATE_TMPD=""
 clean_tmpd() {
   [ -n "$MGATE_TMPD" ] && rm -rf "$MGATE_TMPD"
   MGATE_TMPD=""
 }
 trap clean_tmpd EXIT
-trap 'clean_tmpd; exit 130' INT TERM
+trap 'exit 130' INT TERM
 run_tests_gate() {
-  local base out_file missing failing
+  local base out_file missing failing unexec summary
   MGATE_BASE=""
   # The probe executes the base's own test files, so it must be time-bounded.
   # Nothing to bound it with means it does not run: a viewer that hangs is
@@ -396,30 +418,53 @@ run_tests_gate() {
     clean_tmpd
     return
   fi
-  missing=$(grep -c '^missing: ' "$out_file" || true)
-  failing=$(grep -c '^failing: ' "$out_file" || true)
-  # One `name-check only: <file>` line per base test file check 2 could not
-  # execute; those files are verified by NAME ONLY, so a kept-name test whose
-  # assertion body was rewritten would not be caught. Counting the per-file
-  # lines (never the fixed WARNING header lines) keeps the number a file count,
-  # and it is reported on its own legend line so the box stays inside 80 cols.
-  MGATE_NAMEONLY=$(grep -c '^WARNING:[[:space:]]*name-check only: ' "$tmpd/kept.err" || true)
-  # Exit 0 = clean, exit 1 = reported missing/failing lines. ANY other rc - a
-  # signal death (128+n), the refusal arm, an unforeseen code - means the check
-  # itself did not run, so it lands on pending and never on a false "ok",
-  # whatever counts an empty output happens to grep to. The row carries the
-  # counts alone and the base ref goes on its own legend line whole: a long
-  # default branch would otherwise push the row past 80 columns, and an elided
-  # ref would read as real while naming no ref that exists.
+  # Counts come from the machine-readable `summary:` stdout line; the per-line
+  # greps are only the fallback for an output that carries no summary. The
+  # unexecuted count is per ASSERTION: each `unexecuted:` identifier was
+  # verified by NAME ONLY (check 1), so a kept-name test whose assertion body
+  # was rewritten would not be caught.
+  summary=$(grep -m1 '^summary: ' "$out_file" || true)
+  if [ -n "$summary" ]; then
+    missing=$(printf '%s' "$summary" | sed -n 's/.*missing=\([0-9]\{1,\}\).*/\1/p')
+    failing=$(printf '%s' "$summary" | sed -n 's/.*failing=\([0-9]\{1,\}\).*/\1/p')
+    unexec=$(printf '%s' "$summary" | sed -n 's/.*unexecuted=\([0-9]\{1,\}\).*/\1/p')
+  else
+    missing=$(grep -c '^missing: ' "$out_file" || true)
+    failing=$(grep -c '^failing: ' "$out_file" || true)
+    unexec=$(grep -c '^unexecuted: ' "$out_file" || true)
+  fi
+  missing=${missing:-0} failing=${failing:-0} unexec=${unexec:-0}
+  # One stderr `UNEXECUTED: <file>` line per base test file check 2 could not
+  # execute, so this stays a FILE count for the legend line while the row
+  # carries the assertion count; both stay inside 80 columns that way.
+  MGATE_NAMEONLY=$(grep -c '^UNEXECUTED: ' "$tmpd/kept.err" || true)
+  # Exit 0 = clean, exit 1 = reported missing/failing/unexecuted lines. ANY
+  # other rc - a signal death (128+n), the refusal arm, an unforeseen code -
+  # means the check itself did not run, so it lands on pending and never on a
+  # false "ok", whatever counts an empty output happens to grep to. The row
+  # carries the counts alone and the base ref goes on its own legend line
+  # whole: a long default branch would otherwise push the row past 80 columns,
+  # and an elided ref would read as real while naming no ref that exists.
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
     MGATE_ANN="prior-tests: pending (check could not run, exit $rc)"
     MGATE_NAMEONLY=0
-  elif [ "$rc" -eq 0 ] && [ "$missing" -eq 0 ] && [ "$failing" -eq 0 ]; then
+  elif [ "$missing" -gt 0 ] || [ "$failing" -gt 0 ]; then
+    MGATE_BASE=$base
+    MGATE_ANN="prior-tests: missing $missing / failing $failing !!"
+  elif [ "$unexec" -gt 0 ]; then
+    # Nothing missing or failing, but not everything ran: the row must say so
+    # itself, never a bare "ok" - a green that means "these assertions were
+    # never executed" reads as verified, which is worse than no result at all.
+    MGATE_BASE=$base
+    MGATE_ANN="prior-tests: missing 0 / failing 0 ($unexec unexecuted)"
+  elif [ "$rc" -eq 0 ]; then
     MGATE_BASE=$base
     MGATE_ANN="prior-tests: missing 0 / failing 0 ok"
   else
-    MGATE_BASE=$base
-    MGATE_ANN="prior-tests: missing $missing / failing $failing !!"
+    # rc=1 with every count zero: the check claims findings this viewer could
+    # not read, so the honest render is pending, not a guess either way.
+    MGATE_ANN="prior-tests: pending (result not readable)"
+    MGATE_NAMEONLY=0
   fi
   clean_tmpd
 }
@@ -727,7 +772,22 @@ header_line() {
   printf '...%s' "$tail"
 }
 
-render() {
+# Terminal rows one frame line occupies: its visible length after stripping
+# display attributes (the tput rev/bold/sgr0 sequences the highlight uses),
+# divided across the render width. The PR URL is the line that makes this
+# matter: it is never truncated, so past COLS it wraps, and a budget that
+# counted frame LINES would claim a frame fits a pane it provably scrolls.
+line_rows() {  # <line>
+  local s=$1 esc=$'\033'
+  while [[ $s =~ $esc\[[0-9\;]*[A-Za-z] ]]; do
+    s=${s//"${BASH_REMATCH[0]}"/}
+  done
+  s=${s//"$esc(B"/}
+  printf '%s' $(( ${#s} == 0 ? 1 : (${#s} - 1) / COLS + 1 ))
+}
+
+build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files>
+  local ann=$1 mbase=$2 nameonly=$3
   FRAME_LINES=()
   FRAME_RANK=()
   core_line "$(header_line)"
@@ -744,7 +804,7 @@ render() {
   step_line push     push         det       ""
   step_line pr       "open PR"    det       ""
   step_line ci       "CI monitor" det+LLM   "!! LLM auto-rebase can drop base code; gate catches"
-  step_line mgate    "merge gate" det       "$MGATE_ANN"
+  step_line mgate    "merge gate" det       "$ann"
   step_line captain  captain      human     "explicit approval (or standing yolo)"
   step_line teardown teardown     det       "after landing confirmed"
   core_line "$RULE"
@@ -756,49 +816,78 @@ render() {
   fi
   legend_line 2 'merge gate: check 1 base test names kept; check 2 base assertions vs branch'
   legend_line 3 'supersessions: captain-approved entries in data/supersessions/<project>.md'
-  if [ -n "$MGATE_BASE" ]; then
-    legend_line 6 "prior-tests: compared against base $MGATE_BASE"
+  # The compared-base and name-only legends are the qualifiers of the result
+  # the merge-gate row is showing, so while a result is up they rank as CORE:
+  # a claim and its qualifiers must not be separable by any drop order a future
+  # legend line could disturb. With no result up they are absent anyway.
+  if [ -n "$mbase" ]; then
+    core_line "prior-tests: compared against base $mbase"
   fi
-  if [ "$MGATE_NAMEONLY" -gt 0 ]; then
+  if [ "$nameonly" -gt 0 ]; then
     local noun=files
-    [ "$MGATE_NAMEONLY" -eq 1 ] && noun='file'
-    legend_line 5 "prior-tests: $MGATE_NAMEONLY base $noun verified by name only, not by assertion"
+    [ "$nameonly" -eq 1 ] && noun='file'
+    core_line "prior-tests: $nameonly base $noun verified by name only, not by assertion"
   fi
   if [ "$KIND_TEST" = 'det|LLM' ] || [ "$KIND_LINT" = 'det|LLM' ]; then
     legend_line 4 'det|LLM: commands.<step> not readable in .no-mistakes.yaml; det when it is set'
   fi
+}
+
+frame_core_rows() {
+  local i rows=0
+  for ((i = 0; i < ${#FRAME_LINES[@]}; i++)); do
+    [ "${FRAME_RANK[$i]}" -eq 0 ] && rows=$((rows + $(line_rows "${FRAME_LINES[$i]}")))
+  done
+  printf '%s' "$rows"
+}
+
+render() {
+  build_frame "$MGATE_ANN" "$MGATE_BASE" "$MGATE_NAMEONLY"
+  # The backstop behind the undroppable qualifiers: a pane too short to carry
+  # the result AND its qualifiers gets neither - the box degrades to a
+  # non-committal pending form for the frame, so no pane size exists at which
+  # a green shows up separated from what qualifies it. Watch mode only, like
+  # the bound itself; the cached probe result is untouched for later frames.
+  if [ "$WATCH" = 1 ] && [ -n "$MGATE_BASE" ] && [ "$(frame_core_rows)" -gt "$ROWS" ]; then
+    build_frame "prior-tests: pending (pane too short for qualified result)" "" 0
+  fi
   emit_frame
 }
 
-# Print the assembled frame, dropping the lowest-ranked legend lines (and only
-# legend lines) when it would otherwise overflow the pane. Kept lines stay in
-# assembly order, and the count of dropped lines is stated where they were.
+# Print the assembled frame. In watch mode, when its terminal-row footprint
+# would overflow the pane, the lowest-ranked legend lines (and only legend
+# lines) are dropped; kept lines stay in assembly order and the count dropped
+# is stated where they were. A frame that does not fit even with every legend
+# gone says so plainly - a "dropped to fit" notice on a frame that provably
+# does not fit would be a claim the render cannot honor. The one-shot render
+# prints everything: scrollback makes trimming pointless there.
 emit_frame() {
-  local n=${#FRAME_LINES[@]} i ncore=0 nleg=0 keep dropped=0 best bi taken
-  local -a drop_flag=()
+  local n=${#FRAME_LINES[@]} i dropped=0 best bi
+  local total=0 core=0 legend=0 avail short=0
+  local -a drop_flag=() row_of=()
   for ((i = 0; i < n; i++)); do
     drop_flag[i]=0
+    row_of[i]=$(line_rows "${FRAME_LINES[$i]}")
+    total=$((total + row_of[i]))
     if [ "${FRAME_RANK[$i]}" -eq 0 ]; then
-      ncore=$((ncore + 1))
+      core=$((core + row_of[i]))
     else
-      nleg=$((nleg + 1))
+      legend=$((legend + row_of[i]))
     fi
   done
-  if [ "$n" -gt "$ROWS" ]; then
+  if [ "$WATCH" = 1 ] && [ "$total" -gt "$ROWS" ]; then
     # One row is spent saying what was dropped, so nothing disappears silently.
-    keep=$(( ROWS - ncore - 1 ))
-    [ "$keep" -ge 0 ] || keep=0
-    [ "$keep" -le "$nleg" ] || keep=$nleg
-    dropped=$(( nleg - keep ))
-    taken=0
+    avail=$(( ROWS - core - 1 ))
+    [ "$avail" -ge 0 ] || { avail=0; short=1; }
     for ((i = 0; i < n; i++)); do
-      [ "${FRAME_RANK[$i]}" -eq 0 ] || drop_flag[i]=1
+      [ "${FRAME_RANK[$i]}" -eq 0 ] || { drop_flag[i]=1; dropped=$((dropped + 1)); }
     done
-    while [ "$taken" -lt "$keep" ]; do
+    while [ "$avail" -gt 0 ]; do
       best=0
       bi=-1
       for ((i = 0; i < n; i++)); do
         [ "${drop_flag[$i]}" -eq 1 ] || continue
+        [ "${row_of[$i]}" -le "$avail" ] || continue
         if [ "${FRAME_RANK[$i]}" -gt "$best" ]; then
           best=${FRAME_RANK[$i]}
           bi=$i
@@ -806,13 +895,17 @@ emit_frame() {
       done
       [ "$bi" -ge 0 ] || break
       drop_flag[bi]=0
-      taken=$((taken + 1))
+      dropped=$((dropped - 1))
+      avail=$((avail - row_of[bi]))
     done
   fi
   for ((i = 0; i < n; i++)); do
     [ "${drop_flag[$i]}" -eq 0 ] && printf '%s\n' "${FRAME_LINES[$i]}"
   done
-  if [ "$dropped" -gt 0 ]; then
+  if [ "$short" = 1 ]; then
+    printf '!! frame needs %s rows; this %s-row pane will scroll it (%s legend lines dropped)\n' \
+      "$core" "$ROWS" "$dropped"
+  elif [ "$dropped" -gt 0 ]; then
     local noun=lines
     [ "$dropped" -eq 1 ] && noun=line
     printf '... %s legend %s dropped to fit a %s-row pane\n' "$dropped" "$noun" "$ROWS"
@@ -830,7 +923,6 @@ if [ "$WATCH" = 0 ]; then
   exit 0
 fi
 
-trap 'exit 0' INT TERM
 FRAMES=0
 MAX_FRAMES=${FM_NM_FLOW_WATCH_MAX:-0}
 case "$MAX_FRAMES" in ''|*[!0-9]*) MAX_FRAMES=0 ;; esac
