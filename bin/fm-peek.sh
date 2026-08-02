@@ -3,6 +3,14 @@
 # Usage: fm-peek.sh <target> [lines=40]
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit backend target.
+# After the capture, a footer reports uncommitted changes in the task's
+# recorded worktree (skipped for scout tasks, whose worktree is scratch by
+# contract). The pane already renders the harness's own context reading, so
+# the footer supplies the other half of the actionable pairing owned by
+# AGENTS.md section 8 - a high context reading together with an uncommitted
+# task worktree - and a routine peek can no longer look healthy while a large
+# unlanded diff sits invisible. A clean tree prints nothing; a recorded but
+# missing or unreadable worktree is reported rather than silently skipped.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,3 +31,22 @@ BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$RAW_TARGET" "$STATE")
 
 fm_backend_capture "$BACKEND" "$T" "$N" "$EXPECTED_LABEL"
+
+META=$(fm_backend_meta_for_selector "$RAW_TARGET" "$STATE" 2>/dev/null || true)
+[ -n "$META" ] || META=$(fm_backend_meta_for_window "$T" "$STATE" 2>/dev/null || true)
+if [ -n "$META" ] && [ -e "$META" ] && [ "$(fm_meta_get "$META" kind)" != scout ]; then
+  WT=$(fm_meta_get "$META" worktree)
+  if [ -n "$WT" ]; then
+    if [ ! -d "$WT" ]; then
+      echo "fm-peek: recorded task worktree is missing: $WT"
+    elif DIRTY=$(git -C "$WT" status --porcelain 2>/dev/null); then
+      if [ -n "$DIRTY" ]; then
+        COUNT=$(printf '%s\n' "$DIRTY" | grep -c .)
+        echo "fm-peek: task worktree has $COUNT uncommitted path(s): $WT"
+        echo "fm-peek: if the pane above also shows a high context reading, steer the worker to commit now (AGENTS.md section 8)"
+      fi
+    else
+      echo "fm-peek: could not read git status in recorded task worktree: $WT"
+    fi
+  fi
+fi

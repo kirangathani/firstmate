@@ -341,6 +341,10 @@ Handle actionable wakes as follows:
 3. For `check:`, act on the named poll result, including merges and X-mode events.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
+A high context reading in a peeked pane is not by itself actionable: the harness compacts and continues, and the worktree's files and commits persist.
+A high context reading together with uncommitted changes in the task worktree is actionable: compaction discards the worker's memory of what its uncommitted diff means, and the worktree recycling that follows genuinely discards the diff, so immediately steer that worker to commit its work in progress before anything else.
+`bin/fm-peek.sh` reports the uncommitted half alongside every peek, and a stale wake carrying a visible usage-limit dialog means the worker is frozen at a provider prompt, never a benign quiet pane to dismiss.
+
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, always post the final completion follow-up so the link clears even if earlier follow-ups were spent.
 
