@@ -4,6 +4,7 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+fm_git_identity fmtest fmtest@example.invalid
 
 CHECK="$ROOT/bin/fm-continuity-pretool-check.sh"
 WATCH="$ROOT/bin/fm-watch.sh"

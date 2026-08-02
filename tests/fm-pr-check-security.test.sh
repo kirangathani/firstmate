@@ -5,6 +5,7 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+fm_git_identity fmtest fmtest@example.invalid
 # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
 . "$ROOT/bin/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
