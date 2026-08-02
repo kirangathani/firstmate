@@ -833,23 +833,33 @@ build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files>
   fi
 }
 
-frame_core_rows() {
-  local i rows=0
+CORE_ROWS=0 TOTAL_ROWS=0
+frame_measure() {
+  local i r
+  CORE_ROWS=0
+  TOTAL_ROWS=0
   for ((i = 0; i < ${#FRAME_LINES[@]}; i++)); do
-    [ "${FRAME_RANK[$i]}" -eq 0 ] && rows=$((rows + $(line_rows "${FRAME_LINES[$i]}")))
+    r=$(line_rows "${FRAME_LINES[$i]}")
+    TOTAL_ROWS=$((TOTAL_ROWS + r))
+    [ "${FRAME_RANK[$i]}" -eq 0 ] && CORE_ROWS=$((CORE_ROWS + r))
   done
-  printf '%s' "$rows"
 }
 
 render() {
   build_frame "$MGATE_ANN" "$MGATE_BASE" "$MGATE_NAMEONLY"
   # The backstop behind the undroppable qualifiers: a pane too short to carry
-  # the result AND its qualifiers gets neither - the box degrades to a
-  # non-committal pending form for the frame, so no pane size exists at which
-  # a green shows up separated from what qualifies it. Watch mode only, like
-  # the bound itself; the cached probe result is untouched for later frames.
-  if [ "$WATCH" = 1 ] && [ -n "$MGATE_BASE" ] && [ "$(frame_core_rows)" -gt "$ROWS" ]; then
-    build_frame "prior-tests: pending (pane too short for qualified result)" "" 0
+  # the result, its qualifiers AND the mandatory drop notice gets none of them
+  # - the box degrades to a non-committal pending form for the frame, so no
+  # pane size exists at which a green shows up separated from what qualifies
+  # it. Watch mode only, like the bound itself; the cached probe result is
+  # untouched for later frames. The notice row is part of the test: a frame
+  # that fits whole needs no notice, and one that must drop legends spends a
+  # row saying so.
+  if [ "$WATCH" = 1 ] && [ -n "$MGATE_BASE" ]; then
+    frame_measure
+    if [ "$TOTAL_ROWS" -gt "$ROWS" ] && [ $((CORE_ROWS + 1)) -gt "$ROWS" ]; then
+      build_frame "prior-tests: pending (pane too short to qualify)" "" 0
+    fi
   fi
   emit_frame
 }

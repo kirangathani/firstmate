@@ -20,11 +20,12 @@
 #       shows missing/failing counts; rendering leaves the worktree clean
 #   (k) --watch honors the FM_NM_FLOW_WATCH_MAX test hook and re-renders
 #   (l) --help prints usage on stdout and exits 0
-#   (m) a name-check-only base file is reported on its own legend line instead
-#       of reading as a clean verified pass, and the merge-gate row stays
-#       inside 80 columns; an origin/-prefixed base with two-digit counts keeps
-#       every rendered line inside 80 columns with the base ref named whole,
-#       and an over-running probe degrades to pending rather than hanging
+#   (m) an unexecuted base assertion qualifies the merge-gate row itself and
+#       is never rendered as a bare ok, its file lands on the name-only legend
+#       line, and the row stays inside 80 columns; an origin/-prefixed base
+#       with two-digit counts keeps every rendered line inside 80 columns with
+#       the base ref named whole, and an over-running probe degrades to
+#       pending rather than hanging
 #   (n) a red ci log marker surfaces CI RED instead of a healthy-wait banner
 #   (o) test/lint kinds come from the worktree's .no-mistakes.yaml, and fall
 #       back to det|LLM when no config is readable
@@ -35,9 +36,12 @@
 #       detached HEAD an empty symbolic-ref answer would otherwise imply
 #   (s) a probe killed by a signal renders pending, never a green that means
 #       nothing ran, and the perl bounding arm reports 128+signal like timeout
-#   (t) a frame is bounded to the row budget the way it is bounded to columns:
-#       the 24-line worst case fits a plain pane whole, a smaller budget drops
-#       only legend lines and says how many, and the header always survives
+#   (t) watch frames are bounded to the row budget the way they are bounded to
+#       columns: the 24-row worst case fits a plain pane whole, a smaller
+#       budget drops only plain legend lines and says how many, a result's two
+#       qualifier lines are undroppable (the box degrades to pending sooner),
+#       an unfittable frame says so plainly, and the one-shot render is never
+#       trimmed; a wrapping PR URL is charged the terminal rows it really takes
 #   (u) the probe's scratch dir is removed even when a watch frame is interrupted
 #   (v) --watch takes a task id or a numeric interval in either order, and names
 #       a unit-suffixed interval as the mistyped interval it is
@@ -115,6 +119,25 @@ new_case() {  # <name> -> echoes case dir with an empty state/
 ESC=$(printf '\033')
 strip_sgr() {  # <text>
   printf '%s' "$1" | sed "s/$ESC\\[[0-9;]*m//g"
+}
+
+# Non-tty watch frames are blank-line separated; the tests-gate result only
+# lands from frame 2 on, so the frame under test is the last one.
+last_frame() {  # <watch output>
+  printf '%s\n' "$1" | awk 'BEGIN{RS=""} END{print}'
+}
+
+# Terminal rows a frame occupies in an 80-column pane: each line is charged
+# ceil(len/80) rows after stripping SGR, which is what makes a wrapping PR URL
+# count as the two rows it really takes.
+frame_rows() {  # <frame>
+  local total=0 line len
+  while IFS= read -r line; do
+    line=$(strip_sgr "$line")
+    len=${#line}
+    total=$(( total + (len == 0 ? 1 : (len - 1) / 80 + 1) ))
+  done <<< "$1"
+  printf '%s' "$total"
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -472,8 +495,12 @@ pass() { printf 'ok - %s\n' "$1"; }
 pass "alpha"
 SH
   chmod +x "$d/wt/tests/demo.test.sh"
-  # A python test file is enumerated by name but never executed by check 2, so
-  # the run is a name-only verification for that file while still exiting 0.
+  # A python test file is enumerated by name (check 1) but never executed by
+  # check 2 - deterministically, on any host: pytest resolution requires BOTH a
+  # pytest config marker and a worktree-local interpreter (fm-test-exec-lib.sh),
+  # and this fixture has neither. The gate reports its identifier as
+  # `unexecuted:` and exits 1, so the row must carry the qualifier itself and
+  # never a bare "ok".
   cat > "$d/wt/tests/test_demo.py" <<'PY'
 def test_alpha():
     assert True
@@ -487,8 +514,10 @@ PY
   git -C "$d/wt" commit -qm "unrelated change"
   FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
   out=$(run_flow "$d" --worktree "$d/wt" --tests-gate)
-  assert_contains "$out" "prior-tests: missing 0 / failing 0 ok" \
-    "merge-gate box keeps its own annotation"
+  assert_contains "$out" "prior-tests: missing 0 / failing 0 (1 unexecuted)" \
+    "merge-gate box qualifies its own annotation with the unexecuted count"
+  assert_not_contains "$out" "failing 0 ok" \
+    "an unexecuted base assertion never renders a bare ok"
   assert_contains "$out" "prior-tests: compared against base main" \
     "the compared base is named in full on its own legend line"
   assert_contains "$out" "prior-tests: 1 base file verified by name only, not by assertion" \
@@ -863,12 +892,16 @@ SH
   pass "a signal-killed probe renders pending, never a false green"
 }
 
-# (t) the frame is bounded to the pane's rows the way it is bounded to columns.
-# The worst case is the ordinary one: every conditional line present at once -
-# the PR line, the compared base, the name-only count and the det|LLM legend.
+# (t) in watch mode the frame is bounded to the pane's rows the way it is
+# bounded to columns; the one-shot render is never trimmed. The worst case is
+# the ordinary one: every conditional line present at once - the PR line, the
+# compared base, the name-only count and the det|LLM legend - and the two
+# qualifier lines rank as core while the box shows a result, so a shrinking
+# pane degrades the box to pending before it ever separates a result from
+# what qualifies it.
 test_frame_height_bounded() {
   reset_fakes
-  local d out lines hdr box
+  local d out frame lines hdr box
   d=$(new_case frame-height)
   make_fakebin "$d" >/dev/null
   mkdir -p "$d/wt/tests"
@@ -900,39 +933,112 @@ PY
     "pr=https://github.com/o/r/pull/7"
   FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
 
-  out=$(run_flow "$d" height-task --tests-gate)
-  assert_contains "$out" "PR: https://github.com/o/r/pull/7" "the PR line is present"
-  assert_contains "$out" "prior-tests: compared against base main" "the base legend is present"
-  assert_contains "$out" "verified by name only" "the name-only legend is present"
-  assert_contains "$out" "det|LLM: commands.<step>" "the det|LLM legend is present"
-  lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+  # Watch mode, default 24-row budget: the 24-row worst case fits whole.
+  out=$(FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" height-task --tests-gate --watch 1)
+  frame=$(last_frame "$out")
+  assert_contains "$frame" "PR: https://github.com/o/r/pull/7" "the PR line is present"
+  assert_contains "$frame" "prior-tests: compared against base main" "the base legend is present"
+  assert_contains "$frame" "verified by name only" "the name-only legend is present"
+  assert_contains "$frame" "det|LLM: commands.<step>" "the det|LLM legend is present"
+  lines=$(printf '%s\n' "$frame" | wc -l | tr -d ' ')
   [ "$lines" = 24 ] || fail "the worst-case frame is $lines lines, expected the 24-line case"
-  assert_not_contains "$out" "legend line" "nothing is dropped inside a 24-row budget"
-  hdr=$(strip_sgr "$(printf '%s\n' "$out" | head -1)")
+  assert_not_contains "$frame" "legend line" "nothing is dropped inside a 24-row budget"
+  hdr=$(strip_sgr "$(printf '%s\n' "$frame" | head -1)")
   assert_contains "$hdr" "height-task" "the header survives at the default budget"
 
-  # A genuinely smaller pane: only legend lines go, the drop is stated, and the
-  # run-specific base claim outlives the fixed explanatory legends.
-  out=$(FM_NM_FLOW_ROWS=20 run_flow "$d" height-task --tests-gate)
-  lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
-  [ "$lines" -le 20 ] || fail "frame is $lines lines against a 20-row budget"
-  assert_contains "$out" "legend lines dropped to fit a 20-row pane" "the drop is stated explicitly"
-  hdr=$(strip_sgr "$(printf '%s\n' "$out" | head -1)")
+  # 21 rows: every plain legend goes and the drop is stated, while the result
+  # row and its two qualifier lines all survive - they are core while the box
+  # shows a result, whatever rank order the plain legends drop in.
+  out=$(FM_NM_FLOW_ROWS=21 FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" height-task --tests-gate --watch 1)
+  frame=$(last_frame "$out")
+  lines=$(printf '%s\n' "$frame" | wc -l | tr -d ' ')
+  [ "$lines" -le 21 ] || fail "frame is $lines lines against a 21-row budget"
+  assert_contains "$frame" "4 legend lines dropped to fit a 21-row pane" "the drop is stated explicitly"
+  assert_contains "$frame" "prior-tests: missing 0 / failing 0 (1 unexecuted)" \
+    "the qualified result row survives the drop"
+  assert_contains "$frame" "prior-tests: compared against base main" \
+    "the base claim is undroppable while a result shows"
+  assert_contains "$frame" "verified by name only" \
+    "the name-only claim is undroppable while a result shows"
+  assert_not_contains "$frame" "outcomes: checks-passed" "plain legends are what drops"
+  hdr=$(strip_sgr "$(printf '%s\n' "$frame" | head -1)")
   assert_contains "$hdr" "height-task" "the header is never dropped"
-  assert_contains "$out" "IDLE: no run for branch" "the banner is never dropped"
+  assert_contains "$frame" "IDLE: no run for branch" "the banner is never dropped"
   for box in intent rebase review test document lint push "open PR" "CI monitor" "merge gate" captain teardown; do
-    assert_contains "$out" "[ $box" "step row $box is never dropped"
+    assert_contains "$frame" "[ $box" "step row $box is never dropped"
   done
-  assert_contains "$out" "prior-tests: compared against base main" \
-    "the base claim outranks the fixed legends"
-  assert_not_contains "$out" "outcomes: checks-passed" "the lowest-value legend goes first"
+
+  # 20 rows: the result, its qualifiers and the mandatory drop notice no longer
+  # coexist, so the box itself degrades to pending - at no pane size does a
+  # result appear separated from its qualifiers.
+  out=$(FM_NM_FLOW_ROWS=20 FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" height-task --tests-gate --watch 1)
+  frame=$(last_frame "$out")
+  lines=$(printf '%s\n' "$frame" | wc -l | tr -d ' ')
+  [ "$lines" -le 20 ] || fail "frame is $lines lines against a 20-row budget"
+  assert_contains "$frame" "prior-tests: pending (pane too short to qualify)" \
+    "the box degrades to pending when its qualifiers cannot fit"
+  assert_not_contains "$frame" "compared against base" "no unqualifiable claim is made"
+  assert_not_contains "$frame" "unexecuted)" "no unqualifiable count is shown"
+  assert_not_contains "$frame" "failing 0 ok" "no green appears without its qualifiers"
+  assert_contains "$frame" "legend lines dropped to fit a 20-row pane" "the drop is still stated"
+
+  # A pane too short even for the core rows: everything the frame can say is
+  # said plainly - it will scroll - never a claim that it was made to fit.
+  out=$(FM_NM_FLOW_ROWS=12 FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" height-task --tests-gate --watch 1)
+  frame=$(last_frame "$out")
+  assert_contains "$frame" "prior-tests: pending (pane too short to qualify)" \
+    "the degraded box still never shows an unqualified result"
+  assert_contains "$frame" "frame needs 18 rows; this 12-row pane will scroll it" \
+    "an unfittable frame says so plainly"
+  assert_not_contains "$frame" "dropped to fit" "no notice claims an unfittable frame was made to fit"
+  assert_not_contains "$frame" "compared against base" "still no unqualified claim"
 
   # A bogus override falls back to the same hard 24-row default.
-  out=$(FM_NM_FLOW_ROWS=not-a-number run_flow "$d" height-task --tests-gate)
-  lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+  out=$(FM_NM_FLOW_ROWS=not-a-number FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" height-task --tests-gate --watch 1)
+  frame=$(last_frame "$out")
+  lines=$(printf '%s\n' "$frame" | wc -l | tr -d ' ')
   [ "$lines" = 24 ] || fail "a non-numeric row override did not fall back to 24: $lines lines"
-  assert_not_contains "$out" "legend line" "the fallback budget drops nothing"
-  pass "frame height is bounded without losing the header, banner or a step row"
+  assert_not_contains "$frame" "legend line" "the fallback budget drops nothing"
+
+  # The one-shot render is never trimmed: scrollback makes trimming pointless,
+  # so even a tiny declared pane gets the complete frame.
+  out=$(FM_NM_FLOW_ROWS=12 run_flow "$d" height-task --tests-gate)
+  lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+  [ "$lines" = 24 ] || fail "the one-shot render was trimmed to $lines lines"
+  assert_contains "$out" "prior-tests: compared against base main" \
+    "the one-shot render keeps the base claim"
+  assert_contains "$out" "prior-tests: missing 0 / failing 0 (1 unexecuted)" \
+    "the one-shot render keeps the qualified result"
+  assert_not_contains "$out" "dropped to fit" "the one-shot render drops nothing"
+  assert_not_contains "$out" "frame needs" "the one-shot render claims no shortfall"
+  pass "watch frames are row-bounded, results stay qualified, one-shot renders whole"
+}
+
+# The row budget counts terminal ROWS, not frame lines: the PR URL is never
+# truncated, so past 80 columns it wraps and must be charged the rows it
+# really takes. A line-counting budget would claim this frame fits and drop
+# nothing; the row-counting budget drops two legend lines and says so.
+test_wrapping_pr_row_budget() {
+  reset_fakes
+  local d out frame rows url
+  d=$(new_case pr-wrap)
+  make_fakebin "$d" >/dev/null
+  make_repo_on_branch "$d/wt" fm/wrap
+  url="https://github.com/very-long-organization-name/very-long-repository-name-for-wrapping/pull/123456"
+  fm_write_meta "$d/state/wrap-task.meta" \
+    "window=firstmate:fm-wrap-task" \
+    "worktree=$d/wt" \
+    "project=$d/projects/demo" \
+    "pr=$url"
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+  out=$(FM_NM_FLOW_ROWS=22 FM_NM_FLOW_WATCH_MAX=1 run_flow "$d" wrap-task --watch 1)
+  frame=$(last_frame "$out")
+  assert_contains "$frame" "PR: $url" "the PR URL is carried whole, never truncated"
+  rows=$(frame_rows "$frame")
+  [ "$rows" -le 22 ] || fail "frame occupies $rows terminal rows against a 22-row budget"
+  assert_contains "$frame" "2 legend lines dropped to fit a 22-row pane" \
+    "the wrapped PR line is charged the rows it takes"
+  pass "the row budget charges a wrapping PR URL as the rows it really takes"
 }
 
 # (u) the probe's scratch dir is the only thing this viewer writes, and an
@@ -1091,6 +1197,7 @@ test_header_keeps_task_id
 test_perl_bounding_arm_reports_signals
 test_tests_gate_signal_killed_probe
 test_frame_height_bounded
+test_wrapping_pr_row_budget
 test_tests_gate_tmpdir_cleanup_on_interrupt
 test_watch_argument_shapes
 test_ci_no_checks_banner
