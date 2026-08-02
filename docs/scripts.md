@@ -74,7 +74,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR-poll sidecars              |
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
-| `fm-pr-merge.sh`         | Record PR metadata, gate on `fm-assert-tests-kept.sh`, then merge a task's canonical full GitHub URL |
+| `fm-pr-merge.sh`         | Record PR metadata, gate on `fm-assert-tests-kept.sh` and on the PR's checks being green, then merge a task's canonical full GitHub URL |
 | `fm-assert-tests-kept.sh` | Report the base's test assertions the branch under review lost, broke, or could not execute at all (its header owns the finding classes and exit codes) |
 | `fm-test-exec-lib.sh`   | Shared per-language test runners (shell, pytest) and scratch-tree environment lifecycle that `fm-assert-tests-kept.sh` check 2 drives |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
