@@ -246,6 +246,32 @@ run_bounded() {  # <seconds> <cmd...>
 nm_run() {  # <args...>
   ( cd "$WT" && run_bounded "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true
 }
+# The tests-gate probe alone goes through this background variant. A foreground
+# command defers a trapped INT/TERM until it returns, and timeout(1) keeps the
+# probe in its own process group where a terminal Ctrl-C never lands - so the
+# viewer sat uninterruptible for the probe's whole bound on exactly the arm
+# most hosts take (the perl arm forwards for itself). bash's `wait` IS
+# interruptible by traps, so the probe runs as a background job whose pid the
+# INT/TERM handler can reap explicitly. Each arm is a simple command, so $! is
+# the bounding tool itself; the refusal arm still spawns nothing. The rc
+# contract is run_bounded's exactly - `wait` reports 124 on expiry, 128+signal
+# on a signal death, the child's own exit otherwise, and refusal still answers
+# 125 - so the caller's MGATE_* handling reads the same verdicts from both.
+PROBE_PID=""
+run_bounded_bg() {  # <seconds> <cmd...>
+  local secs=$1 rc=0
+  shift
+  case "$HAVE_TIMEOUT" in
+    timeout)  timeout "$secs" "$@" & ;;
+    gtimeout) gtimeout "$secs" "$@" & ;;
+    perl)     perl -e "$PERL_BOUND_PROG" "$secs" "$@" & ;;
+    *)        return "$BOUND_REFUSED_RC" ;;
+  esac
+  PROBE_PID=$!
+  wait "$PROBE_PID" || rc=$?
+  PROBE_PID=""
+  return "$rc"
+}
 
 trim() {
   local s=${1:-}
@@ -376,21 +402,55 @@ MGATE_ANN="prior-tests: pending (checked at merge)"
 MGATE_NAMEONLY=0
 MGATE_BASE=""
 # The probe's scratch dir is the only thing this viewer ever writes, so its
-# removal is owned by the EXIT trap alone: in watch mode an interrupt is
-# delivered the moment the bounded probe returns, which would otherwise exit
-# past any cleanup left on the return paths and leak a directory per
-# interrupted run. INT/TERM has exactly one handler for the whole script, set
-# here once - a second, mode-specific trap would shadow this one and leave a
-# dead handler a future reader assumes still runs. It only converts the signal
-# into an exit so the EXIT trap fires; 130 is the conventional interrupted
-# status either mode reports.
+# removal is owned by the EXIT trap alone: an interrupt lands mid-probe (the
+# handler fires out of the `wait`) and exits past any cleanup left on the
+# return paths, which would leak a directory per interrupted run. INT/TERM has
+# exactly one handler for the whole script, set here once - a second,
+# mode-specific trap would shadow this one and leave a dead handler a future
+# reader assumes still runs. It TERMs the in-flight probe's tree so the job
+# cannot outlive the viewer - TERM rather than the received signal, because
+# bash starts background jobs with SIGINT ignored and that disposition can
+# survive exec into parts of the probe's tree, while nothing in it ignores
+# TERM - then converts the signal into an exit so the EXIT trap fires; 130 is
+# the conventional interrupted status either mode reports.
+#
+# The whole DESCENDANT TREE is signalled, not just the bounding pid: TERM to
+# timeout(1) is forwarded only to its own process group, and the probe nests a
+# second timeout inside it (fm-assert-tests-kept.sh bounds each executed test
+# file), which re-groups itself exactly like the outer one - so the group
+# signal misses it and an interrupted viewer would orphan the base suite for
+# that inner bound. The tree is collected first and signalled after, so a
+# parent's death cannot reparent a child out of the sweep; each surviving
+# timeout still forwards the TERM to its own child group, covering anything
+# spawned between collect and kill. Without pgrep the bounding pid alone is
+# the best effort a signal handler can make.
 MGATE_TMPD=""
 clean_tmpd() {
   [ -n "$MGATE_TMPD" ] && rm -rf "$MGATE_TMPD"
   MGATE_TMPD=""
 }
+kill_probe_tree() {  # <pid>
+  local frontier=$1 pids=$1 p kids next
+  if command -v pgrep >/dev/null 2>&1; then
+    while [ -n "$frontier" ]; do
+      next=""
+      for p in $frontier; do
+        kids=$(pgrep -P "$p" 2>/dev/null || true)
+        [ -n "$kids" ] && next="$next $kids"
+      done
+      [ -n "$next" ] && pids="$pids $next"
+      frontier=$next
+    done
+  fi
+  # shellcheck disable=SC2086
+  kill -TERM $pids 2>/dev/null
+}
+on_int_term() {
+  [ -n "$PROBE_PID" ] && kill_probe_tree "$PROBE_PID"
+  exit 130
+}
 trap clean_tmpd EXIT
-trap 'exit 130' INT TERM
+trap on_int_term INT TERM
 run_tests_gate() {
   local base out_file missing failing unexec summary
   MGATE_BASE=""
@@ -414,7 +474,7 @@ run_tests_gate() {
   MGATE_TMPD=$tmpd
   out_file="$tmpd/kept.out"
   local rc=0
-  run_bounded "$TESTS_TIMEOUT" "$SCRIPT_DIR/fm-assert-tests-kept.sh" \
+  run_bounded_bg "$TESTS_TIMEOUT" "$SCRIPT_DIR/fm-assert-tests-kept.sh" \
     --worktree "$WT" --base "$base" > "$out_file" 2>"$tmpd/kept.err" || rc=$?
   if [ "$rc" -eq 124 ]; then
     MGATE_ANN="prior-tests: pending (probe timed out after ${TESTS_TIMEOUT}s)"

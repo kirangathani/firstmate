@@ -48,6 +48,9 @@
 #   (w) a no-CI-checks marker gets its own banner, never CI GREEN
 #   (x) a parked run with no resolvable gate name says so, and never invents a
 #       findings breakdown it could not read
+#   (y) INT/TERM during a timeout(1)-arm probe is honored immediately: the
+#       viewer exits 130 promptly instead of after the probe's full bound, the
+#       probe's process tree dies with it, and the scratch dir is cleaned
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1107,14 +1110,82 @@ SH
   [ -d "$1" ] || fail "the probe never created its scratch dir under TMPDIR"
   # TERM, not INT: a background job of a non-interactive shell starts with
   # SIGINT ignored, and bash cannot re-trap a signal that was ignored on entry,
-  # so an INT here would be a no-op. Both land on the same handler, and the
-  # signal is delivered while the probe holds the foreground - so the handler
-  # runs the moment the probe returns, ahead of its own cleanup line.
+  # so an INT here would be a no-op. Both land on the same handler, which fires
+  # out of the `wait` while the probe is still running - ahead of the cleanup
+  # line on run_tests_gate's own return path.
   kill -TERM "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   leftover=$(find "$d/tmp" -maxdepth 1 -name 'fm-nm-flow.*' 2>/dev/null | head -1)
   [ -z "$leftover" ] || fail "an interrupted probe leaked its scratch dir: $leftover"
   pass "the probe's scratch dir is removed even when the frame is interrupted"
+}
+
+# (y) on the timeout(1) arm the probe runs in its own process group, so a
+# terminal interrupt reaches only the viewer's bash - and a FOREGROUND probe
+# would defer the trap until the probe returned, up to the probe's whole bound
+# (five minutes at the default). The probe runs as a background job under an
+# interruptible `wait` precisely so the handler fires the moment the signal
+# lands, TERMs the probe's tree, and lets the EXIT trap clean the scratch dir.
+# TERM for the same re-trap reason as (u); the bound is set far past the
+# test's own patience so a deferred trap cannot sneak through as a pass.
+test_tests_gate_interrupt_not_deferred_on_timeout_arm() {
+  reset_fakes
+  if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
+    pass "interrupting the timeout arm (skipped: no timeout tool on this host)"
+    return
+  fi
+  local d pid base_pid i rc=0 leftover
+  d=$(new_case tests-gate-interrupt-prompt)
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/tmp" "$d/wt/tests"
+  git -C "$d/wt" init -q
+  # The base suite records its own pid so its death is observable, then
+  # outsleeps both the probe bound and the test.
+  cat > "$d/wt/tests/slow.test.sh" <<SH
+#!/usr/bin/env bash
+echo \$\$ > '$d/base-suite-pid'
+sleep 120
+SH
+  chmod +x "$d/wt/tests/slow.test.sh"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm base
+  git -C "$d/wt" branch -M main
+  git -C "$d/wt" checkout -qb fm/change
+  printf 'note\n' > "$d/wt/README.md"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm "unrelated change"
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+
+  TMPDIR="$d/tmp" PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_NM_FLOW_TESTS_TIMEOUT=60 \
+    "$NM_FLOW" --worktree "$d/wt" --tests-gate --watch 1 >/dev/null 2>&1 &
+  pid=$!
+  i=0
+  while [ ! -s "$d/base-suite-pid" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -s "$d/base-suite-pid" ] || fail "the base suite never started under the probe"
+  base_pid=$(cat "$d/base-suite-pid")
+  kill -TERM "$pid" 2>/dev/null || true
+  # Promptness IS the property: the viewer gets ~5s to exit, not the 60s bound
+  # a deferred trap would spend.
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null || true
+    kill -9 "$base_pid" 2>/dev/null || true
+    fail "TERM was deferred: the viewer was still alive 5s after the signal"
+  fi
+  wait "$pid" 2>/dev/null || rc=$?
+  expect_code 130 "$rc" "the one INT/TERM handler still reports 130"
+  # The probe tree must die with the viewer, never run the base suite on.
+  i=0
+  while kill -0 "$base_pid" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  if kill -0 "$base_pid" 2>/dev/null; then
+    kill -9 "$base_pid" 2>/dev/null || true
+    fail "the interrupted viewer orphaned the running base suite"
+  fi
+  leftover=$(find "$d/tmp" -maxdepth 1 -name 'fm-nm-flow.*' 2>/dev/null | head -1)
+  [ -z "$leftover" ] || fail "an interrupted probe leaked its scratch dir: $leftover"
+  pass "a timeout-arm interrupt ends viewer, probe tree and scratch dir promptly"
 }
 
 # (v) --watch before the task id must work: task ids are 26-char ULIDs, and a
@@ -1221,6 +1292,7 @@ test_tests_gate_signal_killed_probe
 test_frame_height_bounded
 test_wrapping_pr_row_budget
 test_tests_gate_tmpdir_cleanup_on_interrupt
+test_tests_gate_interrupt_not_deferred_on_timeout_arm
 test_watch_argument_shapes
 test_ci_no_checks_banner
 test_parked_unnamed_gate
