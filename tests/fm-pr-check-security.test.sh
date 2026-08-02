@@ -67,6 +67,12 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *statusCheckRollup*)
+    # Green rollup so fm-pr-merge.sh's checks-green gate passes; this suite
+    # exercises URL/ID safety, not check classification (tests/fm-pr-merge.test.sh
+    # owns that).
+    printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tmock-default-ci\n'
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
