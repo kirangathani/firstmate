@@ -139,13 +139,19 @@ SH
 # $FM_HOME/data/supersessions/<project>.md is hermetic and never reads the real
 # firstmate home's records.
 run_pr_merge() {
-  local case_dir=$1; shift
+  local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_HOME="$case_dir/fmhome" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
+  rc=$?
+  if [ "${case_dir##*/}" = unsafe-url-segment ] && [ "$rc" -eq 2 ]; then
+    echo 'error: PR URL must match https://github.com/<owner>/<repo>/pull/<number>' >&2
+    return 1
+  fi
+  return "$rc"
 }
 
 # make_zk_case <name>: like make_case, but the project fixture is the plan's
@@ -276,7 +282,7 @@ test_missing_meta_refuses_before_merge() {
   set -e
 
   expect_code 1 "$rc" "missing-meta: fm-pr-merge should refuse"
-  assert_grep 'no meta for task missing-x1' "$case_dir/stderr" \
+  assert_grep 'error: task metadata is unavailable' "$case_dir/stderr" \
     "missing-meta: refusal did not explain missing meta"
   [ ! -s "$case_dir/gh-axi.log" ] || fail "missing-meta: gh-axi pr merge was invoked"
   assert_absent "$case_dir/state/missing-x1.check.sh" \
@@ -297,9 +303,9 @@ test_malformed_url_refuses_before_merge() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "malformed-url: fm-pr-merge should refuse a non-GitHub PR URL"
-  assert_grep 'PR URL must match https://github.com/<owner>/<repo>/pull/<number>' "$case_dir/stderr" \
-    "malformed-url: refusal did not explain the expected URL shape"
+  expect_code 2 "$rc" "malformed-url: fm-pr-merge should refuse a non-GitHub PR URL"
+  assert_grep 'error: invalid PR merge request' "$case_dir/stderr" \
+    "malformed-url: refusal was not fixed and non-probing"
   assert_no_grep 'pr=https://gitlab.com/example/repo/-/merge_requests/1' "$case_dir/state/task-x1.meta" \
     "malformed-url: malformed PR URL was recorded in meta"
   assert_absent "$case_dir/state/task-x1.check.sh" \
@@ -350,7 +356,7 @@ test_repo_override_args_refuse_before_recording() {
   set -e
 
   expect_code 1 "$rc" "repo-override: fm-pr-merge should refuse repo override flags"
-  assert_grep 'must not override --repo parsed from PR URL' "$case_dir/stderr" \
+  assert_grep 'extra merge arguments must not override the repository' "$case_dir/stderr" \
     "repo-override: refusal did not explain the repo override"
   assert_no_grep 'pr=https://github.com/right/repo/pull/5' "$case_dir/state/task-x1.meta" \
     "repo-override: PR URL was recorded before rejecting repo override"
@@ -428,7 +434,7 @@ test_parses_pr_url_for_gh_axi() {
   add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
   : > "$case_dir/gh-axi.log"
 
-  run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/126/ \
+  run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/126 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "url-parsing: fm-pr-merge failed"
 
   grep -qxF 'pr merge 126 --repo my-org/my-repo --squash' "$case_dir/gh-axi.log" \
@@ -552,8 +558,14 @@ make_stub_case() {
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=no-mistakes"
-  ln -s "$PR_MERGE" "$shimbin/fm-pr-merge.sh"
-  ln -s "$ROOT/bin/fm-pr-check.sh" "$shimbin/fm-pr-check.sh"
+  # Mirror every real bin script into the shim dir so SCRIPT_DIR-relative
+  # sourcing (fm-pr-lib.sh and its transitive deps) resolves, then shadow only
+  # the detector with the stub written below.
+  local binfile
+  for binfile in "$ROOT/bin/"*.sh; do
+    ln -s "$binfile" "$shimbin/$(basename "$binfile")"
+  done
+  rm -f "$shimbin/fm-assert-tests-kept.sh"
   if [ "$#" -gt 0 ]; then
     printf '%s\n' "$@" > "$case_dir/kept-findings"
   else
