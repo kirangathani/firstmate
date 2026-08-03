@@ -51,6 +51,12 @@
 #   (y) INT/TERM during a timeout(1)-arm probe is honored immediately: the
 #       viewer exits 130 promptly instead of after the probe's full bound, the
 #       probe's process tree dies with it, and the scratch dir is cleaned
+#   (z) an identifier covered by a captain-approved supersession entry is its
+#       own labelled count in the merge-gate row - never folded into missing,
+#       failing or unexecuted, never a green, inside 80 columns - and the
+#       exec-gate marker decides whether the unexecuted class is matched at
+#       all, mirroring the order bin/fm-pr-merge.sh applies; and the probe
+#       leaves the guard's fleet state untouched
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -891,6 +897,10 @@ test_tests_gate_signal_killed_probe() {
   # real invocation come back signal-killed rather than merely non-zero.
   mkdir -p "$d/bin"
   cp "$NM_FLOW" "$d/bin/fm-nm-flow.sh"
+  # The viewer sources the shared supersession grammar from its own directory,
+  # so the copy needs it too - a missing library is a broken install and the
+  # viewer says so rather than degrading quietly.
+  cp "$ROOT/bin/fm-supersession-lib.sh" "$d/bin/fm-supersession-lib.sh"
   cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
 #!/usr/bin/env bash
 kill -9 $$
@@ -1265,6 +1275,162 @@ test_parked_unnamed_gate() {
   pass "an unnamed parked gate is honest about both the gate and the counts"
 }
 
+# (z) an identifier the captain has already excused by a supersession entry is
+# its OWN category in the merge-gate row: never folded into passing, failing or
+# unexecuted, never silently dropped, and never a green. The viewer classifies
+# for display only - bin/fm-pr-merge.sh remains the sole authority on whether a
+# merge proceeds - so it applies the gate's two policy layers in the gate's own
+# order, which is what keeps "excused" meaning "a captain-approved entry covers
+# this" and not "this project does not gate that class".
+test_tests_gate_excused_by_supersession() {
+  reset_fakes
+  local d out row line width
+  d=$(new_case tests-gate-excused)
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/wt/tests" "$d/data/supersessions" "$d/data/exec-gate"
+  git -C "$d/wt" init -q
+  cat > "$d/wt/tests/demo.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+pass "alpha"
+pass "beta"
+SH
+  chmod +x "$d/wt/tests/demo.test.sh"
+  # Enumerated by name (check 1) but never executable by check 2 on any host
+  # (no pytest config marker, no worktree-local interpreter), so its identifier
+  # is reported `unexecuted:` - the class the exec-gate marker governs.
+  cat > "$d/wt/tests/test_demo.py" <<'PY'
+def test_alpha():
+    assert True
+PY
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm base
+  git -C "$d/wt" branch -M main
+  git -C "$d/wt" checkout -qb fm/change
+  cat > "$d/wt/tests/demo.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+pass "alpha"
+SH
+  git -C "$d/wt" commit -qam "drop beta"
+  fm_write_meta "$d/state/ss-task.meta" \
+    "window=firstmate:fm-ss-task" \
+    "worktree=$d/wt" \
+    "project=$d/projects/demo"
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+
+  # No record at all: the dropped assertion is a plain missing finding.
+  out=$(FM_HOME="$d" run_flow "$d" ss-task --tests-gate)
+  assert_contains "$out" "prior-tests: missing 1 / failing 0 !!" \
+    "with no supersession record the finding is counted as missing"
+  assert_not_contains "$out" "excused" "nothing is excused without a record"
+
+  cat > "$d/data/supersessions/demo.md" <<'MD'
+- ids: tests/demo.test.sh::* | project: demo | kind: missing | date: 2026-08-03 | reason: beta is deliberately superseded
+- ids: tests/test_demo.py::* | project: demo | kind: unexecuted | date: 2026-08-03 | reason: python assertions cannot run here
+MD
+
+  # Exec-gate marker absent: the unexecuted identifier is not matched against
+  # the record at all, so it stays in the not-run count. Only the missing one
+  # moves out of its class, and it moves into a category of its own.
+  out=$(FM_HOME="$d" run_flow "$d" ss-task --tests-gate)
+  assert_contains "$out" "prior-tests: miss 0 / fail 0 / unexec 1 / excused 1" \
+    "an excused identifier is counted and labelled on its own"
+  assert_not_contains "$out" "missing 1" "an excused identifier is not left in missing"
+  assert_not_contains "$out" "failing 1" "an excused identifier is not folded into failing"
+  assert_not_contains "$out" "unexec 2" "an excused identifier is not folded into unexecuted"
+  assert_not_contains "$out" " ok" "an excused identifier never produces a green"
+  assert_contains "$out" "prior-tests: excused = a captain-approved supersession covers it" \
+    "the excused category is spelled out under the diagram"
+  assert_contains "$out" "prior-tests: compared against base main" \
+    "the excused row still names the base it compared against"
+  while IFS= read -r line; do
+    line=$(strip_sgr "$line")
+    width=${#line}
+    [ "$width" -le 80 ] || fail "excused frame line is $width columns: $line"
+  done <<< "$out"
+
+  # Marker present: the project gates the unexecuted class, so its entry now
+  # applies too and that identifier joins the excused count rather than
+  # disappearing from the row.
+  : > "$d/data/exec-gate/demo"
+  out=$(FM_HOME="$d" run_flow "$d" ss-task --tests-gate)
+  assert_contains "$out" "prior-tests: miss 0 / fail 0 / unexec 0 / excused 2" \
+    "the exec-gate marker moves the unexecuted finding into the excused count"
+  assert_not_contains "$out" " ok" "two excused identifiers are still not a green"
+  row=$(printf '%s\n' "$out" | grep 'excused 2' | head -1)
+  row=$(strip_sgr "$row")
+  width=${#row}
+  [ "$width" -le 80 ] || fail "merge-gate row is $width columns: $row"
+
+  # A malformed entry (no reason field) fails closed exactly as the gate's own
+  # parser does: nothing is excused, and the finding is back in its raw class.
+  printf -- '- ids: tests/demo.test.sh::* | project: demo | kind: missing | date: 2026-08-03\n' \
+    > "$d/data/supersessions/demo.md"
+  rm -f "$d/data/exec-gate/demo"
+  out=$(FM_HOME="$d" run_flow "$d" ss-task --tests-gate)
+  assert_contains "$out" "prior-tests: missing 1 / failing 0 !!" \
+    "a malformed entry excuses nothing"
+  assert_not_contains "$out" "excused" "a malformed entry never labels anything excused"
+  pass "excused identifiers are their own category, never folded and never green"
+}
+
+# The tests-gate probe must not write fleet state. fm-assert-tests-kept.sh calls
+# bin/fm-guard.sh unconditionally, and the guard in write mode claims the
+# one-per-episode WATCHER DOWN banner under state/ - both a write this viewer
+# promises never to make, and an alarm the next genuinely guarded command would
+# then never see in full.
+test_tests_gate_leaves_guard_state_alone() {
+  reset_fakes
+  local d out before after
+  d=$(new_case tests-gate-guard)
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/wt/tests"
+  git -C "$d/wt" init -q
+  cat > "$d/wt/tests/demo.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+pass "alpha"
+pass "beta"
+SH
+  chmod +x "$d/wt/tests/demo.test.sh"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm base
+  git -C "$d/wt" branch -M main
+  git -C "$d/wt" checkout -qb fm/change
+  cat > "$d/wt/tests/demo.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+pass "alpha"
+SH
+  git -C "$d/wt" commit -qam "drop beta"
+  # A task in flight with no watcher beacon is exactly the state the guard
+  # writes for, so this fixture is only meaningful if the guard really would
+  # write here: prove it by running the guard as any ordinary caller does,
+  # then clear what it left before the viewer runs.
+  fm_write_meta "$d/state/guard-task.meta" \
+    "window=firstmate:fm-guard-task" \
+    "worktree=$d/wt" \
+    "project=$d/projects/demo"
+  FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1 || true
+  [ -e "$d/state/.guard-watcher-stale-banner" ] || \
+    fail "fixture does not reproduce the guard's write path"
+  rm -f "$d/state/.guard-watcher-stale-banner" "$d/state/.guard-watcher-stale-banner.lock"
+
+  before=$(find "$d/state" -mindepth 1 -maxdepth 1 | sed 's|.*/||' | sort)
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+  out=$(FM_HOME="$d" run_flow "$d" guard-task --tests-gate)
+  assert_contains "$out" "prior-tests: missing 1 / failing 0 !!" \
+    "the probe really ran, so the read-only claim is not vacuous"
+  [ ! -e "$d/state/.guard-watcher-stale-banner" ] || \
+    fail "the tests-gate probe claimed the watcher-down banner episode"
+  [ ! -e "$d/state/.guard-watcher-stale-banner.lock" ] || \
+    fail "the tests-gate probe left the guard's lock behind"
+  after=$(find "$d/state" -mindepth 1 -maxdepth 1 | sed 's|.*/||' | sort)
+  [ "$before" = "$after" ] || fail "the tests-gate probe changed state/: $before -> $after"
+  pass "the tests-gate probe writes no guard state"
+}
+
 test_usage_error
 test_missing_meta
 test_task_id_resolution
@@ -1296,5 +1462,7 @@ test_tests_gate_interrupt_not_deferred_on_timeout_arm
 test_watch_argument_shapes
 test_ci_no_checks_banner
 test_parked_unnamed_gate
+test_tests_gate_excused_by_supersession
+test_tests_gate_leaves_guard_state_alone
 
 echo "all fm-nm-flow tests passed"

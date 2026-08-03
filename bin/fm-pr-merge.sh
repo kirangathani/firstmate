@@ -172,6 +172,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-supersession-lib.sh
+. "$SCRIPT_DIR/fm-supersession-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -228,135 +230,15 @@ SUPERSESSIONS_FILE="$FM_HOME/data/supersessions/$PROJ_NAME.md"
 EXEC_GATE_FILE="$FM_HOME/data/exec-gate/$PROJ_NAME"
 NO_PR_CI_FILE="$FM_HOME/data/no-pr-ci/$PROJ_NAME"
 
-# supersession_approved <file>::<name> <finding-class>: 0 iff the project's
+# supersession_approved <file>::<name> <finding-class>: 0 iff this project's
 # supersession record holds a fully-formed captain-approved entry that covers
-# that identifier for that finding class (grammar in this script's header).
-# An absent file means no approvals; a malformed entry is warned about and never
-# honored.
+# that identifier for that finding class (grammar in this script's header,
+# which stays this file's to own). The matcher itself lives in
+# bin/fm-supersession-lib.sh so the read-only viewer that shows a captain what
+# this gate will excuse (bin/fm-nm-flow.sh) reads the record through the exact
+# same parser rather than a second one that could drift from it.
 supersession_approved() {
-  local ident=$1 finding_class=$2
-  local line head field key val bad req kind_seen seen_keys
-  local entry_id entry_ids entry_proj entry_date entry_reason entry_kind
-  [ -n "$PROJ_NAME" ] || return 1
-  [ -f "$SUPERSESSIONS_FILE" ] || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      "- id: "*|"- ids: "*) ;;
-      "- "*" | "*": "*)
-        echo "warning: ignoring supersession entry that carries neither 'id:' nor 'ids:' as its first field: $line" >&2
-        continue
-        ;;
-      *) continue ;;
-    esac
-    bad=
-    for req in project date reason; do
-      case "$line" in
-        *" | $req: "*) ;;
-        *) bad="a missing required field ($req)" ; break ;;
-      esac
-    done
-    if [ -n "$bad" ]; then
-      echo "warning: ignoring supersession entry missing a required field (id or ids, project, date, reason): $line" >&2
-      continue
-    fi
-    # reason is taken as the whole remainder so it may itself contain " | ";
-    # every other field is parsed out of the head, in any order.
-    entry_reason=${line#* | reason: }
-    head=${line%% | reason: *}
-    head=${head#- }
-    # Fail closed on a field written AFTER reason: it would be swallowed into the
-    # reason text, and a swallowed `kind:` silently widens the entry to any.
-    for req in id ids project date kind; do
-      case "$entry_reason" in
-        *" | $req:"*) bad="a field after reason (reason must be the last field)" ; break ;;
-      esac
-    done
-    if [ -n "$bad" ]; then
-      echo "warning: ignoring supersession entry with $bad: $line" >&2
-      continue
-    fi
-    entry_id='' entry_ids='' entry_proj='' entry_date='' entry_kind='' kind_seen=0
-    seen_keys=' '
-    while :; do
-      case "$head" in
-        *" | "*) field=${head%% | *} ; head=${head#* | } ;;
-        *) field=$head ; head= ;;
-      esac
-      case "$field" in
-        *": "*) key=${field%%:*} ; val=${field#*: } ;;
-        *) bad="an unparseable field '$field'" ; break ;;
-      esac
-      case "$seen_keys" in
-        *" $key "*) bad="a duplicated field '$key' (a repeat would silently take the last value)" ; break ;;
-      esac
-      case "$key" in
-        id) entry_id=$val ;;
-        ids) entry_ids=$val ;;
-        project) entry_proj=$val ;;
-        date) entry_date=$val ;;
-        kind) entry_kind=$val ; kind_seen=1 ;;
-        *) bad="an unrecognized field '$key'" ; break ;;
-      esac
-      seen_keys="$seen_keys$key "
-      [ -n "$head" ] || break
-    done
-    if [ -n "$bad" ]; then
-      echo "warning: ignoring supersession entry with $bad: $line" >&2
-      continue
-    fi
-    if [ -n "$entry_id" ] && [ -n "$entry_ids" ]; then
-      echo "warning: ignoring supersession entry carrying both 'id:' and 'ids:' (use exactly one): $line" >&2
-      continue
-    fi
-    if [ -z "$entry_id" ] && [ -z "$entry_ids" ]; then
-      echo "warning: ignoring supersession entry with an empty field: $line" >&2
-      continue
-    fi
-    if [ -z "$entry_proj" ] || [ -z "$entry_reason" ]; then
-      echo "warning: ignoring supersession entry with an empty field: $line" >&2
-      continue
-    fi
-    if [ "$kind_seen" -eq 1 ]; then
-      case "$entry_kind" in
-        missing|failing|unexecuted|any) ;;
-        "")
-          echo "warning: ignoring supersession entry with an empty field: $line" >&2
-          continue
-          ;;
-        *)
-          echo "warning: ignoring supersession entry whose kind is not missing, failing, unexecuted, or any: $line" >&2
-          continue
-          ;;
-      esac
-    else
-      entry_kind=any
-    fi
-    case "$entry_date" in
-      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
-      *)
-        echo "warning: ignoring supersession entry whose date is not YYYY-MM-DD: $line" >&2
-        continue
-        ;;
-    esac
-    if [ "$entry_proj" != "$PROJ_NAME" ]; then
-      echo "warning: ignoring supersession entry for project '$entry_proj' found in $PROJ_NAME's record: $line" >&2
-      continue
-    fi
-    if [ "$entry_kind" != any ] && [ "$entry_kind" != "$finding_class" ]; then
-      continue
-    fi
-    if [ -n "$entry_id" ]; then
-      if [ "$entry_id" = "$ident" ]; then
-        return 0
-      fi
-    else
-      # shellcheck disable=SC2053  # unquoted glob match is the documented `ids:` batch mechanism
-      if [[ "$ident" == $entry_ids ]]; then
-        return 0
-      fi
-    fi
-  done < "$SUPERSESSIONS_FILE"
-  return 1
+  fm_supersession_approved "$SUPERSESSIONS_FILE" "$PROJ_NAME" "$1" "$2"
 }
 
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"

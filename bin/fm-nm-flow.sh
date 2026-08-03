@@ -30,6 +30,25 @@
 #                      watch frames) in its explicit --worktree/--base mode and
 #                      show missing/failing counts in the merge-gate box, read
 #                      from its `summary:` stdout line (per-line grep fallback).
+#                      An identifier the captain has already excused by a
+#                      supersession entry is NOT one of those counts: it gets a
+#                      FOURTH count of its own (`excused N`), because folding it
+#                      into passing, failing or unexecuted would each be a
+#                      different lie about what the captain decided. Excusal is
+#                      resolved per identifier from the run's own finding lines,
+#                      only in task-id mode (the record is keyed by project, and
+#                      explicit --worktree mode knows no project, so nothing is
+#                      excusable there - the conservative direction: an
+#                      identifier stays in its raw class and never turns green).
+#                      Unexecuted findings are matched against the record only
+#                      when data/exec-gate/<project> exists, mirroring the order
+#                      bin/fm-pr-merge.sh applies its two policy layers in, so
+#                      "excused" means exactly "a captain-approved entry covers
+#                      this", never "this project does not gate that class".
+#                      With a fourth count the row switches to compact labels
+#                      (miss/fail/unexec/excused) and, if even that would exceed
+#                      the render width, to tight separators, rather than
+#                      truncating any count or overflowing an 80-column pane.
 #                      Explicit mode never fetches, so the base may lag origin;
 #                      it executes the base's own test files (check 2), so
 #                      it costs real time - that is why it is opt-in, why the
@@ -103,9 +122,27 @@
 # that no longer exists must not be reported as a detached HEAD.
 #
 # Read-only guarantee: this viewer only ever runs `no-mistakes axi status`,
-# `no-mistakes axi logs`, `no-mistakes runs`, git ref reads, and (opt-in) the
+# `no-mistakes axi logs`, `no-mistakes runs`, git ref reads, plain reads of the
+# captain's supersession record and exec-gate marker, and (opt-in) the
 # report-only fm-assert-tests-kept.sh explicit mode. It never responds to
 # gates, never writes outside its own mktemp dir, and never mutates task state.
+# The probe is run with FM_GUARD_READ_ONLY=1 for that last claim to be true:
+# fm-assert-tests-kept.sh calls bin/fm-guard.sh unconditionally, and the guard
+# in write mode creates, rewrites or deletes
+# $FM_HOME/state/.guard-watcher-stale-banner (plus its lock). That is a fleet-
+# state write, and worse, claiming the episode consumes the one-per-episode
+# WATCHER DOWN banner into this viewer's discarded stderr, leaving the next
+# genuinely guarded command with only the one-line reminder. Read-only mode
+# reports the same lapse without claiming it.
+#
+# Display classification, NEVER policy: bin/fm-pr-merge.sh is the single
+# authority on whether a merge proceeds, and nothing here changes that. This
+# viewer reads data/supersessions/<project>.md and data/exec-gate/<project> for
+# ONE purpose - to show a deliberately-excused identifier under its own label
+# instead of folding it into the passing, failing or unexecuted counts - and it
+# reads that record through bin/fm-supersession-lib.sh, the same matcher the
+# gate itself uses, so the two cannot drift. A future reader must not mistake
+# this classification for the decision: the viewer never decides anything.
 #
 # Exit status: 0 on a successful render (any state), 1 when the task/worktree
 # cannot be resolved, 2 on a usage error, 130 when interrupted (INT/TERM, both
@@ -180,7 +217,7 @@ meta_value() {  # <file> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
-TITLE="" PR_URL=""
+TITLE="" PR_URL="" PROJECT=""
 if [ -n "$ID" ]; then
   META="$STATE/$ID.meta"
   if [ ! -f "$META" ]; then
@@ -206,6 +243,19 @@ if ! git -C "$WT" rev-parse --git-dir >/dev/null 2>&1; then
   echo "fm-nm-flow.sh: not a git worktree: $WT" >&2
   exit 1
 fi
+
+# The captain's own records, addressed exactly as bin/fm-pr-merge.sh addresses
+# them and read exactly as often as it does: never in explicit --worktree mode,
+# where no project is known and therefore no entry can apply.
+PROJ_NAME=""
+[ -n "$PROJECT" ] && PROJ_NAME=$(basename "$PROJECT")
+SUPERSESSIONS_FILE="$FM_HOME/data/supersessions/$PROJ_NAME.md"
+EXEC_GATE_FILE="$FM_HOME/data/exec-gate/$PROJ_NAME"
+# shellcheck source=bin/fm-supersession-lib.sh
+. "$SCRIPT_DIR/fm-supersession-lib.sh" || {
+  echo "fm-nm-flow.sh: cannot read $SCRIPT_DIR/fm-supersession-lib.sh" >&2
+  exit 1
+}
 
 # --- bounded read-only no-mistakes calls (pattern from fm-crew-state.sh) ----
 
@@ -401,6 +451,7 @@ tests_gate_base() {
 MGATE_ANN="prior-tests: pending (checked at merge)"
 MGATE_NAMEONLY=0
 MGATE_BASE=""
+MGATE_EXCUSED=0
 # The probe's scratch dir is the only thing this viewer ever writes, so its
 # removal is owned by the EXIT trap alone: an interrupt lands mid-probe (the
 # handler fires out of the `wait`) and exits past any cleanup left on the
@@ -451,9 +502,73 @@ on_int_term() {
 }
 trap clean_tmpd EXIT
 trap on_int_term INT TERM
+# Per-identifier excusal, for DISPLAY ONLY. Each finding line the probe wrote
+# is matched against the captain's record through the shared grammar owner
+# (bin/fm-supersession-lib.sh), so this viewer and bin/fm-pr-merge.sh cannot
+# answer "is this covered?" differently. The two policy layers are applied in
+# the gate's own order: an unexecuted finding is only matched when the project
+# carries the exec-gate marker, exactly as the gate does, so "excused" here
+# always means "a captain-approved entry covers this identifier" and never
+# "this project does not gate that class" - two different facts that must not
+# share a label. Warnings about malformed entries go to the gate's operator,
+# not to a viewer pane, so they are discarded here; a malformed entry fails
+# closed either way, which leaves the identifier in its raw class.
+#
+# Sets EX_MISSING/EX_FAILING/EX_UNEXEC (excused per class) and
+# SEEN_MISSING/SEEN_FAILING/SEEN_UNEXEC (findings actually parsed per class,
+# used only as a floor under the summary counts so an excusal can never
+# subtract more than was counted).
+EX_MISSING=0 EX_FAILING=0 EX_UNEXEC=0
+SEEN_MISSING=0 SEEN_FAILING=0 SEEN_UNEXEC=0
+classify_excused() {  # <findings-file>
+  local line ident cls exec_gated=0
+  EX_MISSING=0 EX_FAILING=0 EX_UNEXEC=0
+  SEEN_MISSING=0 SEEN_FAILING=0 SEEN_UNEXEC=0
+  [ -n "$PROJ_NAME" ] || return 0
+  [ -f "$SUPERSESSIONS_FILE" ] || return 0
+  [ -e "$EXEC_GATE_FILE" ] && exec_gated=1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      'missing: '*)    cls=missing    ; ident=${line#missing: }    ; SEEN_MISSING=$((SEEN_MISSING + 1)) ;;
+      'failing: '*)    cls=failing    ; ident=${line#failing: }    ; SEEN_FAILING=$((SEEN_FAILING + 1)) ;;
+      'unexecuted: '*) cls=unexecuted ; ident=${line#unexecuted: } ; SEEN_UNEXEC=$((SEEN_UNEXEC + 1)) ;;
+      *) continue ;;
+    esac
+    if [ "$cls" = unexecuted ] && [ "$exec_gated" -eq 0 ]; then
+      continue
+    fi
+    if fm_supersession_approved "$SUPERSESSIONS_FILE" "$PROJ_NAME" "$ident" "$cls" 2>/dev/null; then
+      case "$cls" in
+        missing)    EX_MISSING=$((EX_MISSING + 1)) ;;
+        failing)    EX_FAILING=$((EX_FAILING + 1)) ;;
+        unexecuted) EX_UNEXEC=$((EX_UNEXEC + 1)) ;;
+      esac
+    fi
+  done < "$1"
+  return 0
+}
+
+# The counts row. With nothing excused it is exactly the row this display has
+# always shown. With a fourth count it switches to compact labels so four
+# counts, their separators and the !! flag still fit the annotation column of a
+# plain 80-column pane; if a pathological count would still overflow, the
+# separators tighten before any count is touched, because a truncated count
+# would be a wrong number rather than a cramped one.
+mgate_counts_ann() {  # <missing> <failing> <unexec> <excused>
+  local m=$1 f=$2 u=$3 e=$4 flag='' body max
+  if [ "$m" -gt 0 ] || [ "$f" -gt 0 ]; then flag=' !!'; fi
+  body="prior-tests: miss $m / fail $f / unexec $u / excused $e$flag"
+  max=$((COLS - 27))
+  if [ "${#body}" -gt "$max" ]; then
+    body="prior-tests: miss $m/fail $f/unexec $u/excused $e$flag"
+  fi
+  printf '%s' "$body"
+}
+
 run_tests_gate() {
-  local base out_file missing failing unexec summary
+  local base out_file missing failing unexec excused summary
   MGATE_BASE=""
+  MGATE_EXCUSED=0
   # The probe executes the base's own test files, so it must be time-bounded.
   # Nothing to bound it with means it does not run: a viewer that hangs is
   # worse than one that says the answer is still pending.
@@ -474,7 +589,15 @@ run_tests_gate() {
   MGATE_TMPD=$tmpd
   out_file="$tmpd/kept.out"
   local rc=0
-  run_bounded_bg "$TESTS_TIMEOUT" "$SCRIPT_DIR/fm-assert-tests-kept.sh" \
+  # FM_GUARD_READ_ONLY=1 is what keeps this viewer's read-only claim true: the
+  # probe calls bin/fm-guard.sh unconditionally, and the guard writes fleet
+  # state (and consumes the one-per-episode WATCHER DOWN banner) unless told it
+  # is a read-only caller. Set through `env` so it applies to the probe's tree
+  # alone and never leaks into this shell or a later frame's calls; `env` execs
+  # the probe, so the bounding tool's own pid and exit-status contract are
+  # unchanged.
+  run_bounded_bg "$TESTS_TIMEOUT" env FM_GUARD_READ_ONLY=1 \
+    "$SCRIPT_DIR/fm-assert-tests-kept.sh" \
     --worktree "$WT" --base "$base" > "$out_file" 2>"$tmpd/kept.err" || rc=$?
   if [ "$rc" -eq 124 ]; then
     MGATE_ANN="prior-tests: pending (probe timed out after ${TESTS_TIMEOUT}s)"
@@ -498,6 +621,23 @@ run_tests_gate() {
     unexec=$(grep -c '^unexecuted: ' "$out_file" || true)
   fi
   missing=${missing:-0} failing=${failing:-0} unexec=${unexec:-0}
+  # An excused identifier leaves its raw class and is counted on its own, so
+  # the captain sees what is being deliberately excused instead of it hiding
+  # inside a pass, a failure or a not-run. The parsed per-class tally is used as
+  # a floor first: excusal may only ever subtract findings that were counted, so
+  # a summary line and the finding lines disagreeing can never drive a class
+  # count below what was actually excused (a negative would read as green).
+  classify_excused "$out_file"
+  [ "$SEEN_MISSING" -gt "$missing" ] && missing=$SEEN_MISSING
+  [ "$SEEN_FAILING" -gt "$failing" ] && failing=$SEEN_FAILING
+  [ "$SEEN_UNEXEC" -gt "$unexec" ] && unexec=$SEEN_UNEXEC
+  missing=$((missing - EX_MISSING))
+  failing=$((failing - EX_FAILING))
+  unexec=$((unexec - EX_UNEXEC))
+  [ "$missing" -lt 0 ] && missing=0
+  [ "$failing" -lt 0 ] && failing=0
+  [ "$unexec" -lt 0 ] && unexec=0
+  excused=$((EX_MISSING + EX_FAILING + EX_UNEXEC))
   # One stderr `UNEXECUTED: <file>` line per base test file check 2 could not
   # execute, so this stays a FILE count for the legend line while the row
   # carries the assertion count; both stay inside 80 columns that way.
@@ -512,6 +652,13 @@ run_tests_gate() {
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
     MGATE_ANN="prior-tests: pending (check could not run, exit $rc)"
     MGATE_NAMEONLY=0
+  elif [ "$excused" -gt 0 ]; then
+    # Something is being deliberately excused, so every class is named on the
+    # row at once - and none of them is ever an "ok": what the captain excused
+    # is a decision this display reports, never a result it certifies.
+    MGATE_BASE=$base
+    MGATE_EXCUSED=$excused
+    MGATE_ANN=$(mgate_counts_ann "$missing" "$failing" "$unexec" "$excused")
   elif [ "$missing" -gt 0 ] || [ "$failing" -gt 0 ]; then
     MGATE_BASE=$base
     MGATE_ANN="prior-tests: missing $missing / failing $failing !!"
@@ -850,10 +997,11 @@ line_rows() {  # <line>
   printf '%s' $(( ${#s} == 0 ? 1 : (${#s} - 1) / COLS + 1 ))
 }
 
-build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files>
-  local ann=$1 mbase=$2 nameonly=$3
+build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files> <mgate-excused>
+  local ann=$1 mbase=$2 nameonly=$3 excused=$4
   FRAME_LINES=()
   FRAME_RANK=()
+  FRAME_MEASURED=0
   core_line "$(header_line)"
   core_line "$BOLD$BANNER$SGR0"
   local pr="${RUN_PR:-$PR_URL}"
@@ -892,25 +1040,41 @@ build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files>
     [ "$nameonly" -eq 1 ] && noun='file'
     core_line "prior-tests: $nameonly base $noun verified by name only, not by assertion"
   fi
+  # The row's compact fourth count, spelled out: what "excused" is, and that it
+  # is a category of its own rather than any of the other three. It qualifies
+  # the counts the row is showing, so it ranks core for the same reason they do.
+  if [ "$excused" -gt 0 ]; then
+    core_line "prior-tests: excused = a captain-approved supersession covers it; not passing"
+  fi
   if [ "$KIND_TEST" = 'det|LLM' ] || [ "$KIND_LINT" = 'det|LLM' ]; then
     legend_line 4 'det|LLM: commands.<step> not readable in .no-mistakes.yaml; det when it is set'
   fi
 }
 
-CORE_ROWS=0 TOTAL_ROWS=0
+# The frame's one measurement pass: per-line terminal rows into FRAME_ROWS,
+# with the core and total footprints derived from it. Both the pane-too-short
+# backstop and the drop loop need the same numbers, so it is computed once per
+# assembled frame and invalidated by build_frame - measuring twice cost a
+# command substitution per line per frame and left two loops to keep in step.
+CORE_ROWS=0 TOTAL_ROWS=0 FRAME_MEASURED=0
+FRAME_ROWS=()
 frame_measure() {
   local i r
+  [ "$FRAME_MEASURED" -eq 1 ] && return 0
   CORE_ROWS=0
   TOTAL_ROWS=0
+  FRAME_ROWS=()
   for ((i = 0; i < ${#FRAME_LINES[@]}; i++)); do
     r=$(line_rows "${FRAME_LINES[$i]}")
+    FRAME_ROWS+=("$r")
     TOTAL_ROWS=$((TOTAL_ROWS + r))
     [ "${FRAME_RANK[$i]}" -eq 0 ] && CORE_ROWS=$((CORE_ROWS + r))
   done
+  FRAME_MEASURED=1
 }
 
 render() {
-  build_frame "$MGATE_ANN" "$MGATE_BASE" "$MGATE_NAMEONLY"
+  build_frame "$MGATE_ANN" "$MGATE_BASE" "$MGATE_NAMEONLY" "$MGATE_EXCUSED"
   # The backstop behind the undroppable qualifiers: a pane too short to carry
   # the result, its qualifiers AND the mandatory drop notice gets none of them
   # - the box degrades to a non-committal pending form for the frame, so no
@@ -922,7 +1086,7 @@ render() {
   if [ "$WATCH" = 1 ] && [ -n "$MGATE_BASE" ]; then
     frame_measure
     if [ "$TOTAL_ROWS" -gt "$ROWS" ] && [ $((CORE_ROWS + 1)) -gt "$ROWS" ]; then
-      build_frame "prior-tests: pending (pane too short to qualify)" "" 0
+      build_frame "prior-tests: pending (pane too short to qualify)" "" 0 0
     fi
   fi
   emit_frame
@@ -937,17 +1101,13 @@ render() {
 # prints everything: scrollback makes trimming pointless there.
 emit_frame() {
   local n=${#FRAME_LINES[@]} i dropped=0 best bi
-  local total=0 core=0 legend=0 avail short=0
-  local -a drop_flag=() row_of=()
+  local total core avail short=0
+  local -a drop_flag=()
+  frame_measure
+  total=$TOTAL_ROWS
+  core=$CORE_ROWS
   for ((i = 0; i < n; i++)); do
     drop_flag[i]=0
-    row_of[i]=$(line_rows "${FRAME_LINES[$i]}")
-    total=$((total + row_of[i]))
-    if [ "${FRAME_RANK[$i]}" -eq 0 ]; then
-      core=$((core + row_of[i]))
-    else
-      legend=$((legend + row_of[i]))
-    fi
   done
   if [ "$WATCH" = 1 ] && [ "$total" -gt "$ROWS" ]; then
     # One row is spent saying what was dropped, so nothing disappears silently.
@@ -961,7 +1121,7 @@ emit_frame() {
       bi=-1
       for ((i = 0; i < n; i++)); do
         [ "${drop_flag[$i]}" -eq 1 ] || continue
-        [ "${row_of[$i]}" -le "$avail" ] || continue
+        [ "${FRAME_ROWS[$i]}" -le "$avail" ] || continue
         if [ "${FRAME_RANK[$i]}" -gt "$best" ]; then
           best=${FRAME_RANK[$i]}
           bi=$i
@@ -970,7 +1130,7 @@ emit_frame() {
       [ "$bi" -ge 0 ] || break
       drop_flag[bi]=0
       dropped=$((dropped - 1))
-      avail=$((avail - row_of[bi]))
+      avail=$((avail - FRAME_ROWS[bi]))
     done
   fi
   for ((i = 0; i < n; i++)); do
