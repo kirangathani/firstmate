@@ -132,6 +132,15 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
 # parser, so no shape of name or target can be mis-split here. Verified rc=0
 # for pane-id, window-id, bare-session, and 'session:index.pane' targets.
 #
+# EXISTENCE IS list-panes' EXIT STATUS, never the emptiness of its output. A
+# live pane whose window was renamed to the empty string prints an empty line
+# at rc=0 (verified on tmux 3.4: `tmux rename-window -t %0 ''` then `tmux
+# list-panes -t %0 -F '#{window_name}'` -> rc=0, output ""), so treating empty
+# output as "gone" would report a HEALTHY pane dead. False negatives are the
+# worse direction here: they license bin/fm-bootstrap.sh's secondmate sweep to
+# kill and respawn a live agent, and abort the away-mode daemon's startup on a
+# live supervisor pane.
+#
 # EXPECTED-LABEL: tmux target matching is a unique-prefix/fnmatch match, so
 # 'fmtest:fm-re' resolves to window 'fm-real' when that prefix is unambiguous.
 # When the caller knows the owning task label (the digests pass "fm-<id>"), the
@@ -147,10 +156,9 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
 # task - but both are tracked as their own work.
 fm_backend_tmux_target_exists() {  # <target> [expected-label]
   local target=$1 expected_label=${2:-} name
-  name=$(tmux list-panes -t "$target" -F '#{window_name}' 2>/dev/null | head -n 1)
-  [ -n "$name" ] || return 1
-  [ -z "$expected_label" ] || [ "$name" = "$expected_label" ] || return 1
-  return 0
+  name=$(tmux list-panes -t "$target" -F '#{window_name}' 2>/dev/null) || return 1
+  [ -n "$expected_label" ] || return 0
+  [ "${name%%$'\n'*}" = "$expected_label" ]
 }
 
 # fm_backend_tmux_current_path: the live pane's current working directory, or

@@ -97,6 +97,19 @@ $ tmux list-panes -t 'nosuchsess:fm-real' ; echo rc=$?   # can't find session: n
 $ tmux list-panes -t '%9999'              ; echo rc=$?   # can't find pane: %9999          rc=1
 ```
 
+Existence is that exit status, never the emptiness of `list-panes`' output.
+A live pane whose window name is the empty string prints an empty line at rc=0, so treating empty output as "gone" would report a healthy pane dead.
+Verified with real tmux 3.4 on Linux (WSL2), 2026-08-03:
+
+```sh
+$ tmux rename-window -t %0 ''
+$ tmux list-panes -t %0 -F '#{window_name}' ; echo rc=$?   # (empty line)  rc=0
+```
+
+False negatives are the worse direction here.
+A spurious "gone" verdict licenses `bin/fm-bootstrap.sh`'s secondmate sweep to kill and respawn a live agent, and aborts the away-mode daemon's startup on a live supervisor pane.
+The expected-label comparison is therefore applied only when the caller passed a non-empty label.
+
 It was preferred over enumerating `tmux list-windows -t <session> -F '#{window_name}'` and matching, because enumeration makes the caller split the target back into session and window, and tmux window names may themselves contain `:` (a target may equally be a pane id, a window id, or `session:window.pane`).
 `list-panes` needs no splitting: rc=0 was confirmed the same session for pane-id, window-id, bare-session, and `session:index.pane` targets, so there is no false-negative shape to trip over.
 

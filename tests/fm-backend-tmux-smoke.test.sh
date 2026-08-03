@@ -161,9 +161,10 @@ if fm_backend_target_exists tmux "$SESSION:fm-smoke-gone" "fm-smoke-gone"; then
 fi
 pass "real tmux: fm_backend_target_exists reports a nonexistent window in a live session as dead"
 
-# tmux target matching is a unique-prefix match, so "$SESSION:fm-smoke1" would
-# also resolve from a truncated name; a caller that knows the owning label must
-# not accept a DIFFERENT window that merely resolved.
+# A caller that knows the owning label must not accept a window that merely
+# resolved: the fully-qualified live "$TARGET" is rejected when the expected
+# label names the neighbour instead. (The unique-prefix resolution this guards
+# against is exercised directly further down, once the neighbour is gone.)
 if fm_backend_target_exists tmux "$TARGET" fm-smoke-neighbour; then
   fail "real tmux: a resolved window whose name differs from the expected label must report dead"
 fi
@@ -181,6 +182,41 @@ verdict=$(fm_backend_agent_alive tmux "$SESSION:fm-smoke-gone")
 pass "real tmux: fm_backend_agent_alive reports a gone window dead instead of inheriting the current window's verdict"
 
 tmux kill-window -t "$SESSION:fm-smoke-neighbour" 2>/dev/null || true
+
+# With the neighbour gone, "$SESSION:fm-smoke" is an UNAMBIGUOUS prefix of the
+# one remaining window, so tmux really does resolve it to "$WINDOW". That is
+# the hazard the expected-label argument exists for, exercised non-vacuously:
+# the truncated target resolves, yet a caller that names a DIFFERENT owning
+# window must still be refused, while the caller that names the resolved
+# window must still be accepted.
+TRUNCATED="$SESSION:fm-smoke"
+fm_backend_target_exists tmux "$TRUNCATED" \
+  || fail "real tmux: '$TRUNCATED' should resolve to '$WINDOW' by unique-prefix match (the case below is vacuous otherwise)"
+if fm_backend_target_exists tmux "$TRUNCATED" fm-smoke-other; then
+  fail "real tmux: a truncated target that resolves to '$WINDOW' must be rejected when the expected label names a different window"
+fi
+fm_backend_target_exists tmux "$TRUNCATED" "$WINDOW" \
+  || fail "real tmux: a truncated target must still be accepted when the expected label matches the window it resolved to"
+pass "real tmux: fm_backend_target_exists rejects a unique-prefix resolution to a differently-labelled window and accepts a matching one"
+
+# Existence is list-panes' EXIT STATUS, not the emptiness of its output: a live
+# pane whose window name is the empty string prints an empty line at rc=0, and
+# reporting it dead would fire recovery against a healthy worker.
+tmux new-window -d -t "$SESSION:" -n fm-smoke-unnamed "sleep 300" \
+  || fail "real tmux: could not create the to-be-unnamed window"
+unnamed_pane=$(tmux list-panes -t "$SESSION:fm-smoke-unnamed" -F '#{pane_id}' | head -n 1)
+[ -n "$unnamed_pane" ] || fail "real tmux: could not find the pane of the to-be-unnamed window"
+tmux rename-window -t "$unnamed_pane" '' \
+  || fail "real tmux: could not blank the window name"
+[ -z "$(tmux list-panes -t "$unnamed_pane" -F '#{window_name}')" ] \
+  || fail "real tmux: the window name did not actually blank (the case below would be vacuous)"
+fm_backend_target_exists tmux "$unnamed_pane" \
+  || fail "real tmux: a LIVE pane whose window name is empty must report alive when no label is passed"
+if fm_backend_target_exists tmux "$unnamed_pane" "$WINDOW"; then
+  fail "real tmux: a blank-named window must not satisfy a non-empty expected label"
+fi
+pass "real tmux: fm_backend_target_exists reads existence from list-panes' exit status, so a blank-named live pane is alive"
+tmux kill-window -t "$unnamed_pane" 2>/dev/null || true
 
 # --- kill ---------------------------------------------------------------------
 
