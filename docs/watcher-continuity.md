@@ -44,9 +44,42 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 
 ## Regression coverage
 
-`tests/fm-pi-watch-extension.test.sh` simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+`tests/fm-pi-watch-extension.test.sh` simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, proves an in-flight `read-only` refusal is not served to a request made after the lock was acquired, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state and preserves the existing Stop registration.
+
+## OpenCode arm coalescing: measured behavior, 2026-08-03
+
+`.opencode/plugins/fm-primary-watch-arm.js` guards launches with a module-level `launchInFlight` promise, and the `session.idle` handler calls `ensureArm` fire-and-forget, so a second request can arrive while the first is still running its asynchronous precondition checks.
+`beginArm` refuses with `read-only` when the session does not own the fleet lock.
+Before this fix, a second request made after the session acquired the lock was served that first request's `read-only` refusal, so it never armed and nothing on that path retried.
+The guard coalesced two requests whose lock-ownership preconditions differed.
+
+This is what made `tests/fm-pi-watch-extension.test.sh`'s OpenCode session-lock case fail, and the widely repeated explanation for that failure was wrong.
+It was recorded as a load-sensitive flake that missed the test's fixed 5-second arming poll under load.
+Measured instead with a standalone reproduction of that single assertion, polling 60 seconds rather than 5, arming is bimodal:
+
+```text
+repro 1 PASS armed_after=42ms      repro 4 PASS armed_after=22ms
+repro 2 FAIL never_armed 58206ms   repro 5 PASS armed_after=23ms
+repro 3 PASS armed_after=22ms      repro 6 PASS armed_after=44ms
+```
+
+It arms in roughly 25ms or it never arms at all, so widening the timeout would not have fixed it.
+Load only affects the trigger, meaning whether the first call's precondition checks are still running when the second request arrives.
+The consequence is permanent for that event.
+The same file failed 5 of 5 isolated repeats at load averages from 3.06 to 10.94, which is not flake behavior.
+`tests/fm-watcher-lock.test.sh` is a separate, genuine load-sensitive flake with a different cause and passed 32 of 32 in isolation over the same period.
+
+Two further facts were measured on 2026-08-03 against the unfixed plugin, using a reproduction that pins the first launch inside the lock-ownership walk with a blocking `ps` shim so no timing assumption is needed.
+
+- The failure is deterministic once the race is won rather than probabilistic: 3 of 3 runs never armed within a 20-second poll.
+- A later `session.idle` event does recover arming, in 48ms, 103ms, and 74ms across those same three runs, because the stale launch has settled and cleared `launchInFlight` by then.
+- Forcing the same race on the pre-existing `test_opencode_primary_watch_plugin_requires_session_lock` case, by putting that `ps` shim on `PATH` for the whole file rather than adding any new assertion, turns its historically intermittent failure into a certain one against the unfixed plugin and a pass against the fixed plugin.
+  That is what ties this defect to the failure that was being waved through as a flake.
+
+Recovery on a later event is not a mitigation the fleet can rely on.
+The watcher is what wakes an idle session, so when arming is denied for an idle event there is no guaranteed later turn to produce the next `session.idle`, and supervision stays off while every surface reports healthy.
 
 ## Sanitized live evidence, 2026-07-17
 
