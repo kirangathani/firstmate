@@ -19,8 +19,15 @@
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
-#   2. Matching no-mistakes run for this crew's branch, active or terminal
-#      (from `axi status`, or the coarse `no-mistakes runs` fallback)?
+#   2. Matching no-mistakes run for this crew's OWN ship branch fm/<id>, active
+#      or terminal (from `axi status`, or the coarse `no-mistakes runs`
+#      fallback)? Attribution is keyed on fm/<id> (bin/fm-brief.sh's branch
+#      contract), never on whatever branch the recorded worktree happens to be
+#      checked out on: a worktree pool slot re-leased to a newer task after
+#      this worker died without teardown still sits at the path meta records,
+#      so anything derived from that path answers for the NEW occupant and
+#      would report a dead task as working (2026-07-30 incident, see the
+#      attribution block below).
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -389,37 +396,80 @@ nm_runs_status_for_branch() {  # <branch>
   return 0
 }
 
-# CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
-# scratch worktree); with no branch there is no run to attribute to this crew.
+# The run attribution key is this task's OWN ship branch, fm/<id> - the branch
+# contract bin/fm-brief.sh scaffolds ("create your branch: git checkout -b
+# fm/$ID") and bin/fm-promote.sh instructs - NEVER the branch the recorded
+# worktree is checked out on. A worktree pool slot (treehouse) is released when
+# its worker dies without teardown, while meta deliberately survives so
+# recovery can find the worktree and unlanded work; once the slot is re-leased
+# to a newer task, the path in meta belongs to a DIFFERENT live task, and both
+# `git symbolic-ref` and `axi status` resolved through that path answer for
+# the new occupant. Keying the match on those answers reported two genuinely
+# dead tasks as `working - validating (running)` (2026-07-30 incident:
+# nm-flow-view-r7, fm-upstream-sync-b3, and live kept-exec-p2 all recorded the
+# identical recycled slot path).
+EXPECTED_BRANCH="fm/$ID"
+# CREW_BRANCH - what the recorded worktree is checked out on right now - is an
+# OWNERSHIP signal only. Equal to fm/<id> means the worktree is still this
+# task's (a fresh lease starts detached and creates its own fm/<new-id>, and
+# git refuses to check one branch out in two worktrees of the same repo);
+# any other branch means the slot was re-leased (or this crew never created
+# its branch), so nothing read through the worktree's checkout may be
+# attributed to this task. Empty at detached HEAD (a just-spawned crew, a
+# scout's scratch worktree, or a recycled slot's fresh lease): skip the lookup
+# entirely, as before, so a respawned crew that has not yet re-created fm/<id>
+# is read from its pane rather than a previous attempt's terminal run.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail; "coarse" means only
-# a bare status word came back from the runs-list fallback above, so the
-# run-step block below skips the TOON field parsing entirely for this crew.
+# a bare status word came back from the runs-list fallback, so the run-step
+# block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+# WT_RELEASED=1 records that the slot no longer belongs to this task, purely to
+# surface that fact in the emitted detail.
+WT_RELEASED=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  RUN_OUT=$(nm_run axi status)
-  if [ -n "$RUN_OUT" ]; then
-    run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
-      HAVE_RUN=1
-    else
-      # The active-or-most-recent run is for another branch (the CLI is alive
-      # and answered; only the attribution missed) - try the coarse fallback.
-      # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
-      # primary call means the CLI itself did not respond, so retrying it
-      # immediately with a second bounded call would just double the wait
-      # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
+  if [ "$CREW_BRANCH" = "$EXPECTED_BRANCH" ]; then
+    RUN_OUT=$(nm_run axi status)
+    if [ -n "$RUN_OUT" ]; then
+      run_branch=$(strip_quotes "$(nm_field branch)")
+      if [ -n "$run_branch" ] && [ "$run_branch" = "$EXPECTED_BRANCH" ]; then
         HAVE_RUN=1
-        RUN_SOURCE=coarse
+      else
+        # The active-or-most-recent run is for another branch (the CLI is alive
+        # and answered; only the attribution missed) - try the coarse fallback.
+        # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
+        # primary call means the CLI itself did not respond, so retrying it
+        # immediately with a second bounded call would just double the wait
+        # for no better answer.
+        COARSE_STATUS=$(nm_runs_status_for_branch "$EXPECTED_BRANCH")
+        if [ -n "$COARSE_STATUS" ]; then
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+        fi
       fi
+    fi
+  else
+    # The worktree is checked out on another task's branch: the slot was
+    # re-leased out from under this (dead, never-torn-down) task. `axi status`
+    # from inside it would answer for the NEW occupant, so it is never
+    # consulted here. The repo-wide runs list read through the same path is
+    # still trustworthy - fm/<id> is unique to this task - so this task's own
+    # run, if it ever had one, still reports its true (usually terminal) state,
+    # and a run genuinely still in flight after the slot lapsed still reports
+    # working. No row at all falls through to the pane/log path, where this
+    # task's own dead endpoint reads unknown rather than the new occupant's
+    # health.
+    WT_RELEASED=1
+    COARSE_STATUS=$(nm_runs_status_for_branch "$EXPECTED_BRANCH")
+    if [ -n "$COARSE_STATUS" ]; then
+      HAVE_RUN=1
+      RUN_SOURCE=coarse
     fi
   fi
 fi
@@ -447,6 +497,9 @@ if [ "$HAVE_RUN" = 1 ]; then
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
+    if [ "$WT_RELEASED" = 1 ]; then
+      RUN_DETAIL="$RUN_DETAIL${SEP}worktree slot re-leased (now on $CREW_BRANCH)"
+    fi
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status

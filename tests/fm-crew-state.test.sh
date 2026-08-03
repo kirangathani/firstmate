@@ -25,6 +25,14 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) recycled worktree slot: a task whose meta records a pool slot that has
+#       since been re-leased to a DIFFERENT live task must never inherit the
+#       new occupant's run as its own. Regression set for the 2026-07-30
+#       incident (nm-flow-view-r7 / fm-upstream-sync-b3 / kept-exec-p2, three
+#       metas recording one identical slot path): the dead tasks report their
+#       own terminal run (via the runs list) or unknown, never working; the
+#       live occupant still reports working; and a dead-window crew whose own
+#       fm/<id> run is genuinely in flight still reports from its run step.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -768,6 +776,102 @@ EOF
   pass "another branch's run is ignored, falls back"
 }
 
+# (l) The exact 2026-07-30 incident shape: three metas record the IDENTICAL
+# worktree slot path. The slot's first two lessees (nm-flow-view-r7,
+# fm-upstream-sync-b3) died without teardown, so their metas survived; the
+# slot was then re-leased to kept-exec-p2, which is live and mid-validation
+# on its own branch fm/kept-exec-p2. Before the fix, the run attribution
+# keyed on the branch the recorded worktree is checked out on, so BOTH dead
+# tasks matched the live task's run and reported `working - validating
+# (running)`. Keyed on each task's own fm/<id>: the dead task with a real
+# terminal run reports failed from the runs list, the dead task with no run
+# at all reports unknown (its own endpoint is gone), and the live occupant
+# still reports working from its full run-step.
+test_recycled_slot_dead_tasks_not_working() {
+  reset_fakes
+  local d; d=$(new_case recycled-slot)
+  # ONE slot directory, checked out on the CURRENT lessee's branch.
+  make_repo_on_branch "$d/slot" fm/kept-exec-p2
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/nm-flow-view-r7.meta"   "window=fm:fm-nm-flow-view-r7"   "worktree=$d/slot" "kind=ship"
+  fm_write_meta "$d/state/fm-upstream-sync-b3.meta" "window=fm:fm-fm-upstream-sync-b3" "worktree=$d/slot" "kind=ship"
+  fm_write_meta "$d/state/kept-exec-p2.meta"      "window=fm:fm-kept-exec-p2"      "worktree=$d/slot" "kind=ship"
+  # `axi status` from inside the slot answers for the current lessee's run.
+  FM_FAKE_AXI_STATUS="$(run_running fm/kept-exec-p2)"
+  # Repo-wide runs list, newest-first: the live run, and nm-flow-view-r7's own
+  # real terminal outcome (failed - "daemon shutting down" in the incident).
+  # fm-upstream-sync-b3 never had a run at all.
+  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
+  running    fm/kept-exec-p2 bbbbbbb  2026-07-30 11:00
+  failed     fm/nm-flow-view-r7 aaaaaaa  2026-07-30 10:00
+EOF
+)"
+  # Both dead tasks' windows are gone (and the live one's health is judged by
+  # its run-step, not the shell, so one shared dead-tmux fake serves all three).
+  FM_FAKE_TMUX_MISSING=1
+
+  local out
+  out=$(run_crew_state "$d" nm-flow-view-r7)
+  assert_not_contains "$out" "state: working" "dead first lessee must not inherit the new occupant's run"
+  assert_contains "$out" "state: failed" "dead first lessee reports its own terminal run"
+  assert_contains "$out" "source: run-step" "own terminal run found via the runs list"
+  assert_contains "$out" "re-leased" "detail surfaces that the slot was re-leased"
+
+  out=$(run_crew_state "$d" fm-upstream-sync-b3)
+  assert_not_contains "$out" "state: working" "dead second lessee must not inherit the new occupant's run"
+  assert_contains "$out" "state: unknown" "no run of its own + dead endpoint -> unknown"
+  assert_contains "$out" "source: none" "no run of its own + dead endpoint -> none source"
+
+  out=$(run_crew_state "$d" kept-exec-p2)
+  assert_contains "$out" "state: working" "the live current lessee still reports working"
+  assert_contains "$out" "source: run-step" "the live current lessee keeps its full run-step source"
+  assert_contains "$out" "validating (running)" "the live current lessee keeps step detail"
+  pass "recycled slot: dead lessees are not reported working, live lessee is"
+}
+
+# The precedence's intended case must survive the recycling fix even ACROSS a
+# re-lease: a crew whose window closed and whose slot lapsed, but whose own
+# fm/<id> run is genuinely still in flight, still reports working from the
+# runs list rather than being masked by the dead shell.
+test_recycled_slot_own_run_still_in_flight_reports_working() {
+  reset_fakes
+  local d; d=$(new_case recycled-slot-live-run)
+  make_repo_on_branch "$d/slot" fm/new-occupant
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-lapsed.meta" "window=fm:fm-feat-lapsed" "worktree=$d/slot" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/new-occupant)"
+  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
+  running    fm/new-occupant bbbbbbb  2026-07-30 11:00
+  running    fm/feat-lapsed aaaaaaa  2026-07-30 10:30
+EOF
+)"
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-lapsed)
+  assert_contains "$out" "state: working" "own genuinely in-flight run still reports working"
+  assert_contains "$out" "source: run-step" "own in-flight run found via the runs list"
+  assert_contains "$out" "re-leased" "detail still surfaces the re-leased slot"
+  pass "a genuinely in-flight run survives its slot being re-leased"
+}
+
+# A crew that (against the fm/<id> contract) works on an unconventional branch
+# loses run attribution but degrades in the SAFE direction: a live busy pane
+# still reads working via the pane, never via a misattributed run.
+test_unconventional_branch_degrades_to_pane() {
+  reset_fakes
+  local d; d=$(new_case unconventional-branch)
+  make_repo_on_branch "$d/wt" my-own-fix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-uncv.meta" "window=fm:fm-feat-uncv" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running my-own-fix)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local out; out=$(run_crew_state "$d" feat-uncv)
+  assert_not_contains "$out" "source: run-step" "a non-fm/<id> branch's run is never attributed"
+  assert_contains "$out" "state: working" "a live busy pane still reads working"
+  assert_contains "$out" "source: pane" "degradation lands on the pane source"
+  pass "an unconventional branch degrades to the pane, not to misattribution"
+}
+
 # (f) no run for this crew + a busy pane -> working via pane
 test_no_run_busy_pane() {
   reset_fakes
@@ -1159,6 +1263,9 @@ test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
+test_recycled_slot_dead_tasks_not_working
+test_recycled_slot_own_run_still_in_flight_reports_working
+test_unconventional_branch_degrades_to_pane
 test_no_run_busy_pane
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
