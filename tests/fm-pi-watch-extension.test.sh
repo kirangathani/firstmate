@@ -1048,13 +1048,14 @@ EOF
 }
 
 test_opencode_arm_does_not_reuse_a_stale_read_only_refusal() {
-  local plugin repo home log shim marker real_ps out status
+  local plugin repo home log shim marker release real_ps out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
   repo="$TMP_ROOT/opencode-stale-refusal-root"
   home="$TMP_ROOT/opencode-stale-refusal-home"
   log="$TMP_ROOT/opencode-stale-refusal.log"
   shim="$TMP_ROOT/opencode-stale-refusal-shim"
   marker="$TMP_ROOT/opencode-stale-refusal.ps"
+  release="$TMP_ROOT/opencode-stale-refusal.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config" "$shim"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
@@ -1068,21 +1069,28 @@ SH
   real_ps=$(command -v ps) || real_ps=""
   [ -n "$real_ps" ] || fail "OpenCode stale-refusal test needs ps on PATH"
   # The lock-ownership check walks the process ancestry with ps. Blocking only the
-  # FIRST ps call, and announcing it through a marker file, pins the first launch
-  # inside that walk AFTER it has already read the unowned lock. The driver then
-  # takes the lock and fires the second idle event with no timing assumption at
-  # all, so the second event provably arrives while the first launch is in flight.
+  # FIRST ps call, announcing it through a marker file, and holding it there until
+  # the driver writes a release file pins the first launch inside that walk AFTER
+  # it has already read the unowned lock, for exactly as long as the driver needs.
+  # The driver takes the lock and fires the second idle event before releasing, so
+  # the second event provably arrives while the first launch is still in flight,
+  # with no timing assumption at all. The wait is bounded so a driver bug cannot
+  # wedge the suite.
   cat > "$shim/ps" <<SH
 #!/usr/bin/env bash
 if [ ! -e "\${FM_PS_MARKER:?}" ]; then
   : > "\$FM_PS_MARKER"
-  sleep "\${FM_PS_DELAY:-2}"
+  waited=0
+  while [ ! -e "\${FM_PS_RELEASE:?}" ] && [ "\$waited" -lt 3000 ]; do
+    sleep 0.01
+    waited=\$((waited + 1))
+  done
 fi
 exec $real_ps "\$@"
 SH
   chmod +x "$shim/ps"
   out=$(PATH="$shim:$PATH" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" \
-    FM_PS_MARKER="$marker" FM_PS_DELAY=2 node 2>&1 <<'EOF'
+    FM_PS_MARKER="$marker" FM_PS_RELEASE="$release" node 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -1116,6 +1124,7 @@ if (existsSync(process.env.FM_ARM_LOG)) {
 }
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await hooks.event(event);
+writeFileSync(process.env.FM_PS_RELEASE, "");
 if (!(await waitFor(process.env.FM_ARM_LOG, 20000))) {
   console.error("a post-lock idle event was denied arming by the in-flight read-only refusal");
   process.exit(1);

@@ -81,6 +81,13 @@ Two further facts were measured on 2026-08-03 against the unfixed plugin, using 
 Recovery on a later event is not a mitigation the fleet can rely on.
 The watcher is what wakes an idle session, so when arming is denied for an idle event there is no guaranteed later turn to produce the next `session.idle`, and supervision stays off while every surface reports healthy.
 
+The re-check deliberately covers only the `read-only` refusal, and this class is therefore not fully closed.
+`beginArm` also answers `not-needed` from a synchronous `shouldArm` check and `skipped` when the call carries no session id, and both are the same class of precondition snapshot as `read-only`: the answer describes state read at one instant by one caller, and a coalesced caller is served it whether or not it still holds.
+A task spawn that creates a `.meta` file mid-flight is the `not-needed` version of exactly the race fixed here, with the same permanent consequence for that event.
+Those two statements are read from the plugin source, not measured: unlike every timing recorded above, neither case was reproduced.
+Leaving them unfixed was an explicit scope decision rather than an oversight.
+Closing them needs its own reasoning and its own regression test, because `shouldArm` is a synchronous check with a different flip profile from lock ownership.
+
 ## Sanitized live evidence, 2026-07-17
 
 All five harnesses ran against git-initialized scratch projects and isolated `FM_HOME` state.
