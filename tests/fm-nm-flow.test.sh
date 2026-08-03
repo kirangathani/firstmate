@@ -55,8 +55,11 @@
 #       own labelled count in the merge-gate row - never folded into missing,
 #       failing or unexecuted, never a green, inside 80 columns - and the
 #       exec-gate marker decides whether the unexecuted class is matched at
-#       all, mirroring the order bin/fm-pr-merge.sh applies; and the probe
-#       leaves the guard's fleet state untouched
+#       all, mirroring the order bin/fm-pr-merge.sh applies; a result row
+#       always names all four classes including their zeros, spending the row
+#       prefix rather than a count when a wide magnitude will not fit; and the
+#       probe writes no guard state and creates no state dir, even against a
+#       fresh FM_HOME
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -452,8 +455,8 @@ SH
   git -C "$d/wt" commit -qam "drop beta"
   FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
   out=$(run_flow "$d" --worktree "$d/wt" --tests-gate)
-  assert_contains "$out" "prior-tests: missing 1 / failing 0 !!" \
-    "merge-gate box shows the missing count"
+  assert_contains "$out" "prior-tests: miss 1/fail 0/unexec 0/excused 0 !!" \
+    "merge-gate box shows all four counts, missing among them"
   assert_contains "$out" "prior-tests: compared against base main" \
     "the compared base is named in full on its own legend line"
   [ -z "$(git -C "$d/wt" status --porcelain)" ] || fail "tests-gate render dirtied the worktree"
@@ -523,16 +526,16 @@ PY
   git -C "$d/wt" commit -qm "unrelated change"
   FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
   out=$(run_flow "$d" --worktree "$d/wt" --tests-gate)
-  assert_contains "$out" "prior-tests: missing 0 / failing 0 (1 unexecuted)" \
+  assert_contains "$out" "prior-tests: miss 0/fail 0/unexec 1/excused 0" \
     "merge-gate box qualifies its own annotation with the unexecuted count"
-  assert_not_contains "$out" "failing 0 ok" \
+  assert_not_contains "$out" "excused 0 ok" \
     "an unexecuted base assertion never renders a bare ok"
   assert_contains "$out" "prior-tests: compared against base main" \
     "the compared base is named in full on its own legend line"
   assert_contains "$out" "prior-tests: 1 base file verified by name only, not by assertion" \
     "the name-only file count is reported on its own legend line"
   local row width
-  row=$(printf '%s\n' "$out" | grep 'missing 0 / failing 0' | head -1)
+  row=$(printf '%s\n' "$out" | grep 'miss 0/fail 0' | head -1)
   row=$(strip_sgr "$row")
   width=${#row}
   [ "$width" -le 80 ] || fail "merge-gate row is $width columns: $row"
@@ -590,7 +593,7 @@ SH
 
   FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
   out=$(run_flow "$d" --worktree "$d/wt" --tests-gate)
-  assert_contains "$out" "prior-tests: missing 12 / failing 10 !!" \
+  assert_contains "$out" "prior-tests: miss 12/fail 10/unexec 0/excused 0 !!" \
     "two-digit missing and failing counts both land in the box row"
   base_line=$(printf '%s\n' "$out" | grep 'compared against base' | head -1)
   assert_contains "$base_line" "prior-tests: compared against base origin/master" \
@@ -633,7 +636,7 @@ SH
   out=$(FM_NM_FLOW_TESTS_TIMEOUT=1 run_flow "$d" --worktree "$d/wt" --tests-gate)
   assert_contains "$out" "prior-tests: pending (probe timed out after 1s)" \
     "an over-running probe degrades to pending"
-  assert_not_contains "$out" "failing 0 ok" "a timed-out probe never renders a green result"
+  assert_not_contains "$out" " ok" "a timed-out probe never renders a green result"
   assert_not_contains "$out" "compared against base" \
     "a timed-out probe claims no comparison"
   assert_not_contains "$out" "verified by name only" \
@@ -732,7 +735,7 @@ SH
   assert_contains "$first" "prior-tests: checking..." "frame 1 renders before the probe runs"
   assert_not_contains "$first" "compared against base" \
     "frame 1 claims no comparison before the probe has run"
-  assert_contains "$out" "prior-tests: missing 1 / failing 0 !!" \
+  assert_contains "$out" "prior-tests: miss 1/fail 0/unexec 0/excused 0 !!" \
     "frame 2 carries the computed result"
   pass "--tests-gate --watch never blanks the first frame"
 }
@@ -839,8 +842,8 @@ test_header_keeps_task_id() {
 
 # (s) a signal-killed probe is not a result. The bounding ladder must report the
 # signal death, and the gate must land on pending: run_bounded's rc IS the
-# merge-gate verdict, so an rc that swallowed the signal renders "missing 0 /
-# failing 0 ok" over a suite that never ran.
+# merge-gate verdict, so an rc that swallowed the signal renders an "ok" over a
+# suite that never ran.
 test_perl_bounding_arm_reports_signals() {
   reset_fakes
   local prog rc=0
@@ -918,7 +921,7 @@ SH
     "$d/bin/fm-nm-flow.sh" --worktree "$d/wt" --tests-gate)
   assert_contains "$out" "prior-tests: pending (check could not run, exit 137)" \
     "a signal-killed probe lands on pending and names the exit"
-  assert_not_contains "$out" "failing 0 ok" \
+  assert_not_contains "$out" " ok" \
     "a signal-killed probe never renders a green result"
   assert_not_contains "$out" "compared against base" \
     "a signal-killed probe claims no comparison"
@@ -989,7 +992,7 @@ PY
   lines=$(printf '%s\n' "$frame" | wc -l | tr -d ' ')
   [ "$lines" -le 21 ] || fail "frame is $lines lines against a 21-row budget"
   assert_contains "$frame" "4 legend lines dropped to fit a 21-row pane" "the drop is stated explicitly"
-  assert_contains "$frame" "prior-tests: missing 0 / failing 0 (1 unexecuted)" \
+  assert_contains "$frame" "prior-tests: miss 0/fail 0/unexec 1/excused 0" \
     "the qualified result row survives the drop"
   assert_contains "$frame" "prior-tests: compared against base main" \
     "the base claim is undroppable while a result shows"
@@ -1013,8 +1016,8 @@ PY
   assert_contains "$frame" "prior-tests: pending (pane too short to qualify)" \
     "the box degrades to pending when its qualifiers cannot fit"
   assert_not_contains "$frame" "compared against base" "no unqualifiable claim is made"
-  assert_not_contains "$frame" "unexecuted)" "no unqualifiable count is shown"
-  assert_not_contains "$frame" "failing 0 ok" "no green appears without its qualifiers"
+  assert_not_contains "$frame" "unexec 1" "no unqualifiable count is shown"
+  assert_not_contains "$frame" "excused 0 ok" "no green appears without its qualifiers"
   assert_contains "$frame" "legend lines dropped to fit a 20-row pane" "the drop is still stated"
 
   # A pane too short even for the core rows: everything the frame can say is
@@ -1042,7 +1045,7 @@ PY
   [ "$lines" = 24 ] || fail "the one-shot render was trimmed to $lines lines"
   assert_contains "$out" "prior-tests: compared against base main" \
     "the one-shot render keeps the base claim"
-  assert_contains "$out" "prior-tests: missing 0 / failing 0 (1 unexecuted)" \
+  assert_contains "$out" "prior-tests: miss 0/fail 0/unexec 1/excused 0" \
     "the one-shot render keeps the qualified result"
   assert_not_contains "$out" "dropped to fit" "the one-shot render drops nothing"
   assert_not_contains "$out" "frame needs" "the one-shot render claims no shortfall"
@@ -1321,9 +1324,10 @@ SH
 
   # No record at all: the dropped assertion is a plain missing finding.
   out=$(FM_HOME="$d" run_flow "$d" ss-task --tests-gate)
-  assert_contains "$out" "prior-tests: missing 1 / failing 0 !!" \
-    "with no supersession record the finding is counted as missing"
-  assert_not_contains "$out" "excused" "nothing is excused without a record"
+  assert_contains "$out" "prior-tests: miss 1/fail 0/unexec 1/excused 0 !!" \
+    "with no record the finding is missing and every other class is still named"
+  assert_not_contains "$out" "excused = a captain-approved" \
+    "nothing is labelled excused without a record"
 
   cat > "$d/data/supersessions/demo.md" <<'MD'
 - ids: tests/demo.test.sh::* | project: demo | kind: missing | date: 2026-08-03 | reason: beta is deliberately superseded
@@ -1334,10 +1338,10 @@ MD
   # the record at all, so it stays in the not-run count. Only the missing one
   # moves out of its class, and it moves into a category of its own.
   out=$(FM_HOME="$d" run_flow "$d" ss-task --tests-gate)
-  assert_contains "$out" "prior-tests: miss 0 / fail 0 / unexec 1 / excused 1" \
+  assert_contains "$out" "prior-tests: miss 0/fail 0/unexec 1/excused 1" \
     "an excused identifier is counted and labelled on its own"
-  assert_not_contains "$out" "missing 1" "an excused identifier is not left in missing"
-  assert_not_contains "$out" "failing 1" "an excused identifier is not folded into failing"
+  assert_not_contains "$out" "miss 1" "an excused identifier is not left in missing"
+  assert_not_contains "$out" "fail 1" "an excused identifier is not folded into failing"
   assert_not_contains "$out" "unexec 2" "an excused identifier is not folded into unexecuted"
   assert_not_contains "$out" " ok" "an excused identifier never produces a green"
   assert_contains "$out" "prior-tests: excused = a captain-approved supersession covers it" \
@@ -1355,7 +1359,7 @@ MD
   # disappearing from the row.
   : > "$d/data/exec-gate/demo"
   out=$(FM_HOME="$d" run_flow "$d" ss-task --tests-gate)
-  assert_contains "$out" "prior-tests: miss 0 / fail 0 / unexec 0 / excused 2" \
+  assert_contains "$out" "prior-tests: miss 0/fail 0/unexec 0/excused 2" \
     "the exec-gate marker moves the unexecuted finding into the excused count"
   assert_not_contains "$out" " ok" "two excused identifiers are still not a green"
   row=$(printf '%s\n' "$out" | grep 'excused 2' | head -1)
@@ -1369,10 +1373,70 @@ MD
     > "$d/data/supersessions/demo.md"
   rm -f "$d/data/exec-gate/demo"
   out=$(FM_HOME="$d" run_flow "$d" ss-task --tests-gate)
-  assert_contains "$out" "prior-tests: missing 1 / failing 0 !!" \
+  assert_contains "$out" "prior-tests: miss 1/fail 0/unexec 1/excused 0 !!" \
     "a malformed entry excuses nothing"
-  assert_not_contains "$out" "excused" "a malformed entry never labels anything excused"
+  assert_not_contains "$out" "excused = a captain-approved" \
+    "a malformed entry never labels anything excused"
   pass "excused identifiers are their own category, never folded and never green"
+}
+
+# Whenever the merge-gate box shows a result it names all four classes, zeros
+# included: no ordering, threshold or non-zero test may hide one behind another,
+# because a captain reading a live pane cannot tell a hidden count from a class
+# that had nothing to report. The counts themselves are never truncated and
+# never omitted - when four of them plus a flag will not fit an 80-column row,
+# it is the `prior-tests: ` prefix that gives way, and the base legend line
+# under the diagram carries that prefix anyway.
+test_tests_gate_four_counts_always() {
+  reset_fakes
+  local d out row width
+  d=$(new_case tests-gate-four-counts)
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/wt/tests"
+  git -C "$d/wt" init -q
+  cat > "$d/wt/tests/demo.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+pass "alpha"
+SH
+  chmod +x "$d/wt/tests/demo.test.sh"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm base
+  git -C "$d/wt" branch -M main
+  git -C "$d/wt" checkout -qb fm/change
+  printf 'note\n' > "$d/wt/README.md"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm "unrelated change"
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+
+  # Nothing wrong anywhere: the all-zero row still names every class, and this
+  # is the ONE shape allowed to carry an ok.
+  out=$(run_flow "$d" --worktree "$d/wt" --tests-gate)
+  assert_contains "$out" "prior-tests: miss 0/fail 0/unexec 0/excused 0 ok" \
+    "a clean result names all four classes, zeros included"
+
+  # A magnitude a whole-directory rewrite really can produce. The counts are
+  # reported verbatim and the prefix is what is spent to fit the pane.
+  mkdir -p "$d/bin"
+  cp "$NM_FLOW" "$d/bin/fm-nm-flow.sh"
+  cp "$ROOT/bin/fm-supersession-lib.sh" "$d/bin/fm-supersession-lib.sh"
+  cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
+#!/usr/bin/env bash
+echo "summary: missing=300 failing=250 unexecuted=120 skipped=0 unaccounted=0"
+exit 1
+SH
+  chmod +x "$d/bin/fm-nm-flow.sh" "$d/bin/fm-assert-tests-kept.sh"
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    "$d/bin/fm-nm-flow.sh" --worktree "$d/wt" --tests-gate)
+  assert_contains "$out" "miss 300/fail 250/unexec 120/excused 0 !!" \
+    "three-digit counts are reported whole, never truncated"
+  assert_not_contains "$out" "prior-tests: miss 300" \
+    "the prefix is what gives way to the counts, not the other way round"
+  row=$(printf '%s\n' "$out" | grep 'miss 300' | head -1)
+  row=$(strip_sgr "$row")
+  width=${#row}
+  [ "$width" -le 80 ] || fail "wide-count merge-gate row is $width columns: $row"
+  pass "the merge-gate row always carries all four counts, whole and inside 80 columns"
 }
 
 # The tests-gate probe must not write fleet state. fm-assert-tests-kept.sh calls
@@ -1420,7 +1484,7 @@ SH
   before=$(find "$d/state" -mindepth 1 -maxdepth 1 | sed 's|.*/||' | sort)
   FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
   out=$(FM_HOME="$d" run_flow "$d" guard-task --tests-gate)
-  assert_contains "$out" "prior-tests: missing 1 / failing 0 !!" \
+  assert_contains "$out" "prior-tests: miss 1/fail 0/unexec 0/excused 0 !!" \
     "the probe really ran, so the read-only claim is not vacuous"
   [ ! -e "$d/state/.guard-watcher-stale-banner" ] || \
     fail "the tests-gate probe claimed the watcher-down banner episode"
@@ -1428,7 +1492,20 @@ SH
     fail "the tests-gate probe left the guard's lock behind"
   after=$(find "$d/state" -mindepth 1 -maxdepth 1 | sed 's|.*/||' | sort)
   [ "$before" = "$after" ] || fail "the tests-gate probe changed state/: $before -> $after"
-  pass "the tests-gate probe writes no guard state"
+
+  # A fresh FM_HOME, explicit --worktree mode: the residual write read-only mode
+  # does not reach is bin/fm-wake-lib.sh's source-time `mkdir -p "$STATE"`, so
+  # the probe must carry a STATE pointed at its own scratch dir. Nothing outside
+  # that dir may appear, not even an empty state/.
+  local fresh="$d/fresh-home"
+  mkdir -p "$fresh"
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$fresh" "$NM_FLOW" --worktree "$d/wt" --tests-gate)
+  assert_contains "$out" "prior-tests: miss 1/fail 0/unexec 0/excused 0 !!" \
+    "the fresh-home probe really ran too"
+  [ ! -e "$fresh/state" ] || fail "--tests-gate created state/ under a fresh FM_HOME"
+  [ -z "$(find "$fresh" -mindepth 1)" ] || \
+    fail "--tests-gate wrote under a fresh FM_HOME: $(find "$fresh" -mindepth 1)"
+  pass "the tests-gate probe writes no guard state and creates no state dir"
 }
 
 test_usage_error
@@ -1463,6 +1540,7 @@ test_watch_argument_shapes
 test_ci_no_checks_banner
 test_parked_unnamed_gate
 test_tests_gate_excused_by_supersession
+test_tests_gate_four_counts_always
 test_tests_gate_leaves_guard_state_alone
 
 echo "all fm-nm-flow tests passed"
