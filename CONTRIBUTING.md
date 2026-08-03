@@ -81,7 +81,7 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 ```
 
 `bin/fm-test.sh` is the single owner of the suite: CI runs it as `--shard K/N` and stays exhaustive, the pre-push gate runs `--local`.
-`--local` selects through the reference closure in `bin/fm-test-plan.awk`, so a test that exercises an edited script runs even when the test file itself is untouched, and any changed file the planner cannot attribute to a test escalates the run to the whole set.
+`--local` selects through the reference closure in `bin/fm-test-plan.awk`, so a test that exercises an edited script runs even when the test file itself is untouched, and any changed file the planner cannot attribute to a test escalates the run to the whole set, prose (`*.md`, `*.txt`) being the one deliberate exception the planner's header argues for.
 Use `--list-local` to see what it would run and `--verify-parity` to re-derive the claim that the selected parallel path agrees with the whole set file for file.
 Reproduce one CI shard with `--shard K/N`.
 
