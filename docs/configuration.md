@@ -104,10 +104,11 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` as `bin/fm-test.sh` so no-mistakes runs firstmate's bash behavior suite directly.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
-That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
-It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating the test step to an agent.
+`bin/fm-test.sh` is the single owner of the behavior-suite definition (the `tests/*.test.sh` file set, the execution rules, and the shard partition), and its header comment owns the details.
+The argument-less form the gate runs is the canonical whole-set serial run: it requires `tmux` on `PATH`, prints `tmux -V`, executes every test file directly, runs them all even after a failure, and fails if any exited non-zero or went unrun.
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs that same script as `--shard K/N` across parallel jobs instead of delegating the test step to an agent, and `tests/fm-test.test.sh` asserts the shards' union is exactly this whole set, so the gate and CI cannot diverge.
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
