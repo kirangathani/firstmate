@@ -37,8 +37,9 @@
 #   (s) a probe killed by a signal renders pending, never a green that means
 #       nothing ran, and the perl bounding arm reports 128+signal like timeout
 #   (t) watch frames are bounded to the row budget the way they are bounded to
-#       columns: the 24-row worst case fits a plain pane whole, a smaller
-#       budget drops only plain legend lines and says how many, a result's two
+#       columns: a stock 80x24 pane keeps a full result WITH every qualifier
+#       and spends only plain legend lines to do it, a smaller budget drops
+#       only plain legend lines and says how many, a result's four core
 #       qualifier lines are undroppable (the box degrades to pending sooner),
 #       an unfittable frame says so plainly, and the one-shot render is never
 #       trimmed; a wrapping PR URL is charged the terminal rows it really takes
@@ -462,13 +463,13 @@ SH
   out=$(run_flow "$d" --worktree "$d/wt" --tests-gate)
   assert_contains "$out" "miss 1/fail 0/unex 0/excu -/skip 0/unac 0 !!" \
     "merge-gate box shows all six counts, missing among them"
-  assert_contains "$out" "prior-tests: compared against base main" \
+  assert_contains "$out" "prior-tests: base main: LOCAL, never fetched" \
     "the compared base is named in full on its own legend line"
-  assert_contains "$out" "a LOCAL ref, never fetched" \
+  assert_contains "$out" "LOCAL, never fetched" \
     "the base is disclosed as a local ref this viewer never fetched"
-  assert_contains "$out" "the merge gate refetches the remote base itself" \
+  assert_contains "$out" "the gate refetches it" \
     "the legend says plainly that the real gate compares against the remote"
-  assert_contains "$out" "snapshot taken at" \
+  assert_contains "$out" "prior-tests: snapshot " \
     "the result is stamped as a point-in-time snapshot"
   [ -z "$(git -C "$d/wt" status --porcelain)" ] || fail "tests-gate render dirtied the worktree"
 
@@ -541,7 +542,7 @@ PY
     "merge-gate box qualifies its own annotation with the unexecuted count"
   assert_not_contains "$out" " ok" \
     "an unexecuted base assertion never renders a bare ok"
-  assert_contains "$out" "prior-tests: compared against base main" \
+  assert_contains "$out" "prior-tests: base main: LOCAL, never fetched" \
     "the compared base is named in full on its own legend line"
   assert_contains "$out" "prior-tests: 1 base file verified by name only, not by assertion" \
     "the name-only file count is reported on its own legend line"
@@ -606,8 +607,8 @@ SH
   out=$(run_flow "$d" --worktree "$d/wt" --tests-gate)
   assert_contains "$out" "miss 12/fail 10/unex 0/excu -/skip 0/unac 0 !!" \
     "two-digit missing and failing counts both land in the box row"
-  base_line=$(printf '%s\n' "$out" | grep 'compared against base' | head -1)
-  assert_contains "$base_line" "prior-tests: compared against base origin/master" \
+  base_line=$(printf '%s\n' "$out" | grep 'prior-tests: base ' | head -1)
+  assert_contains "$base_line" "prior-tests: base origin/master: LOCAL, never fetched" \
     "the origin/-prefixed base is named whole and un-elided"
   assert_not_contains "$base_line" "..." "the base ref is never ellipsis-elided"
 
@@ -648,7 +649,7 @@ SH
   assert_contains "$out" "prior-tests: pending (probe timed out after 1s)" \
     "an over-running probe degrades to pending"
   assert_not_contains "$out" " ok" "a timed-out probe never renders a green result"
-  assert_not_contains "$out" "compared against base" \
+  assert_not_contains "$out" "prior-tests: base " \
     "a timed-out probe claims no comparison"
   assert_not_contains "$out" "verified by name only" \
     "a timed-out probe carries no stale name-only count"
@@ -740,16 +741,28 @@ pass() { printf 'ok - %s\n' "$1"; }
 pass "alpha"
 SH
   git -C "$d/wt" commit -qam "drop beta"
-  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+  # A run parked mid-flow, so the snapshot stamp has a real step to name. The
+  # step is read out of `probe`, and watch mode captures only the RENDER in a
+  # command substitution - a probe run in there would leave CURRENT empty in
+  # the shell run_tests_gate executes in and stamp "an unknown step" forever.
+  FM_FAKE_AXI_STATUS="$(run_running fm/change)"
   out=$(FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" --worktree "$d/wt" --tests-gate --watch 1)
   first=$(printf '%s\n' "$out" | sed -n '1,/^$/p')
   assert_contains "$first" "prior-tests: checking..." "frame 1 renders before the probe runs"
-  assert_not_contains "$first" "compared against base" \
+  assert_not_contains "$first" "prior-tests: base " \
     "frame 1 claims no comparison before the probe has run"
   assert_contains "$out" "miss 1/fail 0/unex 0/excu -/skip 0/unac 0 !!" \
     "frame 2 carries the computed result"
-  assert_contains "$out" "snapshot taken at" \
+  assert_contains "$out" "snapshot " \
     "the cached watch result is stamped as a snapshot, not a live verdict"
+  assert_contains "$out" "at step review; not re-checked since" \
+    "the watch stamp names the step the run was really at"
+  assert_not_contains "$out" "an unknown step" \
+    "the watch stamp never falls back to an unknown step for a readable run"
+  # The stamp carries a date as well as a clock reading: a pane left open
+  # overnight must not render a time that scans as this morning's.
+  assert_contains "$out" "snapshot $(date '+%m-%d') " \
+    "the snapshot stamp carries the date, not just the time"
   pass "--tests-gate --watch never blanks the first frame"
 }
 
@@ -936,7 +949,7 @@ SH
     "a signal-killed probe lands on pending and names the exit"
   assert_not_contains "$out" " ok" \
     "a signal-killed probe never renders a green result"
-  assert_not_contains "$out" "compared against base" \
+  assert_not_contains "$out" "prior-tests: base " \
     "a signal-killed probe claims no comparison"
   assert_not_contains "$out" "verified by name only" \
     "a signal-killed probe carries no stale name-only count"
@@ -946,10 +959,12 @@ SH
 # (t) in watch mode the frame is bounded to the pane's rows the way it is
 # bounded to columns; the one-shot render is never trimmed. The worst case is
 # the ordinary one: every conditional line present at once - the PR line, the
-# result's four qualifier lines, the name-only count and the det|LLM legend -
-# and every qualifier ranks as core while the box shows a result, so a shrinking
-# pane spends the plain legends first and then degrades the box to pending,
-# never separating a result from what qualifies it.
+# result's three always-on qualifier lines, the name-only count and the det|LLM
+# legend - and every qualifier ranks as core while the box shows a result. The
+# plain 80x24 pane is the constraint that sizes that block: a full result and
+# all four core qualifiers must still fit there, spending only plain legends to
+# do it. Below it the plain legends go first and then the box degrades to
+# pending, never separating a result from what qualifies it.
 test_frame_height_bounded() {
   reset_fakes
   local d out frame lines hdr box
@@ -984,40 +999,42 @@ PY
     "pr=https://github.com/o/r/pull/7"
   FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
 
-  # 27 rows: the worst case, every conditional line present at once, fits whole.
-  out=$(FM_NM_FLOW_ROWS=27 FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" height-task --tests-gate --watch 1)
+  # 26 rows: the worst case, every conditional line present at once, fits whole.
+  out=$(FM_NM_FLOW_ROWS=26 FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" height-task --tests-gate --watch 1)
   frame=$(last_frame "$out")
   assert_contains "$frame" "PR: https://github.com/o/r/pull/7" "the PR line is present"
-  assert_contains "$frame" "prior-tests: compared against base main" "the base legend is present"
-  assert_contains "$frame" "a LOCAL ref, never fetched" "the unfetched-base qualifier is present"
-  assert_contains "$frame" "snapshot taken at" "the snapshot qualifier is present"
-  assert_contains "$frame" "prior-tests: excu = captain-excused" "the class legend is present"
+  assert_contains "$frame" "prior-tests: base main: LOCAL, never fetched" "the base legend is present"
+  assert_contains "$frame" "LOCAL, never fetched" "the unfetched-base qualifier is present"
+  assert_contains "$frame" "prior-tests: snapshot " "the snapshot qualifier is present"
+  assert_contains "$frame" "prior-tests: excu=captain-excused" "the class legend is present"
   assert_contains "$frame" "verified by name only" "the name-only legend is present"
   assert_contains "$frame" "det|LLM: commands.<step>" "the det|LLM legend is present"
   lines=$(printf '%s\n' "$frame" | wc -l | tr -d ' ')
-  [ "$lines" = 27 ] || fail "the worst-case frame is $lines lines, expected the 27-line case"
-  assert_not_contains "$frame" "legend line" "nothing is dropped inside a 27-row budget"
+  [ "$lines" = 26 ] || fail "the worst-case frame is $lines lines, expected the 26-line case"
+  assert_not_contains "$frame" "legend line" "nothing is dropped inside a 26-row budget"
   hdr=$(strip_sgr "$(printf '%s\n' "$frame" | head -1)")
   assert_contains "$hdr" "height-task" "the header survives the widest budget"
 
-  # The default 24-row pane: every plain legend goes and the drop is stated,
-  # while the result row and ALL FOUR of its qualifier lines survive - they are
-  # core while the box shows a result, whatever rank order the plain legends
-  # drop in.
+  # THE HARD CONSTRAINT: a plain 80x24 tmux pane. The counts and every qualifier
+  # that keeps them from reading as verified must ALL survive there - the plain
+  # legends are what gives way, and the box must never degrade to pending at
+  # this size just because the qualifiers grew.
   out=$(FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" height-task --tests-gate --watch 1)
   frame=$(last_frame "$out")
   lines=$(printf '%s\n' "$frame" | wc -l | tr -d ' ')
   [ "$lines" -le 24 ] || fail "frame is $lines lines against the default 24-row budget"
-  assert_contains "$frame" "4 legend lines dropped to fit a 24-row pane" "the drop is stated explicitly"
+  assert_not_contains "$frame" "pane too short to qualify" \
+    "a stock 80x24 pane never loses the counts to the too-short backstop"
+  assert_contains "$frame" "3 legend lines dropped to fit a 24-row pane" "the drop is stated explicitly"
   assert_contains "$frame" "miss 0/fail 0/unex 1/excu 0/skip 0/unac 0" \
     "the qualified result row survives the drop"
-  assert_contains "$frame" "prior-tests: compared against base main" \
+  assert_contains "$frame" "prior-tests: base main: LOCAL, never fetched" \
     "the base claim is undroppable while a result shows"
-  assert_contains "$frame" "the merge gate refetches the remote base itself" \
+  assert_contains "$frame" "the gate refetches it" \
     "the stale-base qualifier is undroppable while a result shows"
-  assert_contains "$frame" "snapshot taken at" \
+  assert_contains "$frame" "prior-tests: snapshot " \
     "the snapshot qualifier is undroppable while a result shows"
-  assert_contains "$frame" "prior-tests: excu = captain-excused" \
+  assert_contains "$frame" "prior-tests: excu=captain-excused" \
     "the class legend is undroppable while the labels are up"
   assert_contains "$frame" "verified by name only" \
     "the name-only claim is undroppable while a result shows"
@@ -1029,17 +1046,17 @@ PY
     assert_contains "$frame" "[ $box" "step row $box is never dropped"
   done
 
-  # 23 rows: the result, its qualifiers and the mandatory drop notice no longer
-  # coexist, so the box itself degrades to pending - at no pane size does a
-  # result appear separated from its qualifiers.
-  out=$(FM_NM_FLOW_ROWS=23 FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" height-task --tests-gate --watch 1)
+  # 22 rows, below the plain-pane floor: the result, its qualifiers and the
+  # mandatory drop notice no longer coexist, so the box itself degrades to
+  # pending - at no pane size does a result appear separated from its qualifiers.
+  out=$(FM_NM_FLOW_ROWS=22 FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" height-task --tests-gate --watch 1)
   frame=$(last_frame "$out")
   lines=$(printf '%s\n' "$frame" | wc -l | tr -d ' ')
-  [ "$lines" -le 23 ] || fail "frame is $lines lines against a 23-row budget"
+  [ "$lines" -le 22 ] || fail "frame is $lines lines against a 22-row budget"
   assert_contains "$frame" "prior-tests: pending (pane too short to qualify)" \
     "the box degrades to pending when its qualifiers cannot fit"
-  assert_not_contains "$frame" "compared against base" "no unqualifiable claim is made"
-  assert_not_contains "$frame" "snapshot taken at" "no unqualifiable snapshot claim is made"
+  assert_not_contains "$frame" "prior-tests: base " "no unqualifiable claim is made"
+  assert_not_contains "$frame" "snapshot " "no unqualifiable snapshot claim is made"
   assert_not_contains "$frame" "unex 1" "no unqualifiable count is shown"
   assert_not_contains "$frame" "excu 0" "no green appears without its qualifiers"
 
@@ -1062,22 +1079,22 @@ PY
   assert_contains "$frame" "frame needs 18 rows; this 12-row pane will scroll it" \
     "an unfittable frame says so plainly"
   assert_not_contains "$frame" "dropped to fit" "no notice claims an unfittable frame was made to fit"
-  assert_not_contains "$frame" "compared against base" "still no unqualified claim"
+  assert_not_contains "$frame" "prior-tests: base " "still no unqualified claim"
 
   # A bogus override falls back to the same hard 24-row default.
   out=$(FM_NM_FLOW_ROWS=not-a-number FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" height-task --tests-gate --watch 1)
   frame=$(last_frame "$out")
   lines=$(printf '%s\n' "$frame" | wc -l | tr -d ' ')
   [ "$lines" = 24 ] || fail "a non-numeric row override did not fall back to 24: $lines lines"
-  assert_contains "$frame" "4 legend lines dropped to fit a 24-row pane" \
+  assert_contains "$frame" "3 legend lines dropped to fit a 24-row pane" \
     "the fallback budget behaves exactly like the explicit 24-row one"
 
   # The one-shot render is never trimmed: scrollback makes trimming pointless,
   # so even a tiny declared pane gets the complete frame.
   out=$(FM_NM_FLOW_ROWS=12 run_flow "$d" height-task --tests-gate)
   lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
-  [ "$lines" = 27 ] || fail "the one-shot render was trimmed to $lines lines"
-  assert_contains "$out" "prior-tests: compared against base main" \
+  [ "$lines" = 26 ] || fail "the one-shot render was trimmed to $lines lines"
+  assert_contains "$out" "prior-tests: base main: LOCAL, never fetched" \
     "the one-shot render keeps the base claim"
   assert_contains "$out" "miss 0/fail 0/unex 1/excu 0/skip 0/unac 0" \
     "the one-shot render keeps the qualified result"
@@ -1362,7 +1379,7 @@ SH
   out=$(FM_HOME="$d" run_flow "$d" ss-task --tests-gate)
   assert_contains "$out" "miss 1/fail 0/unex 1/excu 0/skip 0/unac 0 !!" \
     "with no record the finding is missing and every other class is still named"
-  assert_contains "$out" "prior-tests: excu = captain-excused" \
+  assert_contains "$out" "prior-tests: excu=captain-excused" \
     "the excused label is explained whenever it appears, not only when non-zero"
 
   cat > "$d/data/supersessions/demo.md" <<'MD'
@@ -1380,9 +1397,9 @@ MD
   assert_not_contains "$out" "fail 1" "an excused identifier is not folded into failing"
   assert_not_contains "$out" "unex 2" "an excused identifier is not folded into unexecuted"
   assert_not_contains "$out" " ok" "an excused identifier never produces a green"
-  assert_contains "$out" "prior-tests: excu = captain-excused, not a pass" \
+  assert_contains "$out" "prior-tests: excu=captain-excused, not a pass" \
     "the excused category is spelled out under the diagram"
-  assert_contains "$out" "prior-tests: compared against base main" \
+  assert_contains "$out" "prior-tests: base main: LOCAL, never fetched" \
     "the excused row still names the base it compared against"
   while IFS= read -r line; do
     line=$(strip_sgr "$line")
@@ -1459,10 +1476,10 @@ SH
   out=$(FM_HOME="$d" run_flow "$d" six-task --tests-gate)
   assert_contains "$out" "miss 0/fail 0/unex 0/excu 0/skip 0/unac 0 ok" \
     "a clean result names all six classes, zeros included"
-  assert_contains "$out" "prior-tests: excu = captain-excused" \
+  assert_contains "$out" "prior-tests: excu=captain-excused" \
     "the class legend shows even when every count is zero"
-  assert_not_contains "$out" "never evaluated that class" \
-    "no dash legend appears when every class really was evaluated"
+  assert_contains "$out" "-=unchecked" \
+    "the dash is explained whenever the labels are up, not only when one shows"
 
   # The same worktree read in explicit --worktree mode knows no project, so the
   # supersession record is never consulted: excused is NOT-EVALUATED, which
@@ -1472,7 +1489,7 @@ SH
     "an unevaluated class renders as a dash, not as a zero"
   assert_not_contains "$out" "excu 0" "never-evaluated is never rendered as a count of 0"
   assert_not_contains "$out" " ok" "an unevaluated class suppresses the green"
-  assert_contains "$out" "prior-tests: a dash = this run never evaluated that class" \
+  assert_contains "$out" "-=unchecked" \
     "the dash is explained under the diagram"
 
   mkdir -p "$d/bin"
@@ -1524,6 +1541,49 @@ SH
   assert_contains "$out" "miss 0/fail 0/unex 0/excu 0/skip 0/unac 1" \
     "a lone unaccounted identifier is still named"
   assert_not_contains "$out" " ok" "a lone unaccounted identifier suppresses the green"
+
+  # Version skew: a check whose summary line has no concept of skipped or
+  # unaccounted at all. Counting the finding lines it never emits would
+  # manufacture a zero out of their absence and hand back a green asserting two
+  # classes nothing evaluated, so both render as dashes and the green is gone.
+  cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
+#!/usr/bin/env bash
+echo "summary: missing=0 failing=0 unexecuted=0"
+exit 0
+SH
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+    "$d/bin/fm-nm-flow.sh" six-task --tests-gate)
+  assert_contains "$out" "miss 0/fail 0/unex 0/excu 0/skip -/unac -" \
+    "a class the summary never reported renders as a dash, never as a zero"
+  assert_not_contains "$out" "skip 0" "an unreported class is not given a zero"
+  assert_not_contains "$out" " ok" \
+    "a class nothing evaluated suppresses the green even at exit 0"
+
+  # The same skew, but the check DID emit a finding line for the class it left
+  # out of the summary. A finding line is positive evidence and is believed;
+  # only its absence proves nothing.
+  cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
+#!/usr/bin/env bash
+echo "skipped: tests/demo.test.sh::alpha"
+echo "summary: missing=0 failing=0 unexecuted=0"
+exit 0
+SH
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+    "$d/bin/fm-nm-flow.sh" six-task --tests-gate)
+  assert_contains "$out" "miss 0/fail 0/unex 0/excu 0/skip 1/unac -" \
+    "a finding line is believed even when the summary omits its class"
+
+  # No summary line at all: every class is read the same way, off the finding
+  # lines, so a zero there is a real reading of the whole output.
+  cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
+#!/usr/bin/env bash
+echo "missing: tests/demo.test.sh::beta"
+exit 1
+SH
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+    "$d/bin/fm-nm-flow.sh" six-task --tests-gate)
+  assert_contains "$out" "miss 1/fail 0/unex 0/excu 0/skip 0/unac 0 !!" \
+    "with no summary line every class is read off the finding lines alike"
 
   # A magnitude a whole-directory rewrite really can produce. The counts are
   # reported verbatim and the prefix is what is spent to fit the pane.

@@ -48,10 +48,15 @@
 #                      A class this run never EVALUATED renders as a dash, never
 #                      as 0: never-checked and checked-and-clean are different
 #                      facts and a captain cannot be asked to tell them apart from
-#                      an identical `0`. Excusal in explicit --worktree mode is
-#                      the live instance (no project, so no record to consult), and
-#                      a dash also suppresses `ok`, since `ok` asserts every class
-#                      is an ESTABLISHED zero.
+#                      an identical `0`. Two paths reach it - excusal in explicit
+#                      --worktree mode (no project, so no record to consult), and
+#                      a `summary:` line that carries no field for a class at all
+#                      (a check with no concept of it, i.e. version skew: counting
+#                      its absent finding lines would manufacture a 0 out of
+#                      nothing). Finding LINES are positive evidence and are
+#                      believed whenever present; only their absence proves
+#                      nothing. A dash also suppresses `ok`, since `ok` asserts
+#                      every class is an ESTABLISHED zero.
 #                      `excused` is the identifiers the captain has already
 #                      excused by a supersession entry. They are subtracted from
 #                      their raw class and counted here instead, never folded
@@ -91,15 +96,17 @@
 #                      only frame 2 carries the result, why the probe is bounded
 #                      by FM_NM_FLOW_TESTS_TIMEOUT (default 300s) and refuses to
 #                      run at all when nothing on the host can bound it, and why
-#                      the legend lines under the diagram qualify the result the
-#                      row is showing: which base it compared against and that
-#                      that base is a LOCAL ref this viewer deliberately never
-#                      fetched (the merge gate refetches the remote itself, so
-#                      the two can disagree), when the snapshot was taken and at
-#                      which pipeline step (the probe runs ONCE per invocation,
-#                      so every later watch frame re-renders that same
-#                      point-in-time result, never a live verdict on current
-#                      HEAD), and how many of the base's files that run could
+#                      three legend lines under the diagram qualify the result
+#                      the row is showing: which base it compared against and
+#                      that that base is a LOCAL ref this viewer deliberately
+#                      never fetched (the merge gate refetches it, so the two can
+#                      disagree); the DATE, time and pipeline step the snapshot
+#                      was taken at (the probe runs ONCE per invocation, so every
+#                      later watch frame re-renders that same point-in-time
+#                      result, never a live verdict on current HEAD, and a bare
+#                      clock reading would scan as this morning's on a pane left
+#                      open overnight); and what the row's compact labels mean. A
+#                      fourth names how many of the base's files that run could
 #                      verify by name only (an identifier the probe reports as
 #                      `unexecuted:` was verified by NAME ONLY). The box row
 #                      itself carries only the counts, so no base ref length can
@@ -128,12 +135,19 @@
 # is charged ceil(len/width) rows after stripping display attributes. Over
 # budget, only legend lines are dropped - lowest value first, never the header,
 # the banner or a step row - and the count dropped is printed where they were.
-# Two qualifiers are structurally undroppable whenever the merge-gate box shows
-# a result: the compared-base legend and the name-only legend rank as core, and
-# when a pane is too short to carry them the box itself degrades to a pending
-# form, so a green can never appear separated from its qualifiers at any pane
-# size. When even the core lines cannot fit, the frame says so plainly instead
-# of claiming it was made to fit.
+# The merge-gate result's qualifiers are structurally undroppable whenever the
+# box shows one, and there are FOUR core lines at most: three that are always up
+# with a result (the local-unfetched base, the snapshot stamp, the compact class
+# legend) and the name-only line when any file was verified by name alone. They
+# are deliberately packed into that count - the plain 80x24 pane is the hard
+# constraint, the diagram plus banner plus PR line plus fail loop already spend
+# 18 rows, and a fifth core qualifier would push a full result past the budget
+# and degrade the box to pending, costing the captain the six counts they opted
+# in for. Splitting one for readability means re-checking that arithmetic. When
+# a pane is too short even for these, the box degrades to a pending form, so a
+# green can never appear separated from its qualifiers at any pane size; when
+# even the core lines cannot fit, the frame says so plainly instead of claiming
+# it was made to fit.
 #
 # Step kinds: the test and lint boxes are deterministic only when the target
 # project defines commands.test / commands.lint in its .no-mistakes.yaml;
@@ -498,11 +512,10 @@ tests_gate_base() {
 MGATE_ANN="prior-tests: pending (checked at merge)"
 MGATE_NAMEONLY=0
 MGATE_BASE=""
-# Whether any class rendered as a dash, and when/where the single probe ran.
-# The probe runs ONCE per invocation by design, so every watch frame after it
-# re-renders the same numbers: the stamp is what keeps that from reading as a
-# live verdict on whatever HEAD has become since.
-MGATE_DASH=0
+# When and where the single probe ran. The probe runs ONCE per invocation by
+# design, so every watch frame after it re-renders the same numbers: the stamp
+# is what keeps that from reading as a live verdict on whatever HEAD has become
+# since.
 MGATE_AT=""
 MGATE_STEP=""
 # The probe's scratch dir is the only thing this viewer ever writes, so its
@@ -662,22 +675,47 @@ mgate_counts_ann() {  # <missing> <failing> <unexec> <excused> <skipped> <unacco
   printf '%s' "$tight"
 }
 
-# One class count out of the probe's machine-readable `summary:` line, falling
-# back to counting that class's own finding lines when the summary carries no
-# field for it (an older check, or an output that lost the line). Both are real
-# measurements of the probe's own output, so a class read either way counts as
-# EVALUATED; the dash is reserved for a class nothing was consulted for at all.
+# One class cell out of the probe's output: a count, or `-` for a class this
+# run has no evidence about either way.
+#
+# With a `summary:` line up, that line is the check's own statement of what it
+# measured. A field it does NOT carry is a check that has no concept of the
+# class (version skew), and grep-counting that class's finding lines would then
+# manufacture a 0 out of their absence - the never-evaluated-versus-clean
+# conflation this viewer exists to prevent, arriving through the parse layer. So
+# an absent field is `-`, not 0. Finding LINES for the class are still positive
+# evidence and are believed when present; only their absence proves nothing.
+#
+# With no summary line at all, every class is being read the same way, off the
+# finding lines, so a 0 there is a real reading of the whole output.
 mgate_field() {  # <class> <summary-line> <stdout-file>
-  local v=''
-  [ -n "$2" ] && v=$(printf '%s' "$2" | sed -n "s/.*[[:space:]]$1=\([0-9]\{1,\}\).*/\1/p")
-  [ -n "$v" ] || v=$(grep -c "^$1: " "$3" || true)
-  printf '%s' "${v:-0}"
+  local v='' n
+  if [ -n "$2" ]; then
+    v=$(printf '%s' "$2" | sed -n "s/.*[[:space:]]$1=\([0-9]\{1,\}\).*/\1/p")
+    if [ -z "$v" ]; then
+      n=$(grep -c "^$1: " "$3" || true)
+      if [ "${n:-0}" -gt 0 ]; then v=$n; else v='-'; fi
+    fi
+  else
+    v=$(grep -c "^$1: " "$3" || true)
+    v=${v:-0}
+  fi
+  printf '%s' "$v"
+}
+
+# The arithmetic view of a cell: a dash contributes nothing, so a class with no
+# evidence can neither raise nor lower a count derived from the others.
+mgate_num() {  # <cell>
+  case "$1" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac
 }
 
 # The pipeline step the snapshot was taken at, named the way its box is: the
 # captain reads the stamp against the diagram above it. The box labels differ
 # from the internal step keys for three steps, so they are mapped rather than
-# printed raw.
+# printed raw. CURRENT is only meaningful in the shell `probe` last ran in, so
+# every caller must resolve this where that assignment is visible - a step read
+# out of a stale or unset CURRENT would stamp "an unknown step" forever while
+# looking exactly like a run whose step genuinely could not be read.
 mgate_step_label() {
   case "$CURRENT" in
     '')      printf 'an unknown step' ;;
@@ -691,8 +729,10 @@ mgate_step_label() {
 run_tests_gate() {
   local base out_file missing failing unexec excused skipped unacct summary
   MGATE_BASE=""
-  MGATE_DASH=0
-  MGATE_AT=$(date '+%H:%M:%S' 2>/dev/null || true)
+  # Date AND time: a pane left open overnight would otherwise stamp a bare
+  # clock reading that scans as this morning's, which is exactly the age at
+  # which the staleness matters most.
+  MGATE_AT=$(date '+%m-%d %H:%M' 2>/dev/null || true)
   MGATE_STEP=$(mgate_step_label)
   # The probe executes the base's own test files, so it must be time-bounded.
   # Nothing to bound it with means it does not run: a viewer that hangs is
@@ -759,16 +799,25 @@ run_tests_gate() {
   # a floor first: excusal may only ever subtract findings that were counted, so
   # a summary line and the finding lines disagreeing can never drive a class
   # count below what was actually excused (a negative would read as green).
+  # A class with no evidence stays a dash through all of this: its floor is 0
+  # by construction (a finding line for it would have made it a count), so the
+  # excusal arithmetic has nothing to move and must not turn it into a number.
   classify_excused "$out_file"
-  [ "$SEEN_MISSING" -gt "$missing" ] && missing=$SEEN_MISSING
-  [ "$SEEN_FAILING" -gt "$failing" ] && failing=$SEEN_FAILING
-  [ "$SEEN_UNEXEC" -gt "$unexec" ] && unexec=$SEEN_UNEXEC
-  missing=$((missing - EX_MISSING))
-  failing=$((failing - EX_FAILING))
-  unexec=$((unexec - EX_UNEXEC))
-  [ "$missing" -lt 0 ] && missing=0
-  [ "$failing" -lt 0 ] && failing=0
-  [ "$unexec" -lt 0 ] && unexec=0
+  if [ "$missing" != '-' ]; then
+    [ "$SEEN_MISSING" -gt "$missing" ] && missing=$SEEN_MISSING
+    missing=$((missing - EX_MISSING))
+    [ "$missing" -lt 0 ] && missing=0
+  fi
+  if [ "$failing" != '-' ]; then
+    [ "$SEEN_FAILING" -gt "$failing" ] && failing=$SEEN_FAILING
+    failing=$((failing - EX_FAILING))
+    [ "$failing" -lt 0 ] && failing=0
+  fi
+  if [ "$unexec" != '-' ]; then
+    [ "$SEEN_UNEXEC" -gt "$unexec" ] && unexec=$SEEN_UNEXEC
+    unexec=$((unexec - EX_UNEXEC))
+    [ "$unexec" -lt 0 ] && unexec=0
+  fi
   excused=$((EX_MISSING + EX_FAILING + EX_UNEXEC))
   # One stderr `UNEXECUTED: <file>` line per base test file check 2 could not
   # execute, so this stays a FILE count for the legend line while the row
@@ -784,7 +833,9 @@ run_tests_gate() {
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
     MGATE_ANN="prior-tests: pending (check could not run, exit $rc)"
     MGATE_NAMEONLY=0
-  elif [ "$rc" -eq 1 ] && [ $((missing + failing + unexec + excused)) -eq 0 ]; then
+  elif [ "$rc" -eq 1 ] && \
+    [ $(( $(mgate_num "$missing") + $(mgate_num "$failing") \
+          + $(mgate_num "$unexec") + excused )) -eq 0 ]; then
     # rc=1 with nothing read out of the three classes rc=1 is keyed on (excused
     # included, since every excused identifier came out of one of those three):
     # the check claims findings this viewer could not read, so the honest render
@@ -800,10 +851,7 @@ run_tests_gate() {
     # class nothing was consulted for goes on as a dash rather than borrowing
     # the appearance of a zero somebody established.
     local d_excused=$excused
-    if [ "$EX_EVAL" -eq 0 ]; then
-      d_excused='-'
-      MGATE_DASH=1
-    fi
+    [ "$EX_EVAL" -eq 0 ] && d_excused='-'
     MGATE_BASE=$base
     MGATE_ANN=$(mgate_counts_ann "$missing" "$failing" "$unexec" "$d_excused" \
       "$skipped" "$unacct")
@@ -1128,8 +1176,8 @@ line_rows() {  # <line>
   printf '%s' $(( ${#s} == 0 ? 1 : (${#s} - 1) / COLS + 1 ))
 }
 
-build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files> <mgate-dash>
-  local ann=$1 mbase=$2 nameonly=$3 dash=$4
+build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files>
+  local ann=$1 mbase=$2 nameonly=$3
   FRAME_LINES=()
   FRAME_RANK=()
   FRAME_MEASURED=0
@@ -1165,31 +1213,33 @@ build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files> <mgate
   # None of them is conditional on a count being non-zero - a legend that
   # appeared only when its class fired would let the row's quietest reading, the
   # all-zero one, go out unqualified.
+  #
+  # THREE lines carry all of it, and the count is load-bearing: every core line
+  # here is a row the plain 80x24 pane cannot spend on the diagram, and the six
+  # counts outrank the prose that qualifies them. Do not split one of these into
+  # two for readability without re-checking the 24-row budget in render().
   if [ -n "$mbase" ]; then
     # The base is whatever refs/remotes/origin/HEAD points at LOCALLY: this
     # viewer deliberately never fetches (that is what keeps it read-only and
     # cheap), so the ref can be a day stale while the row reads as agreement
-    # with current main. The gate itself fetches, so the two can disagree and
-    # this row is never proof the merge will be allowed.
-    core_line "prior-tests: compared against base $mbase, a LOCAL ref, never fetched"
-    core_line "prior-tests: it can lag; the merge gate refetches the remote base itself"
+    # with current main. The gate refetches, so the two can disagree and this
+    # row is never proof the merge will be allowed.
+    core_line "prior-tests: base $mbase: LOCAL, never fetched; the gate refetches it"
     # The probe runs once per invocation, so in watch mode this same result is
     # re-rendered for every later frame while the pipeline keeps committing.
-    # Stamping when and at which step it was taken is what stops an hours-old
-    # green from reading as a live verdict on current HEAD.
-    core_line "prior-tests: ${MGATE_AT:-unknown time} snapshot taken at $MGATE_STEP; not re-checked since"
-    # The row's compact labels, spelled out: what "excu" is (a category of its
-    # own, not any of the other five), and that skip and unac are assertions
-    # nothing verified rather than assertions that passed.
-    core_line "prior-tests: excu = captain-excused, not a pass; skip/unac = never verified"
+    # Stamping the date, the time and the step it was taken at is what stops an
+    # hours-old green from reading as a live verdict on current HEAD.
+    core_line "prior-tests: snapshot $MGATE_AT at $MGATE_STEP; not re-checked since"
+    # The row's compact labels, spelled out in one line: "excu" is a category of
+    # its own rather than any of the other five, skip and unac are assertions
+    # nothing verified rather than assertions that passed, and a dash is a class
+    # with no evidence either way rather than an established zero.
+    core_line "prior-tests: excu=captain-excused, not a pass; skip/unac=unverified; -=unchecked"
   fi
   if [ "$nameonly" -gt 0 ]; then
     local noun=files
     [ "$nameonly" -eq 1 ] && noun='file'
     core_line "prior-tests: $nameonly base $noun verified by name only, not by assertion"
-  fi
-  if [ "$dash" -gt 0 ]; then
-    core_line "prior-tests: a dash = this run never evaluated that class; not a zero"
   fi
   if [ "$KIND_TEST" = 'det|LLM' ] || [ "$KIND_LINT" = 'det|LLM' ]; then
     legend_line 4 'det|LLM: commands.<step> not readable in .no-mistakes.yaml; det when it is set'
@@ -1219,7 +1269,7 @@ frame_measure() {
 }
 
 render() {
-  build_frame "$MGATE_ANN" "$MGATE_BASE" "$MGATE_NAMEONLY" "$MGATE_DASH"
+  build_frame "$MGATE_ANN" "$MGATE_BASE" "$MGATE_NAMEONLY"
   # The backstop behind the undroppable qualifiers: a pane too short to carry
   # the result, its qualifiers AND the mandatory drop notice gets none of them
   # - the box degrades to a non-committal pending form for the frame, so no
@@ -1231,7 +1281,7 @@ render() {
   if [ "$WATCH" = 1 ] && [ -n "$MGATE_BASE" ]; then
     frame_measure
     if [ "$TOTAL_ROWS" -gt "$ROWS" ] && [ $((CORE_ROWS + 1)) -gt "$ROWS" ]; then
-      build_frame "prior-tests: pending (pane too short to qualify)" "" 0 0
+      build_frame "prior-tests: pending (pane too short to qualify)" "" 0
     fi
   fi
   emit_frame
@@ -1291,15 +1341,12 @@ emit_frame() {
   fi
 }
 
-frame() {
-  probe
-  render
-}
-
+# The run state is classified in THIS shell in both modes, never inside the
+# command substitution that captures a frame: a subshell's assignments die with
+# it, so a `probe` run in there leaves CURRENT empty out here and the merge-gate
+# snapshot would stamp "an unknown step" on every frame forever. Only the
+# rendering is captured.
 if [ "$WATCH" = 0 ]; then
-  # The run state is classified BEFORE the probe, not as part of the render, so
-  # the snapshot stamp can name the step the run was at when the probe read the
-  # tree. Watch mode gets that for free: its probe runs after frame 1.
   probe
   [ "$TESTS_GATE_PENDING" = 1 ] && run_tests_gate
   render
@@ -1310,7 +1357,8 @@ FRAMES=0
 MAX_FRAMES=${FM_NM_FLOW_WATCH_MAX:-0}
 case "$MAX_FRAMES" in ''|*[!0-9]*) MAX_FRAMES=0 ;; esac
 while :; do
-  OUT=$(frame)
+  probe
+  OUT=$(render)
   if [ "$TTY" = 1 ]; then
     # No trailing newline: it would advance past the last row and scroll a frame
     # that exactly fills the pane. The non-tty branch keeps its blank-line frame
