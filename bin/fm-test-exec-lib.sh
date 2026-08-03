@@ -174,10 +174,16 @@
 # `--cache=false` is REQUIRED for vitest: without it a run writes its results
 # cache into node_modules/.vite/, which the env symlink would deliver into the
 # live worktree's real node_modules (verified 2026-08-03, vitest 3.2.7; the
-# flag verifiably stops every node_modules write). jest's cache goes to the OS
-# tmpdir and needs no counterpart. The ambient NODE_PATH and NODE_OPTIONS are
-# stripped for the same reason PYTHONPATH is not inherited: both are resolution
-# and preload backdoors that can reach outside the scratch tree.
+# flag stops that write, and the JS no-mutation test locks it in). Residual
+# limitation, stated rather than papered over: the flag disables vitest's
+# RESULTS cache only. Vite's cacheDir (default node_modules/.vite) is also
+# written by the dependency optimizer, which a project can turn on with
+# deps.optimizer.* in its vitest config, and there is no CLI override for
+# cacheDir - such a project's run would still write through the env link.
+# jest's cache goes to the OS tmpdir and needs no counterpart. The ambient
+# NODE_PATH and NODE_OPTIONS are stripped for the same reason PYTHONPATH is not
+# inherited: both are resolution and preload backdoors that can reach outside
+# the scratch tree.
 #
 # Results are read from the jest-shaped JSON both runners emit natively
 # (testResults[].assertionResults[] with status/title/ancestorTitles), one
@@ -221,8 +227,10 @@
 # specifier import loads the LIVE tree while we believe we are testing scratch.
 # scratch_untrusted_reason therefore scans the worktree's top-level
 # node_modules entries (scoped @*/ included): a symlink resolving inside the
-# live worktree but outside node_modules itself is first-party live code and
-# the file is reported unexecuted. Links resolving elsewhere (a shared store, a
+# live worktree but outside node_modules itself - the worktree ROOT included,
+# which is what `npm install file:.` / `npm link` of the root package leaves
+# behind (node_modules/<self> -> ..) - is first-party live code and the file
+# is reported unexecuted. Links resolving elsewhere (a shared store, a
 # global npm-link target) are third-party env by the same rule that shares
 # site-packages. Node resolves the scratch test file's relative imports inside
 # scratch and its bare specifiers through the scratch node_modules link, so
@@ -585,6 +593,10 @@ fm_js_runner_spec() {
 # symlink resolving INSIDE the live worktree but outside node_modules itself is
 # linked first-party live source - a workspace or file:/npm-link package - and
 # a bare specifier import would load the live tree instead of scratch. The
+# worktree ROOT itself counts: a self-link (node_modules/<self> -> .., left by
+# `npm install file:.` or `npm link` of the root package) resolves to exactly
+# the worktree, and treating that as trusted would be the false pass this
+# probe exists to prevent. The
 # answer depends only on <worktree>, so it is memoized.
 fm_js_untrusted_reason() {
   local wt=$1 nmreal wtreal entry real name reason
@@ -603,7 +615,7 @@ fm_js_untrusted_reason() {
         "$nmreal" | "$nmreal"/*) continue ;;
       esac
       case "$real" in
-        "$wtreal"/*)
+        "$wtreal" | "$wtreal"/*)
           name=${entry#"$wt/node_modules/"}
           reason="linked package $name resolves to $real, first-party code in the live worktree"
           break

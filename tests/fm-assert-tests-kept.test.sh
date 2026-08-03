@@ -1210,6 +1210,36 @@ test_js_workspace_link_is_unexecuted() {
   pass "a workspace-style link into live first-party source is reported unexecuted, never passed"
 }
 
+test_js_self_link_to_worktree_root_is_unexecuted() {
+  local dir out code
+  require_vitest_env js-root-shadow
+  # `npm install file:.` / `npm link` of the ROOT package (a common trick for
+  # absolute first-party imports) leaves node_modules/<self> -> .., which
+  # resolves to exactly the worktree root rather than a path beneath it. A bare
+  # `import ... from 'fixture'` would load the LIVE tree, so the root itself
+  # must be untrusted, not just paths under it.
+  dir=$(make_js_repo js-root-shadow vitest)
+  mkdir -p "$dir/node_modules/.bin"
+  ln -s "$VITEST_ENV/node_modules/.bin/vitest" "$dir/node_modules/.bin/vitest"
+  ln -s .. "$dir/node_modules/fixture"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "js-root-shadow: a self-linked root package must not be a silent pass"
+  assert_contains "$out" 'unexecuted: mod.test.js::x behaves' \
+    "js-root-shadow: a tree whose node_modules links back to the worktree root must be reported unexecuted"
+  assert_not_contains "$out" 'failing:' \
+    "js-root-shadow: an untrusted tree yields no verdict at all, neither pass nor fail"
+  assert_grep 'first-party code in the live worktree' "$dir/stderr" \
+    "js-root-shadow: the reason must name the live-tree link so it is actionable"
+  assert_grep 'fixture' "$dir/stderr" \
+    "js-root-shadow: the reason must name the self-linked package"
+  pass "a node_modules entry linking to the worktree root itself is reported unexecuted, never passed"
+}
+
 test_jest_clean_run_exits_zero() {
   local dir out code
   require_jest_env jest-clean
@@ -1287,7 +1317,7 @@ EOF
 }
 
 test_js_run_never_mutates_the_live_worktree() {
-  local dir before after nm_before nm_after
+  local dir before after nm_before nm_after marker touched
   require_vitest_env js-no-mutation
   dir=$(make_js_repo js-no-mutation vitest)
   ln -s "$VITEST_ENV/node_modules" "$dir/node_modules"
@@ -1295,6 +1325,7 @@ test_js_run_never_mutates_the_live_worktree() {
   after="$TMP_ROOT/js-no-mutation.after"
   nm_before="$TMP_ROOT/js-no-mutation.nm-before"
   nm_after="$TMP_ROOT/js-no-mutation.nm-after"
+  marker="$TMP_ROOT/js-no-mutation.marker"
   # run_explicit puts this harness's own state dir inside the fixture, so create
   # it up front: the snapshot must isolate what the RUN does to the worktree.
   mkdir -p "$dir/.state"
@@ -1303,12 +1334,25 @@ test_js_run_never_mutates_the_live_worktree() {
   # too: vitest's results cache writes into node_modules/.vite unless the
   # runner invocation keeps it disabled, and THROUGH the link that would land
   # in the live provisioned env this gate promises never to mutate.
+  #
+  # The path-list snapshot alone cannot see that regression, because the env is
+  # SHARED with every other vitest case in this file: an earlier case would
+  # already have created node_modules/.vite, and a later rewrite of the same
+  # paths leaves the name list identical. So stamp a marker immediately before
+  # the run and assert nothing under the env is newer than it - that holds no
+  # matter which cases ran first, and no matter whether the write creates a
+  # path or rewrites one.
   find "$dir" -path "$dir/.git" -prune -o -print | sort > "$before"
   find "$VITEST_ENV/node_modules" | sort > "$nm_before"
+  : > "$marker"
 
   set +e
   run_explicit "$dir" > /dev/null 2>&1
   set -e
+
+  touched=$(find "$VITEST_ENV/node_modules" -newer "$marker" -print | sort)
+  [ -z "$touched" ] \
+    || fail "js-no-mutation: the run must not write anything into the linked node_modules it borrows"$'\n'"$touched"
 
   find "$dir" -path "$dir/.git" -prune -o -print | sort > "$after"
   diff -u "$before" "$after" > "$TMP_ROOT/js-no-mutation.diff" \
@@ -1347,6 +1391,7 @@ test_vitest_clean_run_exits_zero
 test_vitest_rewritten_assertion_caught
 test_vitest_without_node_modules_is_unexecuted
 test_js_workspace_link_is_unexecuted
+test_js_self_link_to_worktree_root_is_unexecuted
 test_jest_clean_run_exits_zero
 test_jest_rewritten_assertion_caught
 test_jest_explicit_skip_is_visible
