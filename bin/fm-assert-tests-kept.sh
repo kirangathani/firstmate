@@ -488,8 +488,8 @@ if [ -s "$TMPD/execfiles" ]; then
     branch_rc=0
     run_base_test_file "$spec" "$TMPD/branch-tree" "$f" \
       "$TMPD/run-branch" "$TMPD/run-branch.err" ${idents[@]+"${idents[@]}"} || branch_rc=$?
-    passing_idents "$spec" "$TMPD/run-base" "$f" > "$TMPD/ok-base"
-    passing_idents "$spec" "$TMPD/run-branch" "$f" > "$TMPD/ok-branch"
+    passing_idents "$spec" "$TMPD/run-base" "$TMPD/base-tree/$f" > "$TMPD/ok-base"
+    passing_idents "$spec" "$TMPD/run-branch" "$TMPD/branch-tree/$f" > "$TMPD/ok-branch"
     comm -23 "$TMPD/ok-base" "$TMPD/ok-branch" > "$TMPD/ok-delta"
     delta_seen=0
     while IFS= read -r name; do
@@ -515,7 +515,7 @@ if [ -s "$TMPD/execfiles" ]; then
     # Passing wins outright: one passing case of a parametrized name means the
     # baseline verified that name, whatever its other cases did.
     idents_for_file "$f" | sort -u > "$TMPD/requested"
-    skipped_idents "$spec" "$TMPD/run-base" "$f" > "$TMPD/skip-base"
+    skipped_idents "$spec" "$TMPD/run-base" "$TMPD/base-tree/$f" > "$TMPD/skip-base"
     while IFS= read -r ident; do
       [ -n "$ident" ] || continue
       name=${ident#"$f::"}

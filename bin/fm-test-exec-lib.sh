@@ -33,10 +33,12 @@
 #       Print the sorted, unique set of passing test names the runner recorded in
 #       <results-out>. fm-assert composes the full <file>::<name> identifier from
 #       these names; for the shell runner the name is the `ok - <name>` tail.
-#       <file> is the repo-relative test file the run was for; the JS runners use
-#       it to keep names from a suffix-colliding file a substring filter also
-#       matched out of this file's result set (see the vitest section below), and
-#       the other runners ignore it.
+#       <file> is the ABSOLUTE path of the test file inside the scratch tree the
+#       run executed from; the JS runners compare it for exact (realpath-
+#       tolerant) equality against the report's per-file path, so names from a
+#       suffix-colliding file a substring filter also matched stay out of this
+#       file's result set in either direction (see the vitest section below).
+#       The other runners ignore it.
 #
 #   skipped_idents <spec> <results-out> [<file>]
 #       Print the sorted, unique set of test names the runner recorded as an
@@ -205,10 +207,13 @@
 # One imprecision is carried consciously: vitest selects files by SUBSTRING
 # filter, so a path that is a suffix of another (mod.test.js beside
 # src/mod.test.js) can pull the colliding file into the run. The result parse
-# filters testcases to the requested file, so passing/skipped sets stay
-# correct; the residual effect is that a colliding file red on the base can
-# fail that baseline run and report this file unexecuted - fail safe, never a
-# false pass. jest's --runTestsByPath selects exactly the named file.
+# filters testcases to the requested file by EXACT path equality against the
+# scratch-absolute file path the caller supplies (realpath-tolerant, since the
+# runners report absolute paths), so passing/skipped sets stay correct in
+# either suffix direction; the residual effect is that a colliding file red on
+# the base can fail that baseline run and report this file unexecuted - fail
+# safe, never a false pass. jest's --runTestsByPath selects exactly the named
+# file.
 #
 # The JS analogue of the editable-install hazard is a linked first-party
 # package: npm/pnpm/yarn workspaces and file:/npm-link dependencies leave a
@@ -481,8 +486,11 @@ if (vitest && jest) {
 
 # Print each passing (mode "passing") or explicitly skipped (mode "skipped")
 # test name from the jest-shaped JSON report both runners emit. argv[1] is the
-# report path, argv[2] the mode, argv[3] the repo-relative test file the run was
-# for (testcases from any other file a substring filter matched are dropped).
+# report path, argv[2] the mode, argv[3] the absolute path of the test file
+# inside the scratch tree the run executed from. Both runners report
+# testResults[].name as the test file's absolute path, so the filter is EXACT
+# path equality (realpath-tolerant on both sides); testcases from any other
+# file a substring filter matched are dropped, in either suffix direction.
 # Names are ancestorTitles + title joined with " > "; see the vitest/jest
 # header section for why that rendering and these statuses.
 FM_JS_RESULTS_SRC='
@@ -495,11 +503,19 @@ try {
 }
 const mode = process.argv[2];
 const target = process.argv[3] || "";
+const real = (p) => {
+  try {
+    return fs.realpathSync(p);
+  } catch (e) {
+    return p;
+  }
+};
+const targetReal = target ? real(target) : "";
 const skipStatuses = new Set(["skipped", "pending", "todo", "disabled"]);
 for (const file of (data && data.testResults) || []) {
   if (target) {
     const name = String(file.name || "");
-    if (name !== target && !name.endsWith("/" + target)) continue;
+    if (name !== target && real(name) !== targetReal) continue;
   }
   for (const a of file.assertionResults || []) {
     const wanted = mode === "passing" ? a.status === "passed" : skipStatuses.has(a.status);
