@@ -121,8 +121,16 @@ Every `$VAR` in a Grok hook command string must carry an inline `:-default` or t
 In a worktree Codex has not been trusted for hooks, `<worktree>/.codex/hooks.json` is inert rather than wrong: the seatbelt simply does not fire, exactly as if the file were absent.
 Codex was not installed in the environment where this was built, so neither the loading nor the non-loading was confirmed live.
 
-Closing it would mean adding `--dangerously-bypass-hook-trust` to the Codex crewmate launch template.
-That is a launch-time trust posture change with its own blast radius (it would also trust a project's own `.codex/hooks.json`), so it is left as a captain decision rather than taken unilaterally.
+Closing it means adding `--dangerously-bypass-hook-trust` to the Codex crewmate launch template.
+That is a launch-time trust posture change with its own blast radius: it would also trust a project's own `.codex/hooks.json`, so every Codex worker would run a repository's hook code at launch with no trust check.
+
+**This was escalated and the captain has ruled: add the flag**, accepting that stated cost.
+The ruling covers the Codex CREWMATE launch only.
+It does not extend to any other harness, to any other Codex safety flag, or to a Codex secondmate launch.
+
+**The flag is not implemented as of this commit, so the fix-instructions seatbelt is NOT active on Codex yet.**
+That is stated here rather than left quiet because no surface may imply an enforcement it is not performing.
+Whether the flag in fact makes the hook fire on Codex is an inference from Codex's documented trust gate, not a measurement; the first session with Codex installed should confirm it.
 
 ## Part B: the pinned run intent
 
