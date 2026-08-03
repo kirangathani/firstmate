@@ -612,6 +612,14 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
+  list-panes)
+    # Endpoint-liveness primitive (bin/backends/tmux.sh
+    # fm_backend_tmux_target_exists): fm-send verifies an explicit target
+    # through it before sending. Real tmux prints the resolved
+    # '#{window_name}'; every pane in this fake is live.
+    _t=""; _p=""
+    for _a in "$@"; do [ "$_p" = "-t" ] && _t="$_a"; _p="$_a"; done
+    printf '%s\n' "${_t##*:}"; exit 0 ;;
   capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
   list-windows) exit 0 ;;
 esac

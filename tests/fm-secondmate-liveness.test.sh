@@ -56,6 +56,15 @@ make_probe_tmux() {
 #!/usr/bin/env bash
 set -u
 case "\${1:-}" in
+  list-panes)
+    # Endpoint-liveness primitive (bin/backends/tmux.sh
+    # fm_backend_tmux_target_exists): the classifier resolves the target
+    # through it before reading a command name, so this live window answers
+    # with its own '#{window_name}'.
+    _t=""; _p=""
+    for _a in "\$@"; do [ "\$_p" = "-t" ] && _t="\$_a"; _p="\$_a"; done
+    printf '%s\n' "\${_t##*:}"
+    exit 0 ;;
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_command*) printf '%s\n' '$comm'; exit 0 ;; esac; done
     exit 0 ;;
@@ -221,6 +230,16 @@ make_liveness_tmux() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-panes)
+    # Endpoint-liveness primitive (bin/backends/tmux.sh
+    # fm_backend_tmux_target_exists): the classifier resolves the target
+    # through it before reading a command name. FM_TEST_PANE_GONE=1 models a
+    # window that has closed.
+    [ "${FM_TEST_PANE_GONE:-0}" = 1 ] && exit 1
+    _t=""; _p=""
+    for _a in "$@"; do [ "$_p" = "-t" ] && _t="$_a"; _p="$_a"; done
+    printf '%s\n' "${_t##*:}"
+    exit 0 ;;
   display-message)
     for a in "$@"; do case "$a" in *pane_current_command*) printf '%s\n' "${FM_TEST_PANE_CMD:-zsh}"; exit 0 ;; esac; done
     exit 0 ;;

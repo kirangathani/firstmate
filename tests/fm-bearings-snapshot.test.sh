@@ -30,6 +30,15 @@ SH
 #!/usr/bin/env bash
 case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
+  list-panes)
+    # Endpoint-liveness primitive (bin/backends/tmux.sh
+    # fm_backend_tmux_target_exists): resolve the target, print its
+    # '#{window_name}', and fail for the "dead-*" windows this suite treats as
+    # closed.
+    case "$*" in *dead-*) exit 1 ;; esac
+    _t=""; _p=""
+    for _a in "$@"; do [ "$_p" = "-t" ] && _t="$_a"; _p="$_a"; done
+    printf '%s\n' "${_t##*:}" ;;
   capture-pane)
     case "$*" in
       *fm-domain-alpha*) printf 'stale terminal summary: Phase 7 started\n> \n' ;;

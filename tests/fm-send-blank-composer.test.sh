@@ -88,6 +88,15 @@ case "${1:-}" in
       printf "$FM_FAKE_ROW" | LC_ALL=C awk '{gsub(/\033\[[0-9;]*m/, ""); print}'
     fi
     exit 0 ;;
+  list-panes)
+    # Endpoint-liveness primitive (bin/backends/tmux.sh
+    # fm_backend_tmux_target_exists): real tmux resolves the target and prints
+    # its '#{window_name}', failing on a gone window. Every pane in this fake
+    # is live, so it answers with the target's own window name.
+    _t=""; _p=""
+    for _a in "$@"; do [ "$_p" = "-t" ] && _t="$_a"; _p="$_a"; done
+    printf '%s\n' "${_t##*:}"
+    exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0
