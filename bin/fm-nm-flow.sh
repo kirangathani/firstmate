@@ -30,40 +30,60 @@
 #                      watch frames) in its explicit --worktree/--base mode and
 #                      show its counts in the merge-gate box, read from its
 #                      `summary:` stdout line (per-line grep fallback).
-#                      Whenever the box shows a result it names ALL FOUR classes
-#                      - miss / fail / unexec / excused - every render, INCLUDING
-#                      the zeros. There is no ordering, threshold or non-zero
-#                      test that can hide one behind another: a class folded into
-#                      a sibling, or dropped because a louder sibling was
-#                      non-zero, is a different lie in each direction, and the
+#                      Whenever the box shows a result it names ALL SIX classes
+#                      - miss / fail / unex / excu / skip / unac - every render,
+#                      INCLUDING the zeros. There is no ordering, threshold or
+#                      non-zero test that can hide one behind another: a class
+#                      folded into a sibling, or dropped because a louder sibling
+#                      was non-zero, is a different lie in each direction, and the
 #                      captain reading a live pane cannot tell a hidden count
-#                      from an absent one.
+#                      from an absent one. `skip` and `unac` are the check's own
+#                      `skipped:` and `unaccounted:` classes: an identifier a
+#                      green baseline run reported an explicit skip for, and one
+#                      it produced no result for at all. NEITHER affects
+#                      fm-assert-tests-kept.sh's exit code (its exit 0 means only
+#                      that missing/failing/unexecuted are empty), so neither may
+#                      be read off that exit code, and both mean the assertion was
+#                      never verified.
+#                      A class this run never EVALUATED renders as a dash, never
+#                      as 0: never-checked and checked-and-clean are different
+#                      facts and a captain cannot be asked to tell them apart from
+#                      an identical `0`. Excusal in explicit --worktree mode is
+#                      the live instance (no project, so no record to consult), and
+#                      a dash also suppresses `ok`, since `ok` asserts every class
+#                      is an ESTABLISHED zero.
 #                      `excused` is the identifiers the captain has already
 #                      excused by a supersession entry. They are subtracted from
 #                      their raw class and counted here instead, never folded
 #                      into passing, failing or unexecuted. Excusal is resolved
 #                      per identifier from the run's own finding lines, only in
 #                      task-id mode (the record is keyed by project, and explicit
-#                      --worktree mode knows no project, so nothing is excusable
-#                      there - the conservative direction: an identifier stays in
-#                      its raw class and never turns green). Unexecuted findings
+#                      --worktree mode knows no project, so no record is consulted
+#                      at all there: every identifier stays in its raw class and
+#                      the excused cell renders as a DASH, not as the 0 a run that
+#                      really did read the record would show). Knowing the project
+#                      and finding no record IS an evaluation, so that renders 0.
+#                      Unexecuted findings
 #                      are matched against the record only when
 #                      data/exec-gate/<project> exists, mirroring the order
 #                      bin/fm-pr-merge.sh applies its two policy layers in, so
 #                      "excused" means exactly "a captain-approved entry covers
 #                      this", never "this project does not gate that class".
 #                      The row carries `!!` when miss or fail is non-zero, and
-#                      `ok` ONLY when the probe exited clean with all four counts
-#                      at zero - an unexecuted or excused count is never a green,
-#                      because a green that means "nothing ran" or "we decided
-#                      not to look" reads as verified, which is the one thing
-#                      this display must never show.
-#                      Fitting four counts into a plain 80-column row is done by
-#                      LABELLING, never by dropping data: the labels are already
-#                      compact and tightly separated, and a pathological
-#                      magnitude drops the `prior-tests: ` prefix (which the
-#                      base legend line below the diagram carries anyway) rather
-#                      than truncating or omitting any count.
+#                      `ok` ONLY when every one of the six counts is an
+#                      established zero - it is derived from the COUNTS, never
+#                      from the probe's exit status, and an unexecuted, excused,
+#                      skipped, unaccounted or unevaluated class each suppress it
+#                      on their own, because a green that means "nothing ran",
+#                      "we decided not to look" or "we never checked" reads as
+#                      verified, which is the one thing this display must never
+#                      show.
+#                      Fitting six counts into a plain 80-column row is done by
+#                      LABELLING, never by dropping data: the row spends the
+#                      `prior-tests: ` prefix (which every legend line below the
+#                      diagram carries anyway) first, then the space between each
+#                      label and its count, and only then lets the line wrap -
+#                      it never spends a digit.
 #                      Explicit mode never fetches, so the base may lag origin;
 #                      it executes the base's own test files (check 2), so
 #                      it costs real time - that is why it is opt-in, why the
@@ -71,8 +91,15 @@
 #                      only frame 2 carries the result, why the probe is bounded
 #                      by FM_NM_FLOW_TESTS_TIMEOUT (default 300s) and refuses to
 #                      run at all when nothing on the host can bound it, and why
-#                      two legend lines under the diagram name the base the run
-#                      compared against and how many of its files that run could
+#                      the legend lines under the diagram qualify the result the
+#                      row is showing: which base it compared against and that
+#                      that base is a LOCAL ref this viewer deliberately never
+#                      fetched (the merge gate refetches the remote itself, so
+#                      the two can disagree), when the snapshot was taken and at
+#                      which pipeline step (the probe runs ONCE per invocation,
+#                      so every later watch frame re-renders that same
+#                      point-in-time result, never a live verdict on current
+#                      HEAD), and how many of the base's files that run could
 #                      verify by name only (an identifier the probe reports as
 #                      `unexecuted:` was verified by NAME ONLY). The box row
 #                      itself carries only the counts, so no base ref length can
@@ -471,7 +498,13 @@ tests_gate_base() {
 MGATE_ANN="prior-tests: pending (checked at merge)"
 MGATE_NAMEONLY=0
 MGATE_BASE=""
-MGATE_EXCUSED=0
+# Whether any class rendered as a dash, and when/where the single probe ran.
+# The probe runs ONCE per invocation by design, so every watch frame after it
+# re-renders the same numbers: the stamp is what keeps that from reading as a
+# live verdict on whatever HEAD has become since.
+MGATE_DASH=0
+MGATE_AT=""
+MGATE_STEP=""
 # The probe's scratch dir is the only thing this viewer ever writes, so its
 # removal is owned by the EXIT trap alone: an interrupt lands mid-probe (the
 # handler fires out of the `wait`) and exits past any cleanup left on the
@@ -534,17 +567,25 @@ trap on_int_term INT TERM
 # not to a viewer pane, so they are discarded here; a malformed entry fails
 # closed either way, which leaves the identifier in its raw class.
 #
-# Sets EX_MISSING/EX_FAILING/EX_UNEXEC (excused per class) and
+# Sets EX_MISSING/EX_FAILING/EX_UNEXEC (excused per class),
 # SEEN_MISSING/SEEN_FAILING/SEEN_UNEXEC (findings actually parsed per class,
 # used only as a floor under the summary counts so an excusal can never
-# subtract more than was counted).
+# subtract more than was counted), and EX_EVAL: whether the excused class was
+# EVALUATED at all. Knowing the project and finding no record is an evaluation
+# - no entry exists, so nothing is excusable and the count is a real zero.
+# Explicit --worktree mode is not: the record is keyed by project, so with no
+# project there is no record to consult and the honest answer is "not checked",
+# which the row renders as a dash rather than a zero it did not establish.
 EX_MISSING=0 EX_FAILING=0 EX_UNEXEC=0
 SEEN_MISSING=0 SEEN_FAILING=0 SEEN_UNEXEC=0
+EX_EVAL=0
 classify_excused() {  # <findings-file>
   local line ident cls exec_gated=0
   EX_MISSING=0 EX_FAILING=0 EX_UNEXEC=0
   SEEN_MISSING=0 SEEN_FAILING=0 SEEN_UNEXEC=0
+  EX_EVAL=0
   [ -n "$PROJ_NAME" ] || return 0
+  EX_EVAL=1
   [ -f "$SUPERSESSIONS_FILE" ] || return 0
   [ -e "$EXEC_GATE_FILE" ] && exec_gated=1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -568,35 +609,91 @@ classify_excused() {  # <findings-file>
   return 0
 }
 
-# The counts row: all four classes, every time, zeros included. The only thing
+# A cell is positive: numeric and above zero. A dash (a class this run never
+# evaluated) is neither positive nor an established zero, so it answers no to
+# this and no to the all-zero test below - it can neither raise the alarm nor
+# leave a green.
+mgate_pos() {  # <cell>
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -gt 0 ]
+}
+
+# The counts row: all six classes, every time, zeros included. The only thing
 # that varies with the numbers is how much LABELLING fits around them - the
 # counts themselves are never truncated and never left out, because a captain
 # reading a live pane cannot distinguish a count that was hidden from a class
 # that had nothing to report. The labels are already compact and tightly
-# separated; a pathological magnitude spends the `prior-tests: ` prefix, which
-# the base legend line under the diagram carries anyway, before it spends a
-# digit. `!!` marks unexcused missing/failing work; `ok` is emitted only when
-# the probe exited clean with every count at zero, so neither an unexecuted nor
-# an excused identifier can ever leave a green behind it.
-mgate_counts_ann() {  # <missing> <failing> <unexec> <excused> <probe-rc>
-  local m=$1 f=$2 u=$3 e=$4 rc=$5 flag='' counts body
-  if [ "$m" -gt 0 ] || [ "$f" -gt 0 ]; then
+# separated; the row spends the `prior-tests: ` prefix, which every legend line
+# under the diagram carries anyway, before it spends a digit.
+#
+# `!!` marks unexcused missing/failing work. `ok` is derived from the CELLS
+# alone and never from the probe's exit status: fm-assert-tests-kept.sh exits 0
+# whenever missing/failing/unexecuted are empty, which says nothing at all about
+# the skipped and unaccounted identifiers it also reports, and `unaccounted`
+# means a base assertion a green baseline run produced no result for - never
+# verified. So `ok` requires every one of the six to be an established zero: an
+# unexecuted, excused, skipped, unaccounted or never-evaluated class each
+# suppress it alone.
+mgate_counts_ann() {  # <missing> <failing> <unexec> <excused> <skipped> <unaccounted>
+  local v flag='' zero=1 spaced tight body limit=$((COLS - 27))
+  for v in "$@"; do
+    [ "$v" = 0 ] || zero=0
+  done
+  if mgate_pos "$1" || mgate_pos "$2"; then
     flag=' !!'
-  elif [ "$rc" -eq 0 ] && [ "$u" -eq 0 ] && [ "$e" -eq 0 ]; then
+  elif [ "$zero" -eq 1 ]; then
     flag=' ok'
   fi
-  counts="miss $m/fail $f/unexec $u/excused $e$flag"
-  body="prior-tests: $counts"
-  if [ "${#body}" -gt $((COLS - 27)) ]; then
-    body=$counts
-  fi
-  printf '%s' "$body"
+  # The ladder, widest first, every rung carrying all six counts whole: the
+  # `prior-tests: ` prefix goes first (every legend line under the diagram
+  # carries it anyway), then the space between each label and its count. Only
+  # LABELLING is ever spent. A magnitude that outgrows even the tight form is
+  # left to wrap - the row budget charges the rows a wrapped line really takes -
+  # because a count the captain cannot read at all is worse than a line that
+  # runs on.
+  spaced="miss $1/fail $2/unex $3/excu $4/skip $5/unac $6$flag"
+  tight="miss$1/fail$2/unex$3/excu$4/skip$5/unac$6$flag"
+  for body in "prior-tests: $spaced" "$spaced" "$tight"; do
+    if [ "${#body}" -le "$limit" ]; then
+      printf '%s' "$body"
+      return
+    fi
+  done
+  printf '%s' "$tight"
+}
+
+# One class count out of the probe's machine-readable `summary:` line, falling
+# back to counting that class's own finding lines when the summary carries no
+# field for it (an older check, or an output that lost the line). Both are real
+# measurements of the probe's own output, so a class read either way counts as
+# EVALUATED; the dash is reserved for a class nothing was consulted for at all.
+mgate_field() {  # <class> <summary-line> <stdout-file>
+  local v=''
+  [ -n "$2" ] && v=$(printf '%s' "$2" | sed -n "s/.*[[:space:]]$1=\([0-9]\{1,\}\).*/\1/p")
+  [ -n "$v" ] || v=$(grep -c "^$1: " "$3" || true)
+  printf '%s' "${v:-0}"
+}
+
+# The pipeline step the snapshot was taken at, named the way its box is: the
+# captain reads the stamp against the diagram above it. The box labels differ
+# from the internal step keys for three steps, so they are mapped rather than
+# printed raw.
+mgate_step_label() {
+  case "$CURRENT" in
+    '')      printf 'an unknown step' ;;
+    pr)      printf 'step open PR' ;;
+    ci)      printf 'step CI monitor' ;;
+    mgate)   printf 'step merge gate' ;;
+    *)       printf 'step %s' "$CURRENT" ;;
+  esac
 }
 
 run_tests_gate() {
-  local base out_file missing failing unexec excused summary
+  local base out_file missing failing unexec excused skipped unacct summary
   MGATE_BASE=""
-  MGATE_EXCUSED=0
+  MGATE_DASH=0
+  MGATE_AT=$(date '+%H:%M:%S' 2>/dev/null || true)
+  MGATE_STEP=$(mgate_step_label)
   # The probe executes the base's own test files, so it must be time-bounded.
   # Nothing to bound it with means it does not run: a viewer that hangs is
   # worse than one that says the answer is still pending.
@@ -617,14 +714,17 @@ run_tests_gate() {
   MGATE_TMPD=$tmpd
   out_file="$tmpd/kept.out"
   local rc=0
-  # FM_GUARD_READ_ONLY=1 is what keeps this viewer's read-only claim true: the
-  # probe calls bin/fm-guard.sh unconditionally, and the guard writes fleet
+  # TWO mechanisms hold this viewer's read-only claim up, and NEITHER is
+  # sufficient alone - do not trim one as belt-and-braces for the other, because
+  # each covers a write the other misses. FM_GUARD_READ_ONLY=1 covers the guard:
+  # the probe calls bin/fm-guard.sh unconditionally, and the guard writes fleet
   # state (and consumes the one-per-episode WATCHER DOWN banner) unless told it
-  # is a read-only caller. FM_STATE_OVERRIDE closes the one write read-only mode
-  # does not reach - bin/fm-wake-lib.sh's unconditional source-time
-  # `mkdir -p "$STATE"` - by pointing STATE at this probe's scratch dir, which
-  # the EXIT trap removes; the probe runs in explicit --worktree mode, which
-  # never resolves a task's meta, so nothing it needs lives under STATE. Both go
+  # is a read-only caller. FM_STATE_OVERRIDE covers the write read-only mode does
+  # NOT reach - bin/fm-wake-lib.sh's unconditional source-time
+  # `mkdir -p "$STATE"`, which runs before any read-only branch can be consulted
+  # - by pointing STATE at this probe's scratch dir, which the EXIT trap removes;
+  # the probe runs in explicit --worktree mode, which never resolves a task's
+  # meta, so nothing it needs lives under STATE. Both go
   # through `env` so they apply to the probe's tree alone and never leak into
   # this shell or a later frame's calls; `env` execs the probe, so the bounding
   # tool's own pid and exit-status contract are unchanged.
@@ -639,21 +739,20 @@ run_tests_gate() {
     return
   fi
   # Counts come from the machine-readable `summary:` stdout line; the per-line
-  # greps are only the fallback for an output that carries no summary. The
-  # unexecuted count is per ASSERTION: each `unexecuted:` identifier was
-  # verified by NAME ONLY (check 1), so a kept-name test whose assertion body
-  # was rewritten would not be caught.
+  # greps are only the fallback for an output that carries no summary. All FIVE
+  # reported classes are read, not just the three the check's exit status keys
+  # on: `skipped:` and `unaccounted:` leave the exit status at 0, and an
+  # unaccounted identifier is one a green baseline run produced no result for at
+  # all, so reading only the exit-status classes would let the row show a green
+  # over an assertion that was never verified. The unexecuted count is per
+  # ASSERTION: each `unexecuted:` identifier was verified by NAME ONLY (check 1),
+  # so a kept-name test whose assertion body was rewritten would not be caught.
   summary=$(grep -m1 '^summary: ' "$out_file" || true)
-  if [ -n "$summary" ]; then
-    missing=$(printf '%s' "$summary" | sed -n 's/.*missing=\([0-9]\{1,\}\).*/\1/p')
-    failing=$(printf '%s' "$summary" | sed -n 's/.*failing=\([0-9]\{1,\}\).*/\1/p')
-    unexec=$(printf '%s' "$summary" | sed -n 's/.*unexecuted=\([0-9]\{1,\}\).*/\1/p')
-  else
-    missing=$(grep -c '^missing: ' "$out_file" || true)
-    failing=$(grep -c '^failing: ' "$out_file" || true)
-    unexec=$(grep -c '^unexecuted: ' "$out_file" || true)
-  fi
-  missing=${missing:-0} failing=${failing:-0} unexec=${unexec:-0}
+  missing=$(mgate_field missing "$summary" "$out_file")
+  failing=$(mgate_field failing "$summary" "$out_file")
+  unexec=$(mgate_field unexecuted "$summary" "$out_file")
+  skipped=$(mgate_field skipped "$summary" "$out_file")
+  unacct=$(mgate_field unaccounted "$summary" "$out_file")
   # An excused identifier leaves its raw class and is counted on its own, so
   # the captain sees what is being deliberately excused instead of it hiding
   # inside a pass, a failure or a not-run. The parsed per-class tally is used as
@@ -686,18 +785,28 @@ run_tests_gate() {
     MGATE_ANN="prior-tests: pending (check could not run, exit $rc)"
     MGATE_NAMEONLY=0
   elif [ "$rc" -eq 1 ] && [ $((missing + failing + unexec + excused)) -eq 0 ]; then
-    # rc=1 with every count zero: the check claims findings this viewer could
-    # not read, so the honest render is pending, not a guess either way. This
-    # is a "no result to show" branch, not a visibility one - it never hides a
-    # count that was read.
+    # rc=1 with nothing read out of the three classes rc=1 is keyed on (excused
+    # included, since every excused identifier came out of one of those three):
+    # the check claims findings this viewer could not read, so the honest render
+    # is pending, not a guess either way. skipped and unaccounted are deliberately
+    # NOT summed here - both are reported at rc=0 too, so neither can turn an
+    # unreadable rc=1 result into a readable one. This is a "no result to show"
+    # branch, not a visibility one: it never hides a count that was read.
     MGATE_ANN="prior-tests: pending (result not readable)"
     MGATE_NAMEONLY=0
   else
     # The one result branch there is. Every class it read goes on the row,
-    # zeros included, so no ordering between them can exist to hide one.
+    # zeros included, so no ordering between them can exist to hide one, and a
+    # class nothing was consulted for goes on as a dash rather than borrowing
+    # the appearance of a zero somebody established.
+    local d_excused=$excused
+    if [ "$EX_EVAL" -eq 0 ]; then
+      d_excused='-'
+      MGATE_DASH=1
+    fi
     MGATE_BASE=$base
-    MGATE_EXCUSED=$excused
-    MGATE_ANN=$(mgate_counts_ann "$missing" "$failing" "$unexec" "$excused" "$rc")
+    MGATE_ANN=$(mgate_counts_ann "$missing" "$failing" "$unexec" "$d_excused" \
+      "$skipped" "$unacct")
   fi
   clean_tmpd
 }
@@ -1019,8 +1128,8 @@ line_rows() {  # <line>
   printf '%s' $(( ${#s} == 0 ? 1 : (${#s} - 1) / COLS + 1 ))
 }
 
-build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files> <mgate-excused>
-  local ann=$1 mbase=$2 nameonly=$3 excused=$4
+build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files> <mgate-dash>
+  local ann=$1 mbase=$2 nameonly=$3 dash=$4
   FRAME_LINES=()
   FRAME_RANK=()
   FRAME_MEASURED=0
@@ -1050,23 +1159,37 @@ build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files> <mgate
   fi
   legend_line 2 'merge gate: check 1 base test names kept; check 2 base assertions vs branch'
   legend_line 3 'supersessions: captain-approved entries in data/supersessions/<project>.md'
-  # The compared-base and name-only legends are the qualifiers of the result
-  # the merge-gate row is showing, so while a result is up they rank as CORE:
-  # a claim and its qualifiers must not be separable by any drop order a future
-  # legend line could disturb. With no result up they are absent anyway.
+  # Everything that qualifies the merge-gate result ranks as CORE while a result
+  # is up: a claim and its qualifiers must not be separable by any drop order a
+  # future legend line could disturb. With no result up they are absent anyway.
+  # None of them is conditional on a count being non-zero - a legend that
+  # appeared only when its class fired would let the row's quietest reading, the
+  # all-zero one, go out unqualified.
   if [ -n "$mbase" ]; then
-    core_line "prior-tests: compared against base $mbase"
+    # The base is whatever refs/remotes/origin/HEAD points at LOCALLY: this
+    # viewer deliberately never fetches (that is what keeps it read-only and
+    # cheap), so the ref can be a day stale while the row reads as agreement
+    # with current main. The gate itself fetches, so the two can disagree and
+    # this row is never proof the merge will be allowed.
+    core_line "prior-tests: compared against base $mbase, a LOCAL ref, never fetched"
+    core_line "prior-tests: it can lag; the merge gate refetches the remote base itself"
+    # The probe runs once per invocation, so in watch mode this same result is
+    # re-rendered for every later frame while the pipeline keeps committing.
+    # Stamping when and at which step it was taken is what stops an hours-old
+    # green from reading as a live verdict on current HEAD.
+    core_line "prior-tests: ${MGATE_AT:-unknown time} snapshot taken at $MGATE_STEP; not re-checked since"
+    # The row's compact labels, spelled out: what "excu" is (a category of its
+    # own, not any of the other five), and that skip and unac are assertions
+    # nothing verified rather than assertions that passed.
+    core_line "prior-tests: excu = captain-excused, not a pass; skip/unac = never verified"
   fi
   if [ "$nameonly" -gt 0 ]; then
     local noun=files
     [ "$nameonly" -eq 1 ] && noun='file'
     core_line "prior-tests: $nameonly base $noun verified by name only, not by assertion"
   fi
-  # The row's compact fourth count, spelled out: what "excused" is, and that it
-  # is a category of its own rather than any of the other three. It qualifies
-  # the counts the row is showing, so it ranks core for the same reason they do.
-  if [ "$excused" -gt 0 ]; then
-    core_line "prior-tests: excused = a captain-approved supersession covers it; not passing"
+  if [ "$dash" -gt 0 ]; then
+    core_line "prior-tests: a dash = this run never evaluated that class; not a zero"
   fi
   if [ "$KIND_TEST" = 'det|LLM' ] || [ "$KIND_LINT" = 'det|LLM' ]; then
     legend_line 4 'det|LLM: commands.<step> not readable in .no-mistakes.yaml; det when it is set'
@@ -1096,7 +1219,7 @@ frame_measure() {
 }
 
 render() {
-  build_frame "$MGATE_ANN" "$MGATE_BASE" "$MGATE_NAMEONLY" "$MGATE_EXCUSED"
+  build_frame "$MGATE_ANN" "$MGATE_BASE" "$MGATE_NAMEONLY" "$MGATE_DASH"
   # The backstop behind the undroppable qualifiers: a pane too short to carry
   # the result, its qualifiers AND the mandatory drop notice gets none of them
   # - the box degrades to a non-committal pending form for the frame, so no
@@ -1174,8 +1297,12 @@ frame() {
 }
 
 if [ "$WATCH" = 0 ]; then
+  # The run state is classified BEFORE the probe, not as part of the render, so
+  # the snapshot stamp can name the step the run was at when the probe read the
+  # tree. Watch mode gets that for free: its probe runs after frame 1.
+  probe
   [ "$TESTS_GATE_PENDING" = 1 ] && run_tests_gate
-  frame
+  render
   exit 0
 fi
 
