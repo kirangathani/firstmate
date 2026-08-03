@@ -134,7 +134,11 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 # herdr task is read through fm_backend_capture instead of a bare tmux probe.
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
-EXPECTED_LABEL="fm-$ID"
+# The exact-label check is applied only where the endpoint's label is pinned
+# (fm_backend_expected_label_of_meta): a tmux meta written before that pin
+# became a hard spawn requirement reads leniently, so a live crewmate whose
+# window drifted is never masked as an unreadable pane here.
+EXPECTED_LABEL=$(fm_backend_expected_label_of_meta "$META" "$ID")
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
     # tmux goes through the shared fm_backend_target_exists primitive rather

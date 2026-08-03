@@ -60,6 +60,41 @@ if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
 
+# The window-name pin is a HARD requirement, not best-effort: every strict
+# liveness read downstream compares '#{window_name}' against fm-<id>, so both
+# rename options must actually be off on the created window.
+[ "$(tmux show-options -w -t "$TARGET" automatic-rename)" = "automatic-rename off" ] \
+  || fail "real tmux: create_task must pin the window name by disabling automatic-rename"
+[ "$(tmux show-options -w -t "$TARGET" allow-rename)" = "allow-rename off" ] \
+  || fail "real tmux: create_task must pin the window name by disabling allow-rename"
+pass "real tmux: fm_backend_tmux_create_task pins the created window's name"
+
+# An unpinnable window is refused rather than left behind for a strict reader
+# to misjudge: with set-window-option forced to fail, the spawn errors AND the
+# half-created window is removed again.
+PIN_FAIL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-backend-smoke-pin.XXXXXX")
+cat > "$PIN_FAIL_DIR/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = set-window-option ]; then
+  echo "can't set option: automatic-rename" >&2
+  exit 1
+fi
+exec "$REAL_TMUX" -L "$SOCKET" "\$@"
+SH
+chmod +x "$PIN_FAIL_DIR/tmux"
+if out=$(PATH="$PIN_FAIL_DIR:$PATH" fm_backend_tmux_create_task "$SESSION" fm-smoke-unpinnable "$HOME" 2>&1); then
+  fail "real tmux: create_task must refuse a window whose name it could not pin"
+fi
+case "$out" in
+  *"could not pin the window name"*) : ;;
+  *) fail "real tmux: an unpinnable window should fail loudly, got: $out" ;;
+esac
+if tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx fm-smoke-unpinnable; then
+  fail "real tmux: a refused spawn must not leave its half-created window behind"
+fi
+rm -rf "$PIN_FAIL_DIR"
+pass "real tmux: fm_backend_tmux_create_task fails loudly and cleans up when the name cannot be pinned"
+
 # --- send text + Enter -------------------------------------------------------
 
 tmux send-keys -t "$TARGET" "cd /tmp && PS1='smoke\$ '" Enter
@@ -180,6 +215,21 @@ verdict=$(fm_backend_agent_alive tmux "$SESSION:fm-smoke-gone")
 [ "$verdict" = dead ] \
   || fail "real tmux: a gone window must classify as dead from its own resolution, got '$verdict'"
 pass "real tmux: fm_backend_agent_alive reports a gone window dead instead of inheriting the current window's verdict"
+
+# fm_backend_tmux_send_key guards through the same primitive. Its previous
+# guard (`display-message -p -t <target> '#{pane_id}'`) could not fail while
+# the session existed, so a key aimed at a gone window was still handed to
+# send-keys, and one aimed at a target that prefix-resolves elsewhere went to
+# the WRONG pane.
+if fm_backend_tmux_send_key "$SESSION:fm-smoke-gone" Enter 2>/dev/null; then
+  fail "real tmux: send_key must refuse a target that does not resolve"
+fi
+if fm_backend_tmux_send_key "$TARGET" Enter fm-smoke-neighbour 2>/dev/null; then
+  fail "real tmux: send_key must refuse a target that resolves to a differently-labelled window"
+fi
+fm_backend_tmux_send_key "$TARGET" Enter "$WINDOW" \
+  || fail "real tmux: send_key must still send to a live window matching its own label"
+pass "real tmux: fm_backend_tmux_send_key refuses a gone or mislabelled target and sends to a matching one"
 
 tmux kill-window -t "$SESSION:fm-smoke-neighbour" 2>/dev/null || true
 

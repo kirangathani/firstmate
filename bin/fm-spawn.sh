@@ -1000,9 +1000,17 @@ META_WINDOW=$T
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
+  # default path's meta keeps carrying no backend= line (absent backend= means
+  # tmux; data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  # tmux_window_pinned=1 records that this window's name was pinned at
+  # creation: fm_backend_tmux_create_task now REFUSES the spawn unless
+  # automatic-rename and allow-rename could both be turned off, so reaching
+  # this line on tmux proves '#{window_name}' cannot drift from $W. Readers
+  # use it to decide whether an exact-label liveness check is safe
+  # (fm_backend_expected_label_of_meta, bin/fm-backend.sh); a meta written
+  # before this requirement carries no such line and is read leniently.
+  [ "$BACKEND" = tmux ] && echo "tmux_window_pinned=1"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"

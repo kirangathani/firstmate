@@ -118,6 +118,22 @@ Callers that know the owning task label (the digests pass `fm-<id>`) require the
 
 Regression coverage lives in `tests/fm-backend-tmux-smoke.test.sh`, the one suite that talks to a real tmux server.
 
+### The exact-label check needs a pinned window name to be safe
+
+An exact `#{window_name}` comparison is only sound while the name cannot drift.
+`fm_backend_tmux_create_task` (`bin/backends/tmux.sh`) pins it by turning `automatic-rename` and `allow-rename` off on the new window, and that pin is now a HARD requirement: if either option cannot be set, the freshly created window is killed again and the spawn is refused with an error, rather than leaving behind a window whose name no reader can trust.
+Both options were confirmed settable through `set-window-option` on real tmux 3.4 (Linux, WSL2, 2026-08-03).
+
+`bin/fm-spawn.sh` records that guarantee in the task meta as `tmux_window_pinned=1`, written for tmux spawns only.
+Readers ask `fm_backend_expected_label_of_meta` (`bin/fm-backend.sh`) for the label to pass, and it returns `fm-<id>` only when the record carries the guarantee.
+A tmux meta written before the pin became mandatory returns an empty label and so reads through tmux's own resolution, unchanged from before the label existed.
+That asymmetry is deliberate: demanding an exact name match on a record whose window may legitimately have been renamed would report a LIVE crewmate as dead in the session-start digest, the fleet snapshot, `bin/fm-crew-state.sh`, and the secondmate sweep all at once, which is the worse direction.
+Every other backend pins its label by construction, so the helper always returns the label for them.
+
+The one place the label matters most is the secondmate liveness sweep (`bin/fm-bootstrap.sh`), the only probe whose verdict acts destructively.
+Without it, a gone secondmate `sm` prefix-resolves to a live task's window `fm-sm-2` and inherits that task's verdict: either the dead secondmate is never respawned, or the sweep kills the unrelated task's window.
+The sweep therefore also guards its kill on the endpoint still resolving to the secondmate's own window, so a target it could not verify is respawned without anything being killed.
+
 ## Agent liveness probe
 
 `fm_backend_target_exists` (`bin/fm-backend.sh`) only checks that a window's pane still exists.
@@ -157,6 +173,7 @@ The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`
 - `unknown` - anything else, including an unreadable pane.
 
 The classifier resolves the target strictly (through `fm_backend_tmux_target_exists`) before reading any command name, because `#{pane_current_command}` comes from `display-message` and would otherwise answer from a neighbouring window for a target that no longer exists (see the section above).
+It takes the same optional expected-label as that primitive and passes it straight through, so a caller with a pinned record gets the exact-name check on this path too.
 A structurally-gone window maps to `dead`, the same mapping herdr's arm already uses for a structurally-gone pane; if the tmux server itself did not answer, nothing was confidently read and the verdict stays `unknown`, so a momentary server glitch can never license a respawn.
 
 ### Known gap: `pi` cannot be confidently classified

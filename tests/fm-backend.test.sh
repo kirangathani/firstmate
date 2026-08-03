@@ -513,7 +513,7 @@ test_meta_get_and_backend_of_meta() {
 test_resolve_selector_three_forms() {
   local state=$TMP_ROOT/resolve-state fakebin out
   mkdir -p "$state"
-  fm_write_meta "$state/task1.meta" "window=firstmate:fm-task1"
+  fm_write_meta "$state/task1.meta" "window=firstmate:fm-task1" "tmux_window_pinned=1"
   fm_write_meta "$state/dotfiles-d6.meta" "window=default:wA:p2" "backend=herdr"
   fm_write_meta "$state/fm-turnend-all-harnesses-v9.meta" "window=default:wB:p3" "backend=herdr"
 
@@ -538,6 +538,23 @@ test_resolve_selector_three_forms() {
     || fail "legacy fm-<id> label should resolve through <id>.meta's window="
   [ "$(fm_backend_expected_label_of_selector 'fm-task1' "$state")" = "fm-task1" ] \
     || fail "legacy fm-<id> label should preserve its backend label"
+
+  # A tmux record written before fm_backend_tmux_create_task made the
+  # window-name pin a hard requirement carries no tmux_window_pinned=1 line, so
+  # its window may legitimately have been renamed. Demanding an exact name
+  # match there would report a LIVE crewmate dead everywhere at once, so it
+  # reports NO label and keeps tmux's own target resolution.
+  fm_write_meta "$state/unpinned.meta" "window=firstmate:fm-unpinned"
+  [ -z "$(fm_backend_expected_label_of_selector 'unpinned' "$state")" ] \
+    || fail "a tmux meta with no pin guarantee must report no expected label"
+  [ -z "$(fm_backend_expected_label_of_meta "$state/unpinned.meta" unpinned)" ] \
+    || fail "fm_backend_expected_label_of_meta should withhold the label for an unpinned tmux record"
+  [ "$(fm_backend_expected_label_of_meta "$state/task1.meta" task1)" = "fm-task1" ] \
+    || fail "fm_backend_expected_label_of_meta should report the label for a pinned tmux record"
+  # Every non-tmux backend pins its label by construction, so the guarantee
+  # line is neither written nor required for them.
+  [ "$(fm_backend_expected_label_of_meta "$state/dotfiles-d6.meta" dotfiles-d6)" = "fm-dotfiles-d6" ] \
+    || fail "a non-tmux backend should always report its expected label"
 
   out=$(fm_backend_resolve_selector 'fm-missing' "$state" 2>&1) && fail "fm-<id> with no meta should fail"
   assert_contains "$out" "no metadata for fm-missing" "missing-meta error text changed"
@@ -638,10 +655,18 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
     "$bin/bin/fm-send.sh" "$@" >/dev/null 2>&1
 }
 
+# The target-verification preflight is the ONE intentional divergence from the
+# pre-adapter tmux command shape, so it is stripped from both logs before they
+# are compared. The old inline probe was `display-message -p -t <target>
+# '#{pane_id}'`, which cannot fail while the session exists: it falls back to
+# the session's current window for any name (docs/tmux-backend.md "Endpoint
+# existence probe"), so it verified nothing. The adapter resolves the target
+# through `list-panes` instead, which fails loudly on a gone window.
 strip_send_preflight() {  # <log>
-  local preflight
-  preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
-  awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
+  local old_preflight new_preflight
+  old_preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
+  new_preflight=$'tmux\x1flist-panes\x1f-t\x1fsess:win\x1f-F\x1f#{window_name}'
+  awk -v old="$old_preflight" -v new="$new_preflight" '$0 != old && $0 != new { print }' "$1"
 }
 
 test_send_conformance_old_vs_new() {
@@ -658,8 +683,10 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" --key Escape
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
-  assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
-    "fm-send --key did not verify the explicit tmux target before sending"
+  assert_contains "$(cat "$log_new")" $'\x1f''list-panes'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-F'$'\x1f''#{window_name}' \
+    "fm-send --key did not verify the explicit tmux target through the list-panes primitive before sending"
+  assert_not_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
+    "fm-send --key must not fall back to the display-message probe, which passes for any window name"
   strip_send_preflight "$log_old" > "$filtered_old"
   strip_send_preflight "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-key.txt" 2>&1 \

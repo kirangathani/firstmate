@@ -410,10 +410,36 @@ fm_backend_of_selector() {  # <raw-target> <resolved-target> <state-dir>
   printf 'tmux'
 }
 
+# fm_backend_expected_label_of_meta: the owning "fm-<id>" label to hand a
+# label-checking backend read for <meta-file>, or EMPTY when this record
+# carries no guarantee that its endpoint still answers to that label.
+#
+# Every backend that pins a task's label at creation gets the strict check:
+# zellij, cmux, and herdr address labelled tabs/panes by construction, and a
+# tmux window created by fm_backend_tmux_create_task has automatic-rename and
+# allow-rename hard-disabled, so its '#{window_name}' cannot drift from
+# fm-<id>. fm-spawn.sh records that guarantee as tmux_window_pinned=1.
+#
+# A tmux meta WITHOUT that line was written before the pin became a hard
+# requirement, so its window may legitimately have been renamed by the
+# captain's own tmux config. Demanding an exact name match there would turn a
+# LIVE crewmate into a `dead` reading everywhere at once (the digests,
+# fm-crew-state.sh, and the secondmate sweep's respawn decision), which is the
+# worse direction. Such a record falls back to a resolution-only read instead:
+# tmux's own target resolution, unchanged from before the label existed.
+fm_backend_expected_label_of_meta() {  # <meta-file> <id>
+  local meta=$1 id=$2
+  if [ "$(fm_backend_of_meta "$meta")" = tmux ] \
+     && [ "$(fm_meta_get "$meta" tmux_window_pinned)" != 1 ]; then
+    return 0
+  fi
+  printf 'fm-%s' "$id"
+}
+
 fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
   local raw=$1 state=$2 id
   id=$(fm_backend_task_id_for_selector "$raw" "$state" 2>/dev/null || true)
-  [ -n "$id" ] && printf 'fm-%s' "$id"
+  [ -n "$id" ] && fm_backend_expected_label_of_meta "$state/$id.meta" "$id"
   return 0
 }
 
@@ -722,11 +748,16 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
 # live supervisor.
-fm_backend_agent_alive() {  # <backend> <target>
-  local backend=$1 target=$2
+# [expected-label] is the owning "fm-<id>", passed by callers that can prove
+# the endpoint's label is pinned (fm_backend_expected_label_of_meta). It is
+# what stops this probe reading a NEIGHBOURING window that a gone target
+# merely prefix-resolved to; herdr addresses a pane by id, so it has no
+# equivalent ambiguity and takes no label.
+fm_backend_agent_alive() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 expected_label=${3:-}
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_alive "$target" ;;
+    tmux) fm_backend_tmux_agent_alive "$target" "$expected_label" ;;
     herdr) fm_backend_herdr_agent_alive "$target" ;;
     *) printf 'unknown' ;;
   esac

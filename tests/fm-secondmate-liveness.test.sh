@@ -26,6 +26,13 @@
 #     adapter refuses to create a same-named window over a live one), keeps
 #     handled DEAD and ALIVE results silent, and never acts on an inconclusive
 #     (UNKNOWN) reading.
+#   - A secondmate window that is structurally GONE is respawned too, and a
+#     target that merely unique-prefix-resolves to a NEIGHBOURING window is
+#     neither trusted for the verdict nor handed to the kill: only an endpoint
+#     still resolving to this secondmate's own window is ever killed.
+#   - A record with no tmux_window_pinned=1 guarantee is read leniently (no
+#     exact-label check), so a window that predates the pin requirement can
+#     never become a false dead reading that duplicates a live supervisor.
 #   - The sweep converges: once a secondmate reads alive, a later run never
 #     re-touches it (idempotent by construction, not by remembering what it
 #     already did).
@@ -121,6 +128,26 @@ test_tmux_agent_alive_classifies() {
     || fail "an unrecognized foreground process should classify as unknown"
 
   pass "fm_backend_tmux_agent_alive: alive/dead/unknown classification"
+}
+
+# The expected-label argument, on the classifier itself: tmux target matching
+# is a unique-prefix match, so a gone window's target can resolve to a live
+# NEIGHBOUR. A caller that names the owning window must not be given that
+# neighbour's verdict, and a caller with no label keeps tmux's own resolution.
+test_tmux_agent_alive_honors_expected_label() {
+  local fb out
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-label" claude)
+
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:fm-sm1 fm-sm1' "$ROOT")
+  [ "$out" = alive ] || fail "a live window matching its own label should classify as alive, got '$out'"
+
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:fm-sm1 fm-sm1-2' "$ROOT")
+  [ "$out" = dead ] || fail "a window resolving to a name other than the expected label must not inherit its verdict, got '$out'"
+
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_agent_alive tmux sess:fm-sm1 fm-sm1-2' "$ROOT")
+  [ "$out" = dead ] || fail "the dispatcher must pass the expected label through to the tmux classifier, got '$out'"
+
+  pass "fm_backend_tmux_agent_alive: an expected label is required to match the resolved window name"
 }
 
 # --- unit level: fm_backend_herdr_agent_alive -------------------------------
@@ -223,6 +250,20 @@ SH
 # read fresh from $FM_TEST_PANE_CMD on every query (so a test can flip it
 # between bootstrap runs), and which logs every new-window/kill-window call
 # (the only two operations a respawn performs) to $FM_TMUX_CALL_LOG.
+#
+# Its list-panes arm models the three shapes the endpoint-liveness primitive
+# has to tell apart, all switchable per run:
+#   FM_TEST_PANE_GONE=1        - the RECORDED window has closed. A window this
+#                                fake has since been asked to create is live
+#                                again, so a respawn's own sends still work.
+#   FM_TEST_PANE_RESOLVES_TO=X - the target resolves, but to a differently
+#                                named window: real tmux target matching is a
+#                                unique-prefix match, so "firstmate:fm-sm1"
+#                                lands on a neighbouring "fm-sm1-2" once the
+#                                secondmate's own window is gone.
+#   FM_TEST_TMUX_DOWN=1        - the server does not answer the two reads the
+#                                sweep makes (list-panes, list-sessions), the
+#                                case that must stay inconclusive.
 make_liveness_tmux() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -230,15 +271,26 @@ make_liveness_tmux() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-sessions)
+    # fm_backend_tmux_agent_alive's server-down discriminator: a target that
+    # does not resolve is only `dead` if the server itself still answers.
+    [ "${FM_TEST_TMUX_DOWN:-0}" = 1 ] && exit 1
+    printf 'firstmate: 1 windows\n'
+    exit 0 ;;
   list-panes)
     # Endpoint-liveness primitive (bin/backends/tmux.sh
     # fm_backend_tmux_target_exists): the classifier resolves the target
-    # through it before reading a command name. FM_TEST_PANE_GONE=1 models a
-    # window that has closed.
-    [ "${FM_TEST_PANE_GONE:-0}" = 1 ] && exit 1
+    # through it before reading a command name, and real tmux prints the
+    # resolved '#{window_name}'.
+    [ "${FM_TEST_TMUX_DOWN:-0}" = 1 ] && exit 1
     _t=""; _p=""
     for _a in "$@"; do [ "$_p" = "-t" ] && _t="$_a"; _p="$_a"; done
-    printf '%s\n' "${_t##*:}"
+    _w=${_t##*:}
+    if [ "${FM_TEST_PANE_GONE:-0}" = 1 ] \
+       && ! grep -q -- "-n $_w " "${FM_TMUX_CALL_LOG:-/dev/null}" 2>/dev/null; then
+      exit 1
+    fi
+    printf '%s\n' "${FM_TEST_PANE_RESOLVES_TO:-$_w}"
     exit 0 ;;
   display-message)
     for a in "$@"; do case "$a" in *pane_current_command*) printf '%s\n' "${FM_TEST_PANE_CMD:-zsh}"; exit 0 ;; esac; done
@@ -272,12 +324,18 @@ new_world() {
   printf '%s\n' "$w"
 }
 
-# add_sm_home <w> <id> <window>: a plain (non-git) secondmate home - the
-# probe/respawn machinery under test never requires the home to be a real
-# worktree; a non-git home just makes the unrelated fast-forward sweep log a
-# harmless "not a git repo" skip.
+# add_sm_home <w> <id> <window> [harness] [pinned]: a plain (non-git) secondmate
+# home - the probe/respawn machinery under test never requires the home to be a
+# real worktree; a non-git home just makes the unrelated fast-forward sweep log
+# a harmless "not a git repo" skip.
+#
+# <pinned> defaults to 1: bin/fm-spawn.sh writes tmux_window_pinned=1 for every
+# tmux spawn now that fm_backend_tmux_create_task refuses to create a window it
+# could not pin, so a pinned record is what the sweep normally reads. Pass 0 for
+# a record written before that requirement, which must be read leniently
+# (fm_backend_expected_label_of_meta, bin/fm-backend.sh).
 add_sm_home() {
-  local w=$1 id=$2 window=$3 harness=${4:-claude}
+  local w=$1 id=$2 window=$3 harness=${4:-claude} pinned=${5:-1}
   local home="$w/$id"
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
@@ -288,6 +346,7 @@ add_sm_home() {
     printf 'kind=secondmate\n'
     printf 'harness=%s\n' "$harness"
     printf 'home=%s\n' "$home"
+    if [ "$pinned" = 1 ]; then printf 'tmux_window_pinned=1\n'; fi
   } > "$w/home/state/$id.meta"
 }
 
@@ -314,6 +373,94 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   assert_contains "$(cat "$log")" "new-window" \
     "a confirmed-dead secondmate should actually be relaunched"
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+}
+
+test_sweep_respawns_structurally_gone_window() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-gone)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # The whole window is gone, not just its agent: the classifier must reach
+  # `dead` from the target failing to RESOLVE, without ever reading a command
+  # name (a read that would answer from the session's current window). The
+  # pane command is left at "claude" precisely so an inherited read would say
+  # alive and leave the dead secondmate unrespawned.
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" FM_TEST_PANE_GONE=1)
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped" \
+    "a structurally gone window is a confident dead reading, not an inconclusive one"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed" \
+    "the respawn of a gone secondmate window should succeed"
+  assert_contains "$(cat "$log")" "new-window" \
+    "a secondmate whose window has closed must actually be relaunched"
+  # Nothing was killed because nothing of ours was there to kill: the kill is
+  # guarded on the endpoint still resolving to this secondmate's own window,
+  # so an unresolvable target can never be handed to tmux's prefix matching.
+  assert_not_contains "$(cat "$log")" "kill-window" \
+    "a target that no longer resolves must not be handed to kill-window"
+  pass "sweep: a structurally gone window is respawned, with no kill against an unresolvable target"
+}
+
+test_sweep_never_touches_a_prefix_resolved_neighbour() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-prefix)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # The secondmate's own window is gone, and "firstmate:fm-sm1" now
+  # unique-prefix-resolves to a LIVE ordinary task's window "fm-sm1-2" whose
+  # agent is running. Without the owning-label check the sweep would read that
+  # neighbour's "claude" and leave the dead secondmate alone forever; with it,
+  # the secondmate is respawned and the neighbour is never killed.
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" FM_TEST_PANE_RESOLVES_TO=fm-sm1-2)
+
+  assert_contains "$(cat "$log")" "new-window" \
+    "a secondmate whose window merely prefix-resolved to a neighbour must still be respawned"
+  assert_not_contains "$(cat "$log")" "kill-window" \
+    "the neighbouring window a stale target resolved to must never be killed"
+  pass "sweep: a target that prefix-resolves to a differently-named window is neither trusted nor killed"
+}
+
+test_sweep_stays_inconclusive_when_the_server_is_down() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-server-down)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # An unresolvable target is only `dead` when the tmux server itself still
+  # answers. With the server down nothing was confidently read, so a momentary
+  # glitch can never license a respawn (which would duplicate a live agent).
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" FM_TEST_TMUX_DOWN=1)
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: liveness probe inconclusive" \
+    "an unanswering tmux server should be reported as an inconclusive probe"
+  [ ! -s "$log" ] || fail "an unanswering tmux server must NEVER trigger a kill or respawn: $(cat "$log")"
+  pass "sweep: an unanswering tmux server stays inconclusive and is never acted on"
+}
+
+test_sweep_reads_an_unpinned_record_leniently() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-unpinned)
+  # A meta written before fm_backend_tmux_create_task made the window-name pin
+  # a hard requirement: its window may legitimately have been renamed, so the
+  # exact-label check is NOT applied and the endpoint is read through tmux's
+  # own resolution. The window here resolves to a differently-named live
+  # window running an agent, which must therefore read alive rather than
+  # become a false dead reading that kills and respawns a live supervisor.
+  add_sm_home "$w" sm1 firstmate:fm-sm1 claude 0
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" FM_TEST_PANE_RESOLVES_TO=fm-sm1-renamed)
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
+    "an unpinned record reading alive through tmux's own resolution should be silent"
+  [ ! -s "$log" ] || fail "a record with no pin guarantee must never become a false dead reading: $(cat "$log")"
+  pass "sweep: a record with no window-name pin guarantee is read leniently, never as a false dead"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
@@ -421,9 +568,14 @@ test_sweep_noop_with_no_secondmate_meta() {
 }
 
 test_tmux_agent_alive_classifies
+test_tmux_agent_alive_honors_expected_label
 test_herdr_agent_alive_maps_pane_agent_state
 test_agent_alive_dispatcher_routes_and_falls_back
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_respawns_structurally_gone_window
+test_sweep_never_touches_a_prefix_resolved_neighbour
+test_sweep_stays_inconclusive_when_the_server_is_down
+test_sweep_reads_an_unpinned_record_leniently
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_never_acts_on_inconclusive_reading
 test_sweep_never_acts_on_unverified_harness_dead_reading

@@ -38,11 +38,18 @@ fm_backend_tmux_capture() {  # <target> <lines>
   tmux capture-pane -p -t "$1" -S -"$2"
 }
 
-# fm_backend_tmux_send_key: one named key. Mirrors fm-send.sh's --key path:
-# `tmux display-message -p -t "$T" '#{pane_id}' >/dev/null`, then
-# `tmux send-keys -t "$T" "$2"`.
-fm_backend_tmux_send_key() {  # <target> <key>
-  tmux display-message -p -t "$1" '#{pane_id}' >/dev/null
+# fm_backend_tmux_send_key: one named key, sent only once <target> has been
+# resolved through fm_backend_tmux_target_exists (the ONE liveness primitive).
+# The pre-adapter fm-send.sh guard was `tmux display-message -p -t "$T"
+# '#{pane_id}' >/dev/null`, which cannot fail while the session exists: it
+# falls back to the session's current window for any name (see
+# fm_backend_tmux_target_exists), so it neither refused a gone target nor
+# caught the unique-prefix resolution that would type this key into a
+# DIFFERENT crewmate's pane. <expected-label> is the owning "fm-<id>" when the
+# caller knows it (bin/fm-send.sh passes it for a task selector, and never for
+# the explicit-target escape hatch).
+fm_backend_tmux_send_key() {  # <target> <key> [expected-label]
+  fm_backend_tmux_target_exists "$1" "${3:-}" || return 1
   tmux send-keys -t "$1" "$2"
 }
 
@@ -82,15 +89,32 @@ fm_backend_tmux_container_ensure() {
 #     treehouse cd's into the worktree, which would break name-based targeting.
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
+#
+# The pin is a HARD REQUIREMENT, not best-effort: every strict, label-checking
+# liveness read downstream (fm_backend_tmux_target_exists with an
+# expected-label, and through it the session-start digest, the fleet snapshot,
+# fm-crew-state.sh, and the secondmate-liveness sweep's respawn decision)
+# compares the live '#{window_name}' against fm-<id>, so a window whose name
+# tmux is still free to rename would eventually read DEAD while its agent is
+# alive. An unpinnable window is therefore refused at creation - killed again
+# and reported - rather than spawned into a state no reader can trust.
+# fm-spawn.sh records the guarantee as tmux_window_pinned=1 in the task meta;
+# a meta without it predates this requirement and is read leniently
+# (fm_backend_expected_label_of_meta, bin/fm-backend.sh).
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
-  local ses=$1 wname=$2 proj_abs=$3 wid
+  local ses=$1 wname=$2 proj_abs=$3 wid opt err
   if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
   wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
-  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
-  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  for opt in automatic-rename allow-rename; do
+    if ! err=$(tmux set-window-option -t "$wid" "$opt" off 2>&1); then
+      tmux kill-window -t "$wid" 2>/dev/null || true
+      echo "error: could not pin the window name of $ses:$wname ($opt off failed${err:+: $err}); refusing to spawn a window tmux may rename away from $wname" >&2
+      return 1
+    fi
+  done
   printf '%s\n' "$wid"
 }
 
@@ -221,8 +245,17 @@ fm_backend_tmux_current_command() {  # <target>
 #             pane. Callers must never treat unknown as a confirmed-dead
 #             signal (bin/fm-bootstrap.sh's secondmate-liveness sweep gates a
 #             respawn on `dead` only).
-fm_backend_tmux_agent_alive() {  # <target>
-  local target=$1 comm
+# <expected-label> is the owning "fm-<id>" when the caller can prove the
+# window name is pinned (fm_backend_expected_label_of_meta, bin/fm-backend.sh).
+# It matters most HERE, on the one path that acts destructively: without it a
+# gone secondmate window "sm" prefix-resolves to a live neighbour "sm-2" and
+# inherits that neighbour's verdict, so the dead secondmate is never respawned
+# (or, when the neighbour sits at a bare shell, is respawned while the sweep
+# kills the neighbour's window). A caller that cannot prove the pin passes no
+# label and gets tmux's own resolution, which is lenient in the safe direction:
+# a drifted window name must never become a confident dead reading.
+fm_backend_tmux_agent_alive() {  # <target> [expected-label]
+  local target=$1 expected_label=${2:-} comm
   # A GONE window must never be classified from #{pane_current_command}: that
   # read goes through display-message, which falls back to the session's
   # current window (see fm_backend_tmux_target_exists), so a dead secondmate
@@ -232,7 +265,7 @@ fm_backend_tmux_agent_alive() {  # <target>
   # herdr's arm already uses for a structurally-gone pane; if the tmux server
   # itself did not answer, nothing was confidently read and this stays
   # `unknown`, so a momentary server glitch can never license a respawn.
-  if ! fm_backend_tmux_target_exists "$target"; then
+  if ! fm_backend_tmux_target_exists "$target" "$expected_label"; then
     if tmux list-sessions >/dev/null 2>&1; then printf 'dead'; else printf 'unknown'; fi
     return 0
   fi

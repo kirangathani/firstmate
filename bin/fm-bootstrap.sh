@@ -368,10 +368,11 @@ secondmate_liveness_sweep() {
   # with a recorded window=), run the deeper fm_backend_agent_alive probe
   # (bin/fm-backend.sh) and act only on a CONFIDENT verdict:
   #   alive   - no-op.
-  #   dead    - kill the stale endpoint first (best-effort; the tmux adapter
-  #             refuses to create a same-named window over a live one) then
-  #             respawn via the existing recovery path (bin/fm-spawn.sh <id>
-  #             --secondmate; secondmate-provisioning).
+  #   dead    - kill the stale endpoint first (best-effort, and only when it
+  #             still resolves to this secondmate's OWN endpoint; the tmux
+  #             adapter refuses to create a same-named window over a live one)
+  #             then respawn via the existing recovery path (bin/fm-spawn.sh
+  #             <id> --secondmate; secondmate-provisioning).
   #   unknown - NEVER acted on. A false-dead reading would spin up a DUPLICATE
   #             agent (two supervisors in one home); a false-alive reading
   #             merely leaves today's bug unfixed for one more sweep. The
@@ -387,7 +388,7 @@ secondmate_liveness_sweep() {
   # MID-SESSION is a harder follow-on needing a periodic liveness beacon -
   # explicitly out of scope here.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target verdict out
+  local meta id window harness backend target label verdict out
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
@@ -398,7 +399,15 @@ secondmate_liveness_sweep() {
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
-    verdict=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null) || verdict="unknown"
+    # The owning fm-<id> label, passed only where the endpoint's label is
+    # pinned (fm_backend_expected_label_of_meta). This is the one probe whose
+    # verdict acts DESTRUCTIVELY, so it is exactly where a target that merely
+    # prefix-resolved to a neighbouring crewmate's window must be refused: a
+    # gone secondmate "sm" would otherwise inherit the verdict of a live task
+    # "sm-2" and never be respawned. A record with no pin guarantee keeps
+    # tmux's own resolution rather than risking a false dead reading.
+    label=$(fm_backend_expected_label_of_meta "$meta" "$id")
+    verdict=$(fm_backend_agent_alive "$backend" "$target" "$label" 2>/dev/null) || verdict="unknown"
     case "$harness" in
       claude|codex|opencode|pi|grok) ;;
       *) [ "$verdict" = dead ] && verdict=unknown ;;
@@ -407,7 +416,19 @@ secondmate_liveness_sweep() {
       alive)
         ;;
       dead)
-        fm_backend_kill "$backend" "$target" 2>/dev/null || true
+        # Kill only an endpoint this task still verifiably OWNS. The verdict
+        # above is `dead` both for a live pane sitting at a bare shell (which
+        # must be killed, since the tmux adapter refuses to create a
+        # same-named window over a live one) and for a target that no longer
+        # resolves to this secondmate's own window at all. In the second case
+        # there is nothing of ours to remove, and an unguarded kill would be
+        # handed the same ambiguous target the probe just rejected - killing
+        # the neighbouring window it prefix-resolves to. Respawn still
+        # proceeds: fm_backend_tmux_create_task matches window names exactly,
+        # so a differently-named neighbour never blocks it.
+        if fm_backend_target_exists "$backend" "$target" "$label" 2>/dev/null; then
+          fm_backend_kill "$backend" "$target" 2>/dev/null || true
+        fi
         if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
           :
         else
