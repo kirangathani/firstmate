@@ -104,11 +104,15 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` as `bin/fm-test.sh` so no-mistakes runs firstmate's bash behavior suite directly.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` as `bin/fm-test.sh --local` so no-mistakes runs firstmate's bash behavior suite directly.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
-`bin/fm-test.sh` is the single owner of the behavior-suite definition (the `tests/*.test.sh` file set, the execution rules, and the shard partition), and its header comment owns the details.
-The argument-less form the gate runs is the canonical whole-set serial run: it requires `tmux` on `PATH`, prints `tmux -V`, executes every test file directly, runs them all even after a failure, and fails if any exited non-zero or went unrun.
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs that same script as `--shard K/N` across parallel jobs instead of delegating the test step to an agent, and `tests/fm-test.test.sh` asserts the shards' union is exactly this whole set, so the gate and CI cannot diverge.
+`bin/fm-test.sh` is the single owner of the behavior-suite definition (the `tests/*.test.sh` file set, the execution rules, the selection, and the shard partition), and its header comment owns the details.
+The argument-less form is still the canonical whole-set serial run and the definition of the suite: it executes every test file directly, runs them all even after a failure, and fails if any exited non-zero or went unrun.
+`--local`, the form the gate runs, is a selection and scheduling change over that same file set with the same per-file verdict: it runs only the tests the working change can affect, selected through the reference closure `bin/fm-test-plan.awk` builds over the tracked repo, in parallel cost-packed shards, because the whole serial suite is slow enough locally to be worth routing around and a gate developers route around is worse than no gate.
+No pass is ever cached, and anything the planner cannot attribute to a test escalates the run to the whole set; the two files' header comments own the selection rules and their safety argument.
+Every mode requires `tmux` on `PATH` and prints `tmux -V`.
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs that same script as `--shard K/N` across parallel jobs instead of delegating the test step to an agent, and stays exhaustive with no change-based selection, because CI is the authority that catches the host-dependence class of bug a local run passes by construction.
+`tests/fm-test.test.sh` asserts both that the shards' union is exactly this whole set and that the selected, sharded local path returns the whole set's verdict for every file it runs, so the gate and CI cannot diverge.
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 

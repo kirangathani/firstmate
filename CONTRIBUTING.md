@@ -72,11 +72,18 @@ Check and test the toolbelt before pushing:
 ```sh
 for script in bin/*.sh bin/backends/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt
 bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
-bin/fm-test.sh   # behavior tests; the single owner CI (sharded) and no-mistakes commands.test (whole set) both run; reproduce one CI shard with --shard K/N
+bin/fm-test.sh --local   # behavior tests the working change can affect, in parallel; what no-mistakes commands.test runs
+bin/fm-test.sh   # the canonical whole set, serial: the definition of the suite, and what --local is measured against
+
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
 ```
+
+`bin/fm-test.sh` is the single owner of the suite: CI runs it as `--shard K/N` and stays exhaustive, the pre-push gate runs `--local`.
+`--local` selects through the reference closure in `bin/fm-test-plan.awk`, so a test that exercises an edited script runs even when the test file itself is untouched, and any changed file the planner cannot attribute to a test escalates the run to the whole set, prose (`*.md`, `*.txt`) being the one deliberate exception the planner's header argues for.
+Use `--list-local` to see what it would run and `--verify-parity` to re-derive the claim that the selected parallel path agrees with the whole set file for file.
+Reproduce one CI shard with `--shard K/N`.
 
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the run-all command above is always safe.
