@@ -43,6 +43,20 @@
 #       test must NOT be reported unaccounted, an all-skipped one must be
 #       `skipped:`, one passing case outweighs its skipped cases, and a near-name
 #       pair (test_x beside test_xy) must not cross-match
+#   (w) vitest, clean: the base's JS test passes against the branch -> exit
+#       zero with every class zero, proving real execution AND that composed
+#       `describe > it` titles account for check 1's per-segment names
+#   (x) vitest, rewritten assertion body -> caught as `failing:` under the
+#       runner's composed title where check 1 passes (the Z/K case in JS)
+#   (y) vitest signalled but node_modules absent -> `unexecuted:` per
+#       identifier, never a pass
+#   (z) a workspace-style node_modules symlink into live first-party source ->
+#       `unexecuted:`, the safe failure, never a verdict against the wrong tree
+#   (aa) jest, clean and rewritten-assertion variants of (w)/(x)
+#   (bb) jest, an explicitly skipped test reports `skipped:` (jest spells an
+#       explicit skip "pending") and still exits zero
+#   (cc) a JS run never mutates the live worktree or the linked node_modules
+#       (vitest's results cache must stay disabled)
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -348,7 +362,7 @@ test_unexecutable_files_are_reported_not_passed() {
   local dir out code
   # The baseline corpus's shell test calls an undefined `pass`, so its baseline
   # run is red; its python/js files resolve no runner (no config, no venv, and
-  # no JS runner until PR3). None of that may read as a pass.
+  # no package.json). None of that may read as a pass.
   dir=$(make_repo unexecuted-report)
 
   set +e
@@ -999,6 +1013,312 @@ EOF
   pass "a shell assertion that never emitted 'ok - ' is reported unaccounted, not passed"
 }
 
+# --- vitest / jest fixtures --------------------------------------------------
+
+# The provisioned environments the JS fixtures link in, exactly as a
+# pipeline-provisioned worktree's node_modules is linked at the real gate.
+# Built once per suite run by a real `npm install` (versions pinned for
+# determinism: vitest 3.2.7 / jest 30.4.1, the versions the runner behavior in
+# bin/fm-test-exec-lib.sh was verified against on 2026-08-03) and shared, so
+# the per-case cost is a symlink. The install needs node, npm, and network or
+# a warm npm cache; CI provides all three, and the suite is self-contained
+# with no workflow-side installs.
+VITEST_ENV="$TMP_ROOT/_vitest-env"
+JEST_ENV="$TMP_ROOT/_jest-env"
+
+# ensure_js_env <env-dir> <package> <version> <bin>: build the shared env if
+# absent. Returns non-zero when the host cannot provide it, so the caller fails
+# loudly instead of silently dropping the coverage that proves JS assertions
+# really execute.
+ensure_js_env() {
+  local env=$1 pkg=$2 version=$3 bin=$4
+  if [ -x "$env/node_modules/.bin/$bin" ]; then
+    return 0
+  fi
+  command -v node >/dev/null 2>&1 || return 1
+  command -v npm >/dev/null 2>&1 || return 1
+  mkdir -p "$env"
+  printf '{"name":"fm-%s-env","private":true,"devDependencies":{"%s":"%s"}}\n' \
+    "$pkg" "$pkg" "$version" > "$env/package.json"
+  npm install --prefix "$env" --no-audit --no-fund --loglevel=error \
+    >/dev/null 2>&1 || return 1
+  [ -x "$env/node_modules/.bin/$bin" ]
+}
+
+require_vitest_env() {
+  ensure_js_env "$VITEST_ENV" vitest 3.2.7 vitest \
+    || fail "$1: could not provision a node_modules with vitest (needs node and npm, plus network or a warm npm cache); the vitest runner cannot be verified without one"
+}
+
+require_jest_env() {
+  ensure_js_env "$JEST_ENV" jest 30.4.1 jest \
+    || fail "$1: could not provision a node_modules with jest (needs node and npm, plus network or a warm npm cache); the jest runner cannot be verified without one"
+}
+
+# write_js_tree <dir> <runner> <behavior> <asserted>: the plan's Z/K worked
+# example in JS - src/mod.js's greet() returns <behavior> and mod.test.js
+# asserts <asserted> inside a describe block, so check 1 enumerates the
+# describe title and the it title as separate names while the runner reports
+# one composed `greet > x behaves` title. vitest gets an ESM tree, jest a CJS
+# tree it runs with zero config.
+write_js_tree() {
+  local dir=$1 runner=$2 behavior=$3 asserted=$4
+  mkdir -p "$dir/src"
+  if [ "$runner" = vitest ]; then
+    cat > "$dir/package.json" <<'EOF'
+{"name":"fixture","private":true,"type":"module","devDependencies":{"vitest":"3.2.7"}}
+EOF
+    printf 'export function greet() {\n  return "%s";\n}\n' "$behavior" > "$dir/src/mod.js"
+    cat > "$dir/mod.test.js" <<EOF
+import { describe, it, expect } from 'vitest';
+import { greet } from './src/mod.js';
+
+describe('greet', () => {
+  it('x behaves', () => {
+    expect(greet()).toBe('$asserted');
+  });
+});
+EOF
+  else
+    cat > "$dir/package.json" <<'EOF'
+{"name":"fixture","private":true,"devDependencies":{"jest":"30.4.1"}}
+EOF
+    printf 'module.exports.greet = function greet() {\n  return "%s";\n};\n' "$behavior" > "$dir/src/mod.js"
+    cat > "$dir/mod.test.js" <<EOF
+const { greet } = require('./src/mod.js');
+
+describe('greet', () => {
+  it('x behaves', () => {
+    expect(greet()).toBe('$asserted');
+  });
+});
+EOF
+  fi
+  printf 'node_modules/\n' > "$dir/.gitignore"
+}
+
+# make_js_repo <name> <runner>: main has greet returning Z and the composed
+# test asserting Z, with a work branch checked out. Echoes dir. The caller
+# links the provisioned env itself, so the no-node_modules case can skip it.
+make_js_repo() {
+  local dir="$TMP_ROOT/$1"
+  init_repo_at "$dir"
+  write_js_tree "$dir" "$2" Z Z
+  commit_all "$dir" "main: greet returns Z, test asserts Z"
+  git -C "$dir" checkout -q -b work
+  printf '%s\n' "$dir"
+}
+
+test_vitest_clean_run_exits_zero() {
+  local dir out code
+  require_vitest_env vitest-clean
+  dir=$(make_js_repo vitest-clean vitest)
+  ln -s "$VITEST_ENV/node_modules" "$dir/node_modules"
+  # A legitimate refactor: internals change, the behavior main asserted holds.
+  printf 'export function greet() {\n  const value = "Z";\n  return value;\n}\n' > "$dir/src/mod.js"
+  commit_all "$dir" "refactor greet, behavior preserved"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "vitest-clean: the base's JS assertion still passes, so exit must be zero"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0' \
+    "vitest-clean: a real vitest run must report zero in every class, proving the describe and it names were both accounted against the composed title"
+  assert_not_contains "$out" 'unexecuted:' \
+    "vitest-clean: the JS file must be executed, not name-checked"
+  pass "a vitest base test that passes against the branch exits zero"
+}
+
+test_vitest_rewritten_assertion_caught() {
+  local dir out code
+  require_vitest_env vitest-rewrite
+  dir=$(make_js_repo vitest-rewrite vitest)
+  ln -s "$VITEST_ENV/node_modules" "$dir/node_modules"
+  # The resolver takes K's side in BOTH files: greet returns K and the test
+  # keeps its name but asserts K. Check 1 sees the same names on both sides.
+  write_js_tree "$dir" vitest K K
+  commit_all "$dir" "resolver takes K in both src/mod.js and the test"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "vitest-rewrite: a rewritten JS assertion body must exit non-zero"
+  assert_contains "$out" 'failing: mod.test.js::greet > x behaves' \
+    "vitest-rewrite: check 2 must report main's assertion as failing under the runner's composed title"
+  assert_not_contains "$out" 'missing:' \
+    "vitest-rewrite: check 1 must NOT flag anything (the names survived), proving check 2 caught it"
+  assert_not_contains "$out" 'unexecuted:' \
+    "vitest-rewrite: the verdict must come from a real run, not a fallback"
+  pass "a rewritten vitest assertion body is caught by check 2 where check 1 passes"
+}
+
+test_vitest_without_node_modules_is_unexecuted() {
+  local dir out code
+  # package.json signals vitest, but no node_modules is linked, so no binary
+  # resolves from the worktree.
+  dir=$(make_js_repo vitest-no-nm vitest)
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "vitest-no-nm: a missing node_modules must not be a silent pass"
+  assert_contains "$out" 'unexecuted: mod.test.js::greet' \
+    "vitest-no-nm: the describe identifier must be reported as unexecuted"
+  assert_contains "$out" 'unexecuted: mod.test.js::x behaves' \
+    "vitest-no-nm: the it identifier must be reported as unexecuted"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=2' \
+    "vitest-no-nm: the summary must count both identifiers as unexecuted"
+  assert_grep 'UNEXECUTED: mod.test.js' "$dir/stderr" \
+    "vitest-no-nm: the reason the file could not be executed must be on stderr"
+  pass "a vitest test with no node_modules is reported unexecuted, not passed"
+}
+
+test_js_workspace_link_is_unexecuted() {
+  local dir out code
+  require_vitest_env js-workspace-shadow
+  # A workspace-style layout: node_modules is a real dir whose .bin borrows the
+  # shared vitest, plus a package symlink pointing at first-party source INSIDE
+  # the live worktree - the JS analogue of an editable install. A bare
+  # specifier import would load the live tree while we believe we are testing
+  # scratch, so no verdict may be produced at all.
+  dir=$(make_js_repo js-workspace-shadow vitest)
+  mkdir -p "$dir/node_modules/.bin" "$dir/packages/mylib"
+  printf 'export const X = 1;\n' > "$dir/packages/mylib/index.js"
+  ln -s "$VITEST_ENV/node_modules/.bin/vitest" "$dir/node_modules/.bin/vitest"
+  ln -s "$dir/packages/mylib" "$dir/node_modules/mylib"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "js-workspace-shadow: an unauthoritative scratch tree must not be a silent pass"
+  assert_contains "$out" 'unexecuted: mod.test.js::x behaves' \
+    "js-workspace-shadow: a tree that cannot be proven authoritative must be reported unexecuted"
+  assert_not_contains "$out" 'failing:' \
+    "js-workspace-shadow: an untrusted tree yields no verdict at all, neither pass nor fail"
+  assert_grep 'first-party code in the live worktree' "$dir/stderr" \
+    "js-workspace-shadow: the reason must name the live-tree link so it is actionable"
+  assert_grep 'mylib' "$dir/stderr" \
+    "js-workspace-shadow: the reason must name the linked package"
+  pass "a workspace-style link into live first-party source is reported unexecuted, never passed"
+}
+
+test_jest_clean_run_exits_zero() {
+  local dir out code
+  require_jest_env jest-clean
+  dir=$(make_js_repo jest-clean jest)
+  ln -s "$JEST_ENV/node_modules" "$dir/node_modules"
+  printf 'module.exports.greet = function greet() {\n  const value = "Z";\n  return value;\n};\n' > "$dir/src/mod.js"
+  commit_all "$dir" "refactor greet, behavior preserved"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "jest-clean: the base's JS assertion still passes, so exit must be zero"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0' \
+    "jest-clean: a real jest run must report zero in every class"
+  pass "a jest base test that passes against the branch exits zero"
+}
+
+test_jest_rewritten_assertion_caught() {
+  local dir out code
+  require_jest_env jest-rewrite
+  dir=$(make_js_repo jest-rewrite jest)
+  ln -s "$JEST_ENV/node_modules" "$dir/node_modules"
+  write_js_tree "$dir" jest K K
+  commit_all "$dir" "resolver takes K in both src/mod.js and the test"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "jest-rewrite: a rewritten JS assertion body must exit non-zero"
+  assert_contains "$out" 'failing: mod.test.js::greet > x behaves' \
+    "jest-rewrite: check 2 must report main's assertion as failing under the composed title"
+  assert_not_contains "$out" 'missing:' \
+    "jest-rewrite: check 1 must NOT flag anything (the names survived), proving check 2 caught it"
+  assert_not_contains "$out" 'unexecuted:' \
+    "jest-rewrite: the verdict must come from a real run, not a fallback"
+  pass "a rewritten jest assertion body is caught by check 2 where check 1 passes"
+}
+
+test_jest_explicit_skip_is_visible() {
+  local dir out code
+  require_jest_env jest-skip
+  dir="$TMP_ROOT/jest-skip"
+  init_repo_at "$dir"
+  mkdir -p "$dir/src"
+  cat > "$dir/package.json" <<'EOF'
+{"name":"fixture","private":true,"devDependencies":{"jest":"30.4.1"}}
+EOF
+  printf 'node_modules/\n' > "$dir/.gitignore"
+  cat > "$dir/mod.test.js" <<'EOF'
+it.skip('x behaves', () => {
+  expect(false).toBe(true);
+});
+EOF
+  commit_all "$dir" "main: the only test carries an explicit skip"
+  git -C "$dir" checkout -q -b work
+  ln -s "$JEST_ENV/node_modules" "$dir/node_modules"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "jest-skip: a skip-only run must not become a merge-refusing condition"
+  assert_contains "$out" 'skipped: mod.test.js::x behaves' \
+    "jest-skip: jest's pending status must be read as an explicit skip and reported by name"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=1 unaccounted=0' \
+    "jest-skip: a green run that verified nothing must not read as a clean pass"
+  assert_not_contains "$out" 'unaccounted:' \
+    "jest-skip: a reported skip IS a result, so nothing here is unaccounted"
+  pass "a jest test whose only assertion is explicitly skipped is reported skipped, not passed"
+}
+
+test_js_run_never_mutates_the_live_worktree() {
+  local dir before after nm_before nm_after
+  require_vitest_env js-no-mutation
+  dir=$(make_js_repo js-no-mutation vitest)
+  ln -s "$VITEST_ENV/node_modules" "$dir/node_modules"
+  before="$TMP_ROOT/js-no-mutation.before"
+  after="$TMP_ROOT/js-no-mutation.after"
+  nm_before="$TMP_ROOT/js-no-mutation.nm-before"
+  nm_after="$TMP_ROOT/js-no-mutation.nm-after"
+  # run_explicit puts this harness's own state dir inside the fixture, so create
+  # it up front: the snapshot must isolate what the RUN does to the worktree.
+  mkdir -p "$dir/.state"
+  touch "$dir/.state/.last-watcher-beat"
+  # find stops at the node_modules symlink, so snapshot the linked env itself
+  # too: vitest's results cache writes into node_modules/.vite unless the
+  # runner invocation keeps it disabled, and THROUGH the link that would land
+  # in the live provisioned env this gate promises never to mutate.
+  find "$dir" -path "$dir/.git" -prune -o -print | sort > "$before"
+  find "$VITEST_ENV/node_modules" | sort > "$nm_before"
+
+  set +e
+  run_explicit "$dir" > /dev/null 2>&1
+  set -e
+
+  find "$dir" -path "$dir/.git" -prune -o -print | sort > "$after"
+  diff -u "$before" "$after" > "$TMP_ROOT/js-no-mutation.diff" \
+    || fail "js-no-mutation: the run must not add or remove anything in the live worktree"$'\n'"$(cat "$TMP_ROOT/js-no-mutation.diff")"
+  find "$VITEST_ENV/node_modules" | sort > "$nm_after"
+  diff -u "$nm_before" "$nm_after" > "$TMP_ROOT/js-no-mutation.nm-diff" \
+    || fail "js-no-mutation: the run must not write into the linked node_modules it borrows"$'\n'"$(cat "$TMP_ROOT/js-no-mutation.nm-diff")"
+  pass "a JS check-2 run never mutates the live worktree or the linked node_modules"
+}
+
 test_removed_shell_test_reported_via_meta
 test_removed_python_test_reported
 test_added_tests_removed_none_loses_nothing
@@ -1023,3 +1343,11 @@ test_parametrized_green_test_is_not_unaccounted
 test_parametrized_all_skipped_is_skipped_not_unaccounted
 test_parametrized_one_passing_case_counts_as_passing
 test_parametrized_near_name_does_not_cross_match
+test_vitest_clean_run_exits_zero
+test_vitest_rewritten_assertion_caught
+test_vitest_without_node_modules_is_unexecuted
+test_js_workspace_link_is_unexecuted
+test_jest_clean_run_exits_zero
+test_jest_rewritten_assertion_caught
+test_jest_explicit_skip_is_visible
+test_js_run_never_mutates_the_live_worktree
