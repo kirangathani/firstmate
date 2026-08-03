@@ -1742,6 +1742,53 @@ SH
     "blank lines are not a reading either"
   assert_not_contains "$out" " ok" "blank output never produces a green"
 
+  # Neither is output the CHECK ITSELF did not write. fm-assert-tests-kept.sh
+  # runs bin/fm-guard.sh unredirected, so the guard's WORKTREE TANGLE / WATCHER
+  # DOWN banners land on the probe's stdout. A viewer asking only "was there any
+  # output" would take that foreign noise as licence to grep all six classes to
+  # zero and hand back the exact manufactured green the empty-output dash exists
+  # to refuse. The viewer recognises its own contract instead.
+  cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
+#!/usr/bin/env bash
+echo "●------------------------------------------------------------"
+echo "●  WATCHER DOWN - SUPERVISION IS OFF"
+echo "●  1 task(s) in flight, but no watcher has a fresh beacon."
+echo "●------------------------------------------------------------"
+exit 0
+SH
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+    "$d/bin/fm-nm-flow.sh" six-task --tests-gate)
+  assert_contains "$out" "miss -/fail -/unex -/excu 0/skip -/unac -" \
+    "another script's banner on the probe's stdout is not a reading of any class"
+  assert_not_contains "$out" "miss 0" "guard noise never manufactures a zero"
+  assert_not_contains "$out" " ok" "guard noise never produces a green"
+
+  # The same banner alongside a line the check really did write: the contract
+  # line is positive evidence and is believed, banner and all.
+  cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
+#!/usr/bin/env bash
+echo "●  WATCHER DOWN - SUPERVISION IS OFF"
+echo "missing: tests/demo.test.sh::beta"
+exit 1
+SH
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+    "$d/bin/fm-nm-flow.sh" six-task --tests-gate)
+  assert_contains "$out" "miss 1/fail 0/unex 0/excu 0/skip 0/unac 0 !!" \
+    "a contract line is read even when foreign output shares the stream"
+
+  # And a genuine all-clear reading keeps its established zeros and its green:
+  # the tightened test rejects foreign output, not the check's own summary.
+  cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
+#!/usr/bin/env bash
+echo "●  WATCHER DOWN - SUPERVISION IS OFF"
+echo "summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0"
+exit 0
+SH
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+    "$d/bin/fm-nm-flow.sh" six-task --tests-gate)
+  assert_contains "$out" "miss 0/fail 0/unex 0/excu 0/skip 0/unac 0 ok" \
+    "a real all-clear reading still renders six established zeros and the green"
+
   cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
 #!/usr/bin/env bash
 echo "missing: tests/demo.test.sh::beta"

@@ -729,12 +729,16 @@ mgate_counts_ann() {  # <missing> <failing> <unexec> <excused> <skipped> <unacco
 #
 # With no summary line at all, every class is being read the same way, off the
 # finding lines, so a 0 there is a real reading of the whole output - PROVIDED
-# there is output to read. Output with no content at all is not a reading of
-# anything: all six greps answer 0, and the row would go out with six
+# the CHECK ITSELF said something. Output the check did not produce is not a
+# reading of anything: all six greps answer 0, and the row would go out with six
 # established zeros and an `ok` derived from zero positive evidence, which is
 # the same manufactured green an absent summary field already refuses to
-# produce. A check that printed nothing is indistinguishable from one that never
-# ran, so every class renders as a dash and takes the green with it.
+# produce. So the question is not "was there any output" but "is any of it
+# shaped like this check's contract" - the probe inherits other scripts' stdout
+# (fm-assert-tests-kept.sh runs bin/fm-guard.sh unredirected, and the guard's
+# banners print there), and foreign lines say nothing about any class. Anything
+# short of one contract line and every class renders as a dash and takes the
+# green with it.
 mgate_field() {  # <class> <summary-line> <stdout-file>
   local v='' n
   if [ -n "$2" ]; then
@@ -743,7 +747,8 @@ mgate_field() {  # <class> <summary-line> <stdout-file>
       n=$(grep -c "^$1: " "$3" || true)
       if [ "${n:-0}" -gt 0 ]; then v=$n; else v='-'; fi
     fi
-  elif grep -q '[^[:space:]]' "$3" 2>/dev/null; then
+  elif grep -qE '^(summary|missing|failing|unexecuted|skipped|unaccounted): ' \
+    "$3" 2>/dev/null; then
     v=$(grep -c "^$1: " "$3" || true)
     v=${v:-0}
   else
