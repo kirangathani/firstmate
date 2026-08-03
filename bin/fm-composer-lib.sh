@@ -222,7 +222,11 @@ fm_composer_blanks_init
 # silently reintroduce the defect this owner exists to fix. Assigns rather than
 # echoing (the bin/fm-marker-lib.sh idiom) so the classifier stays subshell-free
 # on the per-poll path. Idempotent, so a site that only needs the trim (after
-# the leading-glyph strip below) can call it too.
+# the leading-glyph strip below) can call it too. The adapters' PRE-classifier
+# row-shape and border-strip trims (bin/fm-tmux-lib.sh,
+# bin/backends/{herdr,orca,cmux}.sh) also route through this instead of a bare
+# `[[:space:]]` strip, so a Unicode-blank-padded row still matches its
+# structural shape and reaches the classifier at all.
 fm_composer_normalize_trim() {  # <text> <out-var>
   local _fmcnt_text=$1 _fmcnt_out=$2 _fmcnt_ch
   for _fmcnt_ch in "${FM_COMPOSER_BLANKS[@]}"; do

@@ -547,8 +547,10 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
   local target=$1 expected_label=${2:-} cap line trimmed stripped="" found=0
   cap=$(fm_backend_cmux_capture "$target" "$FM_BACKEND_CMUX_COMPOSER_LINES" "$expected_label") || { printf 'unknown'; return 0; }
   while IFS= read -r line; do
-    trimmed="${line#"${line%%[![:space:]]*}"}"
-    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    # fm_composer_normalize_trim, not a bare `[[:space:]]` strip, so a
+    # Unicode-blank-padded row still matches the border shape below instead
+    # of misshaping before the classifier.
+    fm_composer_normalize_trim "$line" trimmed
     [ -n "$trimmed" ] || continue
     case "$trimmed" in
       '│'*'│'|'┃'*'┃'|'|'*'|') : ;;
@@ -561,8 +563,7 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
   stripped=${stripped//│/}
   stripped=${stripped//┃/}
   stripped=${stripped//|/}
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  fm_composer_normalize_trim "$stripped" stripped
   # A row was found only by the bordered shape above, so content came from a
   # genuine composer box - delegate to the shared owner with bordered=1. A bare
   # dead-shell prompt has no bordered row and already returned 'unknown' above.

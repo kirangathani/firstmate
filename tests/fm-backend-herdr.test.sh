@@ -893,6 +893,51 @@ test_composer_state_unknown_when_no_composer_row_found() {
   pass "fm_backend_herdr_composer_state: reports unknown for bare shell prompts with no composer row"
 }
 
+# Unicode blank padding (task fm-nbsp-adapters): the adapter's structural scan
+# trims run BEFORE the shared classifier, and a bare `[[:space:]]` trim leaves
+# U+00A0 and the other FM_COMPOSER_BLANKS in place, so a blank-padded row failed
+# the border-shape/bare-prompt match and read `unknown` without the classifier
+# ever seeing it. U+00A0 is the pad claude really draws (hex-dumped from a live
+# pane 2026-07-30, see bin/fm-composer-lib.sh); the rows below take the ASCII
+# fixtures above and swap their edge padding for each covered blank, pinning
+# that the verdict is identical to the ASCII-space-padded row.
+test_composer_state_blank_padded_rows_match_ascii() {
+  local dir log resp fb out ch i=0 nbsp
+  # shellcheck source=bin/fm-composer-lib.sh
+  . "$ROOT/bin/fm-composer-lib.sh"
+  nbsp=$(printf '\302\240')
+  dir="$TMP_ROOT/composer-blank-pad"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  for ch in "${FM_COMPOSER_BLANKS[@]}"; do
+    i=$((i + 1))
+    rm -f "$resp/.count"
+    printf '%s\n' "${ch}${ch}│ ❯      │${ch}${ch}" > "$resp/1.out"
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    [ "$out" = empty ] \
+      || fail "blank #$i-padded empty bordered composer must read empty like its ASCII-space twin, got '$out'"
+  done
+  # The bare agent-glyph shape: a leading blank must not hide the ❯ prompt row.
+  rm -f "$resp/.count"
+  printf '%s\n' "${nbsp}❯${nbsp}" > "$resp/1.out"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a U+00A0-padded bare '❯' row must read empty, got '$out'"
+  # The other direction: real text on a blank-padded row is still pending.
+  rm -f "$resp/.count"
+  printf '%s\n' "${nbsp}│ ❯ hello captain │${nbsp}" > "$resp/1.out"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real text on a U+00A0-padded bordered row must stay pending, got '$out'"
+  # The Pi separator row: blank edge padding must not stop a solid ─ rule from
+  # reading as a separator (fm_backend_herdr_pi_separator_row).
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pi_separator_row "$1"' "$ROOT" \
+      "${nbsp}────────────${nbsp}" \
+    || fail "a U+00A0-padded solid ─ rule must still read as a Pi separator row"
+  pass "fm_backend_herdr_composer_state: Unicode-blank-padded rows classify identically to ASCII-space-padded rows"
+}
+
 # Real Pi 0.80.7 on Herdr 0.7.3 renders no prompt glyph and no side border.
 # Its content is the row(s) between two blue horizontal separators; the idle row
 # carries only a reverse-video cursor. This exact shape was `unknown` for 4555s
@@ -2089,6 +2134,7 @@ test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
+test_composer_state_blank_padded_rows_match_ascii
 test_composer_state_pi_separator_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
