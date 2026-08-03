@@ -72,14 +72,14 @@ Check and test the toolbelt before pushing:
 ```sh
 for script in bin/*.sh bin/backends/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt
 bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
-for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior tests, matching CI and no-mistakes commands.test
+bin/fm-test.sh   # behavior tests; the single owner CI (sharded) and no-mistakes commands.test (whole set) both run; reproduce one CI shard with --shard K/N
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
 ```
 
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.
-Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the run-all loop above is always safe.
+Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the run-all command above is always safe.
 `tests/fm-assert-tests-kept.test.sh` is the deliberate exception: it needs `python3` with `venv` plus a `pytest` that is either importable or installable with `pip`, because it builds a venv to prove the kept-tests gate really executes Python assertions, and it fails loudly rather than skipping when it cannot, since a silent skip would drop exactly the coverage that proves assertions ran.
 CI does not add its own guard step for that prerequisite: it relies on the `ubuntu-latest` runner already providing `python3`, `venv`, and `pip`, and on this test failing loudly rather than skipping if that ever stops being true.
 

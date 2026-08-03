@@ -19,13 +19,18 @@ disable_project_settings: true
 # them. commands.lint delegates to bin/fm-lint.sh, the single owner of the lint
 # definition that .github/workflows/ci.yml also invokes, so local can never
 # diverge from CI again (parity asserted by tests/fm-lint.test.sh).
-# The test command mirrors the Linux behavior job in .github/workflows/ci.yml:
-# iterate every tests/*.test.sh, run each, and fail the step if any one exits
-# non-zero (an agent-driven test step has crashed the daemon). The e2e tests need
-# tmux on PATH, which the firstmate environment provides.
+# commands.test delegates to bin/fm-test.sh, the single owner of the behaviour
+# suite definition (file set, execution rules, and shard partition). The
+# argument-less invocation here is the canonical whole-set serial run; CI's
+# Linux behavior jobs run `bin/fm-test.sh --shard K/N` over the SAME script,
+# and tests/fm-test.test.sh asserts the union of those shards is exactly this
+# whole set, so local and CI still cannot diverge - the old guarantee of both
+# gates spelling one identical command is replaced by both gates invoking one
+# owner whose modes are parity-tested. The e2e tests need tmux on PATH, which
+# the runner itself enforces.
 commands:
   lint: 'bin/fm-lint.sh'
-  test: 'command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; exit 1; }; tmux -V; rc=0; for t in tests/*.test.sh; do echo "== $t =="; bash "$t" || rc=1; done; exit "$rc"'
+  test: 'bin/fm-test.sh'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:
