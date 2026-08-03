@@ -262,15 +262,22 @@ SH
 # fm_test_local_list <fixture> <changed path>...: the files --local would run
 # for that exact change set.
 fm_test_local_list() {
-  local fx=$1 changed
+  local fx=$1
   shift
-  changed="$fx/.changed"
-  printf '%s\n' "$@" > "$changed"
-  FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$changed" "$fx/bin/fm-test.sh" --list-local 2>/dev/null
+  printf '%s\n' "$@" > "$CHANGEFILE"
+  FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$CHANGEFILE" "$fx/bin/fm-test.sh" --list-local 2>/dev/null
 }
 
 LOCALROOT=$(fm_test_tmproot fm-test-local)
 FXL="$LOCALROOT/repo"
+# Scratch files live OUTSIDE the fixture repo. The git-derived cases below take
+# their change set from the repo itself, and an untracked scratch file inside it
+# would be a changed file no test reaches, escalating those runs to the whole
+# set and quietly destroying what they assert.
+SCRATCH="$LOCALROOT/scratch"
+mkdir -p "$SCRATCH"
+CHANGEFILE="$SCRATCH/changed"
+VERDICTFILE="$SCRATCH/verdicts"
 fm_test_local_fixture "$FXL"
 
 # --- selection follows the closure, not the file name -----------------------
@@ -311,8 +318,8 @@ pass "prose is a dependency target, not a source of edges"
 # The planner reads a static graph, so it cannot prove it saw every route to a
 # file. It CAN prove a changed file is on no route at all, and that is the case
 # where running less would be a guess.
-printf '%s\n' bin/orphan.sh > "$FXL/.changed"
-out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$FXL/.changed" "$FXL/bin/fm-test.sh" --local 2>&1)
+printf '%s\n' bin/orphan.sh > "$CHANGEFILE"
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$CHANGEFILE" "$FXL/bin/fm-test.sh" --local 2>&1)
 rc=$?
 [ "$rc" -eq 0 ] || fail "the escalated whole-set run must still pass on a green fixture (rc=$rc): $out"
 assert_contains "$out" 'running the canonical whole set instead' \
@@ -324,8 +331,8 @@ pass "an unreferenced script escalates to the whole set"
 # a doc affects a test only by being read, and a test that reads a doc names it.
 # Escalating here instead would put every documentation-only edit through the
 # full suite, which is the slow gate this mode exists to remove.
-printf '%s\n' README.md > "$FXL/.changed"
-out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$FXL/.changed" "$FXL/bin/fm-test.sh" --local 2>&1)
+printf '%s\n' README.md > "$CHANGEFILE"
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$CHANGEFILE" "$FXL/bin/fm-test.sh" --local 2>&1)
 rc=$?
 [ "$rc" -eq 0 ] || fail "an unread doc must not fail the run (rc=$rc): $out"
 assert_not_contains "$out" 'running the canonical whole set instead' \
@@ -363,8 +370,8 @@ pass "the two paths agree file for file on a tree that fails"
 # And the local path must actually FAIL on it: a faster gate that reports green
 # on a broken tree is the only outcome worse than a slow gate.
 sel_rc=0
-printf '%s\n' bin/other.sh > "$FXL/.changed"
-out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$FXL/.changed" \
+printf '%s\n' bin/other.sh > "$CHANGEFILE"
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$CHANGEFILE" \
   "$FXL/bin/fm-test.sh" --local 2>&1) || sel_rc=$?
 [ "$sel_rc" -eq 1 ] || fail "the local run must fail on a broken selected test (rc=$sel_rc): $out"
 assert_contains "$out" 'tests/bb.test.sh (exit 3)' "the local failure must name the file and its status"
@@ -381,16 +388,94 @@ assert_contains "$out" 'running the canonical whole set instead' "an unusable ch
 pass "an unusable change set falls back to the whole set and says why"
 
 # --- the parallel shards cover the selection exactly ------------------------
-# Same disjoint-coverage property the CI partition has, on the selected set:
-# what ran must be exactly what --list-local promised.
-printf '%s\n' bin/lib-core.sh bin/other.sh docs/notes.md > "$FXL/.changed"
-listed=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$FXL/.changed" "$FXL/bin/fm-test.sh" --list-local 2>/dev/null)
-ran=$(FM_TEST_NO_CACHE=1 FM_TEST_EMIT_VERDICTS="$FXL/.verdicts" FM_TEST_CHANGED="$FXL/.changed" \
-  FM_TEST_JOBS=3 "$FXL/bin/fm-test.sh" --local >/dev/null 2>&1; cut -f1 "$FXL/.verdicts")
-[ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$(printf '%s\n' "$ran" | LC_ALL=C sort)" ] \
-  || fail "the parallel shards must run exactly the listed selection; listed [$listed] ran [$ran]"
+# Same disjoint-coverage property the CI partition has, on the selected set.
+# The expected set is spelled out by hand here: comparing the listing with the
+# run and nothing else would be circular if both came from the packer, so the
+# closure-derived answer is stated independently of the code under test.
+#   bin/lib-core.sh -> tests/aa.test.sh, bin/other.sh -> tests/bb.test.sh,
+#   docs/notes.md   -> tests/dd.test.sh (its reader), and nothing reaches cc.
+expected=$(printf 'tests/aa.test.sh\ntests/bb.test.sh\ntests/dd.test.sh\n')
+printf '%s\n' bin/lib-core.sh bin/other.sh docs/notes.md > "$CHANGEFILE"
+listed=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$CHANGEFILE" "$FXL/bin/fm-test.sh" --list-local 2>/dev/null)
+[ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
+  || fail "--list-local must promise exactly the closure-derived selection; listed [$listed]"
+ran=$(FM_TEST_NO_CACHE=1 FM_TEST_EMIT_VERDICTS="$VERDICTFILE" FM_TEST_CHANGED="$CHANGEFILE" \
+  FM_TEST_JOBS=3 "$FXL/bin/fm-test.sh" --local >/dev/null 2>&1; cut -f1 "$VERDICTFILE")
+[ "$(printf '%s\n' "$ran" | LC_ALL=C sort)" = "$expected" ] \
+  || fail "the parallel shards must run exactly that selection; ran [$ran]"
 [ "$(printf '%s\n' "$ran" | wc -l)" -eq "$(printf '%s\n' "$ran" | sort -u | wc -l)" ] \
   || fail "no file may be run twice across the parallel shards"
 pass "the parallel shards disjointly cover exactly the selected set"
+
+# And the run refuses when they do not. The packer is sabotaged to drop one
+# selected file: without the audit that loses a file silently, because the count
+# the accounting compares against would come from the packer's own output.
+BROKEN="$LOCALROOT/broken"
+cp -a "$FXL" "$BROKEN"
+sed 's/packed\[best\] = packed\[best\] " " sel\[i\]/if (i > 1) packed[best] = packed[best] " " sel[i]/' \
+  "$BROKEN/bin/fm-test-plan.awk" > "$SCRATCH/plan.awk"
+mv "$SCRATCH/plan.awk" "$BROKEN/bin/fm-test-plan.awk"
+grep -Fq 'if (i > 1) packed[best]' "$BROKEN/bin/fm-test-plan.awk" \
+  || fail "could not build the dropped-file packer fixture"
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$CHANGEFILE" "$BROKEN/bin/fm-test.sh" --local 2>&1)
+rc=$?
+[ "$rc" -eq 2 ] || fail "a packer that drops a selected file must refuse to run (rc=$rc): $out"
+assert_contains "$out" 'SELECTION PARTITION BROKEN' "the refusal must name the broken partition"
+assert_not_contains "$out" 'all 2 test files passed' "a dropped file must never be reported as green"
+pass "packed shards that do not cover the selection refuse to run"
+
+# --- the git-derived change set, exercised for real -------------------------
+# Every case above hands the runner an explicit change list, which bypasses the
+# path the gate itself uses: base resolution, merge-base, the diff of the
+# WORKING TREE against it, and the separate untracked-file pass. The fixture is
+# a real git repo, so that path is asserted directly rather than assumed.
+BR=$(git -C "$FXL" rev-parse --abbrev-ref HEAD)
+[ -n "$BR" ] || fail "the fixture repo must have a resolvable branch to diff against"
+
+printf 'core_extra() { printf "extra\\n"; }\n' >> "$FXL/bin/lib-core.sh"
+sel=$(FM_TEST_NO_CACHE=1 FM_TEST_BASE="$BR" "$FXL/bin/fm-test.sh" --list-local 2>/dev/null)
+[ "$sel" = 'tests/aa.test.sh' ] \
+  || fail "an uncommitted edit must select its transitive test through git, got: $sel"
+pass "the git-derived change set selects on an uncommitted working-tree edit"
+
+# A brand-new test file is untracked, so `git diff` never sees it; the separate
+# `git ls-files --others` pass is the only thing that can put it in scope.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FXL/tests/ee.test.sh"
+chmod +x "$FXL/tests/ee.test.sh"
+sel=$(FM_TEST_NO_CACHE=1 FM_TEST_BASE="$BR" "$FXL/bin/fm-test.sh" --list-local 2>/dev/null \
+  | LC_ALL=C sort)
+[ "$sel" = "$(printf 'tests/aa.test.sh\ntests/ee.test.sh\n')" ] \
+  || fail "an untracked new test file must be selected alongside the edit, got: $sel"
+pass "an untracked new test file reaches the change set"
+rm -f "$FXL/tests/ee.test.sh"
+git -C "$FXL" checkout -q -- bin/lib-core.sh
+
+# A base that does not resolve is a failure to derive the baseline, so it
+# escalates, and it names the base rather than reporting a generic problem.
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_BASE=refs/heads/no-such-base "$FXL/bin/fm-test.sh" --local 2>&1)
+rc=$?
+[ "$rc" -eq 0 ] || fail "the escalated whole-set run must still pass on a green fixture (rc=$rc): $out"
+assert_contains "$out" 'FM_TEST_BASE=refs/heads/no-such-base does not resolve to a commit' \
+  "the fallback must name the base it could not resolve"
+assert_contains "$out" 'running the canonical whole set instead' "an underivable baseline must not narrow"
+assert_contains "$out" 'whole set: 4 assigned, 4 run' "the escalation must run every file"
+pass "an unresolvable base escalates to the whole set and names the base"
+
+# --- a listing never executes the suite -------------------------------------
+# --list-local answers "what would --local run". Escalation is the case someone
+# is most likely to be asking about (a new, still-unreferenced script), so a
+# fallback there must print the whole set, not spend the whole set's runtime.
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$FXL/nonexistent" "$FXL/bin/fm-test.sh" \
+  --list-local 2>"$SCRATCH/err")
+rc=$?
+[ "$rc" -eq 0 ] || fail "an escalating listing must succeed (rc=$rc): $out"
+[ "$(printf '%s\n' "$out" | LC_ALL=C sort)" \
+  = "$(printf 'tests/aa.test.sh\ntests/bb.test.sh\ntests/cc.test.sh\ntests/dd.test.sh\n')" ] \
+  || fail "an escalating listing must print the canonical whole set, got: $out"
+assert_not_contains "$out" '== tests/' "a listing must never execute a test file"
+err=$(cat "$SCRATCH/err")
+assert_contains "$err" 'listing the canonical whole set instead' "the listing must say why it went wide"
+assert_not_contains "$err" 'assigned' "a listing must not report a run it never performed"
+pass "an escalating --list-local lists the whole set instead of running it"
 
 printf 'ok - fm-test parity suite complete\n'

@@ -311,11 +311,9 @@ BEGIN {
     for (k in seen) {
       cl = cl " " k
       claimed[k] = 1
-      touches[k] = touches[k] " " f
     }
     closure[f] = cl
     claimed[f] = 1
-    touches[f] = touches[f] " " f
   }
 
   if (MODE == "closures") {
@@ -325,13 +323,11 @@ BEGIN {
 
   # --- selection --------------------------------------------------------------
   if (CHANGED == "") bail("CHANGED is required for MODE=" MODE)
-  nch = 0
   while ((getline line < CHANGED) > 0) {
     line = trim(line)
     if (line == "") continue
     if (line in changed) continue
     changed[line] = 1
-    nch++
     if (!(line in claimed)) {
       # "No test reaches this file" means different things for prose and for
       # code, and the difference is the same asymmetry that makes prose a leaf.

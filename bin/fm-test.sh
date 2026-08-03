@@ -55,6 +55,13 @@
 # file, and selects every test whose closure intersects the change set; that
 # file owns the graph's construction and its safety argument.
 #
+# The selection and the packing are two SEPARATE planner invocations, and the
+# packed shards are audited against the selection before anything runs, exactly
+# as a CI shard audits the partition. Deriving both from one invocation would
+# make the audit compare the packer with itself: a file the packer dropped would
+# lower the assigned count and the run count together, and the run would report
+# every file green having never executed it.
+#
 # WHAT LOCAL MODE DOES NOT DO
 # ---------------------------
 # It does not cache a PASS. Caching a lint finding is sound because a finding is
@@ -95,7 +102,8 @@
 #   FM_TEST_JOBS        parallel shard count for --local (default: half the
 #                        cores, clamped to 2..6).
 #   FM_TEST_CACHE_DIR   where measured per-file durations are recorded
-#                        (default: .git/fm-test-cache).
+#                        (default: fm-test-cache under the shared git common
+#                        dir, so linked worktrees share one sidecar).
 #   FM_TEST_NO_CACHE=1  read and write no durations.
 #   FM_TEST_EMIT_VERDICTS  path to write "<file><TAB><exit status>" per executed
 #                        file, sorted. Used by --verify-parity.
@@ -161,9 +169,16 @@ fi
 # Durations only, never a verdict: a recorded time cannot make a file skip, it
 # can only change which shard the file lands in. Kept under .git, which is
 # never tracked and never shipped, so CI always starts without one.
+#
+# The COMMON git dir, not --git-dir: --git-dir in a linked worktree is that
+# worktree's private directory, and the gate this mode exists for runs in a
+# fresh throwaway worktree every time, so a per-worktree sidecar would always be
+# cold and the packer would fall back to a uniform cost for every file. The
+# common dir is shared by every worktree of the repo, so a measurement taken in
+# one run is available to the next.
 CACHE_DIR="${FM_TEST_CACHE_DIR:-}"
 if [ -z "$CACHE_DIR" ]; then
-  git_dir=$(git rev-parse --git-dir 2>/dev/null || true)
+  git_dir=$(git rev-parse --git-common-dir 2>/dev/null || true)
   CACHE_DIR="${git_dir:-$ROOT/.fm-test}/fm-test-cache"
 fi
 TIMINGS="$CACHE_DIR/timings"
@@ -185,13 +200,19 @@ record_timings() {
   [ "$USE_CACHE" = 1 ] || return 0
   [ -s "$1" ] || return 0
   mkdir -p "$CACHE_DIR" 2>/dev/null || return 0
+  # Staged inside CACHE_DIR rather than under $TMP: the sidecar is shared by
+  # every worktree of the repo, so two runs can be writing it at once, and only
+  # a same-directory rename is atomic. A concurrent reader then sees the old
+  # file or the new one, never a half-written one.
+  local staged="$CACHE_DIR/timings.$$"
   {
     cut -f1,3 "$1"
     [ -f "$TIMINGS" ] && cat "$TIMINGS"
   } 2>/dev/null \
     | awk -F'\t' 'NF >= 2 && $1 != "" && !seen[$1]++ { printf "%s\t%s\n", $1, $2 }' \
-      >"$TMP/timings.new" 2>/dev/null \
-    && mv "$TMP/timings.new" "$TIMINGS" 2>/dev/null
+      >"$staged" 2>/dev/null \
+    && mv "$staged" "$TIMINGS" 2>/dev/null
+  rm -f "$staged" 2>/dev/null || true
   return 0
 }
 
@@ -377,7 +398,18 @@ fi
 
 # whole_set_fallback <reason>: the only sound answer whenever selection cannot
 # be derived. Local mode never narrows on a guess.
+#
+# A listing mode answers the question "what would --local run", so it answers it
+# with the whole set's file list, exactly as --list-shard lists without running.
+# Escalation is not exotic - any new, still-unreferenced script triggers it, and
+# that is precisely when someone runs --list-local to see what was selected - so
+# a fallback here must never turn a listing into a full suite execution.
 whole_set_fallback() {
+  if [ "$MODE" = list-local ]; then
+    printf 'fm-test.sh: %s; listing the canonical whole set instead.\n' "$1" >&2
+    cat "$TMP/files"
+    exit 0
+  fi
   printf 'fm-test.sh: %s; running the canonical whole set instead.\n' "$1" >&2
   MODE='whole-set'
   run_canonical
@@ -394,14 +426,23 @@ derive_changed() {
   if [ -n "${FM_TEST_CHANGED:-}" ]; then
     CHANGED_REASON="the supplied change list $FM_TEST_CHANGED is not a readable file"
     [ -f "$FM_TEST_CHANGED" ] || return 1
-    LC_ALL=C sort -u "$FM_TEST_CHANGED" >"$TMP/changed"
+    # Every step that produces $TMP/changed guards its own failure. This
+    # function is invoked as the left operand of `||`, which suspends set -e
+    # inside it, so an unguarded failure here would return 0 with an empty or
+    # truncated change set - a green gate that ran nothing, which is the one
+    # outcome the escalation design exists to prevent.
+    CHANGED_REASON="could not read the supplied change list $FM_TEST_CHANGED"
+    LC_ALL=C sort -u "$FM_TEST_CHANGED" >"$TMP/changed" || return 1
     BASE_LABEL="the supplied change list"
     return 0
   fi
   CHANGED_REASON="not inside a git work tree, so there is no baseline to select against"
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   base=${FM_TEST_BASE:-}
-  if [ -z "$base" ]; then
+  if [ -n "$base" ]; then
+    CHANGED_REASON="FM_TEST_BASE=$base does not resolve to a commit"
+    git rev-parse --verify -q "$base^{commit}" >/dev/null 2>&1 || return 1
+  else
     for cand in origin/main main origin/master master; do
       if git rev-parse --verify -q "$cand^{commit}" >/dev/null 2>&1; then
         base=$cand
@@ -420,7 +461,8 @@ derive_changed() {
   # collected separately because diff never sees them.
   git diff --name-only "$mb" >"$TMP/changed.raw" 2>/dev/null || return 1
   git ls-files --others --exclude-standard >>"$TMP/changed.raw" 2>/dev/null || true
-  LC_ALL=C sort -u "$TMP/changed.raw" >"$TMP/changed"
+  CHANGED_REASON="could not assemble the change set derived from $base"
+  LC_ALL=C sort -u "$TMP/changed.raw" >"$TMP/changed" || return 1
   BASE_LABEL="$base ($(printf '%.12s' "$mb"))"
   return 0
 }
@@ -477,11 +519,16 @@ if [ ! -s "$TMP/changed" ]; then
   exit 0
 fi
 
+# WHAT RUNS is derived here, by MODE=select, and NOT from the packer. The packer
+# is audited against this list below, which it can only do because the two are
+# produced independently: deriving both from the shards output would make the
+# audit compare the packer with itself, and a packing bug that dropped a file
+# would lower both sides together and still report "all N test files passed".
 plan_rc=0
 awk -v TRACKED="$TMP/tracked" -v SCAN="$TMP/scan" -v LINKS="$TMP/links" \
     -v FILES="$TMP/files" -v CHANGED="$TMP/changed" -v COSTS="$COSTS" \
-    -v JOBS="$JOBS" -v MODE=shards -f "$PLAN_AWK" \
-    >"$TMP/shards" 2>"$TMP/plan.err" || plan_rc=$?
+    -v JOBS="$JOBS" -v MODE=select -f "$PLAN_AWK" \
+    >"$TMP/selected.raw" 2>"$TMP/plan.err" || plan_rc=$?
 if [ "$plan_rc" -eq 10 ]; then
   whole_set_fallback "$(head -1 "$TMP/plan.err" | sed 's/^fm-test-plan.awk: //; s/\.$//')"
 elif [ "$plan_rc" -ne 0 ]; then
@@ -492,12 +539,12 @@ fi
 # so a narrowed run is auditable rather than silently narrow.
 [ -s "$TMP/plan.err" ] && sed 's/^fm-test-plan.awk: /fm-test.sh: local: /' "$TMP/plan.err" >&2
 
-cut -f2 "$TMP/shards" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort >"$TMP/run"
-selected=$(wc -l <"$TMP/run" | tr -d ' ')
+LC_ALL=C sort -u "$TMP/selected.raw" >"$TMP/selected"
+selected=$(wc -l <"$TMP/selected" | tr -d ' ')
 changed_n=$(wc -l <"$TMP/changed" | tr -d ' ')
 
 if [ "$MODE" = list-local ]; then
-  cat "$TMP/run"
+  cat "$TMP/selected"
   exit 0
 fi
 
@@ -505,6 +552,29 @@ if [ "$selected" -eq 0 ]; then
   printf 'fm-test.sh: local: %s changed file(s) against %s, none of them reaching a test; 0 of %s files run.\n' \
     "$changed_n" "$BASE_LABEL" "$total" >&2
   exit 0
+fi
+
+# Packing is a SCHEDULING step over the selection above: it may reorder and
+# distribute, never add or drop.
+pack_rc=0
+awk -v TRACKED="$TMP/tracked" -v SCAN="$TMP/scan" -v LINKS="$TMP/links" \
+    -v FILES="$TMP/files" -v CHANGED="$TMP/changed" -v COSTS="$COSTS" \
+    -v JOBS="$JOBS" -v MODE=shards -f "$PLAN_AWK" \
+    >"$TMP/shards" 2>"$TMP/pack.err" || pack_rc=$?
+[ "$pack_rc" -eq 0 ] \
+  || whole_set_fallback "could not pack the selected files into shards ($(tr -d '\n' <"$TMP/pack.err"))"
+
+# Partition audit, the local counterpart of the CI one: the packed shards must
+# disjointly cover exactly the independently derived selection. Sorting with
+# duplicates kept means a file packed twice makes the union longer than the
+# selection, so this one comparison catches a drop and a double-run alike.
+cut -f2 "$TMP/shards" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort >"$TMP/union"
+packed_sum=$(wc -l <"$TMP/union" | tr -d ' ')
+if [ "$packed_sum" -ne "$selected" ] || ! cmp -s "$TMP/union" "$TMP/selected"; then
+  printf 'fm-test.sh: SELECTION PARTITION BROKEN - the packed shards do not disjointly cover the %s selected test file(s); refusing to run.\n' \
+    "$selected" >&2
+  diff -u "$TMP/selected" "$TMP/union" >&2 || true
+  exit 2
 fi
 
 require_tmux
@@ -549,4 +619,4 @@ for sid in $sids; do
 done
 
 record_timings "$TMP/verdicts"
-report "local selection" "$TMP/run" "$TMP/verdicts"
+report "local selection" "$TMP/selected" "$TMP/verdicts"
