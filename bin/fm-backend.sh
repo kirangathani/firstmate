@@ -659,7 +659,13 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      fm_backend_source tmux || return 1
+      # NOT a raw `tmux display-message -p -t "$target"` probe: that command
+      # falls back to the session's current window and exits 0 for ANY window
+      # name, so it reported every dead task as alive. See
+      # fm_backend_tmux_target_exists (bin/backends/tmux.sh) for the reproduced
+      # evidence and why list-panes is the correct primitive.
+      fm_backend_tmux_target_exists "$target" "$expected_label"
       ;;
     herdr)
       fm_backend_source herdr || return 1

@@ -137,7 +137,12 @@ BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
-    tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
+    # tmux goes through the shared fm_backend_target_exists primitive rather
+    # than a raw `tmux display-message` probe: display-message falls back to
+    # the session's current window and exits 0 for any name, so the inline
+    # probe reported a closed pane as readable (bin/backends/tmux.sh,
+    # fm_backend_tmux_target_exists).
+    tmux) fm_backend_target_exists "$TASK_BACKEND" "$1" "$EXPECTED_LABEL" ;;
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }

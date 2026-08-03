@@ -66,6 +66,45 @@ tmux list-windows -t <session-name>
 Use the current tmux session name for the run-inside-tmux path, or `firstmate` for the detached outside-tmux path.
 You should see a `fm-<id>` window for the task, live and updating as the crewmate works.
 
+## Endpoint existence probe: `display-message` is not one (2026-08-03)
+
+`tmux display-message -p -t <session>:<window-name>` does **not** fail on an unmatched window name.
+It silently falls back to the session's current window and exits 0, so a probe that only reads its exit status reports every window name as alive as long as the session exists.
+Verified with real tmux 3.4 on Linux (WSL2), 2026-08-03, in a session holding only the window `fm-real`:
+
+```sh
+$ tmux display-message -p -t 'fmtest:fm-bogus' '#{pane_id} #{window_name}'
+%41 fm-real
+rc=0
+$ tmux display-message -p -t 'fmtest:=fm-bogus' '#{pane_id} #{window_name}'
+%41 fm-real
+rc=0
+$ tmux display-message -p -t '%9999' '#{window_name}'
+
+rc=0
+```
+
+The `=` exact-match prefix does not help, and a stale pane id is accepted the same way.
+Consequence while `fm_backend_target_exists` used that command: the session-start fleet digest and `bin/fm-fleet-snapshot.sh` reported every task in an existing session as `endpoint: alive`, so a dead ordinary crewmate was undetectable there (observed 2026-08-03: six tasks reported alive while one window existed).
+
+`tmux list-panes -t <target>` resolves the target through tmux's own parser and fails loudly, which is why it is now the primitive (`fm_backend_tmux_target_exists`, `bin/backends/tmux.sh`).
+Same session and version:
+
+```sh
+$ tmux list-panes -t 'fmtest:fm-real'     ; echo rc=$?   # rc=0
+$ tmux list-panes -t 'fmtest:fm-bogus'    ; echo rc=$?   # can't find window: fm-bogus     rc=1
+$ tmux list-panes -t 'nosuchsess:fm-real' ; echo rc=$?   # can't find session: nosuchsess  rc=1
+$ tmux list-panes -t '%9999'              ; echo rc=$?   # can't find pane: %9999          rc=1
+```
+
+It was preferred over enumerating `tmux list-windows -t <session> -F '#{window_name}'` and matching, because enumeration makes the caller split the target back into session and window, and tmux window names may themselves contain `:` (a target may equally be a pane id, a window id, or `session:window.pane`).
+`list-panes` needs no splitting: rc=0 was confirmed the same session for pane-id, window-id, bare-session, and `session:index.pane` targets, so there is no false-negative shape to trip over.
+
+One residual sharp edge is covered by the optional expected-label argument: tmux target matching is a unique-prefix match, so `fmtest:fm-re` resolves to `fm-real` when that prefix is unambiguous.
+Callers that know the owning task label (the digests pass `fm-<id>`) require the resolved `#{window_name}` to equal it exactly, mirroring the zellij and cmux arms; callers with no label (`bin/fm-send.sh`'s explicit-target escape hatch, the away-mode daemon's supervisor pane) keep tmux's own resolution, which for them is the very window tmux would act on.
+
+Regression coverage lives in `tests/fm-backend-tmux-smoke.test.sh`, the one suite that talks to a real tmux server.
+
 ## Agent liveness probe
 
 `fm_backend_target_exists` (`bin/fm-backend.sh`) only checks that a window's pane still exists.
@@ -103,6 +142,9 @@ The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`
 - `alive` - the name contains `claude`, `codex`, `opencode`, or `grok`. All four were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): `claude` and `codex` and `opencode` are each a native compiled binary (`file` reports Mach-O), so their `comm` is their own binary name with no interpreter wrapper to hide behind.
 - `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
 - `unknown` - anything else, including an unreadable pane.
+
+The classifier resolves the target strictly (through `fm_backend_tmux_target_exists`) before reading any command name, because `#{pane_current_command}` comes from `display-message` and would otherwise answer from a neighbouring window for a target that no longer exists (see the section above).
+A structurally-gone window maps to `dead`, the same mapping herdr's arm already uses for a structurally-gone pane; if the tmux server itself did not answer, nothing was confidently read and the verdict stays `unknown`, so a momentary server glitch can never license a respawn.
 
 ### Known gap: `pi` cannot be confidently classified
 

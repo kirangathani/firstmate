@@ -127,9 +127,67 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- endpoint liveness (fm_backend_target_exists) ----------------------------
+# Regression: `tmux display-message -p -t <session>:<name>` does NOT fail on an
+# unmatched window name - it silently falls back to the session's CURRENT
+# window and exits 0, so the old probe reported EVERY task in an existing
+# session as alive (evidence 2026-08-03: 6 dead tasks all read alive with 1
+# real window). Both directions matter here: a false negative would fire
+# recovery against a healthy worker, which is worse than the bug being fixed.
+# The `-t` targets below are exactly what the session-start and fleet-snapshot
+# digests pass ("<session>:<window>" plus the owning "fm-<id>" label).
+
+# A second window, made the session's CURRENT one, is what a name-fallback
+# probe would silently answer from. `sleep` is chosen so its agent-liveness
+# classification (unknown) differs from the verdict for a genuinely gone
+# window (dead): without that difference the assertion below could not tell a
+# correct read from an inherited one.
+tmux new-window -d -t "$SESSION:" -n fm-smoke-neighbour "sleep 300" \
+  || fail "real tmux: could not create the neighbour window"
+tmux select-window -t "$SESSION:fm-smoke-neighbour" \
+  || fail "real tmux: could not select the neighbour window"
+
+fm_backend_target_exists tmux "$TARGET" \
+  || fail "real tmux: a LIVE window must report alive (false negative would trigger spurious recovery)"
+fm_backend_target_exists tmux "$TARGET" "$WINDOW" \
+  || fail "real tmux: a LIVE window must report alive when its own label is passed"
+pass "real tmux: fm_backend_target_exists reports a live window alive, with and without its label"
+
+if fm_backend_target_exists tmux "$SESSION:fm-smoke-gone"; then
+  fail "real tmux: a nonexistent window name in a LIVE session must report dead, not alive"
+fi
+if fm_backend_target_exists tmux "$SESSION:fm-smoke-gone" "fm-smoke-gone"; then
+  fail "real tmux: a nonexistent window name must report dead when its label is passed too"
+fi
+pass "real tmux: fm_backend_target_exists reports a nonexistent window in a live session as dead"
+
+# tmux target matching is a unique-prefix match, so "$SESSION:fm-smoke1" would
+# also resolve from a truncated name; a caller that knows the owning label must
+# not accept a DIFFERENT window that merely resolved.
+if fm_backend_target_exists tmux "$TARGET" fm-smoke-neighbour; then
+  fail "real tmux: a resolved window whose name differs from the expected label must report dead"
+fi
+pass "real tmux: fm_backend_target_exists rejects a target that resolves to a differently-named window"
+
+# fm_backend_agent_alive (the secondmate-liveness sweep's probe) must resolve
+# the target the same way: a gone window is `dead`, never the neighbour's
+# verdict (`unknown` here, since sleep is neither a harness nor a shell).
+verdict=$(fm_backend_agent_alive tmux "$SESSION:fm-smoke-neighbour")
+[ "$verdict" = unknown ] \
+  || fail "real tmux: the neighbour window's own agent verdict should be unknown, got '$verdict'"
+verdict=$(fm_backend_agent_alive tmux "$SESSION:fm-smoke-gone")
+[ "$verdict" = dead ] \
+  || fail "real tmux: a gone window must classify as dead from its own resolution, got '$verdict'"
+pass "real tmux: fm_backend_agent_alive reports a gone window dead instead of inheriting the current window's verdict"
+
+tmux kill-window -t "$SESSION:fm-smoke-neighbour" 2>/dev/null || true
+
 # --- kill ---------------------------------------------------------------------
 
 fm_backend_tmux_kill "$TARGET"
+if fm_backend_target_exists tmux "$TARGET"; then
+  fail "real tmux: a killed window must report dead through fm_backend_target_exists"
+fi
 if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
   fail "fm_backend_tmux_kill did not remove the window"
 fi
