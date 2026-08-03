@@ -115,19 +115,19 @@ usage() {
   exit 2
 }
 
-MODE=whole-set
+MODE='whole-set'
 SHARD_K=1
 SHARD_N=1
 case "${1:-}" in
   '') ;;
-  --local) [ "$#" -eq 1 ] || usage; MODE=local ;;
-  --list-local) [ "$#" -eq 1 ] || usage; MODE=list-local ;;
-  --verify-parity) [ "$#" -eq 1 ] || usage; MODE=verify-parity ;;
+  --local) [ "$#" -eq 1 ] || usage; MODE='local' ;;
+  --list-local) [ "$#" -eq 1 ] || usage; MODE='list-local' ;;
+  --verify-parity) [ "$#" -eq 1 ] || usage; MODE='verify-parity' ;;
   --shard|--list-shard)
     [ "$#" -eq 2 ] || usage
     case "$1" in
-      --shard) MODE=shard ;;
-      *) MODE=list-shard ;;
+      --shard) MODE='shard' ;;
+      *) MODE='list-shard' ;;
     esac
     spec=$2
     case "$spec" in
@@ -379,22 +379,26 @@ fi
 # be derived. Local mode never narrows on a guess.
 whole_set_fallback() {
   printf 'fm-test.sh: %s; running the canonical whole set instead.\n' "$1" >&2
-  MODE=whole-set
+  MODE='whole-set'
   run_canonical
   exit $?
 }
 
 BASE_LABEL=''
+CHANGED_REASON=''
 
-# derive_changed: write the change set to $TMP/changed, or return 1.
+# derive_changed: write the change set to $TMP/changed, or set CHANGED_REASON
+# to the concrete blocker and return 1.
 derive_changed() {
   local base cand mb
   if [ -n "${FM_TEST_CHANGED:-}" ]; then
+    CHANGED_REASON="the supplied change list $FM_TEST_CHANGED is not a readable file"
     [ -f "$FM_TEST_CHANGED" ] || return 1
     LC_ALL=C sort -u "$FM_TEST_CHANGED" >"$TMP/changed"
     BASE_LABEL="the supplied change list"
     return 0
   fi
+  CHANGED_REASON="not inside a git work tree, so there is no baseline to select against"
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   base=${FM_TEST_BASE:-}
   if [ -z "$base" ]; then
@@ -405,9 +409,12 @@ derive_changed() {
       fi
     done
   fi
+  CHANGED_REASON="no default branch resolves (tried FM_TEST_BASE, origin/main, main, origin/master, master)"
   [ -n "$base" ] || return 1
+  CHANGED_REASON="HEAD has no merge base with $base"
   mb=$(git merge-base HEAD "$base" 2>/dev/null) || return 1
   [ -n "$mb" ] || return 1
+  CHANGED_REASON="could not diff the working tree against $base"
   # `git diff --name-only <mb>` compares the merge base to the WORKING TREE, so
   # committed, staged and unstaged edits are all in scope; untracked files are
   # collected separately because diff never sees them.
@@ -419,7 +426,7 @@ derive_changed() {
 }
 
 [ -f "$PLAN_AWK" ] || whole_set_fallback "the selection planner $PLAN_AWK is missing"
-derive_changed || whole_set_fallback "no git baseline to select against"
+derive_changed || whole_set_fallback "$CHANGED_REASON"
 
 # The reference universe. A file the planner cannot see is a file it cannot
 # attribute, so a repo listing that fails is a fallback, never a narrower run.
@@ -480,6 +487,10 @@ if [ "$plan_rc" -eq 10 ]; then
 elif [ "$plan_rc" -ne 0 ]; then
   whole_set_fallback "could not plan the selection ($(tr -d '\n' <"$TMP/plan.err"))"
 fi
+
+# The planner reports files it positively determined no test can be affected by,
+# so a narrowed run is auditable rather than silently narrow.
+[ -s "$TMP/plan.err" ] && sed 's/^fm-test-plan.awk: /fm-test.sh: local: /' "$TMP/plan.err" >&2
 
 cut -f2 "$TMP/shards" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort >"$TMP/run"
 selected=$(wc -l <"$TMP/run" | tr -d ' ')

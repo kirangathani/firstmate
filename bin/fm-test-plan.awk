@@ -80,6 +80,12 @@
 # runs the canonical whole set. Selection narrows only when every changed file
 # is one this planner positively accounted for.
 #
+# Prose is the one exception, and it rests on the same asymmetry that makes
+# prose a leaf: a doc affects a test only by being READ, and a test that reads a
+# doc names it, so for a *.md or *.txt file "no test reaches it" is a positive
+# finding rather than an absence of evidence. Such a file selects nothing and
+# says so by name instead of escalating.
+#
 # Reading:
 #   TRACKED  newline-delimited repo-relative paths of every tracked file: the
 #            universe an edge may point at.
@@ -327,12 +333,29 @@ BEGIN {
     changed[line] = 1
     nch++
     if (!(line in claimed)) {
+      # "No test reaches this file" means different things for prose and for
+      # code, and the difference is the same asymmetry that makes prose a leaf.
+      # A doc can only affect a test by being READ, and a test that reads a doc
+      # names it - this planner scans every test file, so an unreferenced doc is
+      # a positive finding that no test can be affected by it. A script can also
+      # be reached by EXECUTION through a computed name, which is explicitly not
+      # modelled here, so an unreferenced script is merely an absence of
+      # evidence and must escalate.
+      # Without the distinction the gate was unusable in practice: 21 of this
+      # repo's 23 unreached files are documentation, and docs are shared tracked
+      # material that most changes touch, so an ordinary code-plus-docs commit
+      # escalated to a 17-minute whole-set run.
+      if (line ~ /\.(md|txt)$/) { proseonly[line] = 1; continue }
       printf "fm-test-plan.awk: no test reaches %s; the whole set is the only sound answer.\n", \
         line > "/dev/stderr"
       exit 10
     }
   }
   close(CHANGED)
+
+  for (pf in proseonly)
+    printf "fm-test-plan.awk: no test reads %s, so no test can be affected by it.\n", \
+      pf > "/dev/stderr"
 
   nsel = 0
   for (i = 1; i <= nt; i++) {
