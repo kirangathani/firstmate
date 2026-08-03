@@ -48,12 +48,16 @@
 #                      A class this run never EVALUATED renders as a dash, never
 #                      as 0: never-checked and checked-and-clean are different
 #                      facts and a captain cannot be asked to tell them apart from
-#                      an identical `0`. Two paths reach it - excusal in explicit
-#                      --worktree mode (no project, so no record to consult), and
-#                      a `summary:` line that carries no field for a class at all
+#                      an identical `0`. Three paths reach it - excusal in explicit
+#                      --worktree mode (no project, so no record to consult), a
+#                      `summary:` line that carries no field for a class at all
 #                      (a check with no concept of it, i.e. version skew: counting
 #                      its absent finding lines would manufacture a 0 out of
-#                      nothing). Finding LINES are positive evidence and are
+#                      nothing), and stdout with no content at all (a check that
+#                      printed nothing reads exactly like one that never ran, so
+#                      counting its six absent classes to six zeros would
+#                      manufacture the whole row). Finding LINES are positive
+#                      evidence and are
 #                      believed whenever present; only their absence proves
 #                      nothing. A dash also suppresses `ok`, since `ok` asserts
 #                      every class is an ESTABLISHED zero.
@@ -124,6 +128,18 @@
 # partial ULID still reads as a run id while being useless to paste back into
 # the CLI - so an extreme width lets the header wrap rather than mutilating
 # either.
+#
+# Every other line that interpolates a value of a length this viewer does not
+# control is bounded to the render width the same way, with the elision marked:
+# the banner (which carries gate names, outcomes, statuses and branches read out
+# of the run) and the merge-gate snapshot's step label. That is not tidiness -
+# an overlong line wraps, costs the frame a row it was not budgeted, and the row
+# budget answers by degrading the merge-gate box to pending, so an unbounded
+# LABEL buys its own space with the six counts the captain opted in for. Labels
+# shrink; data does not. The exceptions are the values a marked elision would
+# not save - the branch, the run id, the PR URL, the base ref and the counts -
+# which the captain reads to act on, and which wrap and are charged their real
+# rows instead.
 #
 # Height: in watch mode a frame is bounded the way width is, to FM_NM_FLOW_ROWS
 # when it is a sane number, else the detected terminal height on a tty, else a
@@ -397,6 +413,31 @@ strip_quotes() {
     \"*\") s=${s#\"}; s=${s%\"} ;;
   esac
   trim "$s"
+}
+
+# Bound ONE variable-length value into a fixed-width line, always marking an
+# elision so a shortened value can never be read as a whole one. Every core
+# line that interpolates a value this viewer did not choose the length of goes
+# through this, because an unbounded interpolation does not merely look untidy:
+# past the render width the line wraps, the frame costs a row it was not
+# budgeted, and the row budget answers by degrading the merge-gate box to
+# pending - so the captain loses the six counts to make room for the prose that
+# qualifies them, which is exactly backwards. LABELS are what this bounds.
+# The values under an explicit never-truncate ruling - the branch, the run id,
+# the PR URL, the base ref, and the counts themselves - are identifiers the
+# captain reads to act on (paste, fetch, compare), where a marked elision is
+# still useless, so those wrap instead and line_rows() charges the frame the
+# rows they really take.
+#
+# Below four columns there is no room for both a value and its marker, so the
+# marker wins: "something was elided here" is the honest reading, and a bare
+# truncation that looks whole is the one outcome that must not happen.
+clip() {  # <max-columns> <text>
+  local max=$1 s=$2 dots='...'
+  [ "$max" -le 0 ] && return 0
+  [ "${#s}" -le "$max" ] && { printf '%s' "$s"; return 0; }
+  [ "$max" -le 3 ] && { printf '%s' "${dots:0:$max}"; return 0; }
+  printf '%s...' "${s:0:$((max - 3))}"
 }
 
 RUN_OUT=""
@@ -687,7 +728,13 @@ mgate_counts_ann() {  # <missing> <failing> <unexec> <excused> <skipped> <unacco
 # evidence and are believed when present; only their absence proves nothing.
 #
 # With no summary line at all, every class is being read the same way, off the
-# finding lines, so a 0 there is a real reading of the whole output.
+# finding lines, so a 0 there is a real reading of the whole output - PROVIDED
+# there is output to read. Output with no content at all is not a reading of
+# anything: all six greps answer 0, and the row would go out with six
+# established zeros and an `ok` derived from zero positive evidence, which is
+# the same manufactured green an absent summary field already refuses to
+# produce. A check that printed nothing is indistinguishable from one that never
+# ran, so every class renders as a dash and takes the green with it.
 mgate_field() {  # <class> <summary-line> <stdout-file>
   local v='' n
   if [ -n "$2" ]; then
@@ -696,9 +743,11 @@ mgate_field() {  # <class> <summary-line> <stdout-file>
       n=$(grep -c "^$1: " "$3" || true)
       if [ "${n:-0}" -gt 0 ]; then v=$n; else v='-'; fi
     fi
-  else
+  elif grep -q '[^[:space:]]' "$3" 2>/dev/null; then
     v=$(grep -c "^$1: " "$3" || true)
     v=${v:-0}
+  else
+    v='-'
   fi
   printf '%s' "$v"
 }
@@ -989,18 +1038,6 @@ probe() {
     F_ASK=$(nm_action_count ask-user)
     F_FIX=$(nm_action_count auto-fix)
     F_NOOP=$(nm_action_count no-op)
-    # A parked run whose gate name nothing resolves is named as such: an invented
-    # "gate" would both claim a gate that does not exist and set a CURRENT that
-    # matches no box, dropping the diagram's highlight in the very state the
-    # captain most needs it. The highlight is simply left where the steps table
-    # put it instead.
-    if [ -n "$GATE" ]; then
-      CURRENT=$GATE
-      where="PARKED at $GATE gate"
-    else
-      CURRENT=$(nm_running_step)
-      where="PARKED at an unnamed gate"
-    fi
     # Zeros here would assert there are no findings when the truth is that none
     # could be read; only a findings[N] header or an explicit `findings: none`
     # makes the breakdown a fact worth printing.
@@ -1011,6 +1048,29 @@ probe() {
       breakdown="$F_TOTAL findings ($F_ASK ask-user, $F_FIX auto-fix, $F_NOOP no-op)"
     else
       breakdown="findings not readable from status"
+    fi
+    # A parked run whose gate name nothing resolves is named as such: an invented
+    # "gate" would both claim a gate that does not exist and set a CURRENT that
+    # matches no box, dropping the diagram's highlight in the very state the
+    # captain most needs it. The highlight is simply left where the steps table
+    # put it instead.
+    #
+    # The gate NAME is the only unbounded part of this banner, and it is the
+    # label half of it: the breakdown is the data the captain is reading, so the
+    # name shrinks around the breakdown rather than the other way round, and it
+    # is bounded here rather than by the whole-line clip in build_frame so that a
+    # long name costs its own characters and never the counts behind it. The
+    # fixed text it shares the line with is "PARKED at " and " gate: " - 17
+    # columns, spelled out in the arithmetic so a reword cannot silently
+    # invalidate it. CURRENT keeps the name WHOLE: it is matched against step
+    # keys, not printed.
+    if [ -n "$GATE" ]; then
+      local lead="PARKED at " mid=" gate: "
+      CURRENT=$GATE
+      where="$lead$(clip $((COLS - ${#lead} - ${#mid} - ${#breakdown})) "$GATE") gate"
+    else
+      CURRENT=$(nm_running_step)
+      where="PARKED at an unnamed gate"
     fi
     BANNER="$where: $breakdown"
     return
@@ -1182,7 +1242,17 @@ build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files>
   FRAME_RANK=()
   FRAME_MEASURED=0
   core_line "$(header_line)"
-  core_line "$BOLD$BANNER$SGR0"
+  # Every banner interpolates something read out of the run - a gate name, an
+  # outcome, a status, a branch, a coarse runs-list column - and none of those
+  # has a length this viewer controls. Bounding the assembled banner once here
+  # is what makes that structural: a banner added later is bounded by
+  # construction rather than by its author remembering to. Each banner puts its
+  # fixed prose last, so this clip spends that prose and never the value; the
+  # one banner whose data sits after a variable label (the parked gate's
+  # findings breakdown) bounds the label itself in probe(), before it gets here.
+  # The branch is not truncated where the captain reads it to act - the header
+  # carries it whole one line up.
+  core_line "$BOLD$(clip "$COLS" "$BANNER")$SGR0"
   local pr="${RUN_PR:-$PR_URL}"
   [ -n "$pr" ] && core_line "PR: $pr"
   core_line "$RULE"
@@ -1229,7 +1299,22 @@ build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files>
     # re-rendered for every later frame while the pipeline keeps committing.
     # Stamping the date, the time and the step it was taken at is what stops an
     # hours-old green from reading as a live verdict on current HEAD.
-    core_line "prior-tests: snapshot $MGATE_AT at $MGATE_STEP; not re-checked since"
+    #
+    # The stamp keeps its explicit fallback: MGATE_AT's assignment tolerates
+    # `date` failing, and this is the one line whose whole job is to make a
+    # stale result self-evidently stale, so a blank where the age belongs is the
+    # qualifier silently failing at exactly its own task. Name the gap instead.
+    #
+    # The step label is the variable part, and in the parked-gate path it is the
+    # gate name, which nothing bounds at the source. It is clipped against what
+    # the surrounding sentence actually leaves, measured from the strings
+    # themselves rather than a constant, so rewording either half cannot quietly
+    # push this line past the render width - and a line past the width wraps,
+    # costs the frame an unbudgeted row, and gets the box degraded to pending,
+    # taking the six counts with it.
+    local snap_pre="prior-tests: snapshot ${MGATE_AT:-unknown time} at "
+    local snap_post="; not re-checked since"
+    core_line "$snap_pre$(clip $((COLS - ${#snap_pre} - ${#snap_post})) "$MGATE_STEP")$snap_post"
     # The row's compact labels, spelled out in one line: "excu" is a category of
     # its own rather than any of the other five, skip and unac are assertions
     # nothing verified rather than assertions that passed, and a dash is a class

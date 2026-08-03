@@ -1130,6 +1130,136 @@ test_wrapping_pr_row_budget() {
   pass "the row budget charges a wrapping PR URL as the rows it really takes"
 }
 
+# The whole-frame budget, asserted for every run state at once against the pane
+# size that is the hard constraint: a plain 80x24.
+#
+# This exists because the two halves of "fits" were only ever checked apart.
+# Line WIDTHS were asserted per row and the total ROW COUNT was not, so a round
+# that added qualifier lines silently pushed the frame to 25 rows and the
+# too-short backstop swallowed the six counts in exactly the pane the captain
+# named. Later the reverse: the row count fitted at 24 while two lines ran past
+# 80 columns, which wraps in a real pane to 26 and loses the header the same way.
+# Either half alone reads as green. So both are asserted here, together, on
+# every state the viewer can be left open at - and rows are counted the way a
+# terminal counts them, charging a wrapped line the rows it really takes.
+#
+# The third assertion is what makes this a closure rather than a fix: the six
+# counts must be present in EVERY one of these frames. Headroom is trivially
+# available by dropping them, that is precisely what the backstop does under
+# pressure, and it is the one trade this display must never make - so a future
+# change cannot buy layout room with the data the flag exists to show.
+#
+# The pathological gate name is deliberate: the parked banner and the snapshot
+# stamp both interpolate it, and a gate name has no length this viewer controls.
+test_frame_row_budget_all_states() {
+  reset_fakes
+  local d out frame rows line width scenario status url
+  d=$(new_case row-budget)
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/wt/tests" "$d/bin" "$d/data/supersessions" "$d/nodate"
+  make_repo_on_branch "$d/wt" fm/change
+  cp "$NM_FLOW" "$d/bin/fm-nm-flow.sh"
+  cp "$ROOT/bin/fm-supersession-lib.sh" "$d/bin/fm-supersession-lib.sh"
+  chmod +x "$d/bin/fm-nm-flow.sh"
+  # Every class non-zero at once, plus the name-only stderr line: the widest
+  # result the row and its qualifiers can ever be asked to carry. Stubbed rather
+  # than provoked from a real base, because reaching all six classes AND an
+  # excusal from real fixtures would make the row's content depend on what the
+  # host can execute.
+  cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
+#!/usr/bin/env bash
+echo "missing: tests/demo.test.sh::alpha"
+echo "missing: tests/demo.test.sh::beta"
+echo "missing: tests/other.test.sh::gamma"
+echo "failing: tests/demo.test.sh::delta"
+echo "unexecuted: tests/test_demo.py::epsilon"
+echo "skipped: tests/demo.test.sh::zeta"
+echo "unaccounted: tests/demo.test.sh::eta"
+echo "summary: missing=3 failing=1 unexecuted=1 skipped=1 unaccounted=1"
+echo "UNEXECUTED: tests/test_demo.py" >&2
+exit 1
+SH
+  chmod +x "$d/bin/fm-assert-tests-kept.sh"
+  # One identifier excused, so the excused count is a real non-zero rather than
+  # the zero every other case in this file renders.
+  cat > "$d/data/supersessions/demo.md" <<'MD'
+- ids: tests/other.test.sh::* | project: demo | kind: missing | date: 2026-08-03 | reason: gamma is deliberately superseded
+MD
+  url="https://github.com/o/r/pull/7"
+  # No .no-mistakes.yaml, so the det|LLM legend is up too: every conditional
+  # line the frame can carry is present in all six renders.
+  fm_write_meta "$d/state/budget-task.meta" \
+    "window=firstmate:fm-budget-task" \
+    "worktree=$d/wt" \
+    "project=$d/projects/demo" \
+    "pr=$url"
+
+  for scenario in idle running parked-named parked-long-gate checks-passed failed; do
+    case "$scenario" in
+      idle)         status="runs: 0 runs yet in this repository" ;;
+      running)      status=$(run_running_with_id fm/change 01KZ3ZKVA4TR8V8S4R667Q6VYK) ;;
+      parked-named) status=$(run_parked fm/change) ;;
+      parked-long-gate)
+        status="$(run_parked fm/change)"
+        status="${status%gate: review}gate: review-with-a-very-long-gate-name-here"
+        ;;
+      checks-passed) status=$(run_outcome fm/change checks-passed "$url") ;;
+      failed)        status=$(run_outcome fm/change failed "$url") ;;
+    esac
+    FM_FAKE_AXI_STATUS="$status"
+    export FM_FAKE_AXI_STATUS
+    out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+      FM_NM_FLOW_COLS=80 FM_NM_FLOW_ROWS=24 FM_NM_FLOW_WATCH_MAX=2 \
+      "$d/bin/fm-nm-flow.sh" budget-task --tests-gate --watch 1)
+    frame=$(last_frame "$out")
+    rows=$(frame_rows "$frame")
+    [ "$rows" -le 24 ] || fail "$scenario frame occupies $rows terminal rows in an 80x24 pane"
+    while IFS= read -r line; do
+      line=$(strip_sgr "$line")
+      width=${#line}
+      [ "$width" -le 80 ] || fail "$scenario frame line is $width columns: $line"
+    done <<< "$frame"
+    assert_contains "$frame" "miss 2/fail 1/unex 1/excu 1/skip 1/unac 1 !!" \
+      "$scenario keeps all six counts inside the 80x24 budget"
+    assert_contains "$frame" "prior-tests: base main: LOCAL, never fetched" \
+      "$scenario keeps the base qualifier with the counts"
+    assert_contains "$frame" "prior-tests: snapshot " \
+      "$scenario keeps the snapshot qualifier with the counts"
+    assert_contains "$frame" "verified by name only" \
+      "$scenario keeps the name-only qualifier with the counts"
+    assert_not_contains "$frame" "pane too short to qualify" \
+      "$scenario never degrades the box in a plain 80x24 pane"
+  done
+
+  # The long gate name is bounded in BOTH lines that interpolate it, and every
+  # elision is marked: a shortened gate name must never read as a whole one.
+  FM_FAKE_AXI_STATUS="$(run_parked fm/change)"
+  FM_FAKE_AXI_STATUS="${FM_FAKE_AXI_STATUS%gate: review}gate: review-with-a-very-long-gate-name-here"
+  export FM_FAKE_AXI_STATUS
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+    FM_NM_FLOW_COLS=80 "$d/bin/fm-nm-flow.sh" budget-task --tests-gate)
+  # The breakdown is carried whole and the name is what shrinks around it, to
+  # exactly the width the rest of the line leaves.
+  assert_contains "$out" \
+    "PARKED at review-with-a-ve... gate: 2 findings (1 ask-user, 1 auto-fix, 0 no-op)" \
+    "the gate name gives way to the findings breakdown, with the elision marked"
+  assert_contains "$out" "at step review-with-a...; not re-checked since" \
+    "the snapshot stamp bounds the same name against what its own sentence leaves"
+  assert_not_contains "$out" "gate-name-here gate:" "no unbounded gate name reaches the banner"
+
+  # The stamp's whole job is to make a stale result self-evidently stale, so the
+  # one host condition its own assignment tolerates - `date` failing - must not
+  # leave a blank where the age belongs.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$d/nodate/date"
+  chmod +x "$d/nodate/date"
+  out=$(PATH="$d/nodate:$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+    FM_NM_FLOW_COLS=80 "$d/bin/fm-nm-flow.sh" budget-task --tests-gate)
+  assert_contains "$out" "prior-tests: snapshot unknown time at " \
+    "a failed clock reading is named, never rendered as a blank age"
+  assert_not_contains "$out" "snapshot  at " "the stamp never renders an empty age"
+  pass "every run state fits a plain 80x24 pane with all six counts intact"
+}
+
 # (u) the probe's scratch dir is the only thing this viewer writes, and an
 # interrupt lands the moment the bounded probe returns - before any cleanup on
 # the return path could run.
@@ -1583,6 +1713,43 @@ SH
   out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
     "$d/bin/fm-nm-flow.sh" six-task --tests-gate)
   assert_contains "$out" "miss 1/fail 0/unex 0/excu 0/skip 0/unac 0 !!" \
+    "with a populated output and no summary line the zeros are a real reading"
+
+  # ...but only because there was output to read. Output with no content at all
+  # is not a reading of anything: every class greps to 0 and the row would go
+  # out as six established zeros with a green derived from no positive evidence
+  # whatever, which is a check that never ran wearing the face of a clean one.
+  cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+    "$d/bin/fm-nm-flow.sh" six-task --tests-gate)
+  assert_contains "$out" "miss -/fail -/unex -/excu 0/skip -/unac -" \
+    "empty output is not a reading: every class the output would speak to is a dash"
+  assert_not_contains "$out" "miss 0" "an empty output never manufactures a zero"
+  assert_not_contains "$out" " ok" "an empty output never produces a green"
+
+  # Whitespace is not content either - the same nothing with a newline in it.
+  cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
+#!/usr/bin/env bash
+printf '\n\n'
+exit 0
+SH
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+    "$d/bin/fm-nm-flow.sh" six-task --tests-gate)
+  assert_contains "$out" "miss -/fail -/unex -/excu 0/skip -/unac -" \
+    "blank lines are not a reading either"
+  assert_not_contains "$out" " ok" "blank output never produces a green"
+
+  cat > "$d/bin/fm-assert-tests-kept.sh" <<'SH'
+#!/usr/bin/env bash
+echo "missing: tests/demo.test.sh::beta"
+exit 1
+SH
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+    "$d/bin/fm-nm-flow.sh" six-task --tests-gate)
+  assert_contains "$out" "miss 1/fail 0/unex 0/excu 0/skip 0/unac 0 !!" \
     "with no summary line every class is read off the finding lines alike"
 
   # A magnitude a whole-directory rewrite really can produce. The counts are
@@ -1700,6 +1867,7 @@ test_perl_bounding_arm_reports_signals
 test_tests_gate_signal_killed_probe
 test_frame_height_bounded
 test_wrapping_pr_row_budget
+test_frame_row_budget_all_states
 test_tests_gate_tmpdir_cleanup_on_interrupt
 test_tests_gate_interrupt_not_deferred_on_timeout_arm
 test_watch_argument_shapes
