@@ -132,11 +132,12 @@ Every other backend pins its label by construction, so the helper always returns
 
 The one place the label matters most is the secondmate liveness sweep (`bin/fm-bootstrap.sh`), the only probe whose verdict acts destructively.
 Without it, a gone secondmate `sm` prefix-resolves to a live task's window `fm-sm-2` and inherits that task's verdict: either the dead secondmate is never respawned, or the sweep kills the unrelated task's window.
-The sweep therefore also guards its kill on the endpoint still resolving to the secondmate's own window, so a target it could not verify is respawned without anything being killed.
+The sweep therefore also guards its kill on the endpoint still resolving to the secondmate's own window.
+With the pin recorded, a failed label check is an ANSWER, not a gap: the target resolved to a window whose name is not `fm-<id>`, so that window belongs to someone else, nothing of this secondmate's is there to kill, and the respawn proceeds past it into a fresh `fm-<id>` window.
 
-Leniency stops at that destructive path.
-An empty label means the record's endpoint identity is UNVERIFIED, not that it may be acted on with tmux's own resolution: a target that resolves may be a neighbour reached by prefix matching rather than the secondmate's own window, and the guard would pass on exactly the ambiguity it exists to refuse.
-So when the sweep reaches a `dead` verdict for a record carrying no pin guarantee, it skips the kill AND the respawn and reports the record instead (`SECONDMATE_LIVENESS: secondmate <id>: skipped: endpoint identity unverifiable`).
+The unpinned case is the opposite, and leniency stops there.
+With no label to check, the record's endpoint identity is not merely unmatched but UNKNOWABLE: a target that resolves may equally be this secondmate's own window or a neighbour reached by prefix matching, and the guard would pass on exactly the ambiguity it exists to refuse.
+Acting anyway could destroy that neighbour's window or duplicate a live agent, so when the sweep reaches a `dead` verdict for a record carrying no pin guarantee it skips the kill AND the respawn and reports the record instead (`SECONDMATE_LIVENESS: secondmate <id>: skipped: endpoint identity unverifiable`).
 Nothing backfills the guarantee onto an existing record; respawning that secondmate deliberately writes it, since every tmux spawn now pins the window name or refuses.
 The other readers stay lenient as described above, because reporting an unpinned record's endpoint state is not a destructive act.
 
