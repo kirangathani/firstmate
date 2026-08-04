@@ -170,7 +170,10 @@ esac
 # non-spawn-capable backends. The resolved value is
 # recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
-# so the default path's meta stays byte-identical.
+# so the default path's meta still carries no backend= line. It is not
+# otherwise byte-identical to an older meta: a tmux spawn also writes
+# tmux_window_pinned=1 (see the meta block below), the window-name pin
+# guarantee that fm_backend_expected_label_of_meta keys off.
 if [ "$BACKEND_SET" -eq 1 ]; then
   BACKEND=$BACKEND_ARG
 else

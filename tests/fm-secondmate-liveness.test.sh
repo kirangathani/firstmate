@@ -32,7 +32,10 @@
 #     still resolving to this secondmate's own window is ever killed.
 #   - A record with no tmux_window_pinned=1 guarantee is read leniently (no
 #     exact-label check), so a window that predates the pin requirement can
-#     never become a false dead reading that duplicates a live supervisor.
+#     never become a false dead reading that duplicates a live supervisor -
+#     and, because that leniency leaves its endpoint identity UNVERIFIED, such
+#     a record is never acted on destructively either: a dead verdict for it
+#     is reported and skipped, with no kill and no respawn.
 #   - The sweep converges: once a secondmate reads alive, a later run never
 #     re-touches it (idempotent by construction, not by remembering what it
 #     already did).
@@ -463,6 +466,27 @@ test_sweep_reads_an_unpinned_record_leniently() {
   pass "sweep: a record with no window-name pin guarantee is read leniently, never as a false dead"
 }
 
+test_sweep_refuses_to_act_on_an_unpinned_record() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-unpinned-dead)
+  # Same unverified record, now reading DEAD: its window resolves to a pane
+  # sitting at a bare shell. Leniency answered the verdict, but it cannot
+  # answer WHOSE window that was - tmux target matching is a unique-prefix
+  # match, so the resolved pane may belong to a neighbouring crewmate. Acting
+  # would either destroy that stranger's window or duplicate a live agent, so
+  # the sweep must refuse both halves and report the record instead.
+  add_sm_home "$w" sm1 firstmate:fm-sm1 claude 0
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: endpoint identity unverifiable" \
+    "a dead reading on a record with no pin guarantee should be reported as unverifiable"
+  [ ! -s "$log" ] || fail "an unverifiable record must NEVER be killed or respawned: $(cat "$log")"
+  pass "sweep: a dead verdict on an unpinned record is refused - no kill, no respawn"
+}
+
 test_sweep_leaves_alive_secondmate_untouched() {
   local w fb tmuxfb log out
   w=$(new_world sweep-alive)
@@ -576,6 +600,7 @@ test_sweep_respawns_structurally_gone_window
 test_sweep_never_touches_a_prefix_resolved_neighbour
 test_sweep_stays_inconclusive_when_the_server_is_down
 test_sweep_reads_an_unpinned_record_leniently
+test_sweep_refuses_to_act_on_an_unpinned_record
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_never_acts_on_inconclusive_reading
 test_sweep_never_acts_on_unverified_harness_dead_reading

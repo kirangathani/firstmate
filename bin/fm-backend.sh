@@ -30,11 +30,18 @@
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
-# treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
-# `backend=tmux` for a default-backend task, so existing and newly spawned
-# default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently experimental herdr, zellij, orca, or cmux,
-# carries an explicit `backend=` line.
+# treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh still does not
+# write `backend=tmux` for a default-backend task. Only a task spawned on a
+# non-tmux spawn-capable backend, currently experimental herdr, zellij, orca,
+# or cmux, carries an explicit `backend=` line.
+# A newly spawned default-path meta is NO LONGER byte-identical to a
+# pre-existing one, though: a tmux spawn now also writes
+# `tmux_window_pinned=1`, the guarantee that fm_backend_tmux_create_task could
+# pin the window name (it refuses the spawn otherwise). That one line is
+# exactly what fm_backend_expected_label_of_meta keys off to decide whether an
+# exact-label liveness read is safe, so an OLDER tmux meta - lacking it - is
+# read leniently and is never acted on destructively by the secondmate
+# liveness sweep (bin/fm-bootstrap.sh).
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces

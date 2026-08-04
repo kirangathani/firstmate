@@ -372,7 +372,10 @@ secondmate_liveness_sweep() {
   #             still resolves to this secondmate's OWN endpoint; the tmux
   #             adapter refuses to create a same-named window over a live one)
   #             then respawn via the existing recovery path (bin/fm-spawn.sh
-  #             <id> --secondmate; secondmate-provisioning).
+  #             <id> --secondmate; secondmate-provisioning). A record whose
+  #             endpoint identity cannot be verified at all (a tmux meta with
+  #             no window-name pin recorded) is reported and left ALONE: it is
+  #             neither killed nor respawned.
   #   unknown - NEVER acted on. A false-dead reading would spin up a DUPLICATE
   #             agent (two supervisors in one home); a false-alive reading
   #             merely leaves today's bug unfixed for one more sweep. The
@@ -405,7 +408,8 @@ secondmate_liveness_sweep() {
     # prefix-resolved to a neighbouring crewmate's window must be refused: a
     # gone secondmate "sm" would otherwise inherit the verdict of a live task
     # "sm-2" and never be respawned. A record with no pin guarantee keeps
-    # tmux's own resolution rather than risking a false dead reading.
+    # tmux's own resolution rather than risking a false dead reading, and is
+    # then refused outright in the dead branch below rather than acted on.
     label=$(fm_backend_expected_label_of_meta "$meta" "$id")
     verdict=$(fm_backend_agent_alive "$backend" "$target" "$label" 2>/dev/null) || verdict="unknown"
     case "$harness" in
@@ -416,6 +420,20 @@ secondmate_liveness_sweep() {
       alive)
         ;;
       dead)
+        # An empty label means this record's endpoint IDENTITY is unverified:
+        # a tmux meta written before the window-name pin became a hard spawn
+        # requirement carries no proof that its window still answers to
+        # fm-<id>, so a target that resolves may be a NEIGHBOUR reached by
+        # tmux's unique-prefix matching rather than this secondmate's own
+        # window. Unverified must produce a refusal on the one probe whose
+        # verdict acts destructively: skip the kill AND the respawn, and say
+        # so, rather than destroying a stranger's window or duplicating a live
+        # agent. Such a record is repaired by respawning the secondmate
+        # deliberately, which writes the pin; nothing here backfills it.
+        if [ -z "$label" ]; then
+          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint identity unverifiable (no window-name pin recorded in meta; backend=$backend)"
+          continue
+        fi
         # Kill only an endpoint this task still verifiably OWNS. The verdict
         # above is `dead` both for a live pane sitting at a bare shell (which
         # must be killed, since the tmux adapter refuses to create a

@@ -134,6 +134,12 @@ The one place the label matters most is the secondmate liveness sweep (`bin/fm-b
 Without it, a gone secondmate `sm` prefix-resolves to a live task's window `fm-sm-2` and inherits that task's verdict: either the dead secondmate is never respawned, or the sweep kills the unrelated task's window.
 The sweep therefore also guards its kill on the endpoint still resolving to the secondmate's own window, so a target it could not verify is respawned without anything being killed.
 
+Leniency stops at that destructive path.
+An empty label means the record's endpoint identity is UNVERIFIED, not that it may be acted on with tmux's own resolution: a target that resolves may be a neighbour reached by prefix matching rather than the secondmate's own window, and the guard would pass on exactly the ambiguity it exists to refuse.
+So when the sweep reaches a `dead` verdict for a record carrying no pin guarantee, it skips the kill AND the respawn and reports the record instead (`SECONDMATE_LIVENESS: secondmate <id>: skipped: endpoint identity unverifiable`).
+Nothing backfills the guarantee onto an existing record; respawning that secondmate deliberately writes it, since every tmux spawn now pins the window name or refuses.
+The other readers stay lenient as described above, because reporting an unpinned record's endpoint state is not a destructive act.
+
 ## Agent liveness probe
 
 `fm_backend_target_exists` (`bin/fm-backend.sh`) only checks that a window's pane still exists.
