@@ -292,6 +292,7 @@ Judge validation by the branch-matched run step through `bin/fm-crew-state.sh`, 
 Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
+`bin/fm-nm-flow.sh <id> --watch` renders a strictly read-only live flow diagram of a task's no-mistakes run for a captain tmux window, and its header owns usage.
 
 ### PR ready, landing, and teardown
 

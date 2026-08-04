@@ -48,9 +48,10 @@
 #                    the report, a report that is missing/empty/unparseable, or
 #                    (shell runner) no `ok - <name>` line.
 # A requested identifier and a runner's own names are two different namespaces,
-# so accounting matches a bare name against `<name>` and `<name>[...]` alike and
-# lets passing win over skipped; bin/fm-test-exec-lib.sh's identifier-scheme note
-# owns that rule.
+# so accounting matches a bare name against the runner's own naming (pytest's
+# `<name>[...]` parametrized cases, the JS runners' composed `a > b` titles) and
+# lets passing win over skipped; bin/fm-test-exec-lib.sh's
+# fm_reported_name_accounts and its identifier-scheme notes own that rule.
 # NEITHER class affects this script's exit code in this PR: exit 1 stays driven
 # only by `missing:`, `failing:` and `unexecuted:`. The point of the change is to
 # make a green-but-empty run VISIBLE where it previously read as verified, not to
@@ -378,19 +379,17 @@ idents_for_file() {
   done < "$TMPD/base"
 }
 
-# name_accounted <name> <names-file>: succeed when <names-file> holds a runner
-# name that accounts for check 1's bare <name>. The two namespaces are not the
-# same (see bin/fm-test-exec-lib.sh's identifier-scheme note), so the match is
-# equality OR <name> followed IMMEDIATELY by a literal `[`, which is how a runner
-# spells the parametrized cases of one bare name. The bracket must be the very
-# next character: a bare prefix test would let `test_xy[a]` account for a
-# requested `test_x`.
+# name_accounted <spec> <name> <names-file>: succeed when <names-file> holds a
+# runner name that accounts for check 1's bare <name>. The two namespaces are
+# not the same and the reconciliation rule is per-runner, so each line is judged
+# by bin/fm-test-exec-lib.sh's fm_reported_name_accounts, which owns that rule.
 name_accounted() {
-  local name=$1 file=$2 reported
+  local spec=$1 name=$2 file=$3 reported
   while IFS= read -r reported; do
     [ -n "$reported" ] || continue
-    [ "$reported" != "$name" ] || return 0
-    case "$reported" in "${name}["*) return 0 ;; esac
+    if fm_reported_name_accounts "$spec" "$name" "$reported"; then
+      return 0
+    fi
   done < "$file"
   return 1
 }
@@ -489,8 +488,8 @@ if [ -s "$TMPD/execfiles" ]; then
     branch_rc=0
     run_base_test_file "$spec" "$TMPD/branch-tree" "$f" \
       "$TMPD/run-branch" "$TMPD/run-branch.err" ${idents[@]+"${idents[@]}"} || branch_rc=$?
-    passing_idents "$spec" "$TMPD/run-base" > "$TMPD/ok-base"
-    passing_idents "$spec" "$TMPD/run-branch" > "$TMPD/ok-branch"
+    passing_idents "$spec" "$TMPD/run-base" "$TMPD/base-tree/$f" > "$TMPD/ok-base"
+    passing_idents "$spec" "$TMPD/run-branch" "$TMPD/branch-tree/$f" > "$TMPD/ok-branch"
     comm -23 "$TMPD/ok-base" "$TMPD/ok-branch" > "$TMPD/ok-delta"
     delta_seen=0
     while IFS= read -r name; do
@@ -516,14 +515,14 @@ if [ -s "$TMPD/execfiles" ]; then
     # Passing wins outright: one passing case of a parametrized name means the
     # baseline verified that name, whatever its other cases did.
     idents_for_file "$f" | sort -u > "$TMPD/requested"
-    skipped_idents "$spec" "$TMPD/run-base" > "$TMPD/skip-base"
+    skipped_idents "$spec" "$TMPD/run-base" "$TMPD/base-tree/$f" > "$TMPD/skip-base"
     while IFS= read -r ident; do
       [ -n "$ident" ] || continue
       name=${ident#"$f::"}
-      if name_accounted "$name" "$TMPD/ok-base"; then
+      if name_accounted "$spec" "$name" "$TMPD/ok-base"; then
         continue
       fi
-      if name_accounted "$name" "$TMPD/skip-base"; then
+      if name_accounted "$spec" "$name" "$TMPD/skip-base"; then
         record_ident "$TMPD/skipped" "$ident"
       else
         record_ident "$TMPD/unaccounted" "$ident"

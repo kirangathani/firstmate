@@ -104,10 +104,15 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` as `bin/fm-test.sh --local` so no-mistakes runs firstmate's bash behavior suite directly.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
-That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
-It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating the test step to an agent.
+`bin/fm-test.sh` is the single owner of the behavior-suite definition (the `tests/*.test.sh` file set, the execution rules, the selection, and the shard partition), and its header comment owns the details.
+The argument-less form is still the canonical whole-set serial run and the definition of the suite: it executes every test file directly, runs them all even after a failure, and fails if any exited non-zero or went unrun.
+`--local`, the form the gate runs, is a selection and scheduling change over that same file set with the same per-file verdict: it runs only the tests the working change can affect, selected through the reference closure `bin/fm-test-plan.awk` builds over the tracked repo, in parallel cost-packed shards, because the whole serial suite is slow enough locally to be worth routing around and a gate developers route around is worse than no gate.
+No pass is ever cached, and anything the planner cannot attribute to a test escalates the run to the whole set; the two files' header comments own the selection rules and their safety argument.
+Every mode requires `tmux` on `PATH` and prints `tmux -V`.
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs that same script as `--shard K/N` across parallel jobs instead of delegating the test step to an agent, and stays exhaustive with no change-based selection, because CI is the authority that catches the host-dependence class of bug a local run passes by construction.
+`tests/fm-test.test.sh` asserts both that the shards' union is exactly this whole set and that the selected, sharded local path returns the whole set's verdict for every file it runs, so the gate and CI cannot diverge.
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
@@ -375,6 +380,11 @@ FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in C
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-branch attribution falls back from axi status
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FM_NM_FLOW_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-nm-flow.sh
+FM_NM_FLOW_TESTS_TIMEOUT=300   # seconds bounding fm-nm-flow.sh's opt-in --tests-gate probe of fm-assert-tests-kept.sh
+FM_NM_FLOW_COLS=        # fm-nm-flow.sh render-width override (40-1000); unset uses a tty width above the 80-column baseline, else 80
+FM_NM_FLOW_ROWS=        # fm-nm-flow.sh watch-frame row budget (10-1000); unset uses the tty height on a tty, else 24; one-shot renders are never trimmed
+FM_NM_FLOW_WATCH_MAX=   # test hook: bound fm-nm-flow.sh --watch to n frames
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env
