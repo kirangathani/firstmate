@@ -2,12 +2,19 @@
 # Shared wall-clock bound for external calls that can hang (network-backed CLIs
 # such as no-mistakes, gh, or treehouse).
 #
-# This library is the single owner of the bounder-selection ladder. GNU
-# `timeout` is the first choice; macOS ships neither `timeout` nor `gtimeout`
-# without coreutils, so `gtimeout` (Homebrew coreutils) and then `perl` (in the
-# macOS base system) follow. The perl arm runs the child in its own process
-# group and group-kills on SIGALRM, so a wedged child's own children die too,
-# and exits 124 on expiry to match GNU timeout.
+# This library owns the bounder-selection ladder for new call sites adopting a
+# bounded external call; reach for it rather than hand-rolling another ladder.
+# It does not yet describe the whole repo: `fm-bearings-snapshot.sh`,
+# `fm-watch-checkpoint.sh`, `fm-fleet-snapshot.sh`, and `fm-watch.sh` still
+# carry their own inline timeout/gtimeout ladders, and migrating them is not
+# mechanical (none has a perl arm today, `fm-watch.sh` uses `exec`, and
+# `fm-watch-checkpoint.sh` captures a return code around redirections).
+#
+# GNU `timeout` is the first choice; macOS ships neither `timeout` nor
+# `gtimeout` without coreutils, so `gtimeout` (Homebrew coreutils) and then
+# `perl` (in the macOS base system) follow. The perl arm runs the child in its
+# own process group and group-kills on SIGALRM, so a wedged child's own
+# children die too, and exits 124 on expiry to match GNU timeout.
 #
 # Callers decide what a bounder-less host means for them, because the safe
 # answer differs: skipping the call entirely, or running it unwrapped. Gate on

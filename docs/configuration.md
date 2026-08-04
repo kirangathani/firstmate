@@ -251,7 +251,8 @@ An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm 
 An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; `bin/fm-dispatch-select.sh` still degrades to the first profile at runtime when quota data is unavailable.
 When `no-mistakes` is installed but its shared daemon is down, bootstrap reports `NO_MISTAKES_DAEMON: not running (start: no-mistakes daemon start)`, because every ship task's validation pipeline needs that daemon.
 The probe is detection only: bootstrap never starts or restarts the daemon itself, since one instance serves every lane and home and restarting it would kill other lanes' in-flight pipeline runs.
-It stays silent when the daemon is up or when the binary is absent entirely (the `MISSING: no-mistakes` line above already owns that case), and it is bounded by `FM_BOOTSTRAP_NM_DAEMON_TIMEOUT` seconds (default 5) so it cannot slow session start.
+It stays silent when the daemon is up or when the binary is absent entirely (the `MISSING: no-mistakes` line above already owns that case).
+On a host with `timeout`, `gtimeout`, or `perl` the probe is bounded by `FM_BOOTSTRAP_NM_DAEMON_TIMEOUT` seconds (default 5) so it cannot slow session start; a host with none of the three runs it unwrapped, which `bin/fm-bounded-lib.sh` owns as the deliberate fallback.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.

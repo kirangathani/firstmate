@@ -54,7 +54,9 @@
 #          the shared daemon itself. Silent when the binary is absent (the
 #          MISSING line above already covers that) or when the daemon is up.
 #          The status probe is bounded by FM_BOOTSTRAP_NM_DAEMON_TIMEOUT
-#          seconds (default 5, non-numeric or blank falls back to 5).
+#          seconds (default 5, non-numeric or blank falls back to 5) on a host
+#          that has timeout, gtimeout, or perl; a host with none of the three
+#          runs the probe unwrapped (see bin/fm-bounded-lib.sh).
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
 #          with update --archive-body and mv [<id>...]); an installed but
