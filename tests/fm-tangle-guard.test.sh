@@ -94,7 +94,10 @@ test_guard_banner() {
 
 run_bootstrap() {
   # No projects/ under the home keeps fleet sync inert; grep isolates the line.
-  FM_ROOT_OVERRIDE="$1" FM_HOME="$1" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
+  # The stub bin shadows any real no-mistakes so bootstrap's daemon probe never
+  # touches this machine's shared daemon.
+  PATH="$(fm_no_mistakes_stub_bin):$PATH" FM_ROOT_OVERRIDE="$1" FM_HOME="$1" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
 }
 
 test_bootstrap_line() {
@@ -112,7 +115,8 @@ test_bootstrap_line() {
   out=$(run_bootstrap "$repo" | grep '^TANGLE:' || true)
   assert_contains "$out" "fm/tangle-bb2" "bootstrap did not report the tangled branch"
   assert_contains "$out" "checkout main" "bootstrap TANGLE line lacked the restore remediation"
-  out=$(FM_ROOT_OVERRIDE="$repo" FM_HOME="$repo" FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null | grep '^TANGLE:' || true)
+  out=$(PATH="$(fm_no_mistakes_stub_bin):$PATH" FM_ROOT_OVERRIDE="$repo" FM_HOME="$repo" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null | grep '^TANGLE:' || true)
   assert_contains "$out" "fm/tangle-bb2" "detect-only bootstrap did not report the tangled branch"
   assert_contains "$out" "read-only session must leave restore work" "detect-only bootstrap did not explain restore ownership"
   assert_not_contains "$out" "checkout main" "detect-only bootstrap printed a state-changing restore command"

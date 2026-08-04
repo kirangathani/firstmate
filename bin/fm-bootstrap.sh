@@ -16,7 +16,7 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
-#                 "NO_MISTAKES_DAEMON: not running (restart: no-mistakes daemon start)",
+#                 "NO_MISTAKES_DAEMON: not running (start: no-mistakes daemon start)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
@@ -53,6 +53,8 @@
 #          not running - detection only, bootstrap never starts or restarts
 #          the shared daemon itself. Silent when the binary is absent (the
 #          MISSING line above already covers that) or when the daemon is up.
+#          The status probe is bounded by FM_BOOTSTRAP_NM_DAEMON_TIMEOUT
+#          seconds (default 5, non-numeric or blank falls back to 5).
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
 #          with update --archive-body and mv [<id>...]); an installed but
@@ -500,12 +502,22 @@ no_mistakes_compatible() {
 # on many invocations, so this matches on the daemon's own "daemon not
 # running"/"daemon running" wording (confirmed via `strings` on the installed
 # binary) rather than parsing the whole line or trusting the exit code.
+NO_MISTAKES_DAEMON_TIMEOUT=${FM_BOOTSTRAP_NM_DAEMON_TIMEOUT:-5}
+case "$NO_MISTAKES_DAEMON_TIMEOUT" in ''|*[!0-9]*) NO_MISTAKES_DAEMON_TIMEOUT=5 ;; esac
+
+NO_MISTAKES_DAEMON_BOUNDER=none
+if command -v timeout >/dev/null 2>&1; then NO_MISTAKES_DAEMON_BOUNDER=timeout
+elif command -v gtimeout >/dev/null 2>&1; then NO_MISTAKES_DAEMON_BOUNDER=gtimeout
+elif command -v perl >/dev/null 2>&1; then NO_MISTAKES_DAEMON_BOUNDER=perl
+fi
+
 no_mistakes_daemon_status_output() {
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 5 no-mistakes daemon status 2>&1
-  else
-    no-mistakes daemon status 2>&1
-  fi
+  case "$NO_MISTAKES_DAEMON_BOUNDER" in
+    timeout)  timeout "$NO_MISTAKES_DAEMON_TIMEOUT" no-mistakes daemon status 2>&1 ;;
+    gtimeout) gtimeout "$NO_MISTAKES_DAEMON_TIMEOUT" no-mistakes daemon status 2>&1 ;;
+    perl)     perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NO_MISTAKES_DAEMON_TIMEOUT" no-mistakes daemon status 2>&1 ;;
+    *)        no-mistakes daemon status 2>&1 ;;
+  esac
 }
 
 no_mistakes_daemon_down() {
@@ -797,11 +809,13 @@ if fm_backend_list_contains "$TOOLS" treehouse \
   && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
-if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
-  echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
-fi
-if command -v no-mistakes >/dev/null 2>&1 && no_mistakes_daemon_down; then
-  echo "NO_MISTAKES_DAEMON: not running (restart: no-mistakes daemon start)"
+if command -v no-mistakes >/dev/null 2>&1; then
+  if ! no_mistakes_compatible; then
+    echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+  fi
+  if no_mistakes_daemon_down; then
+    echo "NO_MISTAKES_DAEMON: not running (start: no-mistakes daemon start)"
+  fi
 fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"

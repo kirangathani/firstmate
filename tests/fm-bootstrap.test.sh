@@ -15,10 +15,11 @@
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
-# A dedicated case pins the 'NO_MISTAKES_DAEMON: not running (restart: ...)'
+# A dedicated case pins the 'NO_MISTAKES_DAEMON: not running (start: ...)'
 # probe: silent while the daemon is up, one remediation line while it is down
-# (unconfused by the daemon's own update-available banner), and silent when
-# no-mistakes is not installed at all.
+# (unconfused by the daemon's own update-available banner), silent when
+# no-mistakes is not installed at all, and bounded by
+# FM_BOOTSTRAP_NM_DAEMON_TIMEOUT (default 5) when a status call wedges.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -76,6 +77,9 @@ if [ "${1:-}" = daemon ] && [ "${2:-}" = status ]; then
   # daemon probe's parsing is proven not to be confused by it.
   printf '%s\n' 'A new version of no-mistakes is available: v1.37.0 -> v1.41.2'
   printf '%s\n' 'Run "no-mistakes update" to update'
+  if [ "${FM_FAKE_NO_MISTAKES_DAEMON_STATE:-running}" = hang ]; then
+    sleep 30
+  fi
   if [ "${FM_FAKE_NO_MISTAKES_DAEMON_STATE:-running}" = running ]; then
     printf '  \xe2\x97\x8f daemon running (pid 82400)\n'
   else
@@ -357,7 +361,7 @@ test_no_mistakes_daemon_probe() {
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_DAEMON_STATE=stopped "$ROOT/bin/fm-bootstrap.sh")
-  [ "$out" = "NO_MISTAKES_DAEMON: not running (restart: no-mistakes daemon start)" ] \
+  [ "$out" = "NO_MISTAKES_DAEMON: not running (start: no-mistakes daemon start)" ] \
     || fail "dead daemon should report exactly one remediation line, got: $out"
 
   # no-mistakes absent entirely: no crash, no NO_MISTAKES_DAEMON line, no
@@ -371,7 +375,31 @@ test_no_mistakes_daemon_probe() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "NO_MISTAKES_DAEMON:" "an absent no-mistakes binary must not trigger the daemon probe"
-  pass "bootstrap probes the no-mistakes daemon: silent when running, one remediation line when dead, silent when absent"
+
+  # A wedged daemon status must never block session start: the probe is bounded,
+  # the bound is overridable, and a non-numeric override falls back to 5s rather
+  # than dropping the ceiling. The stub sleeps 30s, far past either bound.
+  case_dir="$TMP_ROOT/daemon-hang"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  local started elapsed
+  started=$(date +%s)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_DAEMON_STATE=hang \
+    FM_BOOTSTRAP_NM_DAEMON_TIMEOUT=1 "$ROOT/bin/fm-bootstrap.sh")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 15 ] || fail "an explicit 1s daemon-probe bound did not stop a wedged status (${elapsed}s)"
+  assert_not_contains "$out" "NO_MISTAKES_DAEMON:" "a timed-out daemon probe must not claim the daemon is down"
+
+  started=$(date +%s)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_DAEMON_STATE=hang \
+    FM_BOOTSTRAP_NM_DAEMON_TIMEOUT=not-a-number "$ROOT/bin/fm-bootstrap.sh")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 20 ] || fail "a non-numeric daemon-probe bound dropped the ceiling (${elapsed}s)"
+  assert_not_contains "$out" "NO_MISTAKES_DAEMON:" "a timed-out daemon probe must not claim the daemon is down"
+  pass "bootstrap probes the no-mistakes daemon: silent when running, one remediation line when dead, silent when absent, and bounded when wedged"
 }
 
 test_git_is_required_with_supported_install_instruction() {
