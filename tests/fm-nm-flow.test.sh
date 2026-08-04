@@ -1157,7 +1157,11 @@ test_frame_row_budget_all_states() {
   d=$(new_case row-budget)
   make_fakebin "$d" >/dev/null
   mkdir -p "$d/wt/tests" "$d/bin" "$d/data/supersessions" "$d/nodate"
-  make_repo_on_branch "$d/wt" fm/change
+  mkdir -p "$d/wt"
+  git -C "$d/wt" init -q
+  git -C "$d/wt" commit -q --allow-empty -m init
+  git -C "$d/wt" branch -M main
+  git -C "$d/wt" checkout -qb fm/change
   cp "$NM_FLOW" "$d/bin/fm-nm-flow.sh"
   cp "$ROOT/bin/fm-supersession-lib.sh" "$d/bin/fm-supersession-lib.sh"
   chmod +x "$d/bin/fm-nm-flow.sh"
