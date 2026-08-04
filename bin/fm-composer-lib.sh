@@ -60,9 +60,11 @@
 # those use genuinely different primitives (tmux's cursor-row read, herdr's ANSI
 # tail scan, orca/cmux's plain read-screen). Once an adapter has a candidate
 # composer row it hands the RAW styled row to fm_composer_strip_ghost for the
-# real-typed-content extraction, strips the box borders, trims, and hands the
-# result plus a <bordered> flag to fm_composer_classify_content for the shared
-# empty|pending|unknown verdict. orca/cmux read a plain (unstyled) screen so
+# real-typed-content extraction, strips the box borders, trims (with
+# fm_composer_normalize_trim, never a bare `[[:space:]]` strip - see that
+# function), and hands the result plus a <bordered> flag to
+# fm_composer_classify_content for the shared empty|pending|unknown verdict.
+# orca/cmux read a plain (unstyled) screen so
 # they have no ghost styling to strip and rely on the idle-placeholder match
 # below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
@@ -261,11 +263,14 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
   # Unicode blanks -> ASCII space, then re-trim, BEFORE any emptiness test or
-  # exact-glyph match. Callers trim with `[[:space:]]`, which leaves U+00A0 and
-  # friends behind, so without this a blank-padded empty composer reads as
-  # pending input (see UNICODE BLANK PADDING in this file's header). Both the
-  # ghost-stripped content and the structural plain row are normalized, so the
-  # bare-glyph fallback below also lands on a blank-padded row.
+  # exact-glyph match. Kept here even though the in-tree adapters now route
+  # their own pre-classifier trims through fm_composer_normalize_trim too: this
+  # is the one guaranteed point, so a caller that trimmed with a bare
+  # `[[:space:]]` (which leaves U+00A0 and friends behind) still cannot make a
+  # blank-padded empty composer read as pending input (see UNICODE BLANK PADDING
+  # in this file's header). Both the ghost-stripped content and the structural
+  # plain row are normalized, so the bare-glyph fallback below also lands on a
+  # blank-padded row.
   fm_composer_normalize_trim "$content" content
   fm_composer_normalize_trim "$plain_content" plain_content
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
