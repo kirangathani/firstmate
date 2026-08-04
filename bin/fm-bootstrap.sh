@@ -16,6 +16,7 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
+#                 "NO_MISTAKES_DAEMON: not running (restart: no-mistakes daemon start)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
@@ -47,6 +48,11 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
+#          NO_MISTAKES_DAEMON reports the daemon down when the binary is
+#          installed (any version) but `no-mistakes daemon status` reports it
+#          not running - detection only, bootstrap never starts or restarts
+#          the shared daemon itself. Silent when the binary is absent (the
+#          MISSING line above already covers that) or when the daemon is up.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
 #          with update --archive-body and mv [<id>...]); an installed but
@@ -490,6 +496,27 @@ no_mistakes_compatible() {
   [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
 }
 
+# `no-mistakes daemon status` also writes an unrelated update-available banner
+# on many invocations, so this matches on the daemon's own "daemon not
+# running"/"daemon running" wording (confirmed via `strings` on the installed
+# binary) rather than parsing the whole line or trusting the exit code.
+no_mistakes_daemon_status_output() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 5 no-mistakes daemon status 2>&1
+  else
+    no-mistakes daemon status 2>&1
+  fi
+}
+
+no_mistakes_daemon_down() {
+  local out
+  out=$(no_mistakes_daemon_status_output) || true
+  case "$out" in
+    *"daemon not running"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 x_mode_write_if_changed() {
   local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
   parent=${dest%/*}
@@ -772,6 +799,9 @@ if fm_backend_list_contains "$TOOLS" treehouse \
 fi
 if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+fi
+if command -v no-mistakes >/dev/null 2>&1 && no_mistakes_daemon_down; then
+  echo "NO_MISTAKES_DAEMON: not running (restart: no-mistakes daemon start)"
 fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"

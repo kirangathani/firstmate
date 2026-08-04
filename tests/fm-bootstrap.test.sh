@@ -15,6 +15,10 @@
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
+# A dedicated case pins the 'NO_MISTAKES_DAEMON: not running (restart: ...)'
+# probe: silent while the daemon is up, one remediation line while it is down
+# (unconfused by the daemon's own update-available banner), and silent when
+# no-mistakes is not installed at all.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -64,6 +68,19 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
   printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.31.2 (fake) 2026-06-27T00:02:18Z}"
+  exit 0
+fi
+if [ "${1:-}" = daemon ] && [ "${2:-}" = status ]; then
+  # Real no-mistakes prints an unrelated update-available banner on many
+  # invocations, ahead of the daemon status line itself; always emit it so the
+  # daemon probe's parsing is proven not to be confused by it.
+  printf '%s\n' 'A new version of no-mistakes is available: v1.37.0 -> v1.41.2'
+  printf '%s\n' 'Run "no-mistakes update" to update'
+  if [ "${FM_FAKE_NO_MISTAKES_DAEMON_STATE:-running}" = running ]; then
+    printf '  \xe2\x97\x8f daemon running (pid 82400)\n'
+  else
+    printf '  \xe2\x97\x8b daemon not running\n'
+  fi
   exit 0
 fi
 exit 0
@@ -320,6 +337,41 @@ older no-mistakes patch reports an upgrade^no-mistakes version v1.31.1 (fake)^mi
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
 ROWS
   pass "bootstrap enforces no-mistakes minimum version"
+}
+
+test_no_mistakes_daemon_probe() {
+  local case_dir fakebin out
+  # Running daemon: probe stays silent.
+  case_dir="$TMP_ROOT/daemon-running"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_DAEMON_STATE=running "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "running daemon should be silent, got: $out"
+
+  # Dead daemon: exactly one actionable line, unconfused by the update banner.
+  case_dir="$TMP_ROOT/daemon-not-running"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_DAEMON_STATE=stopped "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "NO_MISTAKES_DAEMON: not running (restart: no-mistakes daemon start)" ] \
+    || fail "dead daemon should report exactly one remediation line, got: $out"
+
+  # no-mistakes absent entirely: no crash, no NO_MISTAKES_DAEMON line, no
+  # duplicate of the existing MISSING report (that case is covered by
+  # test_bootstrap_reporting elsewhere; here just confirm the probe adds nothing).
+  case_dir="$TMP_ROOT/daemon-absent"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/no-mistakes"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "NO_MISTAKES_DAEMON:" "an absent no-mistakes binary must not trigger the daemon probe"
+  pass "bootstrap probes the no-mistakes daemon: silent when running, one remediation line when dead, silent when absent"
 }
 
 test_git_is_required_with_supported_install_instruction() {
@@ -788,6 +840,7 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_no_mistakes_daemon_probe
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
