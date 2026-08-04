@@ -9,6 +9,8 @@
 # carry their own inline timeout/gtimeout ladders, and migrating them is not
 # mechanical (none has a perl arm today, `fm-watch.sh` uses `exec`, and
 # `fm-watch-checkpoint.sh` captures a return code around redirections).
+# `fm-test-exec-lib.sh` also bounds its assert-tests runs itself, with a
+# GNU-`timeout`-only wrapper rather than a ladder.
 #
 # GNU `timeout` is the first choice; macOS ships neither `timeout` nor
 # `gtimeout` without coreutils, so `gtimeout` (Homebrew coreutils) and then
