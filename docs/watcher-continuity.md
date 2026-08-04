@@ -81,12 +81,23 @@ Two further facts were measured on 2026-08-03 against the unfixed plugin, using 
 Recovery on a later event is not a mitigation the fleet can rely on.
 The watcher is what wakes an idle session, so when arming is denied for an idle event there is no guaranteed later turn to produce the next `session.idle`, and supervision stays off while every surface reports healthy.
 
-The re-check deliberately covers only the `read-only` refusal, and this class is therefore not fully closed.
-`beginArm` also answers `not-needed` from a synchronous `shouldArm` check and `skipped` when the call carries no session id, and both are the same class of precondition snapshot as `read-only`: the answer describes state read at one instant by one caller, and a coalesced caller is served it whether or not it still holds.
-A task spawn that creates a `.meta` file mid-flight is the `not-needed` version of exactly the race fixed here, with the same permanent consequence for that event.
-Those two statements are read from the plugin source, not measured: unlike every timing recorded above, neither case was reproduced.
-Leaving them unfixed was an explicit scope decision rather than an oversight.
-Closing them needs its own reasoning and its own regression test, because `shouldArm` is a synchronous check with a different flip profile from lock ownership.
+The re-check covers only the `read-only` refusal, and that is deliberate: `beginArm`'s other two refusals were investigated and are not the same mechanism.
+
+`not-needed` was tested directly on 2026-08-04, against the plugin WITHOUT any `not-needed` re-check, using the same release-file reproduction.
+The session owned the lock, `state` held no `.meta` file, the first launch was pinned inside the ownership walk, a `.meta` file was then created mid-flight, and a second `session.idle` event was fired so it coalesced onto that pinned launch.
+It armed in 3 of 3 runs, and the control with no `.meta` file at any point correctly did not arm.
+
+The reason is structural.
+`shouldArm` is the last check in `beginArm` and is fully synchronous, so its answer is computed after every await has already resolved, at the latest possible instant.
+A coalesced caller therefore receives an answer that a launch starting at that same instant would also produce.
+`read-only` is broken for the opposite reason: `sessionOwnsLock` reads the lock file at the START of a long `ps` ancestry walk, so its answer can be older than the coalescing that inherits it.
+The gap being fixed here is that distance between reading a precondition and answering with it, and `shouldArm` has no such distance.
+
+Two consequences worth stating, because the shape looks identical from a distance and will invite the same fix again.
+A regression test for `not-needed` in the usual shape is impossible: it cannot fail against the unfixed plugin, because the unfixed plugin already handles it.
+This property does depend on `shouldArm` staying last and staying synchronous, so moving it before an await, or making it asynchronous, would open exactly the gap `read-only` had.
+
+`skipped` is read from the source rather than measured: `beginArm` returns it only when the call carries no session id, and both live call sites, the `session.idle` handler and the turn-end guard's coordinator call, return early before calling in that case, so no reachable caller can be served it.
 
 ## Sanitized live evidence, 2026-07-17
 

@@ -1085,6 +1085,13 @@ if [ ! -e "\${FM_PS_MARKER:?}" ]; then
     sleep 0.01
     waited=\$((waited + 1))
   done
+  # The ceiling exists only so a driver bug cannot wedge the suite. Reaching it
+  # means the coalescing window was never established, so fail loudly rather than
+  # proceeding into a run that would look like a pass without testing anything.
+  if [ ! -e "\$FM_PS_RELEASE" ]; then
+    printf 'ps shim: driver never released the ownership walk within 30s\n' >&2
+    exit 1
+  fi
 fi
 exec $real_ps "\$@"
 SH
