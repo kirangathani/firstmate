@@ -100,15 +100,21 @@ SH
   done
 }
 
-# fm_no_mistakes_stub_bin: echo a memoized dir holding a healthy `no-mistakes`
-# stub. Cases that run bin/fm-bootstrap.sh on the ambient PATH (rather than a
-# pinned BASE_PATH) must prepend it, so bootstrap's version check and daemon
-# probe never shell out to this machine's real, shared no-mistakes daemon.
-FM_NO_MISTAKES_STUB_BIN=""
+# fm_no_mistakes_stub_bin: echo a dir holding a healthy `no-mistakes` stub.
+# Cases that run bin/fm-bootstrap.sh on the ambient PATH (rather than a pinned
+# BASE_PATH) must prepend it, so bootstrap's version check and daemon probe
+# never shell out to this machine's real, shared no-mistakes daemon.
+#
+# Callers invoke this from a command substitution (`PATH="$(...):$PATH"`), so
+# it must never route through fm_test_tmproot: that registers an EXIT trap,
+# which fires when the substitution's own subshell exits and deletes the dir
+# before the caller can use it. The path is derived from the caller's TMP_ROOT
+# and the writes are idempotent, so repeat calls are cheap and return the same
+# directory without needing memo state (which a subshell could not keep anyway).
 fm_no_mistakes_stub_bin() {
-  if [ -z "$FM_NO_MISTAKES_STUB_BIN" ]; then
-    FM_NO_MISTAKES_STUB_BIN=$(fm_test_tmproot fm-nm-stub)
-    cat > "$FM_NO_MISTAKES_STUB_BIN/no-mistakes" <<'SH'
+  local stub="${TMP_ROOT:?fm_no_mistakes_stub_bin needs TMP_ROOT}/fm-nm-stub-bin"
+  mkdir -p "$stub"
+  cat > "$stub/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
   printf '%s\n' 'no-mistakes version v1.31.2 (fake) 2026-06-27T00:02:18Z'
@@ -120,9 +126,8 @@ if [ "${1:-}" = daemon ] && [ "${2:-}" = status ]; then
 fi
 exit 0
 SH
-    chmod +x "$FM_NO_MISTAKES_STUB_BIN/no-mistakes"
-  fi
-  printf '%s\n' "$FM_NO_MISTAKES_STUB_BIN"
+  chmod +x "$stub/no-mistakes"
+  printf '%s\n' "$stub"
 }
 
 # --- deterministic git identity and fixtures --------------------------------

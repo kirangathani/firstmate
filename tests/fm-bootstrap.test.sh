@@ -379,26 +379,32 @@ test_no_mistakes_daemon_probe() {
   # A wedged daemon status must never block session start: the probe is bounded,
   # the bound is overridable, and a non-numeric override falls back to 5s rather
   # than dropping the ceiling. The stub sleeps 30s, far past either bound.
-  case_dir="$TMP_ROOT/daemon-hang"
-  mkdir -p "$case_dir/home/config"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  fakebin=$(make_fake_toolchain "$case_dir")
+  # bin/fm-bounded-lib.sh deliberately supports a host with no timeout, gtimeout,
+  # or perl, where running unbounded is the documented fallback rather than a
+  # bug, so these two wall-clock cases only apply when a bounder actually exists
+  # on the same pinned PATH bootstrap will see.
   local started elapsed
-  started=$(date +%s)
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_DAEMON_STATE=hang \
-    FM_BOOTSTRAP_NM_DAEMON_TIMEOUT=1 "$ROOT/bin/fm-bootstrap.sh")
-  elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -lt 15 ] || fail "an explicit 1s daemon-probe bound did not stop a wedged status (${elapsed}s)"
-  assert_not_contains "$out" "NO_MISTAKES_DAEMON:" "a timed-out daemon probe must not claim the daemon is down"
+  if PATH="$BASE_PATH" bash -c '. "$1/bin/fm-bounded-lib.sh"; fm_bounded_available' _ "$ROOT"; then
+    case_dir="$TMP_ROOT/daemon-hang"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    started=$(date +%s)
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_DAEMON_STATE=hang \
+      FM_BOOTSTRAP_NM_DAEMON_TIMEOUT=1 "$ROOT/bin/fm-bootstrap.sh")
+    elapsed=$(( $(date +%s) - started ))
+    [ "$elapsed" -lt 15 ] || fail "an explicit 1s daemon-probe bound did not stop a wedged status (${elapsed}s)"
+    assert_not_contains "$out" "NO_MISTAKES_DAEMON:" "a timed-out daemon probe must not claim the daemon is down"
 
-  started=$(date +%s)
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_DAEMON_STATE=hang \
-    FM_BOOTSTRAP_NM_DAEMON_TIMEOUT=not-a-number "$ROOT/bin/fm-bootstrap.sh")
-  elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -lt 20 ] || fail "a non-numeric daemon-probe bound dropped the ceiling (${elapsed}s)"
-  assert_not_contains "$out" "NO_MISTAKES_DAEMON:" "a timed-out daemon probe must not claim the daemon is down"
+    started=$(date +%s)
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_DAEMON_STATE=hang \
+      FM_BOOTSTRAP_NM_DAEMON_TIMEOUT=not-a-number "$ROOT/bin/fm-bootstrap.sh")
+    elapsed=$(( $(date +%s) - started ))
+    [ "$elapsed" -lt 20 ] || fail "a non-numeric daemon-probe bound dropped the ceiling (${elapsed}s)"
+    assert_not_contains "$out" "NO_MISTAKES_DAEMON:" "a timed-out daemon probe must not claim the daemon is down"
+  fi
   pass "bootstrap probes the no-mistakes daemon: silent when running, one remediation line when dead, silent when absent, and bounded when wedged"
 }
 

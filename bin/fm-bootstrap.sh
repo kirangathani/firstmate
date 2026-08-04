@@ -108,6 +108,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-bounded-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-bounded-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -505,19 +507,12 @@ no_mistakes_compatible() {
 NO_MISTAKES_DAEMON_TIMEOUT=${FM_BOOTSTRAP_NM_DAEMON_TIMEOUT:-5}
 case "$NO_MISTAKES_DAEMON_TIMEOUT" in ''|*[!0-9]*) NO_MISTAKES_DAEMON_TIMEOUT=5 ;; esac
 
-NO_MISTAKES_DAEMON_BOUNDER=none
-if command -v timeout >/dev/null 2>&1; then NO_MISTAKES_DAEMON_BOUNDER=timeout
-elif command -v gtimeout >/dev/null 2>&1; then NO_MISTAKES_DAEMON_BOUNDER=gtimeout
-elif command -v perl >/dev/null 2>&1; then NO_MISTAKES_DAEMON_BOUNDER=perl
-fi
-
 no_mistakes_daemon_status_output() {
-  case "$NO_MISTAKES_DAEMON_BOUNDER" in
-    timeout)  timeout "$NO_MISTAKES_DAEMON_TIMEOUT" no-mistakes daemon status 2>&1 ;;
-    gtimeout) gtimeout "$NO_MISTAKES_DAEMON_TIMEOUT" no-mistakes daemon status 2>&1 ;;
-    perl)     perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NO_MISTAKES_DAEMON_TIMEOUT" no-mistakes daemon status 2>&1 ;;
-    *)        no-mistakes daemon status 2>&1 ;;
-  esac
+  if fm_bounded_available; then
+    fm_bounded_run "$NO_MISTAKES_DAEMON_TIMEOUT" no-mistakes daemon status 2>&1
+  else
+    no-mistakes daemon status 2>&1
+  fi
 }
 
 no_mistakes_daemon_down() {
