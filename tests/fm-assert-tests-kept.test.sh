@@ -66,6 +66,87 @@ fm_git_identity fmtest fmtest@example.invalid
 ASSERT_KEPT="$ROOT/bin/fm-assert-tests-kept.sh"
 TMP_ROOT=$(fm_test_tmproot fm-assert-tests-kept-tests)
 
+# --- the shared pinned-runtime cache ----------------------------------------
+# The vitest, jest and pytest environments below are real installs of pinned
+# third-party runners. Rebuilding them into the per-run $TMP_ROOT cost about 29s
+# of this file's ~50s on every single local run, so they now live in a stable
+# directory keyed on the pinned version instead.
+#
+# THE COVERAGE TRADE, DECIDED DELIBERATELY. Caching them means the default local
+# run stops exercising the npm-install and venv-creation path every time: after
+# this change that path runs on the first run after a version bump, whenever the
+# cache is missing or broken, and in CI, which always starts cold. The captain
+# weighed that and accepted it, because CI is exhaustive by design and is the
+# gate that has to catch a broken provisioning path. This is a chosen posture,
+# not something that drifted - if you are tempted to "restore" the per-run
+# rebuild, the trade is recorded in the backlog decision
+# fm-testperf-profile-t3-decision-js-py-env-cache. What did NOT change: the
+# cases still install and execute real vitest, jest and pytest against real
+# trees, and a host that cannot provision one still fails loudly rather than
+# quietly skipping the coverage.
+#
+# Correctness rules the builders below keep:
+#   - the pinned version is part of the directory NAME, so a version bump names
+#     a directory that does not exist yet and is rebuilt, never reused;
+#   - every environment is built under a private staging path and published by
+#     a single rename, so a concurrent local shard either sees no environment or
+#     a complete one, never a half-installed one.
+#
+# Kept beside the timings sidecar under the shared git common dir, which
+# bin/fm-test.sh already establishes as never tracked and never shipped, so a
+# stale or hostile cache cannot ride into the repo or into CI.
+ENV_CACHE="${FM_TEST_ENV_CACHE_DIR:-}"
+if [ -z "$ENV_CACHE" ]; then
+  kept_git_dir=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)
+  case "$kept_git_dir" in
+    '') kept_git_dir=$TMP_ROOT ;;
+    /*) ;;
+    *) kept_git_dir="$ROOT/$kept_git_dir" ;;
+  esac
+  ENV_CACHE="$kept_git_dir/fm-test-env-cache"
+fi
+
+# publish_env <staging> <final>: move a fully built environment into place with
+# one rename, so no reader ever observes a partial tree. Returns non-zero and
+# leaves nothing behind when another shard published first.
+publish_env() {
+  local staging=$1 final=$2 leftover
+  leftover=$(basename "$staging")
+  [ -n "$leftover" ] || return 1
+  mkdir -p "$(dirname "$final")" 2>/dev/null || true
+  if [ -e "$final" ] || ! mv "$staging" "$final" 2>/dev/null; then
+    rm -rf "$staging" 2>/dev/null || true
+  fi
+  # A shard can win the rename between the test above and the mv, in which case
+  # mv put the staging tree INSIDE the winner's directory. The staging name is
+  # unique to this process, so removing it can never touch a real cache entry.
+  rm -rf "${final:?}/$leftover" 2>/dev/null || true
+  [ -e "$final" ]
+}
+
+# relocate_venv_paths <staging> <final>: a venv bakes its own absolute path into
+# its console-script shebangs, its activate scripts and pyvenv.cfg. A venv built
+# at one path and then renamed leaves `bin/pytest` pointing at a path that no
+# longer exists, and bin/fm-test-exec-lib.sh uses exactly that script as its
+# interpreter fallback. Rewrite the baked paths to the FINAL location while the
+# tree is still private, so the publishing rename remains the only step a
+# concurrent reader can observe. `bin/python` itself is a symlink to the system
+# interpreter and needs no repair; a moved venv resolves its own prefix from the
+# executable's real path, so `bin/python -m pytest` was never the broken part.
+relocate_venv_paths() {
+  local staging=$1 final=$2 f body
+  for f in "$staging"/pyvenv.cfg "$staging"/bin/*; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    body=$(cat "$f" 2>/dev/null) || continue
+    case "$body" in
+      *"$staging"*) ;;
+      *) continue ;;
+    esac
+    printf '%s\n' "${body//"$staging"/$final}" > "$f" || return 1
+  done
+  return 0
+}
+
 # write_baseline <dir>: the three-language test corpus every case starts from.
 write_baseline() {
   local dir=$1
@@ -395,25 +476,58 @@ test_unexecutable_files_are_reported_not_passed() {
 
 # The provisioned environment the Python fixtures link in, exactly as a
 # pipeline-provisioned worktree's .venv is linked at the real gate. Built once
-# per suite run and shared, so the per-case cost is a symlink.
-PYTEST_VENV="$TMP_ROOT/_pytest-venv"
+# and shared, so the per-case cost is a symlink. Cached across runs under the
+# interpreter version it was built against - see "the shared pinned-runtime
+# cache" at the top of this file for the key rule and the coverage trade.
+PYTEST_VENV_KEY=$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || true)
+if [ -n "$PYTEST_VENV_KEY" ]; then
+  PYTEST_VENV="$ENV_CACHE/pytest-py$PYTEST_VENV_KEY"
+else
+  # No usable python3 to key on; stay per-run and let ensure_pytest_venv fail.
+  PYTEST_VENV="$TMP_ROOT/_pytest-venv"
+fi
+PYTEST_VENV_READY=0
 
-# ensure_pytest_venv: build $PYTEST_VENV if absent. Returns non-zero when the
-# host cannot provide pytest at all, so the caller fails loudly instead of
-# silently dropping the coverage that proves assertions really execute.
+# ensure_pytest_venv: build $PYTEST_VENV if absent or unusable. Returns non-zero
+# when the host cannot provide pytest at all, so the caller fails loudly instead
+# of silently dropping the coverage that proves assertions really execute.
+#
+# A cached venv is verified once per run rather than trusted on the strength of
+# its interpreter existing: it may have been built with --system-site-packages
+# against a host pytest that has since gone away. An unusable one is rebuilt,
+# never patched around.
 ensure_pytest_venv() {
-  if [ -x "$PYTEST_VENV/bin/python" ]; then
+  local staging
+  if [ "$PYTEST_VENV_READY" = 1 ]; then
     return 0
   fi
+  if [ -x "$PYTEST_VENV/bin/python" ] \
+    && "$PYTEST_VENV/bin/python" -m pytest --version >/dev/null 2>&1; then
+    PYTEST_VENV_READY=1
+    return 0
+  fi
+  mkdir -p "$(dirname "$PYTEST_VENV")" 2>/dev/null || return 1
+  # mktemp creates the directory; `venv` re-uses an existing empty one, so the
+  # name stays claimed for the whole build and no second process can take it.
+  staging=$(mktemp -d "$PYTEST_VENV.build.XXXXXX" 2>/dev/null) || return 1
   if python3 -c 'import pytest' >/dev/null 2>&1; then
     # Already available on the host: reuse it and stay off the network.
-    python3 -m venv --system-site-packages "$PYTEST_VENV" >/dev/null 2>&1 || return 1
+    python3 -m venv --system-site-packages "$staging" >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
   else
-    python3 -m venv "$PYTEST_VENV" >/dev/null 2>&1 || return 1
-    "$PYTEST_VENV/bin/python" -m pip install --quiet --disable-pip-version-check pytest \
-      >/dev/null 2>&1 || return 1
+    python3 -m venv "$staging" >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
+    "$staging/bin/python" -m pip install --quiet --disable-pip-version-check pytest \
+      >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
   fi
-  "$PYTEST_VENV/bin/python" -m pytest --version >/dev/null 2>&1
+  "$staging/bin/python" -m pytest --version >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
+  relocate_venv_paths "$staging" "$PYTEST_VENV" || { rm -rf "$staging"; return 1; }
+  # Drop an unusable predecessor only once the replacement is built and proven.
+  if [ -e "$PYTEST_VENV" ]; then
+    rm -rf "$PYTEST_VENV"
+  fi
+  publish_env "$staging" "$PYTEST_VENV" || return 1
+  [ -x "$PYTEST_VENV/bin/python" ] \
+    && "$PYTEST_VENV/bin/python" -m pytest --version >/dev/null 2>&1 || return 1
+  PYTEST_VENV_READY=1
 }
 
 require_pytest_venv() {
@@ -1017,31 +1131,46 @@ EOF
 
 # The provisioned environments the JS fixtures link in, exactly as a
 # pipeline-provisioned worktree's node_modules is linked at the real gate.
-# Built once per suite run by a real `npm install` (versions pinned for
-# determinism: vitest 3.2.7 / jest 30.4.1, the versions the runner behavior in
-# bin/fm-test-exec-lib.sh was verified against on 2026-08-03) and shared, so
-# the per-case cost is a symlink. The install needs node, npm, and network or
-# a warm npm cache; CI provides all three, and the suite is self-contained
-# with no workflow-side installs.
-VITEST_ENV="$TMP_ROOT/_vitest-env"
-JEST_ENV="$TMP_ROOT/_jest-env"
+# Built by a real `npm install` (versions pinned for determinism: vitest 3.2.7 /
+# jest 30.4.1, the versions the runner behavior in bin/fm-test-exec-lib.sh was
+# verified against on 2026-08-03) and shared, so the per-case cost is a symlink.
+# The install needs node, npm, and network or a warm npm cache; CI provides all
+# three, and the suite is self-contained with no workflow-side installs.
+#
+# The pinned version is part of the cache directory's NAME, so bumping a version
+# above names a directory that does not exist yet and gets a fresh install; a
+# tree installed against the old pin can never be served for the new one. See
+# "the shared pinned-runtime cache" at the top of this file for the trade.
+VITEST_ENV="$ENV_CACHE/vitest-3.2.7"
+JEST_ENV="$ENV_CACHE/jest-30.4.1"
 
 # ensure_js_env <env-dir> <package> <version> <bin>: build the shared env if
 # absent. Returns non-zero when the host cannot provide it, so the caller fails
 # loudly instead of silently dropping the coverage that proves JS assertions
 # really execute.
+#
+# Installed under a private staging path and published with one rename, so a
+# concurrent shard either finds no environment and installs its own or finds a
+# complete one, and never links a half-installed node_modules into a fixture.
+# Unlike a venv, an npm tree bakes in no absolute paths - `node_modules/.bin`
+# entries are relative symlinks - so it survives the rename untouched.
 ensure_js_env() {
-  local env=$1 pkg=$2 version=$3 bin=$4
+  local env=$1 pkg=$2 version=$3 bin=$4 staging
   if [ -x "$env/node_modules/.bin/$bin" ]; then
     return 0
   fi
   command -v node >/dev/null 2>&1 || return 1
   command -v npm >/dev/null 2>&1 || return 1
-  mkdir -p "$env"
+  mkdir -p "$(dirname "$env")" 2>/dev/null || return 1
+  staging=$(mktemp -d "$env.build.XXXXXX" 2>/dev/null) || return 1
   printf '{"name":"fm-%s-env","private":true,"devDependencies":{"%s":"%s"}}\n' \
-    "$pkg" "$pkg" "$version" > "$env/package.json"
-  npm install --prefix "$env" --no-audit --no-fund --loglevel=error \
-    >/dev/null 2>&1 || return 1
+    "$pkg" "$pkg" "$version" > "$staging/package.json"
+  if ! npm install --prefix "$staging" --no-audit --no-fund --loglevel=error \
+      >/dev/null 2>&1 || [ ! -x "$staging/node_modules/.bin/$bin" ]; then
+    rm -rf "$staging"
+    return 1
+  fi
+  publish_env "$staging" "$env" || return 1
   [ -x "$env/node_modules/.bin/$bin" ]
 }
 

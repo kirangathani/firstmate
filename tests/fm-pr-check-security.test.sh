@@ -45,7 +45,14 @@ state_snapshot() {
         printf 'link %s %s\n' "$file" "$(readlink "$file")"
       else
         printf 'file %s %s ' "$file" "$(file_mode "$file")"
-        shasum -a 256 "$file" | awk '{print $1}'
+        # sha256sum first because it is a C binary and shasum is a perl script;
+        # this helper is the hottest single line in the suite. The shasum branch
+        # must stay: stock macOS ships shasum and does not ship sha256sum.
+        if command -v sha256sum >/dev/null 2>&1; then
+          sha256sum "$file" | awk '{print $1}'
+        else
+          shasum -a 256 "$file" | awk '{print $1}'
+        fi
       fi
     done
   )
