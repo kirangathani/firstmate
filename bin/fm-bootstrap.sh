@@ -16,6 +16,7 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
+#                 "NO_MISTAKES_DAEMON: not running (start: no-mistakes daemon start)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
@@ -47,6 +48,15 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
+#          NO_MISTAKES_DAEMON reports the daemon down when the binary is
+#          installed (any version) but `no-mistakes daemon status` reports it
+#          not running - detection only, bootstrap never starts or restarts
+#          the shared daemon itself. Silent when the binary is absent (the
+#          MISSING line above already covers that) or when the daemon is up.
+#          The status probe is bounded by FM_BOOTSTRAP_NM_DAEMON_TIMEOUT
+#          seconds (default 5, non-numeric or blank falls back to 5) on a host
+#          that has timeout, gtimeout, or perl; a host with none of the three
+#          runs the probe unwrapped (see bin/fm-bounded-lib.sh).
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
 #          with update --archive-body and mv [<id>...]); an installed but
@@ -100,6 +110,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-bounded-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-bounded-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -490,6 +502,30 @@ no_mistakes_compatible() {
   [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
 }
 
+# `no-mistakes daemon status` also writes an unrelated update-available banner
+# on many invocations, so this matches on the daemon's own "daemon not
+# running"/"daemon running" wording (confirmed via `strings` on the installed
+# binary) rather than parsing the whole line or trusting the exit code.
+NO_MISTAKES_DAEMON_TIMEOUT=${FM_BOOTSTRAP_NM_DAEMON_TIMEOUT:-5}
+case "$NO_MISTAKES_DAEMON_TIMEOUT" in ''|*[!0-9]*) NO_MISTAKES_DAEMON_TIMEOUT=5 ;; esac
+
+no_mistakes_daemon_status_output() {
+  if fm_bounded_available; then
+    fm_bounded_run "$NO_MISTAKES_DAEMON_TIMEOUT" no-mistakes daemon status 2>&1
+  else
+    no-mistakes daemon status 2>&1
+  fi
+}
+
+no_mistakes_daemon_down() {
+  local out
+  out=$(no_mistakes_daemon_status_output) || true
+  case "$out" in
+    *"daemon not running"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 x_mode_write_if_changed() {
   local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
   parent=${dest%/*}
@@ -770,8 +806,13 @@ if fm_backend_list_contains "$TOOLS" treehouse \
   && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
-if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
-  echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+if command -v no-mistakes >/dev/null 2>&1; then
+  if ! no_mistakes_compatible; then
+    echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+  fi
+  if no_mistakes_daemon_down; then
+    echo "NO_MISTAKES_DAEMON: not running (start: no-mistakes daemon start)"
+  fi
 fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"

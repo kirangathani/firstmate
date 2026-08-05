@@ -249,6 +249,10 @@ When X mode is opted in, bootstrap also requires `curl` and `jq` before arming t
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
 An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; `bin/fm-dispatch-select.sh` still degrades to the first profile at runtime when quota data is unavailable.
+When `no-mistakes` is installed but its shared daemon is down, bootstrap reports `NO_MISTAKES_DAEMON: not running (start: no-mistakes daemon start)`, because every ship task's validation pipeline needs that daemon.
+The probe is detection only: bootstrap never starts or restarts the daemon itself, since one instance serves every lane and home and restarting it would kill other lanes' in-flight pipeline runs.
+It stays silent when the daemon is up or when the binary is absent entirely (the `MISSING: no-mistakes` line above already owns that case).
+On a host with `timeout`, `gtimeout`, or `perl` the probe is bounded by `FM_BOOTSTRAP_NM_DAEMON_TIMEOUT` seconds (default 5) so it cannot slow session start; a host with none of the three runs it unwrapped, which `bin/fm-bounded-lib.sh` owns as the deliberate fallback.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
@@ -415,6 +419,7 @@ FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wa
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
+FM_BOOTSTRAP_NM_DAEMON_TIMEOUT=5     # seconds allowed for bootstrap's `no-mistakes daemon status` probe; blank or non-numeric falls back to 5
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
