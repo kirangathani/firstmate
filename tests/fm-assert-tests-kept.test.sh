@@ -106,6 +106,17 @@ if [ -z "$ENV_CACHE" ]; then
   ENV_CACHE="$kept_git_dir/fm-test-env-cache"
 fi
 
+# Every failure path below removes its own staging tree, but a run KILLED
+# mid-install cannot, and each orphan is a whole node_modules or venv sitting in
+# the cache forever. Sweep only entries carrying the private `.build.<6 chars>`
+# marker that nothing has touched for six hours - two orders of magnitude longer
+# than the slowest install here, so a concurrently building shard is never in
+# range and a published environment never matches the pattern at all.
+if [ -d "$ENV_CACHE" ]; then
+  find "$ENV_CACHE" -maxdepth 1 -type d -name '*.build.??????' -mmin +360 \
+    -exec rm -rf {} + 2>/dev/null || true
+fi
+
 # publish_env <staging> <final>: move a fully built environment into place with
 # one rename, so no reader ever observes a partial tree. Returns non-zero and
 # leaves nothing behind when another shard published first.
@@ -1138,11 +1149,17 @@ EOF
 # three, and the suite is self-contained with no workflow-side installs.
 #
 # The pinned version is part of the cache directory's NAME, so bumping a version
-# above names a directory that does not exist yet and gets a fresh install; a
-# tree installed against the old pin can never be served for the new one. See
-# "the shared pinned-runtime cache" at the top of this file for the trade.
-VITEST_ENV="$ENV_CACHE/vitest-3.2.7"
-JEST_ENV="$ENV_CACHE/jest-30.4.1"
+# names a directory that does not exist yet and gets a fresh install; a tree
+# installed against the old pin can never be served for the new one. See "the
+# shared pinned-runtime cache" at the top of this file for the trade.
+#
+# Bump a pin by editing ONLY the variable below. The cache key and the version
+# npm is asked to install are both derived from it, so they cannot drift apart
+# and leave a stale tree being served under a bumped pin's name.
+VITEST_VERSION=3.2.7
+JEST_VERSION=30.4.1
+VITEST_ENV="$ENV_CACHE/vitest-$VITEST_VERSION"
+JEST_ENV="$ENV_CACHE/jest-$JEST_VERSION"
 
 # ensure_js_env <env-dir> <package> <version> <bin>: build the shared env if
 # absent. Returns non-zero when the host cannot provide it, so the caller fails
@@ -1175,12 +1192,12 @@ ensure_js_env() {
 }
 
 require_vitest_env() {
-  ensure_js_env "$VITEST_ENV" vitest 3.2.7 vitest \
+  ensure_js_env "$VITEST_ENV" vitest "$VITEST_VERSION" vitest \
     || fail "$1: could not provision a node_modules with vitest (needs node and npm, plus network or a warm npm cache); the vitest runner cannot be verified without one"
 }
 
 require_jest_env() {
-  ensure_js_env "$JEST_ENV" jest 30.4.1 jest \
+  ensure_js_env "$JEST_ENV" jest "$JEST_VERSION" jest \
     || fail "$1: could not provision a node_modules with jest (needs node and npm, plus network or a warm npm cache); the jest runner cannot be verified without one"
 }
 
