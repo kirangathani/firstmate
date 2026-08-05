@@ -143,30 +143,6 @@ if [ -d "$ENV_CACHE" ]; then
     -exec rm -rf {} + 2>/dev/null || true
 fi
 
-# A pin or interpreter bump names a NEW directory, so the superseded one is left
-# behind - a whole node_modules or venv per bump, kept forever on every
-# developer machine (CI is unaffected, it always starts cold). Reclaim those,
-# but only under a hard age guard: a concurrent shard could still be running
-# against an older pin, and deleting a live environment out from under it is
-# worse than the disk it saves. So an entry goes only when NOTHING has touched
-# it for seven days, and a directory matching a CURRENT key is never a candidate
-# at all. The guard is deliberately far stricter than the six hours above,
-# because a staging tree is private to one process while a published environment
-# is shared. Both timestamps must agree it is cold; the builders below touch an
-# environment on every cache hit, so "not touched" means not USED either, not
-# merely not rebuilt.
-if [ -d "$ENV_CACHE" ]; then
-  for kept_env in "$ENV_CACHE"/vitest-* "$ENV_CACHE"/jest-* "$ENV_CACHE"/pytest-*; do
-    [ -d "$kept_env" ] || continue
-    case "$kept_env" in
-      "$VITEST_ENV"|"$JEST_ENV"|"$PYTEST_VENV") continue ;;
-      *.build.??????) continue ;;
-    esac
-    [ -n "$(find "$kept_env" -maxdepth 0 -mtime +7 -atime +7 2>/dev/null)" ] || continue
-    rm -rf "$kept_env" 2>/dev/null || true
-  done
-fi
-
 # publish_env <staging> <final>: move a fully built environment into place with
 # one rename, so no reader ever observes a partial tree. Returns non-zero and
 # leaves nothing behind when another shard published first.
@@ -570,9 +546,6 @@ ensure_pytest_venv() {
     return 0
   fi
   if pytest_venv_usable "$PYTEST_VENV"; then
-    # Keep the superseded-environment sweep's age guard honest: a cache HIT is a
-    # use, and an environment in use must never look cold.
-    touch "$PYTEST_VENV" 2>/dev/null || true
     PYTEST_VENV_READY=1
     return 0
   fi
@@ -612,7 +585,7 @@ ensure_pytest_venv() {
 }
 
 require_pytest_venv() {
-  ensure_pytest_venv || fail "$1: could not provision a venv with pytest (needs python3 with venv, and pip or an importable pytest); the pytest runner cannot be verified without one"
+  ensure_pytest_venv || fail "$1: could not provision a venv with pytest==$PYTEST_VERSION (needs python3 with venv, plus a pip able to install that exact version - so an interpreter that version still supports, and network or a matching cached wheel; an importable host pytest skips the install only when it is already exactly $PYTEST_VERSION); the pytest runner cannot be verified without one"
 }
 
 # write_py_tree <dir> <behavior> <asserted> [<pkg-parent>]: the plan's Z/K
@@ -1237,9 +1210,6 @@ EOF
 ensure_js_env() {
   local env=$1 pkg=$2 version=$3 bin=$4 staging
   if [ -x "$env/node_modules/.bin/$bin" ]; then
-    # Keep the superseded-environment sweep's age guard honest: a cache HIT is a
-    # use, and an environment in use must never look cold.
-    touch "$env" 2>/dev/null || true
     return 0
   fi
   command -v node >/dev/null 2>&1 || return 1
