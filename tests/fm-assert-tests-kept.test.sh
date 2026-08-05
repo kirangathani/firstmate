@@ -106,6 +106,32 @@ if [ -z "$ENV_CACHE" ]; then
   ENV_CACHE="$kept_git_dir/fm-test-env-cache"
 fi
 
+# Every pin lives here and is written ONCE. The cache directory's NAME and the
+# version handed to npm/pip are both derived from the same variable, so they
+# cannot drift apart and leave a stale tree served under a bumped pin's name.
+# Bump a runner by editing only its version variable below.
+#
+# These are the versions the runner behavior in bin/fm-test-exec-lib.sh was
+# verified against (vitest/jest on 2026-08-03, pytest on 2026-08-05). pytest is
+# pinned for the same reason vitest and jest are: unpinned, a months-old local
+# venv keeps serving an old pytest while CI, always cold, resolves the newest,
+# so a skip/pending spelling or JUnit-XML shape change would go red in CI and
+# stay green locally forever with no key to invalidate.
+VITEST_VERSION=3.2.7
+JEST_VERSION=30.4.1
+PYTEST_VERSION=9.1.1
+VITEST_ENV="$ENV_CACHE/vitest-$VITEST_VERSION"
+JEST_ENV="$ENV_CACHE/jest-$JEST_VERSION"
+# A venv additionally bakes in the interpreter it was built against and is not
+# portable across CPython versions, so that joins the pinned pytest in the key.
+PYTEST_VENV_KEY=$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || true)
+if [ -n "$PYTEST_VENV_KEY" ]; then
+  PYTEST_VENV="$ENV_CACHE/pytest-$PYTEST_VERSION-py$PYTEST_VENV_KEY"
+else
+  # No usable python3 to key on; stay per-run and let ensure_pytest_venv fail.
+  PYTEST_VENV="$TMP_ROOT/_pytest-venv"
+fi
+
 # Every failure path below removes its own staging tree, but a run KILLED
 # mid-install cannot, and each orphan is a whole node_modules or venv sitting in
 # the cache forever. Sweep only entries carrying the private `.build.<6 chars>`
@@ -115,6 +141,30 @@ fi
 if [ -d "$ENV_CACHE" ]; then
   find "$ENV_CACHE" -maxdepth 1 -type d -name '*.build.??????' -mmin +360 \
     -exec rm -rf {} + 2>/dev/null || true
+fi
+
+# A pin or interpreter bump names a NEW directory, so the superseded one is left
+# behind - a whole node_modules or venv per bump, kept forever on every
+# developer machine (CI is unaffected, it always starts cold). Reclaim those,
+# but only under a hard age guard: a concurrent shard could still be running
+# against an older pin, and deleting a live environment out from under it is
+# worse than the disk it saves. So an entry goes only when NOTHING has touched
+# it for seven days, and a directory matching a CURRENT key is never a candidate
+# at all. The guard is deliberately far stricter than the six hours above,
+# because a staging tree is private to one process while a published environment
+# is shared. Both timestamps must agree it is cold; the builders below touch an
+# environment on every cache hit, so "not touched" means not USED either, not
+# merely not rebuilt.
+if [ -d "$ENV_CACHE" ]; then
+  for kept_env in "$ENV_CACHE"/vitest-* "$ENV_CACHE"/jest-* "$ENV_CACHE"/pytest-*; do
+    [ -d "$kept_env" ] || continue
+    case "$kept_env" in
+      "$VITEST_ENV"|"$JEST_ENV"|"$PYTEST_VENV") continue ;;
+      *.build.??????) continue ;;
+    esac
+    [ -n "$(find "$kept_env" -maxdepth 0 -mtime +7 -atime +7 2>/dev/null)" ] || continue
+    rm -rf "$kept_env" 2>/dev/null || true
+  done
 fi
 
 # publish_env <staging> <final>: move a fully built environment into place with
@@ -487,33 +537,42 @@ test_unexecutable_files_are_reported_not_passed() {
 
 # The provisioned environment the Python fixtures link in, exactly as a
 # pipeline-provisioned worktree's .venv is linked at the real gate. Built once
-# and shared, so the per-case cost is a symlink. Cached across runs under the
-# interpreter version it was built against - see "the shared pinned-runtime
-# cache" at the top of this file for the key rule and the coverage trade.
-PYTEST_VENV_KEY=$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || true)
-if [ -n "$PYTEST_VENV_KEY" ]; then
-  PYTEST_VENV="$ENV_CACHE/pytest-py$PYTEST_VENV_KEY"
-else
-  # No usable python3 to key on; stay per-run and let ensure_pytest_venv fail.
-  PYTEST_VENV="$TMP_ROOT/_pytest-venv"
-fi
+# and shared, so the per-case cost is a symlink. $PYTEST_VERSION and
+# $PYTEST_VENV are set with the other pins under "the shared pinned-runtime
+# cache" at the top of this file; that is also where the key rule and the
+# coverage trade are recorded.
 PYTEST_VENV_READY=0
 
+# pytest_venv_usable <venv>: the venv exists AND resolves the PINNED pytest.
+# Version-checking, not presence-checking: `-m pytest --version` passes for ANY
+# pytest, so a venv built with --system-site-packages against whatever the host
+# happens to carry would sail through while serving a version the directory name
+# promises it is not. A mismatch is a cache miss, so the pin is what the cases
+# actually run.
+pytest_venv_usable() {
+  [ -x "$1/bin/python" ] || return 1
+  [ "$("$1/bin/python" -c 'import pytest; print(pytest.__version__)' 2>/dev/null)" \
+    = "$PYTEST_VERSION" ]
+}
+
 # ensure_pytest_venv: build $PYTEST_VENV if absent or unusable. Returns non-zero
-# when the host cannot provide pytest at all, so the caller fails loudly instead
-# of silently dropping the coverage that proves assertions really execute.
+# when the host cannot provide the pinned pytest, so the caller fails loudly
+# instead of silently dropping the coverage that proves assertions really
+# execute, and never falls back to some other version.
 #
 # A cached venv is verified once per run rather than trusted on the strength of
 # its interpreter existing: it may have been built with --system-site-packages
-# against a host pytest that has since gone away. An unusable one is rebuilt,
-# never patched around.
+# against a host pytest that has since gone away or been upgraded past the pin.
+# An unusable one is rebuilt, never patched around.
 ensure_pytest_venv() {
   local staging
   if [ "$PYTEST_VENV_READY" = 1 ]; then
     return 0
   fi
-  if [ -x "$PYTEST_VENV/bin/python" ] \
-    && "$PYTEST_VENV/bin/python" -m pytest --version >/dev/null 2>&1; then
+  if pytest_venv_usable "$PYTEST_VENV"; then
+    # Keep the superseded-environment sweep's age guard honest: a cache HIT is a
+    # use, and an environment in use must never look cold.
+    touch "$PYTEST_VENV" 2>/dev/null || true
     PYTEST_VENV_READY=1
     return 0
   fi
@@ -521,23 +580,34 @@ ensure_pytest_venv() {
   # mktemp creates the directory; `venv` re-uses an existing empty one, so the
   # name stays claimed for the whole build and no second process can take it.
   staging=$(mktemp -d "$PYTEST_VENV.build.XXXXXX" 2>/dev/null) || return 1
-  if python3 -c 'import pytest' >/dev/null 2>&1; then
-    # Already available on the host: reuse it and stay off the network.
+  if [ "$(python3 -c 'import pytest; print(pytest.__version__)' 2>/dev/null)" = "$PYTEST_VERSION" ]; then
+    # The host already carries EXACTLY the pin: reuse it and stay off the
+    # network. Gated on the version, never on bare importability - borrowing
+    # whatever pytest the host has would quietly defeat the pin.
     python3 -m venv --system-site-packages "$staging" >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
   else
     python3 -m venv "$staging" >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
-    "$staging/bin/python" -m pip install --quiet --disable-pip-version-check pytest \
+    "$staging/bin/python" -m pip install --quiet --disable-pip-version-check "pytest==$PYTEST_VERSION" \
       >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
   fi
-  "$staging/bin/python" -m pytest --version >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
+  pytest_venv_usable "$staging" || { rm -rf "$staging"; return 1; }
   relocate_venv_paths "$staging" "$PYTEST_VENV" || { rm -rf "$staging"; return 1; }
-  # Drop an unusable predecessor only once the replacement is built and proven.
+  # Another shard may have published a good venv while this one was building,
+  # and the fixtures symlink their .venv straight at it - removing it here would
+  # pull a live interpreter out from under a case that is already running. So
+  # re-probe first and, if the published tree is now good, throw away THIS build
+  # rather than the tree in use. Only a still-unusable predecessor is dropped,
+  # and only once the replacement is built and proven.
+  if pytest_venv_usable "$PYTEST_VENV"; then
+    rm -rf "$staging"
+    PYTEST_VENV_READY=1
+    return 0
+  fi
   if [ -e "$PYTEST_VENV" ]; then
     rm -rf "$PYTEST_VENV"
   fi
   publish_env "$staging" "$PYTEST_VENV" || return 1
-  [ -x "$PYTEST_VENV/bin/python" ] \
-    && "$PYTEST_VENV/bin/python" -m pytest --version >/dev/null 2>&1 || return 1
+  pytest_venv_usable "$PYTEST_VENV" || return 1
   PYTEST_VENV_READY=1
 }
 
@@ -1142,24 +1212,17 @@ EOF
 
 # The provisioned environments the JS fixtures link in, exactly as a
 # pipeline-provisioned worktree's node_modules is linked at the real gate.
-# Built by a real `npm install` (versions pinned for determinism: vitest 3.2.7 /
-# jest 30.4.1, the versions the runner behavior in bin/fm-test-exec-lib.sh was
-# verified against on 2026-08-03) and shared, so the per-case cost is a symlink.
-# The install needs node, npm, and network or a warm npm cache; CI provides all
-# three, and the suite is self-contained with no workflow-side installs.
+# Built by a real `npm install` at $VITEST_VERSION / $JEST_VERSION and shared,
+# so the per-case cost is a symlink. The install needs node, npm, and network or
+# a warm npm cache; CI provides all three, and the suite is self-contained with
+# no workflow-side installs.
 #
 # The pinned version is part of the cache directory's NAME, so bumping a version
 # names a directory that does not exist yet and gets a fresh install; a tree
-# installed against the old pin can never be served for the new one. See "the
-# shared pinned-runtime cache" at the top of this file for the trade.
-#
-# Bump a pin by editing ONLY the variable below. The cache key and the version
-# npm is asked to install are both derived from it, so they cannot drift apart
-# and leave a stale tree being served under a bumped pin's name.
-VITEST_VERSION=3.2.7
-JEST_VERSION=30.4.1
-VITEST_ENV="$ENV_CACHE/vitest-$VITEST_VERSION"
-JEST_ENV="$ENV_CACHE/jest-$JEST_VERSION"
+# installed against the old pin can never be served for the new one.
+# $VITEST_VERSION / $JEST_VERSION and the directories they key are set with the
+# other pins under "the shared pinned-runtime cache" at the top of this file;
+# bump a pin there and nowhere else.
 
 # ensure_js_env <env-dir> <package> <version> <bin>: build the shared env if
 # absent. Returns non-zero when the host cannot provide it, so the caller fails
@@ -1174,6 +1237,9 @@ JEST_ENV="$ENV_CACHE/jest-$JEST_VERSION"
 ensure_js_env() {
   local env=$1 pkg=$2 version=$3 bin=$4 staging
   if [ -x "$env/node_modules/.bin/$bin" ]; then
+    # Keep the superseded-environment sweep's age guard honest: a cache HIT is a
+    # use, and an environment in use must never look cold.
+    touch "$env" 2>/dev/null || true
     return 0
   fi
   command -v node >/dev/null 2>&1 || return 1
@@ -1211,8 +1277,8 @@ write_js_tree() {
   local dir=$1 runner=$2 behavior=$3 asserted=$4
   mkdir -p "$dir/src"
   if [ "$runner" = vitest ]; then
-    cat > "$dir/package.json" <<'EOF'
-{"name":"fixture","private":true,"type":"module","devDependencies":{"vitest":"3.2.7"}}
+    cat > "$dir/package.json" <<EOF
+{"name":"fixture","private":true,"type":"module","devDependencies":{"vitest":"$VITEST_VERSION"}}
 EOF
     printf 'export function greet() {\n  return "%s";\n}\n' "$behavior" > "$dir/src/mod.js"
     cat > "$dir/mod.test.js" <<EOF
@@ -1226,8 +1292,8 @@ describe('greet', () => {
 });
 EOF
   else
-    cat > "$dir/package.json" <<'EOF'
-{"name":"fixture","private":true,"devDependencies":{"jest":"30.4.1"}}
+    cat > "$dir/package.json" <<EOF
+{"name":"fixture","private":true,"devDependencies":{"jest":"$JEST_VERSION"}}
 EOF
     printf 'module.exports.greet = function greet() {\n  return "%s";\n};\n' "$behavior" > "$dir/src/mod.js"
     cat > "$dir/mod.test.js" <<EOF
@@ -1434,8 +1500,8 @@ test_jest_explicit_skip_is_visible() {
   dir="$TMP_ROOT/jest-skip"
   init_repo_at "$dir"
   mkdir -p "$dir/src"
-  cat > "$dir/package.json" <<'EOF'
-{"name":"fixture","private":true,"devDependencies":{"jest":"30.4.1"}}
+  cat > "$dir/package.json" <<EOF
+{"name":"fixture","private":true,"devDependencies":{"jest":"$JEST_VERSION"}}
 EOF
   printf 'node_modules/\n' > "$dir/.gitignore"
   cat > "$dir/mod.test.js" <<'EOF'
