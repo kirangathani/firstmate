@@ -3,12 +3,14 @@
 FM_CUSTOM_CHECK_HASH=
 FM_CUSTOM_CHECK_SNAPSHOT=
 
+# sha256sum first because it is a C binary and shasum is a perl script; see
+# bin/fm-pr-lib.sh's fm_pr_sha256 for the measurement and the macOS fallback rule.
 fm_custom_check_sha256() {
   local file=$1
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$file" 2>/dev/null | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
+  if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$file" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" 2>/dev/null | awk '{print $1}'
   else
     return 1
   fi
