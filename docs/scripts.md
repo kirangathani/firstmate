@@ -82,7 +82,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supersession-lib.sh` | Single matcher for the captain-approved supersession record, shared by the merge gate that enforces it and the viewer that displays it (`fm-pr-merge.sh`'s header owns the entry grammar) |
 | `fm-ci-waiver.sh`        | Generate, publish, and sign the CI testing waiver, refusing to sign for a task the captain did not dispatch with a CI skip |
 | `fm-ci-waiver-verify.sh` | Decide in CI whether a published waiver line covers the pull request's current head commit |
-| `fm-ci-waiver-lib.sh`    | Own the waiver's signed payload, published line grammar, and constant-time comparison, shared by signer and verifier |
+| `fm-ci-waiver-lib.sh`    | Own the waiver's signed payload, per-repository key derivation, published line grammar, and constant-time comparison, shared by signer and verifier |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |

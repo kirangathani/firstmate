@@ -4,20 +4,30 @@
 # worktree and never in CI.
 #
 # Usage:
-#   fm-ci-waiver.sh init [--rotate]        generate and store the local secret
-#   fm-ci-waiver.sh publish <owner/repo>   push that secret to a repo's Actions secrets
-#   fm-ci-waiver.sh sign <task-id> <sha>   print the publishable waiver line
+#   fm-ci-waiver.sh init [--rotate]                generate and store the master key
+#   fm-ci-waiver.sh publish <owner/repo>           push that repo's derived key to its Actions secrets
+#   fm-ci-waiver.sh sign <task-id> <sha> <owner/repo>   print the publishable waiver line
 #
 # THE SECRET
-# One secret per firstmate home, stored at $FM_HOME/config/ci-waiver-secret
-# (local, gitignored, mode 0600) and mirrored into every repo that must verify
-# waivers as the Actions repository secret FM_CI_WAIVER_SECRET. It is never
-# committed, never printed, and never given to a worker: `init` writes it
-# straight to the file and `publish` pipes it straight into gh-axi, so its value
-# never reaches a terminal, an argv list, or an environment variable.
-# `publish` takes an explicit <owner/repo> rather than guessing one, and one
-# secret serves every repo, so run it once per project whose CI must honour
-# waivers.
+# One MASTER key per firstmate home, stored at $FM_HOME/config/ci-waiver-secret
+# (local, gitignored, mode 0600). The master is never published anywhere. What
+# each repository receives as the Actions secret FM_CI_WAIVER_SECRET is a key
+# DERIVED for that repository alone, so a theft from one repository's secrets is
+# contained to that repository and reveals nothing about the master or any other
+# repository; bin/fm-ci-waiver-lib.sh owns the derivation and the reasoning.
+#
+# That containment is the point: the ci-waiver job necessarily holds the secret
+# in its environment, and on a pull_request build it sits beside PR-authored
+# code, so a repository key is the realistic thing to lose.
+#
+# Nothing is ever committed, printed, or given to a worker: `init` writes the
+# master straight to the file, and `publish` derives and pipes the repository key
+# straight into gh-axi through a shell builtin, so no value reaches a terminal,
+# an argv list, or an environment variable.
+#
+# `publish` and `sign` both take an explicit <owner/repo> rather than guessing
+# one. Run `publish` once per project whose CI must honour waivers; `init` stays
+# a one-off per home.
 #
 # THE AUTHORITY CHECK
 # `sign` refuses unless the task's own state/<id>.meta records BOTH ci_skip=on
@@ -125,31 +135,47 @@ case "$cmd" in
 
   publish)
     repo=${1:-}
-    case "$repo" in
-      */*) : ;;
-      *) echo "error: publish requires an explicit <owner/repo>" >&2; exit 2 ;;
-    esac
-    case "$repo" in
-      *[!A-Za-z0-9._/-]*|*/*/*) echo "error: '$repo' is not a valid <owner/repo>" >&2; exit 2 ;;
-    esac
+    [ -n "$repo" ] || { echo "error: publish requires an explicit <owner/repo>" >&2; exit 2; }
+    fm_ci_waiver_valid_repo "$repo" || {
+      echo "error: '$repo' is not a valid <owner/repo>" >&2; exit 2
+    }
+    require_node || exit 1
     read_secret_or_die
     command -v gh-axi >/dev/null 2>&1 || {
       echo "error: gh-axi is required to set the repository secret" >&2
       exit 1
     }
-    # Piped, never echoed: gh-axi secret set reads the value only from stdin and
-    # never prints it back.
-    if ! gh-axi secret set FM_CI_WAIVER_SECRET -R "$repo" < "$SECRET_FILE"; then
+    # The MASTER never leaves this machine. What this repository receives is a
+    # key derived for it alone, so a theft from its Actions secrets is contained
+    # to this one repository (bin/fm-ci-waiver-lib.sh owns why).
+    repo_key=$(fm_ci_waiver_repo_key "$repo" < "$SECRET_FILE") || {
+      echo "error: could not derive the repository key for $repo" >&2
+      exit 1
+    }
+    fm_ci_waiver_valid_sig "$repo_key" || {
+      echo "error: key derivation for $repo produced an unusable value" >&2
+      exit 1
+    }
+    # printf is a shell builtin, so the value is not exposed in any argv, and
+    # gh-axi secret set reads it only from stdin and never prints it back.
+    if ! printf '%s' "$repo_key" | gh-axi secret set FM_CI_WAIVER_SECRET -R "$repo"; then
       echo "error: could not set FM_CI_WAIVER_SECRET on $repo" >&2
       exit 1
     fi
-    echo "published FM_CI_WAIVER_SECRET to $repo (value not printed)"
+    echo "published FM_CI_WAIVER_SECRET to $repo (derived for that repo, value not printed)"
     ;;
 
   sign)
     ID=${1:-}
     SHA=${2:-}
+    REPO=${3:-}
     fm_ci_waiver_valid_task_id "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+    [ -n "$REPO" ] || {
+      echo "error: sign requires the <owner/repo> the PR will be opened against" >&2
+      echo "error: each repository verifies against its own derived key, so a signature must name the repository it is for" >&2
+      exit 2
+    }
+    fm_ci_waiver_valid_repo "$REPO" || { echo "error: '$REPO' is not a valid <owner/repo>" >&2; exit 2; }
     fm_ci_waiver_valid_sha "$SHA" || {
       echo "error: '<sha>' must be a full 40-character lowercase commit id; an abbreviation cannot be signed because the verifier compares against GitHub's full head SHA" >&2
       exit 2
@@ -180,7 +206,14 @@ case "$cmd" in
       echo "error: that pairing means the flag line was not written by this home's own dispatch - re-dispatch the task with --ci-skip or --all-testing-skip instead of editing its record" >&2
       exit 1
     fi
-    SIG=$(fm_ci_waiver_sign "$ID" "$SHA" < "$SECRET_FILE") || {
+    # Signed with the key derived for THIS repository, which is the only key its
+    # CI holds. The dispatch check above deliberately used the master instead, so
+    # a stolen repository key cannot authorize a task the captain never flagged.
+    REPO_KEY=$(fm_ci_waiver_repo_key "$REPO" < "$SECRET_FILE") || {
+      echo "error: could not derive the repository key for $REPO" >&2
+      exit 1
+    }
+    SIG=$(printf '%s' "$REPO_KEY" | fm_ci_waiver_sign "$ID" "$SHA") || {
       echo "error: could not compute the waiver signature" >&2
       exit 1
     }

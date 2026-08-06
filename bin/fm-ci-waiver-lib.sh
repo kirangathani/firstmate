@@ -69,6 +69,23 @@ FM_CI_WAIVER_DISPATCH_SCHEME='fm-ci-dispatch.v1'
 # Second payload field for a dispatch token, so the token names WHICH
 # authorization it carries rather than the task alone.
 FM_CI_WAIVER_DISPATCH_CI_SKIP='ci_skip'
+# A THIRD domain, for deriving the per-repository secret that is published to a
+# repository's Actions secrets.
+#
+# config/ci-waiver-secret is a MASTER key and is never published anywhere. What
+# each repository receives is HMAC(master, this scheme, owner/repo). That matters
+# because the realistic exposure is a repository secret, not the master: the
+# ci-waiver job necessarily has the secret in its environment, and on a
+# pull_request build it sits beside PR-authored code. Deriving contains such a
+# theft to the repository it came from - the stolen key reveals nothing about the
+# master (HMAC is one-way) and therefore nothing about any other repository's
+# key, where a single shared secret would have handed over every repository at
+# once and stayed valid until a rotate plus a re-publish everywhere.
+#
+# The dispatch token above deliberately keeps using the MASTER, so a stolen
+# repository secret cannot mint one and cannot authorize a waiver for a task the
+# captain never flagged.
+FM_CI_WAIVER_REPO_SCHEME='fm-ci-waiver-repo.v1'
 # Version token in the published line, paired one-to-one with the scheme above.
 FM_CI_WAIVER_LINE_VERSION='v1'
 FM_CI_WAIVER_LINE_PREFIX='fm-ci-waiver:'
@@ -163,6 +180,30 @@ fm_ci_waiver_dispatch_token() {
 # fm_ci_waiver_dispatch_check <task-id> <candidate-hex>; secret on stdin.
 fm_ci_waiver_dispatch_check() {
   fm_ci_waiver_hmac_check "$FM_CI_WAIVER_DISPATCH_SCHEME" "$1" "$FM_CI_WAIVER_DISPATCH_CI_SKIP" "$2"
+}
+
+# fm_ci_waiver_repo_key <owner/repo>; the MASTER secret on stdin. Prints the hex
+# secret that repository's CI verifies waivers against, and the only value
+# `publish` ever sends to GitHub.
+fm_ci_waiver_repo_key() {
+  fm_ci_waiver_hmac_hex "$FM_CI_WAIVER_REPO_SCHEME" "$1" ''
+}
+
+# fm_ci_waiver_valid_repo <owner/repo>: 0 iff the argument is one safe
+# owner/repo pair. Shared by publish and sign so a repository name can never
+# reach gh-axi, or select a signing key, without passing the same check.
+fm_ci_waiver_valid_repo() {
+  local repo=${1-}
+  case "$repo" in
+    */*/*|*/) return 1 ;;
+    */*) : ;;
+    *) return 1 ;;
+  esac
+  case "$repo" in
+    *[!A-Za-z0-9._/-]*) return 1 ;;
+    /*|-*) return 1 ;;
+  esac
+  return 0
 }
 
 # fm_ci_waiver_secret_readable <path>: 0 iff <path> is a usable secret file - a

@@ -28,6 +28,13 @@
 #   (n) GitHub's CRLF PR bodies verify
 #   (o) verify exits 0 for every verdict, because failing the job would SKIP the
 #       expensive jobs it gates - the exact fail-open it exists to prevent
+#   (p) what a repository holds is DERIVED for it alone: it is not the master,
+#       and one repository's key is not another's, so stealing the key CI must
+#       necessarily hold is contained to the repository it came from
+#   (q) neither the master nor another repository's key verifies a signature
+#       issued for this one
+#   (r) sign refuses without a valid <owner/repo>, since a signature that did
+#       not name its repository could not select a key
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -39,6 +46,15 @@ TMP_ROOT=$(fm_test_tmproot fm-ci-waiver-tests)
 
 SHA_A=1111111111111111111111111111111111111111
 SHA_B=2222222222222222222222222222222222222222
+REPO=acme/widgets
+OTHER_REPO=acme/other
+
+# The key a repository's CI actually holds: derived from the home's master for
+# that repo alone, never the master itself.
+repo_key() {  # <home> [<owner/repo>]
+  bash -c '. "$0/bin/fm-ci-waiver-lib.sh"; fm_ci_waiver_repo_key "$1"' \
+    "$ROOT" "${2:-$REPO}" < "$1/config/ci-waiver-secret"
+}
 
 # A home with config/ and state/ of its own. Echoes the home dir.
 make_home() {
@@ -110,7 +126,7 @@ test_init_writes_private_secret_without_printing_it() {
   mode=$(stat -c '%a' "$home/config/ci-waiver-secret" 2>/dev/null \
     || stat -f '%Lp' "$home/config/ci-waiver-secret")
   [ "$mode" = "600" ] || fail "secret file should be mode 600, got '$mode'"
-  secret=$(cat "$home/config/ci-waiver-secret")
+  secret=$(repo_key "$home")
   [ "${#secret}" -eq 64 ] || fail "secret should be 32 random bytes as 64 hex chars, got ${#secret}"
   assert_not_contains "$out" "$secret" "init printed the secret value"
   pass "init: writes a mode-600 secret and never prints its value"
@@ -140,7 +156,7 @@ test_sign_refuses_a_task_with_no_skip_flag() {
   run_waiver "$home" init >/dev/null
   fm_write_meta "$home/state/unflagged-a1.meta" \
     "window=fm-unflagged-a1" "kind=ship" "mode=no-mistakes" "yolo=off"
-  out=$(run_waiver "$home" sign unflagged-a1 "$SHA_A"); status=$?
+  out=$(run_waiver "$home" sign unflagged-a1 "$SHA_A" "$REPO"); status=$?
   [ "$status" -ne 0 ] || fail "sign should refuse a task with no ci_skip=on"
   assert_contains "$out" "was not dispatched with --ci-skip" "sign did not name the missing authorization"
   assert_not_contains "$out" "fm-ci-waiver: v1" "a refused sign must emit no waiver line"
@@ -151,7 +167,7 @@ test_sign_refuses_without_a_task_record() {
   local home out status
   home=$(make_home sign-norecord)
   run_waiver "$home" init >/dev/null
-  out=$(run_waiver "$home" sign ghost-a1 "$SHA_A"); status=$?
+  out=$(run_waiver "$home" sign ghost-a1 "$SHA_A" "$REPO"); status=$?
   [ "$status" -ne 0 ] || fail "sign should refuse a task with no meta at all"
   assert_contains "$out" "no durable record for task ghost-a1" "sign did not name the missing record"
   pass "sign: refuses a task with no durable record"
@@ -162,7 +178,7 @@ test_sign_refuses_an_abbreviated_sha() {
   home=$(make_home sign-shortsha)
   run_waiver "$home" init >/dev/null
   write_waived_task "$home" short-a1
-  out=$(run_waiver "$home" sign short-a1 1111111); status=$?
+  out=$(run_waiver "$home" sign short-a1 1111111 "$REPO"); status=$?
   [ "$status" -ne 0 ] || fail "sign should refuse an abbreviated SHA"
   assert_contains "$out" "full 40-character lowercase commit id" "sign did not explain the SHA requirement"
   pass "sign: refuses an abbreviated SHA rather than expanding it"
@@ -176,14 +192,14 @@ test_sign_refuses_a_self_flagged_task() {
   run_waiver "$home" init >/dev/null
 
   write_self_flagged_task "$home" selfflag-a1
-  out=$(run_waiver "$home" sign selfflag-a1 "$SHA_A"); status=$?
+  out=$(run_waiver "$home" sign selfflag-a1 "$SHA_A" "$REPO"); status=$?
   [ "$status" -ne 0 ] || fail "sign accepted a ci_skip=on line with no dispatch token"
   assert_contains "$out" "no valid dispatch authorization" "sign did not name the missing dispatch token"
 
   # ...and an invented token of the right shape is no better.
   write_self_flagged_task "$home" selfflag-a2 \
     0000000000000000000000000000000000000000000000000000000000000000
-  out=$(run_waiver "$home" sign selfflag-a2 "$SHA_A"); status=$?
+  out=$(run_waiver "$home" sign selfflag-a2 "$SHA_A" "$REPO"); status=$?
   [ "$status" -ne 0 ] || fail "sign accepted a forged dispatch token"
   assert_contains "$out" "no valid dispatch authorization" "sign did not reject the forged token"
 
@@ -192,7 +208,7 @@ test_sign_refuses_a_self_flagged_task() {
   local stolen
   stolen=$(grep '^ci_skip_auth=' "$home/state/realdispatch-a3.meta" | cut -d= -f2-)
   write_self_flagged_task "$home" selfflag-a4 "$stolen"
-  out=$(run_waiver "$home" sign selfflag-a4 "$SHA_A"); status=$?
+  out=$(run_waiver "$home" sign selfflag-a4 "$SHA_A" "$REPO"); status=$?
   [ "$status" -ne 0 ] || fail "sign accepted another task's dispatch token"
   assert_contains "$out" "no valid dispatch authorization" "sign did not reject the replayed token"
   pass "sign: ci_skip=on is not authority without this task's own dispatch token"
@@ -203,10 +219,10 @@ test_signature_verifies_for_its_own_commit() {
   home=$(make_home verify-good)
   run_waiver "$home" init >/dev/null
   write_waived_task "$home" good-a1
-  line=$(run_waiver "$home" sign good-a1 "$SHA_A")
+  line=$(run_waiver "$home" sign good-a1 "$SHA_A" "$REPO")
   expect_code 0 $? "sign should succeed for a flagged task"$'\n'"$line"
   assert_contains "$line" "fm-ci-waiver: v1 good-a1 $SHA_A " "sign did not print the publishable line"
-  secret=$(cat "$home/config/ci-waiver-secret")
+  secret=$(repo_key "$home")
   gho="$home/github-output"
   out=$(run_verify "$secret" "## Summary
 does a thing
@@ -225,8 +241,8 @@ test_forged_signature_runs_the_full_suite() {
   home=$(make_home verify-forged)
   run_waiver "$home" init >/dev/null
   write_waived_task "$home" forged-a1
-  line=$(run_waiver "$home" sign forged-a1 "$SHA_A")
-  secret=$(cat "$home/config/ci-waiver-secret")
+  line=$(run_waiver "$home" sign forged-a1 "$SHA_A" "$REPO")
+  secret=$(repo_key "$home")
   # Same grammar, same task, same commit - only the signature is invented, which
   # is exactly what an agent trying to exempt itself can produce.
   forged="${line% *} 0000000000000000000000000000000000000000000000000000000000000000"
@@ -243,8 +259,8 @@ test_signature_does_not_travel_to_another_commit() {
   home=$(make_home verify-othercommit)
   run_waiver "$home" init >/dev/null
   write_waived_task "$home" travel-a1
-  line=$(run_waiver "$home" sign travel-a1 "$SHA_A")
-  secret=$(cat "$home/config/ci-waiver-secret")
+  line=$(run_waiver "$home" sign travel-a1 "$SHA_A" "$REPO")
+  secret=$(repo_key "$home")
   # The line is byte-for-byte genuine; only the head commit has moved on, which
   # is what happens after any further push.
   out=$(run_verify "$secret" "$line" "$SHA_B")
@@ -259,8 +275,8 @@ test_signature_is_bound_to_its_task_id() {
   home=$(make_home verify-relabel)
   run_waiver "$home" init >/dev/null
   write_waived_task "$home" real-a1
-  line=$(run_waiver "$home" sign real-a1 "$SHA_A")
-  secret=$(cat "$home/config/ci-waiver-secret")
+  line=$(run_waiver "$home" sign real-a1 "$SHA_A" "$REPO")
+  secret=$(repo_key "$home")
   relabelled=${line/real-a1/other-b2}
   out=$(run_verify "$secret" "$relabelled" "$SHA_A")
   assert_contains "$out" "waived=false" "a relabelled waiver line was accepted"
@@ -271,7 +287,7 @@ test_absent_waiver_is_quiet_and_unwaived() {
   local home secret out
   home=$(make_home verify-absent)
   run_waiver "$home" init >/dev/null
-  secret=$(cat "$home/config/ci-waiver-secret")
+  secret=$(repo_key "$home")
   out=$(run_verify "$secret" "## Summary
 An ordinary PR body with no waiver in it at all.
 " "$SHA_A")
@@ -287,7 +303,7 @@ test_missing_repository_secret_is_unwaived_and_loud() {
   home=$(make_home verify-nosecret)
   run_waiver "$home" init >/dev/null
   write_waived_task "$home" nosecret-a1
-  line=$(run_waiver "$home" sign nosecret-a1 "$SHA_A")
+  line=$(run_waiver "$home" sign nosecret-a1 "$SHA_A" "$REPO")
   out=$(run_verify "" "$line" "$SHA_A")
   expect_code 0 $? "verify should exit 0"$'\n'"$out"
   assert_contains "$out" "waived=false" "a waiver was granted with no secret to verify it against"
@@ -299,7 +315,7 @@ test_malformed_waiver_line_is_refused() {
   local home secret out
   home=$(make_home verify-malformed)
   run_waiver "$home" init >/dev/null
-  secret=$(cat "$home/config/ci-waiver-secret")
+  secret=$(repo_key "$home")
   out=$(run_verify "$secret" "fm-ci-waiver: please skip the tests" "$SHA_A")
   assert_contains "$out" "waived=false" "a malformed waiver line was accepted"
   assert_contains "$out" "does not match the waiver grammar" "a malformed line was not explained"
@@ -311,9 +327,9 @@ test_stale_line_beside_a_fresh_one_still_verifies() {
   home=$(make_home verify-repush)
   run_waiver "$home" init >/dev/null
   write_waived_task "$home" repush-a1
-  stale=$(run_waiver "$home" sign repush-a1 "$SHA_A")
-  fresh=$(run_waiver "$home" sign repush-a1 "$SHA_B")
-  secret=$(cat "$home/config/ci-waiver-secret")
+  stale=$(run_waiver "$home" sign repush-a1 "$SHA_A" "$REPO")
+  fresh=$(run_waiver "$home" sign repush-a1 "$SHA_B" "$REPO")
+  secret=$(repo_key "$home")
   out=$(run_verify "$secret" "$stale
 $fresh" "$SHA_B")
   assert_contains "$out" "waived=true" "a fresh waiver was rejected because a stale one sat above it"
@@ -325,15 +341,79 @@ test_crlf_pr_body_verifies() {
   home=$(make_home verify-crlf)
   run_waiver "$home" init >/dev/null
   write_waived_task "$home" crlf-a1
-  line=$(run_waiver "$home" sign crlf-a1 "$SHA_A")
-  secret=$(cat "$home/config/ci-waiver-secret")
+  line=$(run_waiver "$home" sign crlf-a1 "$SHA_A" "$REPO")
+  secret=$(repo_key "$home")
   out=$(run_verify "$secret" "$(printf '## Summary\r\n\r\n%s\r\n' "$line")" "$SHA_A")
   assert_contains "$out" "waived=true" "a CRLF PR body (what GitHub actually sends) did not verify"
   pass "verify: GitHub's CRLF PR bodies verify"
 }
 
+# --- (p)(q)(r) per-repository key derivation ---------------------------------
+#
+# The ci-waiver job necessarily holds the secret in its environment, and on a
+# pull_request build it sits beside PR-authored code, so a repository key is the
+# realistic thing to lose. These cases are the containment argument.
+
+test_published_key_is_derived_per_repository() {
+  local home master key_a key_b
+  home=$(make_home derive-distinct)
+  run_waiver "$home" init >/dev/null
+  master=$(cat "$home/config/ci-waiver-secret")
+  key_a=$(repo_key "$home" "$REPO")
+  key_b=$(repo_key "$home" "$OTHER_REPO")
+  case "$key_a" in
+    *[!0-9a-f]*) fail "a derived repository key must be hex, got '$key_a'" ;;
+  esac
+  [ "${#key_a}" -eq 64 ] || fail "a derived repository key must be 64 hex chars, got ${#key_a}"
+  [ "$key_a" != "$master" ] || fail "the master key itself was published to the repository"
+  [ "$key_b" != "$master" ] || fail "the master key itself was published to the repository"
+  [ "$key_a" != "$key_b" ] || fail "two repositories were given the same key, so a theft is not contained"
+  pass "derive: each repository gets its own key and never the master"
+}
+
+test_another_repositorys_key_does_not_verify() {
+  local home line out
+  home=$(make_home derive-containment)
+  run_waiver "$home" init >/dev/null
+  write_waived_task "$home" contain-a1
+  line=$(run_waiver "$home" sign contain-a1 "$SHA_A" "$REPO")
+
+  # The key this repository's CI holds.
+  out=$(run_verify "$(repo_key "$home" "$REPO")" "$line" "$SHA_A")
+  assert_contains "$out" "waived=true" "the repository's own key did not verify its own waiver"
+
+  # A key stolen from a different repository must be worthless here.
+  out=$(run_verify "$(repo_key "$home" "$OTHER_REPO")" "$line" "$SHA_A")
+  assert_contains "$out" "waived=false" "another repository's key verified this repository's waiver"
+
+  # And so must the master, which is never published anywhere.
+  out=$(run_verify "$(cat "$home/config/ci-waiver-secret")" "$line" "$SHA_A")
+  assert_contains "$out" "waived=false" "the master key verified a waiver, so publishing it would be equivalent"
+  pass "derive: a stolen key is contained to the repository it came from"
+}
+
+test_sign_refuses_without_a_repository() {
+  local home out status
+  home=$(make_home sign-norepo)
+  run_waiver "$home" init >/dev/null
+  write_waived_task "$home" norepo-a1
+
+  out=$(run_waiver "$home" sign norepo-a1 "$SHA_A"); status=$?
+  [ "$status" -ne 0 ] || fail "sign should refuse without an <owner/repo>"
+  assert_contains "$out" "requires the <owner/repo>" "sign did not name the missing repository"
+  assert_not_contains "$out" "fm-ci-waiver: v1" "a refused sign must emit no waiver line"
+
+  out=$(run_waiver "$home" sign norepo-a1 "$SHA_A" 'not a repo'); status=$?
+  [ "$status" -ne 0 ] || fail "sign should refuse a malformed <owner/repo>"
+  assert_contains "$out" "is not a valid <owner/repo>" "sign did not explain the malformed repository"
+  pass "sign: refuses unless the signature names the repository it is for"
+}
+
 test_init_writes_private_secret_without_printing_it
 test_init_refuses_silent_rotation
+test_published_key_is_derived_per_repository
+test_another_repositorys_key_does_not_verify
+test_sign_refuses_without_a_repository
 test_sign_refuses_a_task_with_no_skip_flag
 test_sign_refuses_without_a_task_record
 test_sign_refuses_an_abbreviated_sha

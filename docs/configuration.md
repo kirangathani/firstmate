@@ -119,13 +119,22 @@ Every mode requires `tmux` on `PATH` and prints `tmux -V`.
 A repository's expensive CI jobs can be waived for one commit, but only by a keyed signature the captain issues, never by a marker string anyone can type into a PR body.
 This section owns the secret's configuration and provisioning; `bin/fm-ci-waiver-lib.sh` owns the signed payload and the published line's grammar, and `bin/fm-ci-waiver-verify.sh` owns the verdict rules.
 
-`config/ci-waiver-secret` is a local, gitignored, mode-600 file holding one 32-byte random value per firstmate home, and the same value is mirrored into every repository that must verify waivers as the Actions repository secret `FM_CI_WAIVER_SECRET`.
-Create it with `bin/fm-ci-waiver.sh init` and mirror it with `bin/fm-ci-waiver.sh publish <owner/repo>`, once per such repository; both paths keep the value out of terminals, argv, and environment variables, so it is never committed, never printed, and never given to a worker.
-`--rotate` is the only way to replace an existing secret, because rotating invalidates every signature already published on an open PR and requires re-publishing to every repository.
-The secret is not inherited by secondmate homes: a home that dispatches its own waived work runs its own `init` and `publish`.
+`config/ci-waiver-secret` is a local, gitignored, mode-600 file holding one 32-byte random MASTER key per firstmate home.
+The master is never published anywhere.
+What each repository receives as the Actions repository secret `FM_CI_WAIVER_SECRET` is a key derived for that repository alone, `HMAC(master, "fm-ci-waiver-repo.v1", <owner/repo>)`.
+
+That containment is deliberate rather than incidental: the `ci-waiver` job necessarily holds the secret in its environment, and on a pull-request build it sits beside PR-authored code, so a repository key is the realistic thing to lose.
+Because it is derived, a stolen repository key reveals nothing about the master and therefore nothing about any other repository's key, so the theft is contained to the repository it came from.
+A single shared secret would instead have handed over every repository at once and stayed valid until a rotate plus a re-publish everywhere.
+The dispatch token keeps using the master, so a stolen repository key cannot mint one either.
+
+Create the master with `bin/fm-ci-waiver.sh init` and enrol a repository with `bin/fm-ci-waiver.sh publish <owner/repo>`, once per repository whose CI must honour waivers; both paths keep every value out of terminals, argv, and environment variables, so nothing is ever committed, printed, or given to a worker.
+`--rotate` is the only way to replace an existing master, because rotating invalidates every signature already published on an open PR and requires re-publishing to every repository.
+The master is not inherited by secondmate homes: a home that dispatches its own waived work runs its own `init` and `publish`.
 
 Until a repository holds the secret the feature is inert there: a waiver line cannot be verified, so the verifier refuses it loudly and the full suite runs, which is exactly the behaviour without this feature at all.
-`bin/fm-ci-waiver.sh sign <task-id> <sha>` prints the publishable line, and it refuses unless the task's own `state/<id>.meta` records `ci_skip=on` together with a `ci_skip_auth=` dispatch token this secret reproduces for that task id.
+`bin/fm-ci-waiver.sh sign <task-id> <sha> <owner/repo>` prints the publishable line, signed with that repository's derived key, and it refuses unless the task's own `state/<id>.meta` records `ci_skip=on` together with a `ci_skip_auth=` dispatch token the master reproduces for that task id.
+It names the repository explicitly rather than inferring one, because a signature has to select a key and a wrong guess would produce a line that silently never verifies.
 That pair is the whole authorization model, and both halves are load-bearing: a worker appends its status lines into the same `state/` directory, so it could append the flag line to its own record, and the token is an HMAC it cannot compute.
 The signature covers the commit as well as the task id, so it is bound to exactly one head commit and every further push needs a fresh one; publishing the line is harmless, since it reveals nothing about the secret.
 
