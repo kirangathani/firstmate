@@ -54,9 +54,11 @@
 #      working EXCEPT when the recorded worktree is off the fm/<id> contract and
 #      is either provably another task's or has no confirmed-live agent of its
 #      own, since the busy banner cannot then be told apart from a crew parked
-#      at a gate. The coarse run-step's `running` row is withheld on that same
-#      not-proven-so-not-healthy rule (wt_ownership_unproven), so the two sites
-#      fail closed together.
+#      at a gate. An active run record and a coarse `running` row are withheld
+#      on that same not-proven-so-not-healthy rule (wt_ownership_unproven), so
+#      all three healthy-verdict sites fail closed together. A crew still on its
+#      own fm/<id> is never in that tier, so a closed window over a genuinely
+#      in-flight run keeps full run-step attribution and still reports working.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. Every verdict carries the "worktree not
@@ -544,10 +546,11 @@ fi
 # gate inside a synchronous `no-mistakes axi run`) is precisely the signal that
 # could not be proven, so the honest answer is unknown, which surfaces.
 #
-# The SINGLE owner of that rule. Both the coarse run-step guard and the busy-pane
-# fallback consult it, so the two cannot drift apart again - that drift is what
-# left the run-step site reporting working for a crew that created fm/<id>, moved
-# its own worktree onto another branch and died, while the pane site surfaced.
+# The SINGLE owner of that rule. All three sites that can produce a healthy
+# verdict consult it - the full run record, the coarse runs-list row, and the
+# busy-pane fallback - so they cannot drift apart again, which is exactly how
+# a crew that created fm/<id>, moved its own worktree onto another branch and
+# died kept reading working at whichever site had not yet been widened.
 # The pane site additionally surfaces the whole foreign tier (a worktree provably
 # another task's) even when the agent is alive, since it has no attributable run
 # at all to tell a busy banner from a gate; the run-step site by then HAS this
@@ -691,6 +694,16 @@ if [ "$HAVE_RUN" = 1 ]; then
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
+      # The third and last healthy-verdict site, held to the same rule as the
+      # runs-list row and the busy pane: a run RECORD reading active is not
+      # rewritten when its worker is killed either, so across the unproven tier
+      # it is not evidence of a live worker. Only the active statuses above pass
+      # through here - a terminal record needs no liveness proof, and the parked
+      # branch above must keep surfacing its gate findings.
+      if [ "$RUN_STATE" = working ] && wt_ownership_unproven; then
+        RUN_STATE=unknown
+        RUN_DETAIL="run record still reads active, but no live agent process is confirmed"
+      fi
       if [ "$RUN_STATE" = working ]; then
         CI_STEP_STATUS=$(nm_effective_ci_step_status)
         case "$CI_STEP_STATUS" in

@@ -42,11 +42,13 @@
 #       a gate-parked crew surfaces instead of being absorbed as a busy pane),
 #       loses it on any other liveness reading, and loses it outright once
 #       another meta records the same resolved worktree path. Wherever
-#       attribution is withheld like that, neither a coarse `running` row nor a
-#       busy pane may hand a healthy verdict back: both read unknown, so the
-#       backends and harnesses that can never read `alive` do not recover one
-#       through a side door. The repo-wide runs list is queried for fm/<id>
-#       only, never a shared branch name.
+#       attribution is withheld like that, none of the three healthy-verdict
+#       sites may hand one back: an active run record, a coarse `running` row
+#       and a busy pane all read unknown, so the backends and harnesses that can
+#       never read `alive` do not recover one through a side door. A crew still
+#       on its own fm/<id> is never in that tier, so a closed window over an
+#       in-flight run keeps reporting working. The repo-wide runs list is
+#       queried for fm/<id> only, never a shared branch name.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -983,6 +985,67 @@ EOF
   pass "an off-contract coarse running row reports working only with a live agent"
 }
 
+# The same rule at the FULL run-record site: `axi status` run from inside a
+# worktree with no run for its current branch falls back to some other branch's
+# run as informational display, which can be this task's own fm/<id> record -
+# and a record is no more rewritten when its worker is killed than a runs-list
+# row is. Off the contract with no confirmed-live agent that must read unknown;
+# with a live agent it keeps its full step detail.
+test_off_contract_full_run_record_needs_a_live_agent() {
+  reset_fakes
+  local d; d=$(new_case off-contract-full-record)
+  make_repo_on_branch "$d/wt" my-own-fix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-record.meta" "window=fm:fm-feat-record" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-record)"
+  FM_FAKE_RUNS_LIST=""
+
+  local out probe
+  for probe in bash node; do
+    FM_FAKE_TMUX_COMMAND=$probe
+    out=$(run_crew_state "$d" feat-record)
+    assert_not_contains "$out" "state: working" \
+      "an active run record is not a live worker on the unproven tier ($probe)"
+    assert_contains "$out" "state: unknown" "unproven tier + active record -> unknown ($probe)"
+    assert_contains "$out" "run record still reads active" "detail says what was and was not proven ($probe)"
+    PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-record \
+      && fail "an off-contract crew ($probe) was absorbed off a stale active run record"
+  done
+
+  FM_FAKE_TMUX_COMMAND=claude
+  out=$(run_crew_state "$d" feat-record)
+  assert_contains "$out" "state: working" "with a live agent the same record still reports working"
+  assert_contains "$out" "validating (running)" "and keeps its full step detail"
+  pass "an off-contract active run record reports working only with a live agent"
+}
+
+# The hard acceptance criterion the guard above must never touch: a crew whose
+# window closed mid-validation is still on its own fm/<id>, so it is not in the
+# unproven tier at all and run-step-over-pane precedence still reports working.
+# Pinned here against the liveness reading the closed window actually produces.
+test_on_contract_closed_window_in_flight_run_still_working() {
+  reset_fakes
+  local d; d=$(new_case on-contract-closed-window)
+  make_repo_on_branch "$d/wt" fm/feat-inflight
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-inflight.meta" "window=fm:fm-feat-inflight" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-inflight)"
+  FM_FAKE_RUNS_LIST=""
+  local out probe
+  for probe in 1 0; do
+    FM_FAKE_TMUX_MISSING=$probe
+    # A bare shell left behind reads `dead`, the strongest not-alive verdict.
+    FM_FAKE_TMUX_COMMAND=bash
+    out=$(run_crew_state "$d" feat-inflight)
+    assert_contains "$out" "state: working" \
+      "an on-contract in-flight run keeps reporting working (tmux missing=$probe)"
+    assert_contains "$out" "source: run-step" "and keeps run-step precedence (tmux missing=$probe)"
+    assert_not_contains "$out" "no live agent process is confirmed" \
+      "the ownership guard must not fire on the contract branch (tmux missing=$probe)"
+  done
+  pass "an on-contract closed-window crew with an in-flight run still reports working"
+}
+
 # A crew that (against the fm/<id> contract) works on an unconventional branch
 # IN ITS OWN worktree keeps full run-step attribution while its own agent
 # process is confirmed alive: no other task records that path, it is not another
@@ -1556,6 +1619,8 @@ test_recycled_slot_dead_tasks_not_working
 test_recycled_slot_own_run_still_in_flight_reports_working
 test_recycled_slot_stale_running_row_without_live_agent_is_unknown
 test_off_contract_coarse_running_row_needs_a_live_agent
+test_off_contract_full_run_record_needs_a_live_agent
+test_on_contract_closed_window_in_flight_run_still_working
 test_off_contract_branch_own_worktree_keeps_attribution
 test_off_contract_branch_without_live_agent_loses_attribution
 test_off_contract_branch_without_live_agent_busy_pane_surfaces
