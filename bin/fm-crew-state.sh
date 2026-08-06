@@ -22,12 +22,12 @@
 #   2. Matching no-mistakes run for this crew's OWN ship branch fm/<id>, active
 #      or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Attribution is keyed on fm/<id> (bin/fm-brief.sh's branch
-#      contract), never on whatever branch the recorded worktree happens to be
-#      checked out on: a worktree pool slot re-leased to a newer task after
-#      this worker died without teardown still sits at the path meta records,
-#      so anything derived from that path answers for the NEW occupant and
-#      would report a dead task as working (2026-07-30 incident, see the
-#      attribution block below).
+#      contract). Anything read THROUGH the recorded worktree path is attributed
+#      to this task only while that worktree is provably still this task's: a
+#      worktree pool slot re-leased to a newer task after this worker died
+#      without teardown still sits at the path meta records, so a read through
+#      it answers for the NEW occupant and would report a dead task as working
+#      (2026-07-30 incident, see the attribution block below).
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -42,10 +42,14 @@
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. A busy pane reports
+#      working EXCEPT when the recorded worktree is provably not this task's, as
+#      the busy banner cannot then be told apart from a crew parked at a gate.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log.
+#      than trusting a stale status log. Every verdict carries the "worktree not
+#      on fm/<id>" observation when the recorded checkout has moved off the
+#      contract branch, since that is what recovery has to know.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -79,9 +83,19 @@ case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;;
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
+#
+# $WT_NOTE (set below, empty until then) is appended to EVERY verdict, not just
+# the run-step one: when the recorded worktree is no longer checked out on this
+# task's own fm/<id>, recovery needs that observation most on the paths where
+# there is no run to report at all (a dead endpoint, a stale status log), since
+# it is the one hint that the recorded worktree may no longer hold this task's
+# unlanded work.
 emit() {  # <state> <source> [detail]
-  local line="state: $1${SEP}source: $2"
-  [ -n "${3:-}" ] && line="$line${SEP}$3"
+  local line="state: $1${SEP}source: $2" detail=${3:-}
+  if [ -n "${WT_NOTE:-}" ]; then
+    if [ -n "$detail" ]; then detail="$detail${SEP}${WT_NOTE}"; else detail=$WT_NOTE; fi
+  fi
+  [ -n "$detail" ] && line="$line${SEP}$detail"
   printf '%s\n' "$line"
   exit 0
 }
@@ -147,6 +161,14 @@ pane_readable() {  # <target>
     tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
+}
+# 0 when this crew's own recorded endpoint still answers. Used ONLY to
+# corroborate a coarse `running` row for a task whose recorded worktree is no
+# longer its own (see the attribution block): the run-step still takes
+# precedence over the pane everywhere else, exactly as before.
+crew_endpoint_alive() {
+  [ -n "$BACKEND_TARGET" ] || return 1
+  pane_readable "$BACKEND_TARGET"
 }
 # crew_pane_is_busy: the busy-signature fallback, backend-aware the same way -
 # fm_backend_busy_state's native semantic state (herdr's agent.get) when
@@ -376,9 +398,12 @@ nm_ci_checks_state() {
 # is exact) - but branch + coarse status is exactly what this predicate needs:
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
-nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br
+# when no listed branch has a run within FM_CREW_STATE_RUNS_LIMIT rows.
+# Variadic so a crew that is provably still in its own worktree but off the
+# fm/<id> branch contract can be looked up under either name in ONE bounded
+# call rather than two.
+nm_runs_status_for_branch() {  # <branch>...
+  local out row st rest br branch
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -388,38 +413,81 @@ nm_runs_status_for_branch() {  # <branch>
     rest=${row#* }
     rest=$(trim "$rest")
     br=${rest%% *}
-    if [ "$br" = "$branch" ]; then
-      printf '%s' "$st"
-      return 0
-    fi
+    for branch in "$@"; do
+      if [ -n "$branch" ] && [ "$br" = "$branch" ]; then
+        printf '%s' "$st"
+        return 0
+      fi
+    done
   done <<< "$out"
   return 0
 }
 
 # The run attribution key is this task's OWN ship branch, fm/<id> - the branch
 # contract bin/fm-brief.sh scaffolds ("create your branch: git checkout -b
-# fm/$ID") and bin/fm-promote.sh instructs - NEVER the branch the recorded
-# worktree is checked out on. A worktree pool slot (treehouse) is released when
-# its worker dies without teardown, while meta deliberately survives so
-# recovery can find the worktree and unlanded work; once the slot is re-leased
-# to a newer task, the path in meta belongs to a DIFFERENT live task, and both
-# `git symbolic-ref` and `axi status` resolved through that path answer for
-# the new occupant. Keying the match on those answers reported two genuinely
+# fm/$ID") and bin/fm-promote.sh instructs. A worktree pool slot (treehouse) is
+# released when its worker dies without teardown, while meta deliberately
+# survives so recovery can find the worktree and unlanded work; once the slot is
+# re-leased to a newer task, the path in meta belongs to a DIFFERENT live task,
+# and both `git symbolic-ref` and `axi status` resolved through that path answer
+# for the new occupant. Keying the match on those answers reported two genuinely
 # dead tasks as `working - validating (running)` (2026-07-30 incident:
 # nm-flow-view-r7, fm-upstream-sync-b3, and live kept-exec-p2 all recorded the
 # identical recycled slot path).
 EXPECTED_BRANCH="fm/$ID"
 # CREW_BRANCH - what the recorded worktree is checked out on right now - is an
-# OWNERSHIP signal only. Equal to fm/<id> means the worktree is still this
-# task's (a fresh lease starts detached and creates its own fm/<new-id>, and
-# git refuses to check one branch out in two worktrees of the same repo);
-# any other branch means the slot was re-leased (or this crew never created
-# its branch), so nothing read through the worktree's checkout may be
-# attributed to this task. Empty at detached HEAD (a just-spawned crew, a
-# scout's scratch worktree, or a recycled slot's fresh lease): skip the lookup
-# entirely, as before, so a respawned crew that has not yet re-created fm/<id>
-# is read from its pane rather than a previous attempt's terminal run.
+# OWNERSHIP signal. Equal to fm/<id> means the worktree is still this task's (a
+# fresh lease starts detached and creates its own fm/<new-id>, and git refuses
+# to check one branch out in two worktrees of the same repo). Empty at detached
+# HEAD (a just-spawned crew, a scout's scratch worktree, or a recycled slot's
+# fresh lease): skip the lookup entirely, as before, so a respawned crew that
+# has not yet re-created fm/<id> is read from its pane rather than a previous
+# attempt's terminal run.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+
+# 0 when some OTHER surviving state/<other>.meta records this very worktree
+# path. bin/fm-teardown.sh removes meta, so a second surviving record of one
+# path is the direct evidence that the pool slot was leased out more than once
+# and this task can no longer claim exclusive ownership of it.
+wt_recorded_by_another_task() {
+  local meta other other_wt
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    other=${meta##*/}
+    other=${other%.meta}
+    [ "$other" = "$ID" ] && continue
+    other_wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -n "$other_wt" ] && [ "$other_wt" = "$WT" ] && return 0
+  done
+  return 1
+}
+
+# WT_FOREIGN=1 means the recorded worktree is provably NOT exclusively this
+# task's, so nothing read through that path may be attributed here. Two proofs,
+# both independent of what is running inside it:
+#   - it is checked out on ANOTHER task's ship branch (fm/<other-id>), which
+#     only the slot's newer lessee can have created; or
+#   - another surviving meta records the same path (wt_recorded_by_another_task).
+# A crew merely off the fm/<id> branch contract - on main, or on a hand-made
+# branch, in a worktree no other task records - is NOT foreign: that worktree is
+# still provably its own, so its `axi status` is still its own answer and keeps
+# full run-step attribution. Dropping that was what turned a ship crew PARKED at
+# a gate on an off-contract branch into `working - source: pane` (the pane keeps
+# rendering the harness busy banner for the whole of a synchronous
+# `no-mistakes axi run`, see crew_pane_is_busy), which crew_absorb_class absorbs
+# instead of surfacing for a captain decision.
+# WT_NOTE states only what the branch mismatch itself proves - the worktree is
+# not on fm/<id> - and never that the slot was re-leased, which a mismatch alone
+# does not show. emit() appends it to every verdict.
+WT_FOREIGN=0
+WT_NOTE=""
+if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && [ "$CREW_BRANCH" != "$EXPECTED_BRANCH" ]; then
+  WT_NOTE="worktree not on $EXPECTED_BRANCH (now on $CREW_BRANCH)"
+  case "$CREW_BRANCH" in
+    fm/*) WT_FOREIGN=1 ;;
+    *) if wt_recorded_by_another_task; then WT_FOREIGN=1; fi ;;
+  esac
+fi
 
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
@@ -428,17 +496,28 @@ HAVE_RUN=0
 # block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
-# WT_RELEASED=1 records that the slot no longer belongs to this task, purely to
-# surface that fact in the emitted detail.
-WT_RELEASED=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  if [ "$CREW_BRANCH" = "$EXPECTED_BRANCH" ]; then
+  if [ "$WT_FOREIGN" = 1 ]; then
+    # `axi status` from inside a worktree that is not ours would answer for the
+    # other occupant, so it is never consulted here. The repo-wide runs list is
+    # keyed on branch rather than path, so this task's own fm/<id> run, if it
+    # ever had one, still reports its true state. No row at all falls through
+    # to the pane/log path, where this task's own dead endpoint reads unknown
+    # rather than the other occupant's health.
+    COARSE_STATUS=$(nm_runs_status_for_branch "$EXPECTED_BRANCH")
+    if [ -n "$COARSE_STATUS" ]; then
+      HAVE_RUN=1
+      RUN_SOURCE=coarse
+    fi
+  else
     RUN_OUT=$(nm_run axi status)
     if [ -n "$RUN_OUT" ]; then
       run_branch=$(strip_quotes "$(nm_field branch)")
-      if [ -n "$run_branch" ] && [ "$run_branch" = "$EXPECTED_BRANCH" ]; then
+      # The worktree is provably this task's, so a run for either its contract
+      # branch or the branch it is actually on is its own run.
+      if [ -n "$run_branch" ] && { [ "$run_branch" = "$EXPECTED_BRANCH" ] || [ "$run_branch" = "$CREW_BRANCH" ]; }; then
         HAVE_RUN=1
       else
         # The active-or-most-recent run is for another branch (the CLI is alive
@@ -447,29 +526,12 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # primary call means the CLI itself did not respond, so retrying it
         # immediately with a second bounded call would just double the wait
         # for no better answer.
-        COARSE_STATUS=$(nm_runs_status_for_branch "$EXPECTED_BRANCH")
+        COARSE_STATUS=$(nm_runs_status_for_branch "$EXPECTED_BRANCH" "$CREW_BRANCH")
         if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
           RUN_SOURCE=coarse
         fi
       fi
-    fi
-  else
-    # The worktree is checked out on another task's branch: the slot was
-    # re-leased out from under this (dead, never-torn-down) task. `axi status`
-    # from inside it would answer for the NEW occupant, so it is never
-    # consulted here. The repo-wide runs list read through the same path is
-    # still trustworthy - fm/<id> is unique to this task - so this task's own
-    # run, if it ever had one, still reports its true (usually terminal) state,
-    # and a run genuinely still in flight after the slot lapsed still reports
-    # working. No row at all falls through to the pane/log path, where this
-    # task's own dead endpoint reads unknown rather than the new occupant's
-    # health.
-    WT_RELEASED=1
-    COARSE_STATUS=$(nm_runs_status_for_branch "$EXPECTED_BRANCH")
-    if [ -n "$COARSE_STATUS" ]; then
-      HAVE_RUN=1
-      RUN_SOURCE=coarse
     fi
   fi
 fi
@@ -491,15 +553,27 @@ if [ "$HAVE_RUN" = 1 ]; then
     # surfaced through signal_reason_is_actionable regardless of this
     # coarse-vs-full distinction, so a real gate is never silently missed.
     case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
+      running)
+        # A row still reading `running` is only a row: the runs list is not
+        # rewritten when a worker is killed. For a task whose worktree is no
+        # longer its own - the abrupt-death shape this whole block exists for -
+        # that alone is NOT evidence of a live worker, so it is corroborated
+        # against this crew's own endpoint before it may report working. With
+        # no endpoint left the honest verdict is unknown, which surfaces for
+        # supervision instead of being absorbed as healthy.
+        if [ "$WT_FOREIGN" = 1 ] && ! crew_endpoint_alive; then
+          RUN_STATE=unknown
+          RUN_DETAIL="runs list row still running, but this crew's endpoint is gone"
+        else
+          RUN_STATE=working
+          RUN_DETAIL="validating (background run)"
+        fi
+        ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
-    if [ "$WT_RELEASED" = 1 ]; then
-      RUN_DETAIL="$RUN_DETAIL${SEP}worktree slot re-leased (now on $CREW_BRANCH)"
-    fi
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
@@ -605,7 +679,15 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
+#
+# A busy pane is NOT reported as working for a task whose recorded worktree is
+# provably not its own: the busy banner covers a synchronous `no-mistakes axi
+# run` blocked at a gate just as it covers real work (see crew_pane_is_busy),
+# and with no attributable run to tell the two apart, `working - source: pane`
+# would let crew_absorb_class absorb a crew that may be parked and waiting on
+# the captain. Such a task needs supervision anyway, so it surfaces.
 if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
+  [ "$WT_FOREIGN" = 1 ] && emit unknown pane "harness busy, but no run of this task's own is attributable"
   emit working pane "harness busy"
 fi
 
