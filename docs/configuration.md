@@ -138,8 +138,7 @@ It names the repository explicitly rather than inferring one, because a signatur
 That pair is the whole authorization model, and both halves are load-bearing: a worker appends its status lines into the same `state/` directory, so it could append the flag line to its own record, and the token is an HMAC it cannot compute.
 The signature covers the commit as well as the task id, so it is bound to exactly one head commit and every further push needs a fresh one; publishing the line is harmless, since it reveals nothing about the secret.
 
-The dispatch flags that set `ci_skip=on` are not part of this change, so nothing writes that pair yet and `sign` refuses every task until they land.
-The signing and verification machinery ships first and inert, deliberately, so the enforcement path is reviewable on its own.
+The only thing that writes that pair is `bin/fm-spawn.sh --ci-skip` (or `--all-testing-skip`) at dispatch, on the captain's machine; "Testing skips" below owns those flags, and `sign` refuses any task dispatched without one.
 
 In [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) the cheap `ci-waiver` job gates the expensive behaviour-test and macOS jobs, while `lint`, `invariants`, and the required `tests-complete` verdict always run, so a fully waived PR still reports checks and never reaches `bin/fm-pr-merge.sh`'s zero-checks refusal looking like CI that never ran.
 `lint` is ungated for the same reason as `invariants`: a minute of ShellCheck is not an expensive job, so there is nothing worth skipping, and a waived PR should still get static analysis rather than nothing looking at its shell at all.
