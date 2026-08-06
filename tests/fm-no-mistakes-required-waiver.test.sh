@@ -40,6 +40,7 @@ TMP_ROOT=$(fm_test_tmproot fm-nm-required-waiver-tests)
 mkdir -p "$TMP_ROOT"
 
 SHA=3333333333333333333333333333333333333333
+REPO=acme/widgets
 
 [ -f "$WORKFLOW" ] || fail "missing $WORKFLOW"
 
@@ -103,9 +104,16 @@ make_dispatched_home() {  # <name> <task-id>
   printf '%s\n' "$home"
 }
 
+# The key this repository's CI holds: derived from the home's master for that
+# repo alone, never the master itself (bin/fm-ci-waiver-lib.sh owns why).
+repo_key() {  # <home>
+  bash -c '. "$0/bin/fm-ci-waiver-lib.sh"; fm_ci_waiver_repo_key "$1"' \
+    "$ROOT" "$REPO" < "$1/config/ci-waiver-secret"
+}
+
 sign_for() {  # <home> <task-id> <sha>
   FM_ROOT_OVERRIDE='' FM_HOME="$1" FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
-    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' "$WAIVER" sign "$2" "$3" 2>&1
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' "$WAIVER" sign "$2" "$3" "$REPO" 2>&1
 }
 
 ORDINARY_BODY='## Summary
@@ -171,7 +179,7 @@ attestation_step_disposition() {  # <waived>
 test_ordinary_pr_is_not_waived_and_still_fails() {
   local home secret out waived status
   home=$(make_dispatched_home e2e-ordinary ord-a1)
-  secret=$(cat "$home/config/ci-waiver-secret")
+  secret=$(repo_key "$home")
   out=$(run_verify "$secret" "$ORDINARY_BODY" "$SHA")
   assert_contains "$out" "waived=false" "an ordinary PR body was somehow waived"
   waived=$(printf '%s\n' "$out" | sed -n 's/^waived=//p')
@@ -185,7 +193,7 @@ test_ordinary_pr_is_not_waived_and_still_fails() {
 test_verified_waiver_exempts_the_attestation() {
   local home secret line out waived
   home=$(make_dispatched_home e2e-waived skip-a1)
-  secret=$(cat "$home/config/ci-waiver-secret")
+  secret=$(repo_key "$home")
   line=$(sign_for "$home" skip-a1 "$SHA")
   assert_contains "$line" "fm-ci-waiver: v1 skip-a1 $SHA " "sign did not print a waiver line"
   # A skipped worker's PR body: a real summary, no pipeline attestation
@@ -205,7 +213,7 @@ $line" "$SHA")
 test_forged_waiver_does_not_exempt_anything() {
   local home secret line forged out waived status
   home=$(make_dispatched_home e2e-forged forge-a1)
-  secret=$(cat "$home/config/ci-waiver-secret")
+  secret=$(repo_key "$home")
   line=$(sign_for "$home" forge-a1 "$SHA")
   forged="${line% *} 0000000000000000000000000000000000000000000000000000000000000000"
   out=$(run_verify "$secret" "$ORDINARY_BODY
