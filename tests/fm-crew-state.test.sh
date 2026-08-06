@@ -42,10 +42,11 @@
 #       a gate-parked crew surfaces instead of being absorbed as a busy pane),
 #       loses it on any other liveness reading, and loses it outright once
 #       another meta records the same resolved worktree path. Wherever
-#       attribution is withheld like that, a busy pane reads unknown rather than
-#       working, so the backends and harnesses that can never read `alive` do
-#       not get a healthy verdict back through the pane. The repo-wide runs list
-#       is queried for fm/<id> only, never a shared branch name.
+#       attribution is withheld like that, neither a coarse `running` row nor a
+#       busy pane may hand a healthy verdict back: both read unknown, so the
+#       backends and harnesses that can never read `alive` do not recover one
+#       through a side door. The repo-wide runs list is queried for fm/<id>
+#       only, never a shared branch name.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -941,6 +942,47 @@ EOF
   pass "a stale running row on a lapsed slot is not reported working"
 }
 
+# The same not-proven-so-not-healthy rule reaches the case with NO foreign-slot
+# evidence at all: a crew that created fm/<id>, started validating, moved its own
+# worktree onto another branch and then died. No other meta records the slot, so
+# WT_FOREIGN is 0, `axi status` answers for some other branch, and the repo-wide
+# list still carries this task's own fm/<id> row at `running` because that list
+# is never rewritten when a worker is killed. Without a confirmed-live agent
+# that row must not report working - it would be absorbed as healthy - and with
+# one it still must, so both directions are pinned here.
+test_off_contract_coarse_running_row_needs_a_live_agent() {
+  reset_fakes
+  local d; d=$(new_case off-contract-coarse-running)
+  make_repo_on_branch "$d/wt" my-own-fix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-moved.meta" "window=fm:fm-feat-moved" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/some-other)"
+  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
+  running    fm/some-other bbbbbbb  2026-07-30 11:00
+  running    fm/feat-moved aaaaaaa  2026-07-30 10:30
+EOF
+)"
+
+  local out probe
+  for probe in bash node; do
+    FM_FAKE_TMUX_COMMAND=$probe
+    out=$(run_crew_state "$d" feat-moved)
+    assert_not_contains "$out" "state: working" \
+      "an off-contract crew with no confirmed agent ($probe) must not read working off a stale row"
+    assert_contains "$out" "state: unknown" "uncorroborated running row on an off-contract worktree -> unknown"
+    assert_contains "$out" "no live agent process is confirmed" \
+      "detail says why the row was not trusted ($probe)"
+    PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-moved \
+      && fail "an off-contract crew ($probe) with only a stale running row was absorbed"
+  done
+
+  FM_FAKE_TMUX_COMMAND=claude
+  out=$(run_crew_state "$d" feat-moved)
+  assert_contains "$out" "state: working" "with a live agent the same row still reports working"
+  assert_contains "$out" "source: run-step" "and keeps the run-step source"
+  pass "an off-contract coarse running row reports working only with a live agent"
+}
+
 # A crew that (against the fm/<id> contract) works on an unconventional branch
 # IN ITS OWN worktree keeps full run-step attribution while its own agent
 # process is confirmed alive: no other task records that path, it is not another
@@ -1513,6 +1555,7 @@ test_other_branch_run_ignored
 test_recycled_slot_dead_tasks_not_working
 test_recycled_slot_own_run_still_in_flight_reports_working
 test_recycled_slot_stale_running_row_without_live_agent_is_unknown
+test_off_contract_coarse_running_row_needs_a_live_agent
 test_off_contract_branch_own_worktree_keeps_attribution
 test_off_contract_branch_without_live_agent_loses_attribution
 test_off_contract_branch_without_live_agent_busy_pane_surfaces

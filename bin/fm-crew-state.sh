@@ -51,8 +51,12 @@
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail. A busy pane reports
-#      working EXCEPT when the recorded worktree is provably not this task's, as
-#      the busy banner cannot then be told apart from a crew parked at a gate.
+#      working EXCEPT when the recorded worktree is off the fm/<id> contract and
+#      is either provably another task's or has no confirmed-live agent of its
+#      own, since the busy banner cannot then be told apart from a crew parked
+#      at a gate. The coarse run-step's `running` row is withheld on that same
+#      not-proven-so-not-healthy rule (wt_ownership_unproven), so the two sites
+#      fail closed together.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. Every verdict carries the "worktree not
@@ -181,11 +185,19 @@ pane_readable() {  # <target>
 # from `unknown`, so only a literal `alive` corroborates: `dead`, `unknown`, an
 # unreadable target, and every backend without a verified classifier all fail
 # closed, and the verdict stays unknown so the crew surfaces for supervision.
+# The reading is memoized: this helper is consulted from more than one decision
+# point in a single invocation, each probe is a real backend round trip (a herdr
+# CLI call on that backend), and fm-crew-state runs per heartbeat for every crew
+# in the fleet.
+AGENT_ALIVE_VERDICT=""
 crew_agent_alive() {
-  local verdict
   [ -n "$BACKEND_TARGET" ] || return 1
-  verdict=$(fm_backend_agent_alive "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null) || verdict=unknown
-  [ "$verdict" = alive ]
+  if [ -z "$AGENT_ALIVE_VERDICT" ]; then
+    AGENT_ALIVE_VERDICT=$(fm_backend_agent_alive "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null) \
+      || AGENT_ALIVE_VERDICT=unknown
+    [ -n "$AGENT_ALIVE_VERDICT" ] || AGENT_ALIVE_VERDICT=unknown
+  fi
+  [ "$AGENT_ALIVE_VERDICT" = alive ]
 }
 # crew_pane_is_busy: the busy-signature fallback, backend-aware the same way -
 # fm_backend_busy_state's native semantic state (herdr's agent.get) when
@@ -524,6 +536,29 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && [ "$CREW_BRANCH" != "$EXPECTED
   esac
 fi
 
+# 0 when this task sits in the UNPROVEN tier: its recorded worktree is off the
+# fm/<id> contract AND this task's own agent is not confirmed alive, so neither
+# the worktree's ownership nor a live worker behind any signal read here could
+# be established. Nothing in that tier may yield a healthy verdict: every signal
+# that would tell real work apart from a dead task (or from a crew blocked at a
+# gate inside a synchronous `no-mistakes axi run`) is precisely the signal that
+# could not be proven, so the honest answer is unknown, which surfaces.
+#
+# The SINGLE owner of that rule. Both the coarse run-step guard and the busy-pane
+# fallback consult it, so the two cannot drift apart again - that drift is what
+# left the run-step site reporting working for a crew that created fm/<id>, moved
+# its own worktree onto another branch and died, while the pane site surfaced.
+# The pane site additionally surfaces the whole foreign tier (a worktree provably
+# another task's) even when the agent is alive, since it has no attributable run
+# at all to tell a busy banner from a gate; the run-step site by then HAS this
+# task's own fm/<id> row, so a foreign slot plus a live agent still reports
+# working, the deliberately preserved "run still in flight after the slot
+# lapsed" case.
+wt_ownership_unproven() {
+  [ -n "$WT_NOTE" ] || return 1
+  ! crew_agent_alive
+}
+
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail; "coarse" means only
@@ -594,14 +629,14 @@ if [ "$HAVE_RUN" = 1 ]; then
     case "$COARSE_STATUS" in
       running)
         # A row still reading `running` is only a row: the runs list is not
-        # rewritten when a worker is killed. For a task whose worktree is no
-        # longer its own - the abrupt-death shape this whole block exists for -
-        # that alone is NOT evidence of a live worker, so it is corroborated
-        # against a CONFIRMED-alive agent process before it may report working.
-        # Anything short of that (a bare shell left behind, an unreadable or
-        # unclassifiable endpoint) is unknown, which surfaces for supervision
-        # instead of being absorbed as healthy.
-        if [ "$WT_FOREIGN" = 1 ] && ! crew_agent_alive; then
+        # rewritten when a worker is killed. Across the whole unproven tier -
+        # the abrupt-death shape this block exists for, including a crew that
+        # created fm/<id>, moved its own worktree onto another branch and then
+        # died - that alone is NOT evidence of a live worker, so it reports
+        # working only outside that tier (wt_ownership_unproven, the same rule
+        # the busy-pane fallback applies). Anything short of that is unknown,
+        # which surfaces for supervision instead of being absorbed as healthy.
+        if wt_ownership_unproven; then
           RUN_STATE=unknown
           RUN_DETAIL="runs list row still running, but no live agent process is confirmed"
         else
@@ -720,22 +755,21 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
 #
-# A busy pane is NOT reported as working wherever attribution was deliberately
-# WITHHELD above because ownership or liveness could not be proven - the
-# worktree is provably another task's, or it is off the fm/<id> contract and
-# this task's own agent could not be confirmed alive. The busy banner covers a
-# synchronous `no-mistakes axi run` blocked at a gate just as it covers real
-# work (see crew_pane_is_busy), so with no attributable run to tell the two
-# apart, `working - source: pane` would let crew_absorb_class absorb a crew that
-# may be parked and waiting on the captain. The honest verdict there is unknown,
-# which surfaces for supervision. This costs nothing on the verified tmux
-# harnesses, whose busy pane classifies as alive; it bounds the extra surfacing
-# to the off-contract path on the configurations fm_backend_agent_alive cannot
-# classify at all (pi execs into a generic node process; zellij, orca and cmux
-# always read unknown), which is exactly where the withheld attribution would
-# otherwise silently become a healthy verdict.
+# A busy pane is NOT reported as working across the unproven tier
+# (wt_ownership_unproven) nor on the foreign tier, which together are exactly
+# where attribution was deliberately WITHHELD above. The busy
+# banner covers a synchronous `no-mistakes axi run` blocked at a gate just as it
+# covers real work (see crew_pane_is_busy), so with no attributable run to tell
+# the two apart, `working - source: pane` would let crew_absorb_class absorb a
+# crew that may be parked and waiting on the captain. The honest verdict there
+# is unknown, which surfaces for supervision. This costs nothing on the verified
+# tmux harnesses, whose busy pane classifies as alive; it bounds the extra
+# surfacing to the off-contract path on the configurations fm_backend_agent_alive
+# cannot classify at all (pi execs into a generic node process; zellij, orca and
+# cmux always read unknown), which is exactly where the withheld attribution
+# would otherwise silently become a healthy verdict.
 if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
-  if [ -n "$WT_NOTE" ] && { [ "$WT_FOREIGN" = 1 ] || ! crew_agent_alive; }; then
+  if [ "$WT_FOREIGN" = 1 ] || wt_ownership_unproven; then
     emit unknown pane "harness busy, but no run of this task's own is attributable"
   fi
   emit working pane "harness busy"
