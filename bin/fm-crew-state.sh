@@ -22,12 +22,20 @@
 #   2. Matching no-mistakes run for this crew's OWN ship branch fm/<id>, active
 #      or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Attribution is keyed on fm/<id> (bin/fm-brief.sh's branch
-#      contract). Anything read THROUGH the recorded worktree path is attributed
-#      to this task only while that worktree is provably still this task's: a
-#      worktree pool slot re-leased to a newer task after this worker died
-#      without teardown still sits at the path meta records, so a read through
-#      it answers for the NEW occupant and would report a dead task as working
-#      (2026-07-30 incident, see the attribution block below).
+#      contract), because a worktree pool slot re-leased to a newer task after
+#      this worker died without teardown still sits at the path meta records, so
+#      a read through that path answers for the NEW occupant and would report a
+#      dead task as working (2026-07-30 incident). Three ownership tiers decide
+#      what a read through the recorded worktree may be attributed to (see the
+#      attribution block below): the worktree checked out on fm/<id> is the
+#      strong proof and keeps full attribution unconditionally; a worktree on
+#      any other branch that no other task records is unproven either way, so it
+#      keeps its own `axi status` answer only while this task's own agent
+#      process is confirmed alive; a worktree provably another task's gets no
+#      attribution from that path at all, only its own fm/<id> row in the
+#      repo-wide runs list.
+#      The coarse runs list is repo-wide and is therefore only ever queried for
+#      fm/<id>, the one branch name unique to this task.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -162,13 +170,22 @@ pane_readable() {  # <target>
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
-# 0 when this crew's own recorded endpoint still answers. Used ONLY to
-# corroborate a coarse `running` row for a task whose recorded worktree is no
-# longer its own (see the attribution block): the run-step still takes
-# precedence over the pane everywhere else, exactly as before.
-crew_endpoint_alive() {
+# 0 only when a real harness-agent PROCESS is CONFIRMED running for this crew.
+# Deliberately fm_backend_agent_alive and not pane_readable: bin/fm-spawn.sh
+# types the harness command into the endpoint's own shell, so a crew whose agent
+# died leaves the endpoint readable as a bare shell, and the window itself is
+# removed only by bin/fm-teardown.sh's kill - which by definition did not run in
+# the dead-without-teardown shape this predicate exists to catch. Pane presence
+# would therefore still be true for exactly the dead task it is meant to expose.
+# Per fm_backend_agent_alive's contract a caller must never license anything
+# from `unknown`, so only a literal `alive` corroborates: `dead`, `unknown`, an
+# unreadable target, and every backend without a verified classifier all fail
+# closed, and the verdict stays unknown so the crew surfaces for supervision.
+crew_agent_alive() {
+  local verdict
   [ -n "$BACKEND_TARGET" ] || return 1
-  pane_readable "$BACKEND_TARGET"
+  verdict=$(fm_backend_agent_alive "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null) || verdict=unknown
+  [ "$verdict" = alive ]
 }
 # crew_pane_is_busy: the busy-signature fallback, backend-aware the same way -
 # fm_backend_busy_state's native semantic state (herdr's agent.get) when
@@ -398,12 +415,16 @@ nm_ci_checks_state() {
 # is exact) - but branch + coarse status is exactly what this predicate needs:
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
-# when no listed branch has a run within FM_CREW_STATE_RUNS_LIMIT rows.
-# Variadic so a crew that is provably still in its own worktree but off the
-# fm/<id> branch contract can be looked up under either name in ONE bounded
-# call rather than two.
-nm_runs_status_for_branch() {  # <branch>...
-  local out row st rest br branch
+# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+#
+# The branch passed here must always be fm/<id>. This list is REPO-WIDE, so
+# unlike the in-worktree `axi status` answer it carries no path scoping of its
+# own: fm/<id> is the only branch name that is unique to one task. Looking a
+# crew up under whatever branch its worktree happens to be on would match the
+# newest run anyone started on a shared name like main and report this crew
+# working off someone else's run.
+nm_runs_status_for_branch() {  # <branch>
+  local branch=$1 out row st rest br
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -413,12 +434,10 @@ nm_runs_status_for_branch() {  # <branch>...
     rest=${row#* }
     rest=$(trim "$rest")
     br=${rest%% *}
-    for branch in "$@"; do
-      if [ -n "$branch" ] && [ "$br" = "$branch" ]; then
-        printf '%s' "$st"
-        return 0
-      fi
-    done
+    if [ "$br" = "$branch" ]; then
+      printf '%s' "$st"
+      return 0
+    fi
   done <<< "$out"
   return 0
 }
@@ -435,15 +454,28 @@ nm_runs_status_for_branch() {  # <branch>...
 # nm-flow-view-r7, fm-upstream-sync-b3, and live kept-exec-p2 all recorded the
 # identical recycled slot path).
 EXPECTED_BRANCH="fm/$ID"
-# CREW_BRANCH - what the recorded worktree is checked out on right now - is an
-# OWNERSHIP signal. Equal to fm/<id> means the worktree is still this task's (a
-# fresh lease starts detached and creates its own fm/<new-id>, and git refuses
-# to check one branch out in two worktrees of the same repo). Empty at detached
-# HEAD (a just-spawned crew, a scout's scratch worktree, or a recycled slot's
-# fresh lease): skip the lookup entirely, as before, so a respawned crew that
-# has not yet re-created fm/<id> is read from its pane rather than a previous
-# attempt's terminal run.
+# CREW_BRANCH - what the recorded worktree is checked out on right now - is the
+# STRONG ownership proof, and only when it equals fm/<id>: that branch is unique
+# to this task, a fresh lease starts detached and creates its own fm/<new-id>,
+# and git refuses to check one branch out in two worktrees of the same repo, so
+# an equal reading means the slot is still ours and everything read through the
+# path is ours. Empty at detached HEAD (a just-spawned crew, a scout's scratch
+# worktree, or a recycled slot's fresh lease): skip the lookup entirely, as
+# before, so a respawned crew that has not yet re-created fm/<id> is read from
+# its pane rather than a previous attempt's terminal run.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+
+# Physically-resolved form of <path>, falling back to the raw string when it
+# cannot be resolved (a path that no longer exists). Meta's worktree= is written
+# from each backend's own cwd read (bin/fm-spawn.sh), which is physical for some
+# backends and possibly symlinked for others, so two metas recording ONE slot
+# can differ as raw strings and must be compared in this normalized form.
+norm_path() {  # <path>
+  local p=${1:-} real
+  [ -n "$p" ] || return 0
+  if real=$(cd "$p" 2>/dev/null && pwd -P); then printf '%s' "$real"; else printf '%s' "$p"; fi
+}
+WT_REAL=$(norm_path "$WT")
 
 # 0 when some OTHER surviving state/<other>.meta records this very worktree
 # path. bin/fm-teardown.sh removes meta, so a second surviving record of one
@@ -457,7 +489,8 @@ wt_recorded_by_another_task() {
     other=${other%.meta}
     [ "$other" = "$ID" ] && continue
     other_wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    [ -n "$other_wt" ] && [ "$other_wt" = "$WT" ] && return 0
+    [ -n "$other_wt" ] || continue
+    [ "$(norm_path "$other_wt")" = "$WT_REAL" ] && return 0
   done
   return 1
 }
@@ -468,14 +501,16 @@ wt_recorded_by_another_task() {
 #   - it is checked out on ANOTHER task's ship branch (fm/<other-id>), which
 #     only the slot's newer lessee can have created; or
 #   - another surviving meta records the same path (wt_recorded_by_another_task).
-# A crew merely off the fm/<id> branch contract - on main, or on a hand-made
-# branch, in a worktree no other task records - is NOT foreign: that worktree is
-# still provably its own, so its `axi status` is still its own answer and keeps
-# full run-step attribution. Dropping that was what turned a ship crew PARKED at
-# a gate on an off-contract branch into `working - source: pane` (the pane keeps
-# rendering the harness busy banner for the whole of a synchronous
-# `no-mistakes axi run`, see crew_pane_is_busy), which crew_absorb_class absorbs
-# instead of surfacing for a captain decision.
+# Neither proof is exhaustive - an occupant that is a human, a tool, or a crew
+# from another FM_HOME sitting on a non-fm branch leaves both false - so a
+# worktree that merely fails them is NOT thereby proven ours. That is why
+# attribution off an off-contract branch additionally requires this task's own
+# agent process to be confirmed alive (crew_agent_alive) below: an unrecorded
+# foreign occupant implies our own agent is long gone, while the case that
+# actually needs the attribution - a ship crew PARKED at a gate, blocked in a
+# synchronous `no-mistakes axi run` - has a real agent process by construction,
+# so it still reports parked and surfaces for a captain decision instead of
+# being read as a busy pane and absorbed by crew_absorb_class.
 # WT_NOTE states only what the branch mismatch itself proves - the worktree is
 # not on fm/<id> - and never that the slot was re-leased, which a mismatch alone
 # does not show. emit() appends it to every verdict.
@@ -515,9 +550,13 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     RUN_OUT=$(nm_run axi status)
     if [ -n "$RUN_OUT" ]; then
       run_branch=$(strip_quotes "$(nm_field branch)")
-      # The worktree is provably this task's, so a run for either its contract
-      # branch or the branch it is actually on is its own run.
-      if [ -n "$run_branch" ] && { [ "$run_branch" = "$EXPECTED_BRANCH" ] || [ "$run_branch" = "$CREW_BRANCH" ]; }; then
+      if [ -n "$run_branch" ] && [ "$run_branch" = "$EXPECTED_BRANCH" ]; then
+        HAVE_RUN=1
+      elif [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && crew_agent_alive; then
+        # Off the branch contract: the run matches only the branch the worktree
+        # is on, which is not by itself proof the worktree is still ours, so it
+        # is attributed only while this task's own agent process is confirmed
+        # running.
         HAVE_RUN=1
       else
         # The active-or-most-recent run is for another branch (the CLI is alive
@@ -526,7 +565,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # primary call means the CLI itself did not respond, so retrying it
         # immediately with a second bounded call would just double the wait
         # for no better answer.
-        COARSE_STATUS=$(nm_runs_status_for_branch "$EXPECTED_BRANCH" "$CREW_BRANCH")
+        COARSE_STATUS=$(nm_runs_status_for_branch "$EXPECTED_BRANCH")
         if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
           RUN_SOURCE=coarse
@@ -558,12 +597,13 @@ if [ "$HAVE_RUN" = 1 ]; then
         # rewritten when a worker is killed. For a task whose worktree is no
         # longer its own - the abrupt-death shape this whole block exists for -
         # that alone is NOT evidence of a live worker, so it is corroborated
-        # against this crew's own endpoint before it may report working. With
-        # no endpoint left the honest verdict is unknown, which surfaces for
-        # supervision instead of being absorbed as healthy.
-        if [ "$WT_FOREIGN" = 1 ] && ! crew_endpoint_alive; then
+        # against a CONFIRMED-alive agent process before it may report working.
+        # Anything short of that (a bare shell left behind, an unreadable or
+        # unclassifiable endpoint) is unknown, which surfaces for supervision
+        # instead of being absorbed as healthy.
+        if [ "$WT_FOREIGN" = 1 ] && ! crew_agent_alive; then
           RUN_STATE=unknown
-          RUN_DETAIL="runs list row still running, but this crew's endpoint is gone"
+          RUN_DETAIL="runs list row still running, but no live agent process is confirmed"
         else
           RUN_STATE=working
           RUN_DETAIL="validating (background run)"
