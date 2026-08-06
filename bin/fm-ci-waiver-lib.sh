@@ -206,16 +206,6 @@ fm_ci_waiver_valid_repo() {
   return 0
 }
 
-# fm_ci_waiver_secret_readable <path>: 0 iff <path> is a usable secret file - a
-# non-empty regular file that is not a symlink pointing somewhere else.
-fm_ci_waiver_secret_readable() {
-  local path=${1-}
-  [ -n "$path" ] || return 1
-  [ ! -L "$path" ] || return 1
-  [ -f "$path" ] || return 1
-  [ -s "$path" ] || return 1
-}
-
 # fm_ci_waiver_line <task-id> <sha> <hex>: the publishable PR-body line.
 fm_ci_waiver_line() {
   printf '%s %s %s %s %s\n' \

@@ -28,6 +28,10 @@
 #   (f) a forged signature does not exempt anything, so (a) still applies
 #   (g) a waiver job that did not succeed HARD-FAILS the check rather than
 #       silently exempting the PR
+#   (h) a base ref that carries no verifier at all reports waived=false rather
+#       than exiting 127, which would fail the job and hard-fail (g)
+#   (i) both workflows' ci-waiver jobs run byte-identical verify steps, since
+#       the defect (h) covers was present in both
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -61,10 +65,13 @@ step_script() {  # <step-name>
 
 ATTEST_SH="$TMP_ROOT/attestation.sh"
 GATE_SH="$TMP_ROOT/gate.sh"
+VERIFY_STEP_SH="$TMP_ROOT/verify-step.sh"
 step_script 'Verify no-mistakes signature in PR body' > "$ATTEST_SH"
 step_script 'Gate on the CI testing waiver' > "$GATE_SH"
+step_script 'Verify the CI testing waiver' > "$VERIFY_STEP_SH"
 [ -s "$ATTEST_SH" ] || fail "could not extract the attestation step's script from $WORKFLOW"
 [ -s "$GATE_SH" ] || fail "could not extract the waiver gate step's script from $WORKFLOW"
+[ -s "$VERIFY_STEP_SH" ] || fail "could not extract the waiver verify step's script from $WORKFLOW"
 
 # The attestation marker, read from the workflow rather than restated here, so
 # this suite cannot drift from the string the check actually greps for.
@@ -147,7 +154,7 @@ $MARKER
 test_workflow_wires_the_check_to_the_waiver_verdict() {
   local body
   body=$(cat "$WORKFLOW")
-  assert_contains "$body" "run: bin/fm-ci-waiver-verify.sh" \
+  assert_contains "$(cat "$VERIFY_STEP_SH")" "bin/fm-ci-waiver-verify.sh" \
     "the exemption must come from the verifier, not from a second grep"
   assert_contains "$body" "FM_CI_WAIVER_SECRET: \${{ secrets.FM_CI_WAIVER_SECRET }}" \
     "the waiver job does not read this repository's secret"
@@ -255,6 +262,56 @@ test_gate_passes_and_announces_each_verdict() {
   pass "gate: an ordinary PR is quiet, a waived one is announced loudly"
 }
 
+# --- (h) the bootstrap case ---------------------------------------------------
+
+# The waiver job checks out the BASE ref, so on any base predating the waiver
+# there is no verifier to run. An unguarded invocation would exit 127, fail the
+# job, and (g) above would then hard-fail the required check on every open PR.
+run_verify_step() {  # <cwd> <github-output-file>
+  ( cd "$1" \
+      && FM_CI_WAIVER_SECRET='' FM_CI_WAIVER_CLAIM='' FM_CI_WAIVER_HEAD_SHA='' \
+        GITHUB_OUTPUT="$2" bash "$VERIFY_STEP_SH" 2>&1 )
+}
+
+test_base_without_a_verifier_is_unwaived_not_a_job_failure() {
+  local bare gho out status
+  bare="$TMP_ROOT/base-without-verifier"
+  mkdir -p "$bare"
+  gho="$bare/github-output"
+  : > "$gho"
+  out=$(run_verify_step "$bare" "$gho"); status=$?
+  expect_code 0 $status "a base with no verifier must not fail the waiver job"$'\n'"$out"
+  assert_contains "$out" "::warning::" "the missing verifier was not announced"
+  assert_grep "waived=false" "$gho" \
+    "the fallback must publish its verdict to GITHUB_OUTPUT, or the job output is empty"
+  pass "verify step: a base carrying no verifier is unwaived, loudly, and exits 0"
+}
+
+test_verify_step_runs_the_real_verifier_when_present() {
+  local gho out status
+  gho="$TMP_ROOT/github-output-present"
+  : > "$gho"
+  out=$(run_verify_step "$ROOT" "$gho"); status=$?
+  expect_code 0 $status "the verify step must exit 0 when the verifier is present"$'\n'"$out"
+  assert_not_contains "$out" "carries no CI waiver verifier" \
+    "the bootstrap fallback swallowed the real verifier"
+  assert_grep "waived=false" "$gho" "the real verifier did not publish its verdict"
+  pass "verify step: the guard defers to the real verifier whenever it exists"
+}
+
+# The two workflows carry the same ci-waiver job, and the bootstrap defect this
+# guards against was present in both. Byte parity is what stops one being fixed
+# and the other quietly left behind.
+test_both_workflows_run_the_same_verify_step() {
+  local ci_step
+  ci_step="$TMP_ROOT/ci-verify-step.sh"
+  ( WORKFLOW="$ROOT/.github/workflows/ci.yml"; step_script 'Verify the CI testing waiver' ) > "$ci_step"
+  [ -s "$ci_step" ] || fail "could not extract the waiver verify step's script from ci.yml"
+  diff -u "$VERIFY_STEP_SH" "$ci_step" >/dev/null \
+    || fail "the two ci-waiver jobs' verify steps have drifted apart"$'\n'"$(diff -u "$VERIFY_STEP_SH" "$ci_step")"
+  pass "workflow: both ci-waiver jobs run byte-identical verify steps"
+}
+
 test_ordinary_body_still_fails_the_attestation
 test_attested_body_still_passes
 test_workflow_wires_the_check_to_the_waiver_verdict
@@ -263,3 +320,6 @@ test_verified_waiver_exempts_the_attestation
 test_forged_waiver_does_not_exempt_anything
 test_gate_hard_fails_when_the_waiver_job_did_not_complete
 test_gate_passes_and_announces_each_verdict
+test_base_without_a_verifier_is_unwaived_not_a_job_failure
+test_verify_step_runs_the_real_verifier_when_present
+test_both_workflows_run_the_same_verify_step

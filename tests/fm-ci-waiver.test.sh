@@ -11,6 +11,8 @@
 # Matrix:
 #   (a) init writes a mode-600 secret and never prints its value
 #   (b) init refuses to overwrite an existing secret; --rotate replaces it
+#   (b2) init refuses an unusable generated master rather than installing it,
+#        leaves no temp file behind, and leaves any existing secret untouched
 #   (c) sign REFUSES for a task whose record carries no skip flag
 #   (d) sign refuses when the task has no durable record at all
 #   (e) sign refuses an abbreviated SHA rather than expanding it
@@ -146,6 +148,63 @@ test_init_refuses_silent_rotation() {
   second=$(cat "$home/config/ci-waiver-secret")
   [ "$second" != "$first" ] || fail "--rotate produced the same secret"
   pass "init: refuses to overwrite silently, replaces on --rotate"
+}
+
+# A stub `node` that stands in for a generation that goes wrong: <mode> is
+# `truncated` for a short write or `broken` for a non-zero exit. Echoes a
+# directory to put at the front of PATH.
+stub_node_dir() {  # <name> <truncated|broken>
+  local dir="$TMP_ROOT/stub-$1"
+  mkdir -p "$dir"
+  if [ "$2" = truncated ]; then
+    printf '%s\n' '#!/bin/sh' 'printf abcd' > "$dir/node"
+  else
+    printf '%s\n' '#!/bin/sh' 'exit 1' > "$dir/node"
+  fi
+  chmod +x "$dir/node"
+  printf '%s\n' "$dir"
+}
+
+# run_waiver with a stub `node` in front of PATH, restored afterwards so only
+# this call sees it.
+run_waiver_with_node_stub() {  # <stub-dir> <home> [args...]
+  local stub=$1 saved=$PATH out status
+  shift
+  PATH="$stub:$PATH"
+  out=$(run_waiver "$@"); status=$?
+  PATH=$saved
+  printf '%s\n' "$out"
+  return $status
+}
+
+# A master that is not a full 64-hex-digit value would sign every waiver weakly
+# and never fail loudly, so it is refused with the same rule both derived-key
+# paths already use. The temp file must go with it: under `set -e` an unguarded
+# generation aborts the script and strands config/ci-waiver-secret.tmp.<pid>.
+test_init_refuses_an_unusable_generated_secret() {
+  local home stub out status left first
+  for mode in truncated broken; do
+    home=$(make_home "init-bad-$mode")
+    stub=$(stub_node_dir "node-$mode" "$mode")
+    out=$(run_waiver_with_node_stub "$stub" "$home" init); status=$?
+    [ "$status" -ne 0 ] || fail "init accepted an unusable generated secret ($mode)"$'\n'"$out"
+    assert_contains "$out" "could not generate a usable waiver secret" \
+      "init did not name why it refused ($mode)"
+    assert_absent "$home/config/ci-waiver-secret" "init installed an unusable secret ($mode)"
+    left=$(find "$home/config" -name 'ci-waiver-secret.tmp.*' 2>/dev/null)
+    [ -z "$left" ] || fail "init left a temp file behind ($mode): $left"
+  done
+
+  # A refused generation must also leave an existing secret byte-identical.
+  home=$(make_home init-bad-rotate)
+  run_waiver "$home" init >/dev/null
+  first=$(cat "$home/config/ci-waiver-secret")
+  stub=$(stub_node_dir node-rotate-broken broken)
+  out=$(run_waiver_with_node_stub "$stub" "$home" init --rotate); status=$?
+  [ "$status" -ne 0 ] || fail "a failed --rotate reported success"$'\n'"$out"
+  [ "$(cat "$home/config/ci-waiver-secret")" = "$first" ] \
+    || fail "a failed --rotate replaced the existing secret"
+  pass "init: refuses an unusable generated master, leaving no temp file and no damage"
 }
 
 # THE authority check. Nothing else in the design grants authority: the flag is
@@ -411,6 +470,7 @@ test_sign_refuses_without_a_repository() {
 
 test_init_writes_private_secret_without_printing_it
 test_init_refuses_silent_rotation
+test_init_refuses_an_unusable_generated_secret
 test_published_key_is_derived_per_repository
 test_another_repositorys_key_does_not_verify
 test_sign_refuses_without_a_repository

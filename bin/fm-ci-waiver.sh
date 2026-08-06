@@ -86,7 +86,9 @@ require_node() {
 }
 
 # Refuse a secret file that is a symlink or unreadable rather than following it
-# somewhere unexpected; the secret must live in the home's own config dir.
+# somewhere unexpected; the secret must live in the home's own config dir. This
+# is the single statement of that shape rule, and each case names its own
+# remedy, so the three checks stay separate rather than collapsing into one.
 read_secret_or_die() {
   if [ ! -e "$SECRET_FILE" ]; then
     echo "error: no CI waiver secret at $SECRET_FILE; run 'fm-ci-waiver.sh init' first" >&2
@@ -124,9 +126,22 @@ case "$cmd" in
     old_umask=$(umask)
     umask 077
     tmp="$SECRET_FILE.tmp.$$"
-    node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))' > "$tmp"
+    # Guarded rather than bare, because under `set -e` a failing node would abort
+    # here and leave both the tightened umask and the temp file behind.
+    generated=
+    if node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))' > "$tmp"; then
+      generated=$(cat "$tmp")
+    fi
     umask "$old_umask"
-    [ -s "$tmp" ] || { rm -f "$tmp"; echo "error: could not generate a waiver secret" >&2; exit 1; }
+    # Validated with the same rule both derived-key paths use, so a truncated
+    # write refuses loudly instead of installing a short master whose every
+    # signature would be weak without ever failing. The value stays in a shell
+    # variable: it is never printed, and never reaches argv or the environment.
+    if ! fm_ci_waiver_valid_sig "$generated"; then
+      rm -f "$tmp"
+      echo "error: could not generate a usable waiver secret; any existing secret is unchanged" >&2
+      exit 1
+    fi
     mv "$tmp" "$SECRET_FILE"
     chmod 600 "$SECRET_FILE"
     echo "wrote $SECRET_FILE (mode 600, value not printed)"

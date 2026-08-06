@@ -34,6 +34,12 @@ jobs:
     # back to the pushed commit. This does NOT close the broader path where a
     # PR edits the workflow file itself; that is inherent to pull_request
     # events and is mitigated by branch protection, not here.
+    #
+    # A base that predates the waiver carries no verifier at all, so the step
+    # below reports waived=false rather than exiting 127 and failing the job.
+    # That is the fail-closed verdict, not a workaround: a base with no
+    # verifier has no waiver capability, so "run everything" is correct. It
+    # self-heals, because every base from this change onwards has the verifier.
     name: CI testing waiver
     runs-on: ubuntu-latest
     outputs:
@@ -42,18 +48,28 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
-      - id: verify
+      - name: Verify the CI testing waiver
+        id: verify
         env:
           FM_CI_WAIVER_SECRET: ${{ secrets.FM_CI_WAIVER_SECRET }}
           FM_CI_WAIVER_CLAIM: ${{ github.event.pull_request.body }}
           FM_CI_WAIVER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: bin/fm-ci-waiver-verify.sh
+        run: |
+          set -eu
+          if [ ! -x bin/fm-ci-waiver-verify.sh ]; then
+            echo "::warning::the base branch carries no CI waiver verifier, so nothing can be waived here; every gated check runs"
+            echo "waived=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bin/fm-ci-waiver-verify.sh
 
   lint:
+    # Deliberately NOT gated on the waiver, for the same reason as `invariants`
+    # below: a minute of ShellCheck is not an expensive job, so there is nothing
+    # worth skipping, and a waived PR should still get static analysis rather
+    # than nothing looking at its shell at all.
     name: Lint shell scripts
     runs-on: ubuntu-latest
-    needs: ci-waiver
-    if: needs.ci-waiver.outputs.waived != 'true'
     steps:
       - uses: actions/checkout@v6
       - name: Install pinned ShellCheck

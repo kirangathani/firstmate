@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verify a published CI testing waiver. CI-SIDE ONLY: this is the job that
-# decides whether the expensive lint and test jobs run.
+# decides whether the expensive behaviour-test and macOS jobs run.
 #
 # Inputs, all from the environment so that no untrusted text is ever
 # interpolated into a shell command by the workflow:
@@ -100,7 +100,7 @@ while IFS= read -r line; do
     continue
   fi
   if printf '%s' "$SECRET" | fm_ci_waiver_check "$claim_id" "$claim_sha" "$claim_sig"; then
-    annotate notice "CI testing waived for task $claim_id at commit $claim_sha by a verified firstmate waiver. The lint and behaviour-test jobs will not run; this PR carries NO test evidence."
+    annotate notice "CI testing waived for task $claim_id at commit $claim_sha by a verified firstmate waiver. The expensive behaviour-test and macOS jobs will not run; this PR carries NO test evidence."
     verdict true
   fi
   saw_bad_signature=$claim_id
