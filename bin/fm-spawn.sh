@@ -1017,10 +1017,24 @@ mkdir -p "$TASK_TMP/gotmp"
 # serves every other lane - is far more damaging than the skip itself. Exiting 0
 # with a message that names the flag and points straight at push-and-PR keeps the
 # worker on the intended path instead of into a repair loop.
+#
+# Ownership: /tmp/fm-<id> is a predictable path, and this directory is not the
+# inert scratch space the sibling gotmp dir is - it goes at the FRONT of an
+# agent's PATH and shadows a real tool by name. On a shared host another local
+# user could pre-create it, keep ownership, and swap the shim after it is
+# written, which is code execution inside this worker's session. So it is
+# created mode 700 and the spawn refuses outright if the temp root is already
+# there and owned by somebody else, rather than trusting a path anyone can
+# guess.
 SKIP_BIN=
 if [ "$LOCAL_SKIP" = on ]; then
+  if [ -e "$TASK_TMP" ] && [ ! -O "$TASK_TMP" ]; then
+    echo "error: refusing to install the --local-skip shim: $TASK_TMP already exists and is not owned by this user, so nothing under it can be trusted at the front of a worker's PATH" >&2
+    exit 1
+  fi
   SKIP_BIN="$TASK_TMP/skip-bin"
   mkdir -p "$SKIP_BIN"
+  chmod 700 "$SKIP_BIN"
   cat > "$SKIP_BIN/no-mistakes" <<EOF
 #!/usr/bin/env bash
 # Firstmate local-testing skip shim for task $ID, installed by bin/fm-spawn.sh.

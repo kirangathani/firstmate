@@ -206,6 +206,24 @@ fm_ci_waiver_valid_repo() {
   return 0
 }
 
+# fm_ci_waiver_secret_readable <path>: 0 iff <path> is a usable secret file - a
+# non-empty regular file that is not a symlink pointing somewhere else.
+#
+# This is the BOOLEAN form, for a caller that only needs to know whether a
+# waiver could be issued at all - bin/fm-spawn.sh asks it before minting a
+# dispatch token, because without a secret the dispatch could never be waived.
+# bin/fm-ci-waiver.sh's read_secret_or_die deliberately keeps its own per-case
+# checks instead of calling this: it has to name a DIFFERENT remedy for each
+# case (init, a refused symlink, init --rotate), which a single yes/no cannot
+# do. Two contracts, not two copies of one.
+fm_ci_waiver_secret_readable() {
+  local path=${1-}
+  [ -n "$path" ] || return 1
+  [ ! -L "$path" ] || return 1
+  [ -f "$path" ] || return 1
+  [ -s "$path" ] || return 1
+}
+
 # fm_ci_waiver_line <task-id> <sha> <hex>: the publishable PR-body line.
 fm_ci_waiver_line() {
   printf '%s %s %s %s %s\n' \

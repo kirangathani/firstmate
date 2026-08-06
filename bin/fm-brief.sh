@@ -337,6 +337,20 @@ fi
 # before the final commit, and CI must see it on the PR's FIRST run because
 # editing a PR body afterwards does not re-run the workflow. Pushing a feature
 # branch triggers no workflow, so pushing before the PR costs nothing.
+# The definition-of-done sentence and the waiver handshake below must not each
+# give their own PR order. The handshake is the only authority when it applies:
+# the signature covers the head commit and CI must see it on the PR's FIRST run,
+# so a worker that opened the PR on the DOD sentence's word would get a PR the
+# waiver can never cover. A brief that states two orders is exactly the "the
+# agent decides" failure the mechanical skip exists to remove, so the DOD
+# sentence stops at push and defers to the handshake whenever one follows.
+if [ "$CI_SKIP" = on ]; then
+  PR_ORDER='push your branch, then follow the CI waiver handshake below for when and how to open the PR.'
+else
+  # shellcheck disable=SC2016 # {url} and the backticks are literal brief text, not expansions.
+  PR_ORDER='push your branch and open a PR with `gh-axi`, then append `done: PR {url}` to the status file and stop.'
+fi
+
 if [ "$CI_SKIP" = on ]; then
 CI_SKIP_SECTION=$(cat <<EOF
 
@@ -345,7 +359,8 @@ CI's expensive jobs are waived for this task, but only by a signature you cannot
 It is computed from a secret only the captain's machine holds, and it covers your exact head commit, so it can only be issued after your final commit.
 1. Commit everything, then push your branch: \`git push -u origin fm/$ID\`. Pushing a branch runs no CI, so this step is free.
 2. Read your head commit: \`git rev-parse HEAD\`.
-3. Append \`blocked: ci-waiver needed for {full-40-char-sha}\` to the status file and stop. Firstmate replies with a single line.
+3. Append \`blocked: ci-waiver needed for {full-40-char-sha} on {owner}/{repo}\` to the status file and stop. Firstmate replies with a single line.
+   Name the repository as well as the commit: a waiver is signed with a key derived for one repository, so firstmate needs both to issue the right line.
 4. When that line arrives, append \`resolved: ci waiver received\`, then open the PR with \`gh-axi\` and put the line VERBATIM on its own line in the PR body.
 5. If you push again afterwards, the head commit changes and the old line no longer covers it. Repeat steps 2-4 for a fresh one before that push can be waived.
 Never invent, guess, edit, reformat, or reuse a line for another commit.
@@ -364,7 +379,7 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, $PR_ORDER
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 $CI_SKIP_SECTION
 EOF
@@ -395,7 +410,7 @@ This task was dispatched with **local testing skipped**: the captain switched th
 That skip is enforced, not requested - the \`no-mistakes\` on your PATH is a shim that explains the skip and exits without running anything.
 Nothing is broken. Do not look for another copy of it, do not install one, do not change your PATH, and do not touch the shared daemon.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, $PR_ORDER
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 $CI_SKIP_SECTION
 EOF
