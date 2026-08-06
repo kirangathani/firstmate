@@ -88,9 +88,6 @@ KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
 fm_testing_skip_reset
-LOCAL_SKIP=off
-CI_SKIP=off
-SKIP_FLAGS=
 POS=()
 for a in "$@"; do
   case "$a" in

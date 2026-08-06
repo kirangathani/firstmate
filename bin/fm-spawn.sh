@@ -148,9 +148,6 @@ MODEL=
 EFFORT=
 BACKEND_ARG=
 fm_testing_skip_reset
-LOCAL_SKIP=off
-CI_SKIP=off
-SKIP_FLAGS=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -968,7 +965,24 @@ fi
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+#
+# Ownership, checked before anything is written into the root: /tmp/fm-<id> is a
+# predictable path under a world-writable sticky directory, so another local user
+# can pre-create it. The spawn refuses when it is already there as a symlink, or
+# already there owned by somebody else, rather than writing through a path it does
+# not control. -e and -O both FOLLOW a symlink, so the -L test is the one that
+# actually rejects a planted link, and it is asked first for that reason. The guard
+# covers EVERY spawn, not only a --local-skip one: writing this task's Go temp
+# through a link somebody else chose is wrong on its own terms, and for the shim
+# installed below - which goes at the FRONT of a worker's PATH - it would be code
+# execution as this user. It refuses outright and never falls back to another path:
+# fm-teardown.sh removes exactly $TASK_TMP and the PATH export names exactly that
+# directory, so a silent fallback would strand both.
 TASK_TMP="/tmp/fm-$ID"
+if [ -L "$TASK_TMP" ] || { [ -e "$TASK_TMP" ] && [ ! -O "$TASK_TMP" ]; }; then
+  echo "error: refusing to use $TASK_TMP as this task's temp root: it already exists as a symlink or is not owned by this user, so nothing written under it can be trusted" >&2
+  exit 1
+fi
 mkdir -p "$TASK_TMP/gotmp"
 
 # --local-skip enforcement. A brief that merely ASKS a worker not to run the
@@ -990,20 +1004,18 @@ mkdir -p "$TASK_TMP/gotmp"
 # with a message that names the flag and points straight at push-and-PR keeps the
 # worker on the intended path instead of into a repair loop.
 #
-# Ownership: /tmp/fm-<id> is a predictable path, and this directory is not the
-# inert scratch space the sibling gotmp dir is - it goes at the FRONT of an
-# agent's PATH and shadows a real tool by name. On a shared host another local
-# user could pre-create it, keep ownership, and swap the shim after it is
-# written, which is code execution inside this worker's session. So it is
-# created mode 700 and the spawn refuses outright if the temp root is already
-# there and owned by somebody else, rather than trusting a path anyone can
-# guess.
+# Permissions: this directory is not the inert scratch space the sibling gotmp dir
+# is - it goes at the FRONT of an agent's PATH and shadows a real tool by name, so
+# it is created mode 700 and nobody else can swap the shim after it is written. The
+# temp root it sits under was validated for symlinks and ownership above, before
+# anything was written there.
+#
+# Streams: the shim prints the same message on stdout AND stderr. Exit 0 paired
+# with empty stdout is the worst combination for a machine reader - a worker
+# running `no-mistakes axi run --json` and parsing stdout would see nothing plus a
+# success status, and could read that as a pipeline that ran and passed.
 SKIP_BIN=
 if [ "$LOCAL_SKIP" = on ]; then
-  if [ -e "$TASK_TMP" ] && [ ! -O "$TASK_TMP" ]; then
-    echo "error: refusing to install the --local-skip shim: $TASK_TMP already exists and is not owned by this user, so nothing under it can be trusted at the front of a worker's PATH" >&2
-    exit 1
-  fi
   SKIP_BIN="$TASK_TMP/skip-bin"
   mkdir -p "$SKIP_BIN"
   chmod 700 "$SKIP_BIN"
@@ -1011,7 +1023,8 @@ if [ "$LOCAL_SKIP" = on ]; then
 #!/usr/bin/env bash
 # Firstmate local-testing skip shim for task $ID, installed by bin/fm-spawn.sh.
 # Not the real no-mistakes; see that script's --local-skip contract.
-cat >&2 <<'MSG'
+emit_skip_notice() {
+cat <<'MSG'
 no-mistakes is intentionally disabled for this task.
 
 The captain dispatched it with --local-skip, so the local validation pipeline is
@@ -1023,6 +1036,9 @@ do not install one, and do not touch the shared daemon.
 Go straight to delivery instead: commit your work, push your branch, open the PR
 with gh-axi, and report done exactly as your instructions say.
 MSG
+}
+emit_skip_notice
+emit_skip_notice >&2
 exit 0
 EOF
   chmod 755 "$SKIP_BIN/no-mistakes"

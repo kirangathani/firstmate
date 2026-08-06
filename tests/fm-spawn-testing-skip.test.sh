@@ -29,6 +29,10 @@
 #       binary, exits 0, and is told the skip was intentional
 #   (m) the same real invocation outside that PATH still reaches the real binary,
 #       so the shim is scoped to the one worker and leaks nowhere
+#   (n) the shim says the same thing on stdout as on stderr, so a caller that
+#       parses stdout alone cannot read exit 0 as a pipeline that ran and passed
+#   (o) a symlink planted at the predictable per-task temp root is refused before
+#       anything is written through it
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -38,7 +42,9 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-testing-skip)
 
 # Per-task temp roots are a fixed /tmp/fm-<id> path that fm-teardown.sh normally
-# removes, so this suite cleans up its own.
+# removes, so this suite cleans up its own. Registration happens in make_case, in
+# the parent shell: every spawn here is invoked as out=$(run_spawn ...), and an
+# append inside that command substitution would be lost with its subshell.
 SPAWNED_TASK_TMPS=()
 cleanup_all() {
   local d
@@ -89,6 +95,7 @@ SH
 # CASE_RESP CASE_FB for the case named by <id>.
 make_case() {  # <id> <mode>
   local id=$1 mode=$2 dir
+  SPAWNED_TASK_TMPS+=("/tmp/fm-$id")
   dir="$TMP_ROOT/$id"
   CASE_HOME="$dir/home"
   CASE_PROJ="$dir/alpha"
@@ -126,7 +133,6 @@ arm_orca_success() {
 run_spawn() {  # <id> [<extra spawn args>...]
   local id=$1
   shift
-  SPAWNED_TASK_TMPS+=("/tmp/fm-$id")
   PATH="$CASE_FB:$PATH" \
     FM_ORCA_LOG="$CASE_LOG" \
     FM_ORCA_RESPONSES="$CASE_RESP" \
@@ -248,7 +254,7 @@ test_ci_skip_without_a_secret_refuses() {
 }
 
 test_local_skip_cannot_be_run_around() {
-  local out real_bin export_line worker_path invoked marker
+  local out real_bin export_line worker_path invoked marker on_stdout on_stderr
   make_case enforced no-mistakes
   arm_orca_success
 
@@ -284,6 +290,14 @@ SH
   [ "$(PATH="$worker_path" command -v no-mistakes)" = "/tmp/fm-enforced/skip-bin/no-mistakes" ] \
     || fail "the shim is not first on the worker's PATH"
 
+  # Both streams carry the same message. Exit 0 with an empty stdout is the one
+  # combination a caller parsing stdout alone could read as a pipeline that ran
+  # and passed.
+  on_stdout=$(PATH="$worker_path" bash -c 'no-mistakes axi run --json' 2>/dev/null)
+  on_stderr=$(PATH="$worker_path" bash -c 'no-mistakes axi run --json' 2>&1 >/dev/null)
+  assert_contains "$on_stdout" "intentionally disabled" "the shim wrote nothing to stdout"
+  [ "$on_stdout" = "$on_stderr" ] || fail "the shim's stdout and stderr messages differ"$'\n'"$on_stdout"$'\n---\n'"$on_stderr"
+
   # The other half: the enforcement is scoped to that one worker. Outside its
   # exported PATH the real binary is still reachable, so nothing global was
   # renamed, removed, or shadowed.
@@ -292,8 +306,31 @@ SH
   pass "--local-skip: a worker cannot run the pipeline, and no other environment is affected"
 }
 
+# /tmp/fm-<id> is a predictable path under a world-writable sticky directory, so
+# another local user can plant one. A symlink has to be refused on its own terms:
+# -e and -O both follow it, so an ownership test alone would judge the target the
+# link points at, not the link somebody else controls.
+test_a_planted_temp_root_symlink_is_refused() {
+  local out status target
+  make_case planted no-mistakes
+  arm_orca_success
+  target="$TMP_ROOT/planted/attacker-target"
+  mkdir -p "$target"
+  rm -rf /tmp/fm-planted
+  ln -s "$target" /tmp/fm-planted
+  out=$(run_spawn planted --local-skip)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn should refuse a symlinked per-task temp root"$'\n'"$out"
+  assert_contains "$out" "refusing to use /tmp/fm-planted" "the refusal did not name the temp root"
+  assert_absent "$target/gotmp" "the spawn wrote Go's temp dir through the planted symlink"
+  assert_absent "$target/skip-bin" "the spawn wrote the shim through the planted symlink"
+  assert_absent "$CASE_HOME/state/planted.meta" "a refused spawn wrote task metadata"
+  pass "a symlink planted at the per-task temp root is refused before anything is written"
+}
+
 test_refused_combinations
 test_secondmate_refuses_a_skip_flag
+test_a_planted_temp_root_symlink_is_refused
 test_meta_records_only_the_flags_that_were_passed
 test_ci_skip_without_a_secret_refuses
 test_local_skip_cannot_be_run_around
