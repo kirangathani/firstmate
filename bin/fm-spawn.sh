@@ -134,6 +134,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-ci-waiver-lib.sh
 . "$SCRIPT_DIR/fm-ci-waiver-lib.sh"
+# shellcheck source=bin/fm-testing-skip-lib.sh
+. "$SCRIPT_DIR/fm-testing-skip-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -145,10 +147,10 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+fm_testing_skip_reset
 LOCAL_SKIP=off
 CI_SKIP=off
 SKIP_FLAGS=
-SKIP_FLAG_COUNT=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -173,9 +175,7 @@ for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
-    --local-skip) LOCAL_SKIP=on; SKIP_FLAGS="${SKIP_FLAGS}${SKIP_FLAGS:+ }--local-skip"; SKIP_FLAG_COUNT=$((SKIP_FLAG_COUNT + 1)) ;;
-    --ci-skip) CI_SKIP=on; SKIP_FLAGS="${SKIP_FLAGS}${SKIP_FLAGS:+ }--ci-skip"; SKIP_FLAG_COUNT=$((SKIP_FLAG_COUNT + 1)) ;;
-    --all-testing-skip) LOCAL_SKIP=on; CI_SKIP=on; SKIP_FLAGS="${SKIP_FLAGS}${SKIP_FLAGS:+ }--all-testing-skip"; SKIP_FLAG_COUNT=$((SKIP_FLAG_COUNT + 1)) ;;
+    --local-skip|--ci-skip|--all-testing-skip) fm_testing_skip_note "$a" ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -203,14 +203,10 @@ esac
 # Every unrecognised combination refuses rather than picking an interpretation:
 # these flags remove test coverage, so guessing which one the captain meant is
 # the one behaviour they must never have.
-if [ "$SKIP_FLAG_COUNT" -gt 1 ]; then
-  echo "error: pass exactly one testing-skip flag; got '$SKIP_FLAGS'. Use --all-testing-skip for both, not --local-skip together with --ci-skip." >&2
-  exit 1
-fi
-if [ -n "$SKIP_FLAGS" ] && [ "$KIND" != ship ]; then
-  echo "error: $SKIP_FLAGS applies only to a ship task; a $KIND spawn runs no local pipeline and opens no PR" >&2
-  exit 1
-fi
+fm_testing_skip_check_args "$KIND" task || exit 1
+LOCAL_SKIP=$FM_TESTING_SKIP_LOCAL
+CI_SKIP=$FM_TESTING_SKIP_CI
+SKIP_FLAGS=$FM_TESTING_SKIP_FLAGS
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -721,31 +717,7 @@ fi
 # rule below refuses a combination the mode CANNOT actually deliver, rather than
 # accepting it and silently doing nothing, so a captain who asks for less testing
 # always learns whether they got it.
-if [ -n "$SKIP_FLAGS" ]; then
-  case "$MODE" in
-    no-mistakes)
-      if [ "$CI_SKIP" = on ] && [ "$LOCAL_SKIP" = off ]; then
-        echo "error: --ci-skip alone cannot be honoured for a no-mistakes project: that pipeline owns the push and the PR, and it may add fix commits, so the head commit a waiver must cover is not known until after the PR already exists - and editing a PR body does not re-run CI." >&2
-        echo "error: use --all-testing-skip (the worker then opens the PR itself, with the waiver in the body on the first CI run), or drop --ci-skip." >&2
-        exit 1
-      fi
-      ;;
-    direct-PR)
-      if [ "$LOCAL_SKIP" = on ]; then
-        echo "error: --local-skip and --all-testing-skip do not apply to a direct-PR project: that mode already runs no local pipeline. Use --ci-skip." >&2
-        exit 1
-      fi
-      ;;
-    local-only)
-      echo "error: $SKIP_FLAGS does not apply to a local-only project: it runs no pipeline, opens no PR, and has no CI to waive." >&2
-      exit 1
-      ;;
-    *)
-      echo "error: $SKIP_FLAGS is not supported for delivery mode '$MODE'" >&2
-      exit 1
-      ;;
-  esac
-fi
+fm_testing_skip_check_mode "$MODE" || exit 1
 
 # The dispatch-authorization token for a CI skip, minted here and only here.
 # ci_skip=on on its own is not authority: the worker appends its status lines

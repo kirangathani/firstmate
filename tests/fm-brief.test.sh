@@ -404,6 +404,29 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# The lockstep property finding 3 is about: bin/fm-brief.sh and bin/fm-spawn.sh
+# must refuse the same combinations with the same words, so a brief can never be
+# scaffolded for a combination spawn will then refuse. They drifted while each
+# held its own copy, so this asserts the matrix is stated in exactly ONE place
+# and both scripts consume it - the structural fact, not just today's strings.
+test_skip_matrix_has_exactly_one_owner() {
+  local lib="$ROOT/bin/fm-testing-skip-lib.sh" f n
+  assert_present "$lib" "the shared testing-skip owner is missing"
+  for f in bin/fm-brief.sh bin/fm-spawn.sh; do
+    assert_grep 'fm-testing-skip-lib.sh' "$ROOT/$f" "$f must consume the shared testing-skip owner"
+    assert_grep 'fm_testing_skip_check_mode' "$ROOT/$f" "$f must use the shared delivery-mode matrix"
+    assert_grep 'fm_testing_skip_check_args' "$ROOT/$f" "$f must use the shared argument-only rules"
+    # The refusal text must exist only in the owner, never re-spelled downstream.
+    n=$(grep -c 'cannot be honoured for a no-mistakes project' "$ROOT/$f" || true)
+    [ "$n" -eq 0 ] || fail "$f re-spells the no-mistakes refusal; it belongs only in bin/fm-testing-skip-lib.sh"
+  done
+  n=$(grep -c 'cannot be honoured for a no-mistakes project' "$lib" || true)
+  [ "$n" -eq 1 ] || fail "the no-mistakes refusal must be stated exactly once in the owner, found $n"
+  pass "testing-skip matrix: stated once, consumed by both brief and spawn"
+}
+
+
+test_skip_matrix_has_exactly_one_owner
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs

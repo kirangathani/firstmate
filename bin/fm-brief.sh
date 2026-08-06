@@ -77,6 +77,8 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-testing-skip-lib.sh
+. "$SCRIPT_DIR/fm-testing-skip-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -85,10 +87,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+fm_testing_skip_reset
 LOCAL_SKIP=off
 CI_SKIP=off
 SKIP_FLAGS=
-SKIP_FLAG_COUNT=0
 POS=()
 for a in "$@"; do
   case "$a" in
@@ -96,9 +98,7 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
-    --local-skip) LOCAL_SKIP=on; SKIP_FLAGS="${SKIP_FLAGS}${SKIP_FLAGS:+ }--local-skip"; SKIP_FLAG_COUNT=$((SKIP_FLAG_COUNT + 1)) ;;
-    --ci-skip) CI_SKIP=on; SKIP_FLAGS="${SKIP_FLAGS}${SKIP_FLAGS:+ }--ci-skip"; SKIP_FLAG_COUNT=$((SKIP_FLAG_COUNT + 1)) ;;
-    --all-testing-skip) LOCAL_SKIP=on; CI_SKIP=on; SKIP_FLAGS="${SKIP_FLAGS}${SKIP_FLAGS:+ }--all-testing-skip"; SKIP_FLAG_COUNT=$((SKIP_FLAG_COUNT + 1)) ;;
+    --local-skip|--ci-skip|--all-testing-skip) fm_testing_skip_note "$a" ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -106,14 +106,10 @@ ID=${POS[0]}
 
 # Same argument-only refusals as bin/fm-spawn.sh, so a brief can never be
 # scaffolded for a combination that spawn will then refuse to launch.
-if [ "$SKIP_FLAG_COUNT" -gt 1 ]; then
-  echo "error: pass exactly one testing-skip flag; got '$SKIP_FLAGS'. Use --all-testing-skip for both, not --local-skip together with --ci-skip." >&2
-  exit 1
-fi
-if [ -n "$SKIP_FLAGS" ] && [ "$KIND" != ship ]; then
-  echo "error: $SKIP_FLAGS applies only to a ship brief; a $KIND brief runs no local pipeline and opens no PR" >&2
-  exit 1
-fi
+fm_testing_skip_check_args "$KIND" brief || exit 1
+LOCAL_SKIP=$FM_TESTING_SKIP_LOCAL
+CI_SKIP=$FM_TESTING_SKIP_CI
+SKIP_FLAGS=$FM_TESTING_SKIP_FLAGS
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -307,30 +303,7 @@ EOF
 
 # Same delivery-mode refusals as bin/fm-spawn.sh, whose header owns the matrix
 # and the reasoning behind each row.
-if [ -n "$SKIP_FLAGS" ]; then
-  case "$MODE" in
-    no-mistakes)
-      if [ "$CI_SKIP" = on ] && [ "$LOCAL_SKIP" = off ]; then
-        echo "error: --ci-skip alone cannot be honoured for a no-mistakes project: that pipeline owns the push and the PR, so the head commit a waiver must cover is not known until the PR already exists. Use --all-testing-skip, or drop --ci-skip." >&2
-        exit 1
-      fi
-      ;;
-    direct-PR)
-      if [ "$LOCAL_SKIP" = on ]; then
-        echo "error: --local-skip and --all-testing-skip do not apply to a direct-PR project: that mode already runs no local pipeline. Use --ci-skip." >&2
-        exit 1
-      fi
-      ;;
-    local-only)
-      echo "error: $SKIP_FLAGS does not apply to a local-only project: it runs no pipeline, opens no PR, and has no CI to waive." >&2
-      exit 1
-      ;;
-    *)
-      echo "error: $SKIP_FLAGS is not supported for delivery mode '$MODE'" >&2
-      exit 1
-      ;;
-  esac
-fi
+fm_testing_skip_check_mode "$MODE" || exit 1
 
 # The waiver handshake, appended to whichever definition of done applies. Its
 # order is load-bearing: the signature covers the head commit, so it cannot exist
