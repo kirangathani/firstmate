@@ -41,9 +41,11 @@
 #       run-step attribution WHILE its own agent process is confirmed alive (so
 #       a gate-parked crew surfaces instead of being absorbed as a busy pane),
 #       loses it on any other liveness reading, and loses it outright once
-#       another meta records the same resolved worktree path, where its busy
-#       pane reads unknown rather than working. The repo-wide runs list is
-#       queried for fm/<id> only, never a shared branch name.
+#       another meta records the same resolved worktree path. Wherever
+#       attribution is withheld like that, a busy pane reads unknown rather than
+#       working, so the backends and harnesses that can never read `alive` do
+#       not get a healthy verdict back through the pane. The repo-wide runs list
+#       is queried for fm/<id> only, never a shared branch name.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -996,6 +998,40 @@ test_off_contract_branch_without_live_agent_loses_attribution() {
   pass "an off-contract branch with no live agent loses run attribution"
 }
 
+# ... and having withheld that attribution, the pane must not hand back a
+# healthy verdict through the back door. `node` is not a contrived reading: the
+# pi harness execs into a generic node process, and the zellij, orca and cmux
+# backends have no classifier at all, so `unknown` is the PERMANENT reading for
+# those supported configurations. A busy banner there is indistinguishable from
+# a crew blocked at a gate inside a synchronous `axi run`, so the verdict must
+# surface rather than be absorbed by crew_absorb_class.
+test_off_contract_branch_without_live_agent_busy_pane_surfaces() {
+  reset_fakes
+  local d; d=$(new_case unconventional-branch-dead-agent-busy)
+  make_repo_on_branch "$d/wt" my-own-fix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-uncv4.meta" "window=fm:fm-feat-uncv4" "worktree=$d/wt" "kind=ship"
+  # No run is attributable: the repo-wide answer is another branch's and the
+  # coarse list has no fm/<id> row.
+  FM_FAKE_AXI_STATUS="$(run_running fm/some-other)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local out probe
+  for probe in node bash; do
+    FM_FAKE_TMUX_COMMAND=$probe
+    out=$(run_crew_state "$d" feat-uncv4)
+    assert_not_contains "$out" "state: working" \
+      "a busy pane must not read working where attribution was withheld ($probe)"
+    assert_contains "$out" "state: unknown" "unattributable busy pane -> unknown ($probe)"
+    assert_contains "$out" "source: pane" "the busy pane is still the source ($probe)"
+    assert_contains "$out" "worktree not on fm/feat-uncv4 (now on my-own-fix)" \
+      "the off-contract checkout is still reported ($probe)"
+    PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-uncv4 \
+      && fail "an off-contract crew with no confirmed agent ($probe) was absorbed off its busy pane"
+  done
+  pass "a busy pane cannot restore a verdict attribution deliberately withheld"
+}
+
 # The repo-wide runs list is only ever queried for fm/<id>. A crew sitting on a
 # shared branch name must never inherit whatever run someone else last started
 # on that name.
@@ -1479,6 +1515,7 @@ test_recycled_slot_own_run_still_in_flight_reports_working
 test_recycled_slot_stale_running_row_without_live_agent_is_unknown
 test_off_contract_branch_own_worktree_keeps_attribution
 test_off_contract_branch_without_live_agent_loses_attribution
+test_off_contract_branch_without_live_agent_busy_pane_surfaces
 test_coarse_lookup_never_keyed_on_the_shared_crew_branch
 test_off_contract_branch_own_worktree_falls_back_to_pane
 test_foreign_worktree_busy_pane_is_not_absorbed

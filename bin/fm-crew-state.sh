@@ -720,14 +720,24 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
 #
-# A busy pane is NOT reported as working for a task whose recorded worktree is
-# provably not its own: the busy banner covers a synchronous `no-mistakes axi
-# run` blocked at a gate just as it covers real work (see crew_pane_is_busy),
-# and with no attributable run to tell the two apart, `working - source: pane`
-# would let crew_absorb_class absorb a crew that may be parked and waiting on
-# the captain. Such a task needs supervision anyway, so it surfaces.
+# A busy pane is NOT reported as working wherever attribution was deliberately
+# WITHHELD above because ownership or liveness could not be proven - the
+# worktree is provably another task's, or it is off the fm/<id> contract and
+# this task's own agent could not be confirmed alive. The busy banner covers a
+# synchronous `no-mistakes axi run` blocked at a gate just as it covers real
+# work (see crew_pane_is_busy), so with no attributable run to tell the two
+# apart, `working - source: pane` would let crew_absorb_class absorb a crew that
+# may be parked and waiting on the captain. The honest verdict there is unknown,
+# which surfaces for supervision. This costs nothing on the verified tmux
+# harnesses, whose busy pane classifies as alive; it bounds the extra surfacing
+# to the off-contract path on the configurations fm_backend_agent_alive cannot
+# classify at all (pi execs into a generic node process; zellij, orca and cmux
+# always read unknown), which is exactly where the withheld attribution would
+# otherwise silently become a healthy verdict.
 if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
-  [ "$WT_FOREIGN" = 1 ] && emit unknown pane "harness busy, but no run of this task's own is attributable"
+  if [ -n "$WT_NOTE" ] && { [ "$WT_FOREIGN" = 1 ] || ! crew_agent_alive; }; then
+    emit unknown pane "harness busy, but no run of this task's own is attributable"
+  fi
   emit working pane "harness busy"
 fi
 
