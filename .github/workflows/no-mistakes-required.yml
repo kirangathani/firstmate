@@ -14,14 +14,84 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ci-waiver:
+    # Mirrors the job of the same name in .github/workflows/ci.yml, and is the
+    # ONLY thing that may exempt the attestation check below. A captain-flagged
+    # testing skip means the worker never ran the pipeline, so it never wrote
+    # the attestation, so without this the flags are unusable on this repo -
+    # the one repo where --all-testing-skip is the valid combination.
+    #
+    # Only a signature this repository's FM_CI_WAIVER_SECRET reproduces over
+    # the PR's current head commit exempts anything. That secret lives on the
+    # captain's machine and in this repository's Actions secrets and never
+    # reaches a worker, so the exemption is not something an agent can type -
+    # which is exactly what the attestation marker below is not.
+    #
+    # Untrusted PR-body text reaches the script only through env, never
+    # interpolated into a shell command.
+    #
+    # Checks out the BASE ref rather than the default PR merge ref, for the
+    # same reason as the identical job in ci.yml: a pull_request build
+    # otherwise runs PR-authored code, which would let a PR replace the very
+    # script that decides whether its own attestation may be waived.
+    name: CI testing waiver
+    runs-on: ubuntu-latest
+    outputs:
+      waived: ${{ steps.verify.outputs.waived }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+      - id: verify
+        env:
+          FM_CI_WAIVER_SECRET: ${{ secrets.FM_CI_WAIVER_SECRET }}
+          FM_CI_WAIVER_CLAIM: ${{ github.event.pull_request.body }}
+          FM_CI_WAIVER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bin/fm-ci-waiver-verify.sh
+
   check:
     name: PR must be raised via no-mistakes
     runs-on: ubuntu-latest
+    needs: ci-waiver
+    # `!cancelled()` keeps this job REPORTING rather than letting a FAILED
+    # waiver job skip it. Skipping would be a fail-open twice over: a skipped
+    # check reads as passing to bin/fm-pr-merge.sh, and a required check that
+    # never reports leaves branch protection pending forever. So the job runs
+    # and the gate step below decides, hard-failing when the waiver job did not
+    # complete - "the attestation was legitimately waived" and "the waiver
+    # check crashed" are indistinguishable from its absence alone, and only one
+    # of those is authorized.
+    #
+    # NOT `always()`, deliberately: `always()` also runs a job when the whole
+    # workflow RUN was cancelled, and this workflow sets cancel-in-progress. A
+    # superseded run would then still execute this job, see the waiver job's
+    # result as `cancelled`, and hard-fail - leaving a spurious red required
+    # check that only clears on the next push or edit. `!cancelled()` drops
+    # that case while keeping the failed-waiver case above.
     if: >-
+      !cancelled() &&
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
+      - name: Gate on the CI testing waiver
+        env:
+          WAIVER_RESULT: ${{ needs.ci-waiver.result }}
+          WAIVED: ${{ needs.ci-waiver.outputs.waived }}
+        run: |
+          set -eu
+          if [ "$WAIVER_RESULT" != "success" ]; then
+            echo "::error::the CI waiver check did not complete (result: $WAIVER_RESULT), so it cannot be known whether this PR's missing attestation was authorized"
+            exit 1
+          fi
+          if [ "$WAIVED" = "true" ]; then
+            echo "::warning::the no-mistakes attestation requirement was WAIVED for this PR by a verified firstmate CI waiver; this PR was not raised through the pipeline"
+          fi
+      # Unchanged below this line, and deliberately so: for every PR that
+      # carries no verified waiver - which is every ordinary PR, since an
+      # absent or invalid signature yields waived=false - this step runs
+      # exactly as it did before the waiver existed.
       - name: Verify no-mistakes signature in PR body
+        if: needs.ci-waiver.outputs.waived != 'true'
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}

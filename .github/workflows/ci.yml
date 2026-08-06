@@ -10,9 +10,50 @@ permissions:
   contents: read
 
 jobs:
+  ci-waiver:
+    # The one job that decides whether the expensive jobs below run at all. It is
+    # cheap (a checkout plus one HMAC) and it always runs, including on push to
+    # main, where there is no pull-request body and the verdict is therefore
+    # always "not waived" - post-merge CI on main is never skippable.
+    #
+    # A waiver is a signature this repository's FM_CI_WAIVER_SECRET reproduces
+    # over the PR's current head commit. A body marker CI merely greps for would
+    # be forgeable by any agent that can type it; a signature is not, because the
+    # secret lives only on the captain's machine and in this repository's Actions
+    # secrets, and never reaches a worker. bin/fm-ci-waiver-lib.sh owns the
+    # payload and bin/fm-ci-waiver-verify.sh owns the verdict rules.
+    #
+    # Untrusted PR-body text reaches the script only through env, never
+    # interpolated into a shell command.
+    #
+    # This job checks out the BASE ref, not the default PR merge ref, so the
+    # verifier and its library are the versions already on the base branch. A
+    # pull_request build otherwise runs PR-authored code, which would let a PR
+    # replace the very script that decides whether its own tests may be
+    # skipped. On push to main there is no pull-request payload, so it falls
+    # back to the pushed commit. This does NOT close the broader path where a
+    # PR edits the workflow file itself; that is inherent to pull_request
+    # events and is mitigated by branch protection, not here.
+    name: CI testing waiver
+    runs-on: ubuntu-latest
+    outputs:
+      waived: ${{ steps.verify.outputs.waived }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+      - id: verify
+        env:
+          FM_CI_WAIVER_SECRET: ${{ secrets.FM_CI_WAIVER_SECRET }}
+          FM_CI_WAIVER_CLAIM: ${{ github.event.pull_request.body }}
+          FM_CI_WAIVER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bin/fm-ci-waiver-verify.sh
+
   lint:
     name: Lint shell scripts
     runs-on: ubuntu-latest
+    needs: ci-waiver
+    if: needs.ci-waiver.outputs.waived != 'true'
     steps:
       - uses: actions/checkout@v6
       - name: Install pinned ShellCheck
@@ -35,6 +76,8 @@ jobs:
     # with the same `bin/fm-test.sh --shard K/4`.
     name: Behavior tests (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
+    needs: ci-waiver
+    if: needs.ci-waiver.outputs.waived != 'true'
     strategy:
       # Let every shard report its own verdict; the tests-complete gate below
       # is what fails the check when any one shard fails or is cancelled.
@@ -73,24 +116,46 @@ jobs:
     # cancelled, and the explicit result test below turns anything but
     # every-shard-success - including skipped, cancelled, or never-scheduled
     # shards - into a failure, never a silent pass.
+    #
+    # It must keep RUNNING on a waived PR rather than being skipped with the
+    # shards: a required check that never reports leaves branch protection
+    # pending forever. So it stays the always-reporting verdict and reports the
+    # waiver itself, loudly. A waiver job that did not itself succeed is a hard
+    # failure here, because "the shards were skipped" and "the waiver check
+    # crashed and skipped them" are indistinguishable from the shard result
+    # alone, and only one of those is authorized.
     name: Behavior tests complete
     runs-on: ubuntu-latest
-    needs: tests
+    needs: [tests, ci-waiver]
     if: always()
     steps:
       - name: Require every shard green
+        env:
+          WAIVER_RESULT: ${{ needs.ci-waiver.result }}
+          WAIVED: ${{ needs.ci-waiver.outputs.waived }}
+          TESTS_RESULT: ${{ needs.tests.result }}
         run: |
           set -eu
-          result="${{ needs.tests.result }}"
-          echo "aggregate shard result: $result"
-          if [ "$result" != "success" ]; then
-            echo "::error::behaviour-test shards did not all succeed (aggregate result: $result)"
+          if [ "$WAIVER_RESULT" != "success" ]; then
+            echo "::error::the CI waiver check did not complete (result: $WAIVER_RESULT), so it cannot be known whether the behaviour shards were skipped legitimately"
+            exit 1
+          fi
+          if [ "$WAIVED" = "true" ]; then
+            echo "::warning::behaviour tests were WAIVED for this PR by a verified firstmate CI waiver; this PR carries no test evidence"
+            echo "behaviour tests waived (verified waiver, shard result: $TESTS_RESULT)"
+            exit 0
+          fi
+          echo "aggregate shard result: $TESTS_RESULT"
+          if [ "$TESTS_RESULT" != "success" ]; then
+            echo "::error::behaviour-test shards did not all succeed (aggregate result: $TESTS_RESULT)"
             exit 1
           fi
 
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
     runs-on: macos-latest
+    needs: ci-waiver
+    if: needs.ci-waiver.outputs.waived != 'true'
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -125,6 +190,10 @@ jobs:
           }
 
   invariants:
+    # Deliberately NOT gated on the waiver: two greps cost nothing, so there is
+    # no expense to skip, and keeping a substantive check reporting on every PR
+    # is what stops a fully waived PR from arriving at bin/fm-pr-merge.sh's
+    # zero-checks gate looking like CI that never ran.
     name: Repo invariants
     runs-on: ubuntu-latest
     steps:

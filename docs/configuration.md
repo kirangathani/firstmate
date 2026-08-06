@@ -114,6 +114,36 @@ Every mode requires `tmux` on `PATH` and prints `tmux -V`.
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs that same script as `--shard K/N` across parallel jobs instead of delegating the test step to an agent, and stays exhaustive with no change-based selection, because CI is the authority that catches the host-dependence class of bug a local run passes by construction.
 `tests/fm-test.test.sh` asserts both that the shards' union is exactly this whole set and that the selected, sharded local path returns the whole set's verdict for every file it runs, so the gate and CI cannot diverge.
 
+## The CI testing waiver secret (config/ci-waiver-secret)
+
+A repository's expensive CI jobs can be waived for one commit, but only by a keyed signature the captain issues, never by a marker string anyone can type into a PR body.
+This section owns the secret's configuration and provisioning; `bin/fm-ci-waiver-lib.sh` owns the signed payload and the published line's grammar, and `bin/fm-ci-waiver-verify.sh` owns the verdict rules.
+
+`config/ci-waiver-secret` is a local, gitignored, mode-600 file holding one 32-byte random value per firstmate home, and the same value is mirrored into every repository that must verify waivers as the Actions repository secret `FM_CI_WAIVER_SECRET`.
+Create it with `bin/fm-ci-waiver.sh init` and mirror it with `bin/fm-ci-waiver.sh publish <owner/repo>`, once per such repository; both paths keep the value out of terminals, argv, and environment variables, so it is never committed, never printed, and never given to a worker.
+`--rotate` is the only way to replace an existing secret, because rotating invalidates every signature already published on an open PR and requires re-publishing to every repository.
+The secret is not inherited by secondmate homes: a home that dispatches its own waived work runs its own `init` and `publish`.
+
+Until a repository holds the secret the feature is inert there: a waiver line cannot be verified, so the verifier refuses it loudly and the full suite runs, which is exactly the behaviour without this feature at all.
+`bin/fm-ci-waiver.sh sign <task-id> <sha>` prints the publishable line, and it refuses unless the task's own `state/<id>.meta` records `ci_skip=on` together with a `ci_skip_auth=` dispatch token this secret reproduces for that task id.
+That pair is the whole authorization model, and both halves are load-bearing: a worker appends its status lines into the same `state/` directory, so it could append the flag line to its own record, and the token is an HMAC it cannot compute.
+The signature covers the commit as well as the task id, so it is bound to exactly one head commit and every further push needs a fresh one; publishing the line is harmless, since it reveals nothing about the secret.
+
+The dispatch flags that set `ci_skip=on` are not part of this change, so nothing writes that pair yet and `sign` refuses every task until they land.
+The signing and verification machinery ships first and inert, deliberately, so the enforcement path is reviewable on its own.
+
+In [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) the cheap `ci-waiver` job gates the expensive lint, behaviour-test, and macOS jobs, while `invariants` and the required `tests-complete` verdict always run, so a fully waived PR still reports checks and never reaches `bin/fm-pr-merge.sh`'s zero-checks refusal looking like CI that never ran.
+A project adopting this pattern must keep at least one always-running check for the same reason.
+On push to `main` there is no pull-request body, so the verdict is always "not waived" and post-merge CI on main is never skippable.
+
+[`.github/workflows/no-mistakes-required.yml`](../.github/workflows/no-mistakes-required.yml) fails any PR whose body lacks the pipeline's own attestation, and a waived pipeline never writes one, so it carries the same `ci-waiver` job for the same reason.
+Only a verified waiver exempts it, and the exemption is deliberately not a second marker string, because the attestation is already a literal string the PR author writes and a second one would be forgeable by the same agent.
+Its `check` job keeps reporting instead of being skipped by a failed dependency, and hard-fails when the waiver job did not complete, because a skipped check reads as passing to `bin/fm-pr-merge.sh` and a required check that never reports leaves branch protection pending forever.
+It uses `!cancelled()` rather than `always()` so a superseded run does not leave a spurious red required check behind.
+
+Both `ci-waiver` jobs check out the base ref rather than the default pull-request merge ref, so PR-authored code cannot replace the verifier that decides whether its own checks may be skipped.
+That does not close the broader path where a PR edits the workflow file itself, which is inherent to `pull_request` events and is mitigated by branch protection rather than here.
+
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
 Domain-local preferences for one captain's fleet live locally in each home's `data/captain.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.
