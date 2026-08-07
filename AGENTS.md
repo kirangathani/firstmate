@@ -90,7 +90,7 @@ state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; a captain-authorized testing skip also records local_skip=on and/or ci_skip=on with its ci_skip_auth= token (section 7); kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
@@ -266,6 +266,10 @@ The path's worker, automated gates, and captain approval remain authoritative:
 - **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.
 - **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
+
+Testing skips are a third orthogonal axis that only the captain authorizes, never `yolo` and never a worker: `bin/fm-spawn.sh`'s `--local-skip`, `--ci-skip`, and `--all-testing-skip` are enforced by code and by a keyed signature rather than by an instruction a worker could decline, and `bin/fm-brief.sh` takes the same flag for the worker-facing half.
+A worker can neither flag its own task nor obtain a signature for an unflagged one, no skip flag ever disables the kept-tests gate, and a skipped PR is always disclosed at merge.
+A `ci-waiver needed` blocker from a CI-skipped task is firstmate's own routine step rather than a captain decision: sign it with `bin/fm-ci-waiver.sh` and steer the one line back.
 
 Delivery mode and `yolo` are orthogonal.
 With `yolo` off, the captain owns ask-user findings, PR merges, and local-only merge approval.

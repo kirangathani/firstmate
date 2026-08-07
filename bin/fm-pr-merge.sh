@@ -162,6 +162,25 @@
 #     exists to stop - while the marker records one considered decision per
 #     project, made once, away from the pressure of a blocked merge.
 #
+# Testing-waiver disclosure: when the task was dispatched with a testing skip
+# (bin/fm-spawn.sh's --local-skip / --ci-skip / --all-testing-skip), this script
+# prints a loud banner naming exactly what was skipped, both before the gates run
+# and again on the line immediately before the merge, so a waived PR is never
+# indistinguishable in the log from one that actually passed. Three properties
+# of that disclosure are deliberate:
+#   - It is read from the task's own state/<id>.meta, on the captain's machine,
+#     and never from the PR, the branch, or the CI result. Nothing a worker can
+#     write can add, remove, or alter this banner.
+#   - It grants nothing. A waiver is disclosure only: every gate below still
+#     applies unchanged, including the zero-checks refusal, so a project whose
+#     CI is fully waived must still leave at least one check reporting or the
+#     merge refuses as unverified exactly as it does today.
+#   - The kept-tests gate above runs under EVERY flag combination and no skip
+#     flag can disable it. It costs seconds, it is firstmate-side rather than
+#     CI-side, and it is what catches a rebase quietly eating a base assertion -
+#     which is precisely the failure a PR with no test evidence cannot catch any
+#     other way.
+#
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -229,6 +248,34 @@ PROJ_NAME=
 SUPERSESSIONS_FILE="$FM_HOME/data/supersessions/$PROJ_NAME.md"
 EXEC_GATE_FILE="$FM_HOME/data/exec-gate/$PROJ_NAME"
 NO_PR_CI_FILE="$FM_HOME/data/no-pr-ci/$PROJ_NAME"
+
+# --- testing-waiver disclosure (contract in this script's header) -------------
+LOCAL_SKIP=off
+CI_SKIP=off
+if grep -qx 'local_skip=on' "$META"; then LOCAL_SKIP=on; fi
+if grep -qx 'ci_skip=on' "$META"; then CI_SKIP=on; fi
+
+waiver_banner() {  # <where>
+  [ "$LOCAL_SKIP" = on ] || [ "$CI_SKIP" = on ] || return 0
+  {
+    echo "================================================================================"
+    echo "TESTING WAIVER ($1): this PR does NOT carry full test evidence."
+    echo "  task:            $ID"
+    if [ "$LOCAL_SKIP" = on ]; then
+      echo "  local pipeline:  SKIPPED - the captain dispatched this task with the local"
+      echo "                   validation pipeline switched off, so no review, test, lint,"
+      echo "                   or docs stage ever ran against this branch."
+    fi
+    if [ "$CI_SKIP" = on ]; then
+      echo "  CI test jobs:    WAIVED - the captain authorized a CI waiver for this task,"
+      echo "                   so the expensive lint and test jobs did not run on the PR."
+    fi
+    echo "  still enforced:  the base's own test assertions (fm-assert-tests-kept.sh) and"
+    echo "                   every PR check gate below; no skip flag can disable either."
+    echo "================================================================================"
+  } >&2
+}
+waiver_banner "before gates"
 
 # supersession_approved <file>::<name> <finding-class>: 0 iff this project's
 # supersession record holds a fully-formed captain-approved entry that covers
@@ -406,5 +453,9 @@ merge_args=()
 if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
+
+# Repeated on the line immediately before the merge so the disclosure cannot be
+# lost above a long gate log.
+waiver_banner "MERGING NOW"
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"

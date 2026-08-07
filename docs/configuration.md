@@ -138,8 +138,7 @@ It names the repository explicitly rather than inferring one, because a signatur
 That pair is the whole authorization model, and both halves are load-bearing: a worker appends its status lines into the same `state/` directory, so it could append the flag line to its own record, and the token is an HMAC it cannot compute.
 The signature covers the commit as well as the task id, so it is bound to exactly one head commit and every further push needs a fresh one; publishing the line is harmless, since it reveals nothing about the secret.
 
-The dispatch flags that set `ci_skip=on` are not part of this change, so nothing writes that pair yet and `sign` refuses every task until they land.
-The signing and verification machinery ships first and inert, deliberately, so the enforcement path is reviewable on its own.
+The only thing that writes that pair is `bin/fm-spawn.sh --ci-skip` (or `--all-testing-skip`) at dispatch, on the captain's machine; "Testing skips" below owns those flags, and `sign` refuses any task dispatched without one.
 
 In [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) the cheap `ci-waiver` job gates the expensive behaviour-test and macOS jobs, while `lint`, `invariants`, and the required `tests-complete` verdict always run, so a fully waived PR still reports checks and never reaches `bin/fm-pr-merge.sh`'s zero-checks refusal looking like CI that never ran.
 `lint` is ungated for the same reason as `invariants`: a minute of ShellCheck is not an expensive job, so there is nothing worth skipping, and a waived PR should still get static analysis rather than nothing looking at its shell at all.
@@ -154,6 +153,40 @@ It uses `!cancelled()` rather than `always()` so a superseded run does not leave
 Both `ci-waiver` jobs check out the base ref rather than the default pull-request merge ref, so PR-authored code cannot replace the verifier that decides whether its own checks may be skipped.
 That does not close the broader path where a PR edits the workflow file itself, which is inherent to `pull_request` events and is mitigated by branch protection rather than here.
 When the checked-out base predates the waiver and carries no verifier at all, both jobs report "not waived" and run everything rather than failing on the missing script, because a base with no verifier has no waiver capability to honour.
+
+## Testing skips (bin/fm-spawn.sh --local-skip / --ci-skip / --all-testing-skip)
+
+A ship task can be dispatched with testing switched off, but only by the captain and only mechanically: the skip is enforced by code and by a keyed signature, never by an instruction a worker can decline and never by a string a worker can type.
+They are a third axis, orthogonal to delivery mode and to `yolo`, and `yolo` never grants one.
+Pass the same flag to `bin/fm-brief.sh`, which writes the worker-facing half; `bin/fm-testing-skip-lib.sh` is the single owner of the flags, the accepted matrix, and every refusal, so the two scripts cannot drift.
+
+`--local-skip` switches off the local pipeline, `--ci-skip` waives CI's expensive jobs for the PR, and `--all-testing-skip` does both.
+Each is recorded in `state/<id>.meta` only when on, as `local_skip=on` and/or `ci_skip=on` with its `ci_skip_auth=` token, so an unflagged task's record is byte-identical to one from before the feature existed.
+
+A local skip is enforced rather than requested.
+`bin/fm-spawn.sh` writes a `no-mistakes` shim into the task's own temp root and puts that directory first on the worker's PATH, so a flagged worker cannot run the pipeline even if it tries.
+The shim exits 0 deliberately: a non-zero exit reads to an agent as a broken toolchain, and the repair it would reach for - reinstalling no-mistakes, hunting another copy, or restarting the shared daemon that serves every other lane - is worse than the skip itself.
+The directory is mode 700 and the spawn refuses when the temp root already exists owned by another user, because it shadows a real tool at the front of an agent's PATH and its path is predictable.
+The shim is scoped to that one pane's environment, so it reaches no other task and not the captain's own shell, and teardown removes it.
+
+A CI skip additionally mints the `ci_skip_auth=` dispatch token described in the waiver-secret section above.
+It is required because a worker appends its status lines into the same `state/` directory and could otherwise append the flag to its own record; the token is an HMAC it cannot compute.
+Because the token is minted at dispatch, `--ci-skip` refuses when the home has no waiver secret yet, while `--local-skip` needs none.
+
+Which flag a delivery mode can honour, refused loudly rather than silently ignored:
+
+| Delivery mode | accepted | refused, and why |
+|---|---|---|
+| `no-mistakes` | `--local-skip`, `--all-testing-skip` | `--ci-skip` alone: the pipeline owns the push and the PR and may add fix commits, so the head commit a waiver must cover is unknown until the PR exists, and a later body edit does not re-run CI. |
+| `direct-PR` | `--ci-skip` | `--local-skip`, `--all-testing-skip`: that mode already runs no local pipeline, so the flag would be a no-op. |
+| `local-only` | none | no pipeline, no PR, no CI to waive. |
+| scout, secondmate | none | neither runs a local pipeline nor opens a PR. |
+
+Two skip flags on one command line also refuse, naming `--all-testing-skip`.
+The argument-only rules are checked before any filesystem or backend work, and the delivery-mode rules before any worktree or backend container exists, so a refusal never leaves an orphan window behind.
+
+No skip flag relaxes a merge gate.
+`bin/fm-pr-merge.sh` still refuses a red, pending, unclassifiable, or zero-check PR under every flag, the kept-tests gate still runs, and the merge prints a loud waiver banner read from the task's own record on the captain's machine rather than from anything in the PR.
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
