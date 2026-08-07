@@ -27,9 +27,13 @@ REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
 REAL_BASENAME=$(command -v basename)
+# Resolved once: file_mode runs thousands of times per suite (state_snapshot walks
+# the whole state dir per assertion), and a per-call `uname` fork costs more than
+# the stat it selects.
+UNAME_S=$(uname)
 
 file_mode() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$UNAME_S" = Darwin ]; then
     stat -f %Lp "$1"
   else
     stat -c %a "$1"
