@@ -241,7 +241,7 @@ Load `diagnostic-reasoning` before scoping a reported bug and before acting on a
 
 Classify work as dispatchable when it does not overlap work under way, or queued and blocked when it touches the same project subsystem or depends on unlanded work.
 Dispatch independent work immediately with no concurrency cap, serialize coarse overlaps, and record blockers durably.
-A ready queued item is dispatched immediately by default; withholding it requires a tangible reason - an uncleared dependency, a coarse overlap or ordered series that must land first, an unavailable prerequisite, or an explicit captain hold - never mere machine contention or scheduling convenience.
+A ready queued item is dispatched immediately by default; withholding it requires a tangible reason - an uncleared dependency, an uncleared time gate, a coarse overlap or ordered series that must land first, an unavailable prerequisite, or an explicit captain hold - never mere machine contention or scheduling convenience.
 Whenever a ready item is withheld, tell the captain which item is held and why; a silently idle queue is a failure of this rule even when the reason is valid.
 Write the task-specific brief under section 11 before spawning.
 
