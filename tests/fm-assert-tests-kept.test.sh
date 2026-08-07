@@ -97,13 +97,7 @@ TMP_ROOT=$(fm_test_tmproot fm-assert-tests-kept-tests)
 # stale or hostile cache cannot ride into the repo or into CI.
 ENV_CACHE="${FM_TEST_ENV_CACHE_DIR:-}"
 if [ -z "$ENV_CACHE" ]; then
-  kept_git_dir=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)
-  case "$kept_git_dir" in
-    '') kept_git_dir=$TMP_ROOT ;;
-    /*) ;;
-    *) kept_git_dir="$ROOT/$kept_git_dir" ;;
-  esac
-  ENV_CACHE="$kept_git_dir/fm-test-env-cache"
+  ENV_CACHE="$(fm_test_git_common_dir "$TMP_ROOT")/fm-test-env-cache"
 fi
 
 # Every pin lives here and is written ONCE. The cache directory's NAME and the

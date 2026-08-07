@@ -133,30 +133,11 @@ pass "shard listing is deterministic"
 # near-zero junk entry drags it down permanently. The guard belongs on every
 # fixture invocation; the assertions at the bottom of this section hold it there.
 
-# Snapshot the real sidecar so the fixture runs below can be proven not to have
-# touched it. Absence is a state too, and must stay absence.
-REAL_CACHE_DIR="${FM_TEST_CACHE_DIR:-}"
-if [ -z "$REAL_CACHE_DIR" ]; then
-  # Resolved exactly as bin/fm-test.sh resolves it, including the relative
-  # ".git" that rev-parse returns for a primary checkout: the runner reads it
-  # with its cwd at ROOT, so this must too.
-  git_common="$(cd "$ROOT" && git rev-parse --git-common-dir 2>/dev/null || true)"
-  case "$git_common" in
-    '') git_common="$ROOT/.fm-test" ;;
-    /*) ;;
-    *) git_common="$ROOT/$git_common" ;;
-  esac
-  REAL_CACHE_DIR="$git_common/fm-test-cache"
-fi
-REAL_TIMINGS="$REAL_CACHE_DIR/timings"
-sidecar_state() {
-  if [ -f "$REAL_TIMINGS" ]; then
-    cksum <"$REAL_TIMINGS"
-  else
-    printf 'absent\n'
-  fi
-}
-SIDECAR_BEFORE=$(sidecar_state)
+# The real, shared sidecar the fixture runs below must be proven not to have
+# polluted. Its path is resolved by the one helper in tests/lib.sh that spells
+# the runner's own rule, so a change to that rule cannot leave this test
+# pointing at a path that never exists and passing vacuously.
+REAL_TIMINGS=$(fm_test_timings_file)
 
 TMPROOT=$(fm_test_tmproot fm-test-fixture)
 FX="$TMPROOT/suite"
@@ -223,22 +204,47 @@ pass "malformed and out-of-range shard specs are rejected"
 
 # --- the fixture runs must not touch the real, shared timings sidecar -------
 # Behavioural half: every fixture invocation above has now run against the real
-# bin/fm-test.sh, so if any of them recorded durations the shared sidecar would
-# have changed under us. It must be byte-identical, or still absent.
-[ "$(sidecar_state)" = "$SIDECAR_BEFORE" ] \
-  || fail "fixture runs changed the shared timings sidecar ($REAL_TIMINGS); every real-runner invocation with FM_TEST_SUITE_DIR must set FM_TEST_NO_CACHE=1"
-pass "fixture-suite runs leave the shared timings sidecar untouched"
+# runner, so an unguarded one would have recorded this run's throwaway files -
+# and their paths are always absolute, under this run's own mktemp root. That is
+# exactly the claim asserted, rather than "the file did not change": the sidecar
+# is shared by every worktree of the repo and another worktree's legitimate run
+# may land in it at any moment. Such a run only ever writes repo-relative paths,
+# so it cannot forge this failure, and cannot mask it either.
+# An absent sidecar satisfies the claim trivially - it must not be created here.
+if [ -f "$REAL_TIMINGS" ]; then
+  LEAKED=$(awk -F'\t' -v root="$TMPROOT/" 'index($1, root) == 1 { print $1 }' "$REAL_TIMINGS")
+  [ -z "$LEAKED" ] \
+    || fail "fixture-suite paths leaked into the shared timings sidecar ($REAL_TIMINGS); every real-runner invocation pointed at a throwaway suite must set FM_TEST_NO_CACHE=1. Leaked: $LEAKED"
+fi
+pass "fixture-suite runs record no throwaway paths in the shared timings sidecar"
 
 # Static half: the behavioural check above only covers the invocations that
 # already ran. This one covers every fixture invocation in this file, including
 # any added later, so an unguarded new one fails here instead of quietly
 # polluting the sidecar for the rest of the repo's life.
-# shellcheck disable=SC2016 # the $RUNNER is the literal source text being matched, not an expansion.
-UNGUARDED=$(grep -n '"\$RUNNER"' "${BASH_SOURCE[0]}" \
-  | grep 'FM_TEST_SUITE_DIR=' \
-  | grep -v 'FM_TEST_NO_CACHE=1' || true)
+#
+# Line-based on purpose: an invocation whose env assignment and runner sit on
+# different source lines is NOT covered, because matching across lines needs a
+# parse fragile enough to be its own defect. Keep such invocations on one line.
+# The runner is matched by PATH, not by the "$RUNNER" spelling alone, so a call
+# site written out in full is caught too; that also matches the fixture-copied
+# runners, which is harmless, since the guard they would then have to carry is
+# the one they already carry. The two patterns are applied on SEPARATE source
+# lines, which is what keeps this guard from matching its own text.
+CALLS_FILE="$TMPROOT/fixture-call-sites"
+# shellcheck disable=SC2016 # literal source text being matched, not expansions.
+grep -nE '"\$RUNNER"|bin/fm-test\.sh' "${BASH_SOURCE[0]}" \
+  | grep 'FM_TEST_SUITE_DIR=' >"$CALLS_FILE" || true
+# A pattern that quietly stops matching would make the check above pass while
+# proving nothing, so the known guarded call sites are counted, not assumed.
+# Deleting a fixture invocation is meant to require lowering this number.
+KNOWN_GUARDED=6
+GUARDED=$(grep -c 'FM_TEST_NO_CACHE=1' "$CALLS_FILE" || true)
+[ "$GUARDED" -ge "$KNOWN_GUARDED" ] \
+  || fail "the fixture-invocation guard matched only $GUARDED of the $KNOWN_GUARDED known guarded call sites; its pattern has stopped matching and it is no longer checking anything"
+UNGUARDED=$(grep -v 'FM_TEST_NO_CACHE=1' "$CALLS_FILE" || true)
 [ -z "$UNGUARDED" ] \
-  || fail "these real-runner fixture invocations lack FM_TEST_NO_CACHE=1 and would write /tmp paths into the shared sidecar: $UNGUARDED"
+  || fail "these real-runner fixture invocations lack FM_TEST_NO_CACHE=1 and would write throwaway paths into the shared sidecar: $UNGUARDED"
 pass "every real-runner fixture invocation in this file sets FM_TEST_NO_CACHE=1"
 
 # ===========================================================================
