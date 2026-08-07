@@ -124,6 +124,39 @@ pass "shard listing is deterministic"
 # --- execution rules, on a fixture suite ------------------------------------
 # FM_TEST_SUITE_DIR points the runner at a throwaway suite so the failure
 # paths run in milliseconds instead of re-running the real 86-file suite.
+#
+# Every one of these invocations is the REAL bin/fm-test.sh, so its ROOT is the
+# real repo and its timings sidecar is the real, SHARED one under the git common
+# dir. Without FM_TEST_NO_CACHE=1 each run writes the fixture files' absolute
+# /tmp paths into that sidecar, where nothing ever removes them: the packer's
+# fallback cost for an unmeasured file is sum-of-known/count-of-known, so every
+# near-zero junk entry drags it down permanently. The guard belongs on every
+# fixture invocation; the assertions at the bottom of this section hold it there.
+
+# Snapshot the real sidecar so the fixture runs below can be proven not to have
+# touched it. Absence is a state too, and must stay absence.
+REAL_CACHE_DIR="${FM_TEST_CACHE_DIR:-}"
+if [ -z "$REAL_CACHE_DIR" ]; then
+  # Resolved exactly as bin/fm-test.sh resolves it, including the relative
+  # ".git" that rev-parse returns for a primary checkout: the runner reads it
+  # with its cwd at ROOT, so this must too.
+  git_common="$(cd "$ROOT" && git rev-parse --git-common-dir 2>/dev/null || true)"
+  case "$git_common" in
+    '') git_common="$ROOT/.fm-test" ;;
+    /*) ;;
+    *) git_common="$ROOT/$git_common" ;;
+  esac
+  REAL_CACHE_DIR="$git_common/fm-test-cache"
+fi
+REAL_TIMINGS="$REAL_CACHE_DIR/timings"
+sidecar_state() {
+  if [ -f "$REAL_TIMINGS" ]; then
+    cksum <"$REAL_TIMINGS"
+  else
+    printf 'absent\n'
+  fi
+}
+SIDECAR_BEFORE=$(sidecar_state)
 
 TMPROOT=$(fm_test_tmproot fm-test-fixture)
 FX="$TMPROOT/suite"
@@ -138,7 +171,7 @@ chmod +x "$FX"/*.test.sh
 
 # A deliberately failing test must fail its shard, name the shard, the file,
 # and the exit status, and must not stop the shard's remaining files.
-out=$(FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 2/2 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 2/2 2>&1)
 rc=$?
 [ "$rc" -eq 1 ] || fail "a failing test file must fail its shard (got rc=$rc)"
 assert_contains "$out" "FAILED in shard 2/2" "the failure must name the shard it came from"
@@ -148,14 +181,14 @@ assert_contains "$out" "2 run, 1 passed, 1 failed, 0 skipped" "the accounting li
 pass "a deliberately failing test fails its shard with full attribution"
 
 # The sibling shard without the failing file passes with explicit accounting.
-out=$(FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 1/2 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 1/2 2>&1)
 rc=$?
 [ "$rc" -eq 0 ] || fail "the all-green shard must pass (got rc=$rc): $out"
 assert_contains "$out" "2 run, 2 passed, 0 failed, 0 skipped" "the green shard must still print its accounting"
 pass "an all-green shard passes with explicit accounting"
 
 # The whole-set mode reports the same failure, so the pre-push gate catches it.
-out=$(FM_TEST_SUITE_DIR="$FX" "$RUNNER" 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" 2>&1)
 rc=$?
 [ "$rc" -eq 1 ] || fail "the whole-set run must fail on a failing file (got rc=$rc)"
 assert_contains "$out" "FAILED in whole set" "the whole-set run must report the failure"
@@ -164,7 +197,7 @@ pass "the whole-set mode fails on the same failing file"
 # A file without its executable bit must fail loudly (exit 126), preserving
 # the mode-100755 invariant CI has always enforced by direct execution.
 chmod -x "$FX/cc.test.sh"
-out=$(FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 1/2 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 1/2 2>&1)
 rc=$?
 chmod +x "$FX/cc.test.sh"
 [ "$rc" -eq 1 ] || fail "a non-executable test file must fail its shard (got rc=$rc)"
@@ -174,7 +207,7 @@ pass "a test file missing its executable bit fails, never silently passes"
 # An empty suite must refuse rather than report green.
 EMPTY="$TMPROOT/empty"
 mkdir -p "$EMPTY"
-out=$(FM_TEST_SUITE_DIR="$EMPTY" "$RUNNER" 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$EMPTY" "$RUNNER" 2>&1)
 rc=$?
 [ "$rc" -eq 2 ] || fail "an empty suite must refuse with rc=2 (got rc=$rc)"
 assert_contains "$out" "refusing to report an empty suite as green" "the empty-suite refusal must be loud"
@@ -182,11 +215,31 @@ pass "an empty suite refuses instead of passing vacuously"
 
 # Out-of-range and malformed shard specs must be usage errors, not runs.
 for spec in 0/4 5/4 x/4 4 4/ /4 1/2/3; do
-  FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard "$spec" >/dev/null 2>&1
+  FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard "$spec" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "--shard $spec must be rejected with rc=2 (got rc=$rc)"
 done
 pass "malformed and out-of-range shard specs are rejected"
+
+# --- the fixture runs must not touch the real, shared timings sidecar -------
+# Behavioural half: every fixture invocation above has now run against the real
+# bin/fm-test.sh, so if any of them recorded durations the shared sidecar would
+# have changed under us. It must be byte-identical, or still absent.
+[ "$(sidecar_state)" = "$SIDECAR_BEFORE" ] \
+  || fail "fixture runs changed the shared timings sidecar ($REAL_TIMINGS); every real-runner invocation with FM_TEST_SUITE_DIR must set FM_TEST_NO_CACHE=1"
+pass "fixture-suite runs leave the shared timings sidecar untouched"
+
+# Static half: the behavioural check above only covers the invocations that
+# already ran. This one covers every fixture invocation in this file, including
+# any added later, so an unguarded new one fails here instead of quietly
+# polluting the sidecar for the rest of the repo's life.
+# shellcheck disable=SC2016 # the $RUNNER is the literal source text being matched, not an expansion.
+UNGUARDED=$(grep -n '"\$RUNNER"' "${BASH_SOURCE[0]}" \
+  | grep 'FM_TEST_SUITE_DIR=' \
+  | grep -v 'FM_TEST_NO_CACHE=1' || true)
+[ -z "$UNGUARDED" ] \
+  || fail "these real-runner fixture invocations lack FM_TEST_NO_CACHE=1 and would write /tmp paths into the shared sidecar: $UNGUARDED"
+pass "every real-runner fixture invocation in this file sets FM_TEST_NO_CACHE=1"
 
 # ===========================================================================
 # Local mode: closure selection and selected-vs-whole-set parity
