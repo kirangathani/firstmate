@@ -752,6 +752,41 @@ test_composer_state_unknown_when_no_composer_row_found() {
   pass "fm_backend_cmux_composer_state: reports unknown when no border-delimited composer row is found"
 }
 
+# Unicode blank padding (task fm-nbsp-adapters): the adapter's structural scan
+# trims run BEFORE the shared classifier, and a bare `[[:space:]]` trim leaves
+# U+00A0 and the other FM_COMPOSER_BLANKS in place, so a blank-padded row failed
+# the border-shape match and read `unknown` without the classifier ever seeing
+# it. U+00A0 is the pad claude really draws (hex-dumped from a live pane
+# 2026-07-30, see bin/fm-composer-lib.sh); the rows below take the ASCII
+# fixtures above and swap their edge padding for each covered blank, pinning
+# that the verdict is identical to the ASCII-space-padded row.
+test_composer_state_blank_padded_rows_match_ascii() {
+  local dir fb out ch i=0 nbsp
+  # shellcheck source=bin/fm-composer-lib.sh
+  . "$ROOT/bin/fm-composer-lib.sh"
+  nbsp=$(printf '\302\240')
+  dir="$TMP_ROOT/composer-blank-pad"; mkdir -p "$dir/responses"
+  fb=$(make_cmux_fakebin "$dir")
+  for ch in "${FM_COMPOSER_BLANKS[@]}"; do
+    i=$((i + 1))
+    rm -f "$dir/responses/.count"
+    cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+    cmux_read_screen_response "$dir" 2 "${ch}│ ❯      │${ch}"
+    out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+      bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
+    [ "$out" = empty ] \
+      || fail "blank #$i-padded empty bordered composer must read empty like its ASCII-space twin, got '$out'"
+  done
+  # The other direction: real text on a blank-padded row is still pending.
+  rm -f "$dir/responses/.count"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 "${nbsp}│ ❯ hello captain │${nbsp}"
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
+  [ "$out" = pending ] || fail "real text on a U+00A0-padded bordered row must stay pending, got '$out'"
+  pass "fm_backend_cmux_composer_state: Unicode-blank-padded rows classify identically to ASCII-space-padded rows"
+}
+
 # --- send_text_submit: structural composer-row verify-and-retry --------------
 
 test_send_text_submit_detects_landed_send() {
@@ -1049,6 +1084,7 @@ test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
+test_composer_state_blank_padded_rows_match_ascii
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter

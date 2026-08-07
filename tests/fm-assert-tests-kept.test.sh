@@ -43,6 +43,20 @@
 #       test must NOT be reported unaccounted, an all-skipped one must be
 #       `skipped:`, one passing case outweighs its skipped cases, and a near-name
 #       pair (test_x beside test_xy) must not cross-match
+#   (w) vitest, clean: the base's JS test passes against the branch -> exit
+#       zero with every class zero, proving real execution AND that composed
+#       `describe > it` titles account for check 1's per-segment names
+#   (x) vitest, rewritten assertion body -> caught as `failing:` under the
+#       runner's composed title where check 1 passes (the Z/K case in JS)
+#   (y) vitest signalled but node_modules absent -> `unexecuted:` per
+#       identifier, never a pass
+#   (z) a workspace-style node_modules symlink into live first-party source ->
+#       `unexecuted:`, the safe failure, never a verdict against the wrong tree
+#   (aa) jest, clean and rewritten-assertion variants of (w)/(x)
+#   (bb) jest, an explicitly skipped test reports `skipped:` (jest spells an
+#       explicit skip "pending") and still exits zero
+#   (cc) a JS run never mutates the live worktree or the linked node_modules
+#       (vitest's results cache must stay disabled)
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -51,6 +65,124 @@ fm_git_identity fmtest fmtest@example.invalid
 
 ASSERT_KEPT="$ROOT/bin/fm-assert-tests-kept.sh"
 TMP_ROOT=$(fm_test_tmproot fm-assert-tests-kept-tests)
+
+# --- the shared pinned-runtime cache ----------------------------------------
+# The vitest, jest and pytest environments below are real installs of pinned
+# third-party runners. Rebuilding them into the per-run $TMP_ROOT cost about 29s
+# of this file's ~50s on every single local run, so they now live in a stable
+# directory keyed on the pinned version instead.
+#
+# THE COVERAGE TRADE, DECIDED DELIBERATELY. Caching them means the default local
+# run stops exercising the npm-install and venv-creation path every time: after
+# this change that path runs on the first run after a version bump, whenever the
+# cache is missing or broken, and in CI, which always starts cold. The captain
+# weighed that and accepted it, because CI is exhaustive by design and is the
+# gate that has to catch a broken provisioning path. This is a chosen posture,
+# not something that drifted - if you are tempted to "restore" the per-run
+# rebuild, the trade is recorded in the backlog decision
+# fm-testperf-profile-t3-decision-js-py-env-cache. What did NOT change: the
+# cases still install and execute real vitest, jest and pytest against real
+# trees, and a host that cannot provision one still fails loudly rather than
+# quietly skipping the coverage.
+#
+# Correctness rules the builders below keep:
+#   - the pinned version is part of the directory NAME, so a version bump names
+#     a directory that does not exist yet and is rebuilt, never reused;
+#   - every environment is built under a private staging path and published by
+#     a single rename, so a concurrent local shard either sees no environment or
+#     a complete one, never a half-installed one.
+#
+# Kept beside the timings sidecar under the shared git common dir, which
+# bin/fm-test.sh already establishes as never tracked and never shipped, so a
+# stale or hostile cache cannot ride into the repo or into CI.
+ENV_CACHE="${FM_TEST_ENV_CACHE_DIR:-}"
+if [ -z "$ENV_CACHE" ]; then
+  kept_git_dir=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)
+  case "$kept_git_dir" in
+    '') kept_git_dir=$TMP_ROOT ;;
+    /*) ;;
+    *) kept_git_dir="$ROOT/$kept_git_dir" ;;
+  esac
+  ENV_CACHE="$kept_git_dir/fm-test-env-cache"
+fi
+
+# Every pin lives here and is written ONCE. The cache directory's NAME and the
+# version handed to npm/pip are both derived from the same variable, so they
+# cannot drift apart and leave a stale tree served under a bumped pin's name.
+# Bump a runner by editing only its version variable below.
+#
+# These are the versions the runner behavior in bin/fm-test-exec-lib.sh was
+# verified against (vitest/jest on 2026-08-03, pytest on 2026-08-05). pytest is
+# pinned for the same reason vitest and jest are: unpinned, a months-old local
+# venv keeps serving an old pytest while CI, always cold, resolves the newest,
+# so a skip/pending spelling or JUnit-XML shape change would go red in CI and
+# stay green locally forever with no key to invalidate.
+VITEST_VERSION=3.2.7
+JEST_VERSION=30.4.1
+PYTEST_VERSION=9.1.1
+VITEST_ENV="$ENV_CACHE/vitest-$VITEST_VERSION"
+JEST_ENV="$ENV_CACHE/jest-$JEST_VERSION"
+# A venv additionally bakes in the interpreter it was built against and is not
+# portable across CPython versions, so that joins the pinned pytest in the key.
+PYTEST_VENV_KEY=$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || true)
+if [ -n "$PYTEST_VENV_KEY" ]; then
+  PYTEST_VENV="$ENV_CACHE/pytest-$PYTEST_VERSION-py$PYTEST_VENV_KEY"
+else
+  # No usable python3 to key on; stay per-run and let ensure_pytest_venv fail.
+  PYTEST_VENV="$TMP_ROOT/_pytest-venv"
+fi
+
+# Every failure path below removes its own staging tree, but a run KILLED
+# mid-install cannot, and each orphan is a whole node_modules or venv sitting in
+# the cache forever. Sweep only entries carrying the private `.build.<6 chars>`
+# marker that nothing has touched for six hours - two orders of magnitude longer
+# than the slowest install here, so a concurrently building shard is never in
+# range and a published environment never matches the pattern at all.
+if [ -d "$ENV_CACHE" ]; then
+  find "$ENV_CACHE" -maxdepth 1 -type d -name '*.build.??????' -mmin +360 \
+    -exec rm -rf {} + 2>/dev/null || true
+fi
+
+# publish_env <staging> <final>: move a fully built environment into place with
+# one rename, so no reader ever observes a partial tree. Returns non-zero and
+# leaves nothing behind when another shard published first.
+publish_env() {
+  local staging=$1 final=$2 leftover
+  leftover=$(basename "$staging")
+  [ -n "$leftover" ] || return 1
+  mkdir -p "$(dirname "$final")" 2>/dev/null || true
+  if [ -e "$final" ] || ! mv "$staging" "$final" 2>/dev/null; then
+    rm -rf "$staging" 2>/dev/null || true
+  fi
+  # A shard can win the rename between the test above and the mv, in which case
+  # mv put the staging tree INSIDE the winner's directory. The staging name is
+  # unique to this process, so removing it can never touch a real cache entry.
+  rm -rf "${final:?}/$leftover" 2>/dev/null || true
+  [ -e "$final" ]
+}
+
+# relocate_venv_paths <staging> <final>: a venv bakes its own absolute path into
+# its console-script shebangs, its activate scripts and pyvenv.cfg. A venv built
+# at one path and then renamed leaves `bin/pytest` pointing at a path that no
+# longer exists, and bin/fm-test-exec-lib.sh uses exactly that script as its
+# interpreter fallback. Rewrite the baked paths to the FINAL location while the
+# tree is still private, so the publishing rename remains the only step a
+# concurrent reader can observe. `bin/python` itself is a symlink to the system
+# interpreter and needs no repair; a moved venv resolves its own prefix from the
+# executable's real path, so `bin/python -m pytest` was never the broken part.
+relocate_venv_paths() {
+  local staging=$1 final=$2 f body
+  for f in "$staging"/pyvenv.cfg "$staging"/bin/*; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    body=$(cat "$f" 2>/dev/null) || continue
+    case "$body" in
+      *"$staging"*) ;;
+      *) continue ;;
+    esac
+    printf '%s\n' "${body//"$staging"/$final}" > "$f" || return 1
+  done
+  return 0
+}
 
 # write_baseline <dir>: the three-language test corpus every case starts from.
 write_baseline() {
@@ -348,7 +480,7 @@ test_unexecutable_files_are_reported_not_passed() {
   local dir out code
   # The baseline corpus's shell test calls an undefined `pass`, so its baseline
   # run is red; its python/js files resolve no runner (no config, no venv, and
-  # no JS runner until PR3). None of that may read as a pass.
+  # no package.json). None of that may read as a pass.
   dir=$(make_repo unexecuted-report)
 
   set +e
@@ -381,29 +513,79 @@ test_unexecutable_files_are_reported_not_passed() {
 
 # The provisioned environment the Python fixtures link in, exactly as a
 # pipeline-provisioned worktree's .venv is linked at the real gate. Built once
-# per suite run and shared, so the per-case cost is a symlink.
-PYTEST_VENV="$TMP_ROOT/_pytest-venv"
+# and shared, so the per-case cost is a symlink. $PYTEST_VERSION and
+# $PYTEST_VENV are set with the other pins under "the shared pinned-runtime
+# cache" at the top of this file; that is also where the key rule and the
+# coverage trade are recorded.
+PYTEST_VENV_READY=0
 
-# ensure_pytest_venv: build $PYTEST_VENV if absent. Returns non-zero when the
-# host cannot provide pytest at all, so the caller fails loudly instead of
-# silently dropping the coverage that proves assertions really execute.
+# pytest_venv_usable <venv>: the venv exists AND resolves the PINNED pytest.
+# Version-checking, not presence-checking: `-m pytest --version` passes for ANY
+# pytest, so a venv built with --system-site-packages against whatever the host
+# happens to carry would sail through while serving a version the directory name
+# promises it is not. A mismatch is a cache miss, so the pin is what the cases
+# actually run.
+pytest_venv_usable() {
+  [ -x "$1/bin/python" ] || return 1
+  [ "$("$1/bin/python" -c 'import pytest; print(pytest.__version__)' 2>/dev/null)" \
+    = "$PYTEST_VERSION" ]
+}
+
+# ensure_pytest_venv: build $PYTEST_VENV if absent or unusable. Returns non-zero
+# when the host cannot provide the pinned pytest, so the caller fails loudly
+# instead of silently dropping the coverage that proves assertions really
+# execute, and never falls back to some other version.
+#
+# A cached venv is verified once per run rather than trusted on the strength of
+# its interpreter existing: it may have been built with --system-site-packages
+# against a host pytest that has since gone away or been upgraded past the pin.
+# An unusable one is rebuilt, never patched around.
 ensure_pytest_venv() {
-  if [ -x "$PYTEST_VENV/bin/python" ]; then
+  local staging
+  if [ "$PYTEST_VENV_READY" = 1 ]; then
     return 0
   fi
-  if python3 -c 'import pytest' >/dev/null 2>&1; then
-    # Already available on the host: reuse it and stay off the network.
-    python3 -m venv --system-site-packages "$PYTEST_VENV" >/dev/null 2>&1 || return 1
-  else
-    python3 -m venv "$PYTEST_VENV" >/dev/null 2>&1 || return 1
-    "$PYTEST_VENV/bin/python" -m pip install --quiet --disable-pip-version-check pytest \
-      >/dev/null 2>&1 || return 1
+  if pytest_venv_usable "$PYTEST_VENV"; then
+    PYTEST_VENV_READY=1
+    return 0
   fi
-  "$PYTEST_VENV/bin/python" -m pytest --version >/dev/null 2>&1
+  mkdir -p "$(dirname "$PYTEST_VENV")" 2>/dev/null || return 1
+  # mktemp creates the directory; `venv` re-uses an existing empty one, so the
+  # name stays claimed for the whole build and no second process can take it.
+  staging=$(mktemp -d "$PYTEST_VENV.build.XXXXXX" 2>/dev/null) || return 1
+  if [ "$(python3 -c 'import pytest; print(pytest.__version__)' 2>/dev/null)" = "$PYTEST_VERSION" ]; then
+    # The host already carries EXACTLY the pin: reuse it and stay off the
+    # network. Gated on the version, never on bare importability - borrowing
+    # whatever pytest the host has would quietly defeat the pin.
+    python3 -m venv --system-site-packages "$staging" >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
+  else
+    python3 -m venv "$staging" >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
+    "$staging/bin/python" -m pip install --quiet --disable-pip-version-check "pytest==$PYTEST_VERSION" \
+      >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
+  fi
+  pytest_venv_usable "$staging" || { rm -rf "$staging"; return 1; }
+  relocate_venv_paths "$staging" "$PYTEST_VENV" || { rm -rf "$staging"; return 1; }
+  # Another shard may have published a good venv while this one was building,
+  # and the fixtures symlink their .venv straight at it - removing it here would
+  # pull a live interpreter out from under a case that is already running. So
+  # re-probe first and, if the published tree is now good, throw away THIS build
+  # rather than the tree in use. Only a still-unusable predecessor is dropped,
+  # and only once the replacement is built and proven.
+  if pytest_venv_usable "$PYTEST_VENV"; then
+    rm -rf "$staging"
+    PYTEST_VENV_READY=1
+    return 0
+  fi
+  if [ -e "$PYTEST_VENV" ]; then
+    rm -rf "$PYTEST_VENV"
+  fi
+  publish_env "$staging" "$PYTEST_VENV" || return 1
+  pytest_venv_usable "$PYTEST_VENV" || return 1
+  PYTEST_VENV_READY=1
 }
 
 require_pytest_venv() {
-  ensure_pytest_venv || fail "$1: could not provision a venv with pytest (needs python3 with venv, and pip or an importable pytest); the pytest runner cannot be verified without one"
+  ensure_pytest_venv || fail "$1: could not provision a venv with pytest==$PYTEST_VERSION (needs python3 with venv, plus a pip able to install that exact version - so an interpreter that version still supports, and network or a matching cached wheel; an importable host pytest skips the install only when it is already exactly $PYTEST_VERSION); the pytest runner cannot be verified without one"
 }
 
 # write_py_tree <dir> <behavior> <asserted> [<pkg-parent>]: the plan's Z/K
@@ -999,6 +1181,370 @@ EOF
   pass "a shell assertion that never emitted 'ok - ' is reported unaccounted, not passed"
 }
 
+# --- vitest / jest fixtures --------------------------------------------------
+
+# The provisioned environments the JS fixtures link in, exactly as a
+# pipeline-provisioned worktree's node_modules is linked at the real gate.
+# Built by a real `npm install` at $VITEST_VERSION / $JEST_VERSION and shared,
+# so the per-case cost is a symlink. The install needs node, npm, and network or
+# a warm npm cache; CI provides all three, and the suite is self-contained with
+# no workflow-side installs.
+#
+# The pinned version is part of the cache directory's NAME, so bumping a version
+# names a directory that does not exist yet and gets a fresh install; a tree
+# installed against the old pin can never be served for the new one.
+# $VITEST_VERSION / $JEST_VERSION and the directories they key are set with the
+# other pins under "the shared pinned-runtime cache" at the top of this file;
+# bump a pin there and nowhere else.
+
+# ensure_js_env <env-dir> <package> <version> <bin>: build the shared env if
+# absent. Returns non-zero when the host cannot provide it, so the caller fails
+# loudly instead of silently dropping the coverage that proves JS assertions
+# really execute.
+#
+# Installed under a private staging path and published with one rename, so a
+# concurrent shard either finds no environment and installs its own or finds a
+# complete one, and never links a half-installed node_modules into a fixture.
+# Unlike a venv, an npm tree bakes in no absolute paths - `node_modules/.bin`
+# entries are relative symlinks - so it survives the rename untouched.
+ensure_js_env() {
+  local env=$1 pkg=$2 version=$3 bin=$4 staging
+  if [ -x "$env/node_modules/.bin/$bin" ]; then
+    return 0
+  fi
+  command -v node >/dev/null 2>&1 || return 1
+  command -v npm >/dev/null 2>&1 || return 1
+  mkdir -p "$(dirname "$env")" 2>/dev/null || return 1
+  staging=$(mktemp -d "$env.build.XXXXXX" 2>/dev/null) || return 1
+  printf '{"name":"fm-%s-env","private":true,"devDependencies":{"%s":"%s"}}\n' \
+    "$pkg" "$pkg" "$version" > "$staging/package.json"
+  if ! npm install --prefix "$staging" --no-audit --no-fund --loglevel=error \
+      >/dev/null 2>&1 || [ ! -x "$staging/node_modules/.bin/$bin" ]; then
+    rm -rf "$staging"
+    return 1
+  fi
+  publish_env "$staging" "$env" || return 1
+  [ -x "$env/node_modules/.bin/$bin" ]
+}
+
+require_vitest_env() {
+  ensure_js_env "$VITEST_ENV" vitest "$VITEST_VERSION" vitest \
+    || fail "$1: could not provision a node_modules with vitest (needs node and npm, plus network or a warm npm cache); the vitest runner cannot be verified without one"
+}
+
+require_jest_env() {
+  ensure_js_env "$JEST_ENV" jest "$JEST_VERSION" jest \
+    || fail "$1: could not provision a node_modules with jest (needs node and npm, plus network or a warm npm cache); the jest runner cannot be verified without one"
+}
+
+# write_js_tree <dir> <runner> <behavior> <asserted>: the plan's Z/K worked
+# example in JS - src/mod.js's greet() returns <behavior> and mod.test.js
+# asserts <asserted> inside a describe block, so check 1 enumerates the
+# describe title and the it title as separate names while the runner reports
+# one composed `greet > x behaves` title. vitest gets an ESM tree, jest a CJS
+# tree it runs with zero config.
+write_js_tree() {
+  local dir=$1 runner=$2 behavior=$3 asserted=$4
+  mkdir -p "$dir/src"
+  if [ "$runner" = vitest ]; then
+    cat > "$dir/package.json" <<EOF
+{"name":"fixture","private":true,"type":"module","devDependencies":{"vitest":"$VITEST_VERSION"}}
+EOF
+    printf 'export function greet() {\n  return "%s";\n}\n' "$behavior" > "$dir/src/mod.js"
+    cat > "$dir/mod.test.js" <<EOF
+import { describe, it, expect } from 'vitest';
+import { greet } from './src/mod.js';
+
+describe('greet', () => {
+  it('x behaves', () => {
+    expect(greet()).toBe('$asserted');
+  });
+});
+EOF
+  else
+    cat > "$dir/package.json" <<EOF
+{"name":"fixture","private":true,"devDependencies":{"jest":"$JEST_VERSION"}}
+EOF
+    printf 'module.exports.greet = function greet() {\n  return "%s";\n};\n' "$behavior" > "$dir/src/mod.js"
+    cat > "$dir/mod.test.js" <<EOF
+const { greet } = require('./src/mod.js');
+
+describe('greet', () => {
+  it('x behaves', () => {
+    expect(greet()).toBe('$asserted');
+  });
+});
+EOF
+  fi
+  printf 'node_modules/\n' > "$dir/.gitignore"
+}
+
+# make_js_repo <name> <runner>: main has greet returning Z and the composed
+# test asserting Z, with a work branch checked out. Echoes dir. The caller
+# links the provisioned env itself, so the no-node_modules case can skip it.
+make_js_repo() {
+  local dir="$TMP_ROOT/$1"
+  init_repo_at "$dir"
+  write_js_tree "$dir" "$2" Z Z
+  commit_all "$dir" "main: greet returns Z, test asserts Z"
+  git -C "$dir" checkout -q -b work
+  printf '%s\n' "$dir"
+}
+
+test_vitest_clean_run_exits_zero() {
+  local dir out code
+  require_vitest_env vitest-clean
+  dir=$(make_js_repo vitest-clean vitest)
+  ln -s "$VITEST_ENV/node_modules" "$dir/node_modules"
+  # A legitimate refactor: internals change, the behavior main asserted holds.
+  printf 'export function greet() {\n  const value = "Z";\n  return value;\n}\n' > "$dir/src/mod.js"
+  commit_all "$dir" "refactor greet, behavior preserved"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "vitest-clean: the base's JS assertion still passes, so exit must be zero"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0' \
+    "vitest-clean: a real vitest run must report zero in every class, proving the describe and it names were both accounted against the composed title"
+  assert_not_contains "$out" 'unexecuted:' \
+    "vitest-clean: the JS file must be executed, not name-checked"
+  pass "a vitest base test that passes against the branch exits zero"
+}
+
+test_vitest_rewritten_assertion_caught() {
+  local dir out code
+  require_vitest_env vitest-rewrite
+  dir=$(make_js_repo vitest-rewrite vitest)
+  ln -s "$VITEST_ENV/node_modules" "$dir/node_modules"
+  # The resolver takes K's side in BOTH files: greet returns K and the test
+  # keeps its name but asserts K. Check 1 sees the same names on both sides.
+  write_js_tree "$dir" vitest K K
+  commit_all "$dir" "resolver takes K in both src/mod.js and the test"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "vitest-rewrite: a rewritten JS assertion body must exit non-zero"
+  assert_contains "$out" 'failing: mod.test.js::greet > x behaves' \
+    "vitest-rewrite: check 2 must report main's assertion as failing under the runner's composed title"
+  assert_not_contains "$out" 'missing:' \
+    "vitest-rewrite: check 1 must NOT flag anything (the names survived), proving check 2 caught it"
+  assert_not_contains "$out" 'unexecuted:' \
+    "vitest-rewrite: the verdict must come from a real run, not a fallback"
+  pass "a rewritten vitest assertion body is caught by check 2 where check 1 passes"
+}
+
+test_vitest_without_node_modules_is_unexecuted() {
+  local dir out code
+  # package.json signals vitest, but no node_modules is linked, so no binary
+  # resolves from the worktree.
+  dir=$(make_js_repo vitest-no-nm vitest)
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "vitest-no-nm: a missing node_modules must not be a silent pass"
+  assert_contains "$out" 'unexecuted: mod.test.js::greet' \
+    "vitest-no-nm: the describe identifier must be reported as unexecuted"
+  assert_contains "$out" 'unexecuted: mod.test.js::x behaves' \
+    "vitest-no-nm: the it identifier must be reported as unexecuted"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=2' \
+    "vitest-no-nm: the summary must count both identifiers as unexecuted"
+  assert_grep 'UNEXECUTED: mod.test.js' "$dir/stderr" \
+    "vitest-no-nm: the reason the file could not be executed must be on stderr"
+  pass "a vitest test with no node_modules is reported unexecuted, not passed"
+}
+
+test_js_workspace_link_is_unexecuted() {
+  local dir out code
+  require_vitest_env js-workspace-shadow
+  # A workspace-style layout: node_modules is a real dir whose .bin borrows the
+  # shared vitest, plus a package symlink pointing at first-party source INSIDE
+  # the live worktree - the JS analogue of an editable install. A bare
+  # specifier import would load the live tree while we believe we are testing
+  # scratch, so no verdict may be produced at all.
+  dir=$(make_js_repo js-workspace-shadow vitest)
+  mkdir -p "$dir/node_modules/.bin" "$dir/packages/mylib"
+  printf 'export const X = 1;\n' > "$dir/packages/mylib/index.js"
+  ln -s "$VITEST_ENV/node_modules/.bin/vitest" "$dir/node_modules/.bin/vitest"
+  ln -s "$dir/packages/mylib" "$dir/node_modules/mylib"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "js-workspace-shadow: an unauthoritative scratch tree must not be a silent pass"
+  assert_contains "$out" 'unexecuted: mod.test.js::x behaves' \
+    "js-workspace-shadow: a tree that cannot be proven authoritative must be reported unexecuted"
+  assert_not_contains "$out" 'failing:' \
+    "js-workspace-shadow: an untrusted tree yields no verdict at all, neither pass nor fail"
+  assert_grep 'first-party code in the live worktree' "$dir/stderr" \
+    "js-workspace-shadow: the reason must name the live-tree link so it is actionable"
+  assert_grep 'mylib' "$dir/stderr" \
+    "js-workspace-shadow: the reason must name the linked package"
+  pass "a workspace-style link into live first-party source is reported unexecuted, never passed"
+}
+
+test_js_self_link_to_worktree_root_is_unexecuted() {
+  local dir out code
+  require_vitest_env js-root-shadow
+  # `npm install file:.` / `npm link` of the ROOT package (a common trick for
+  # absolute first-party imports) leaves node_modules/<self> -> .., which
+  # resolves to exactly the worktree root rather than a path beneath it. A bare
+  # `import ... from 'fixture'` would load the LIVE tree, so the root itself
+  # must be untrusted, not just paths under it.
+  dir=$(make_js_repo js-root-shadow vitest)
+  mkdir -p "$dir/node_modules/.bin"
+  ln -s "$VITEST_ENV/node_modules/.bin/vitest" "$dir/node_modules/.bin/vitest"
+  ln -s .. "$dir/node_modules/fixture"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "js-root-shadow: a self-linked root package must not be a silent pass"
+  assert_contains "$out" 'unexecuted: mod.test.js::x behaves' \
+    "js-root-shadow: a tree whose node_modules links back to the worktree root must be reported unexecuted"
+  assert_not_contains "$out" 'failing:' \
+    "js-root-shadow: an untrusted tree yields no verdict at all, neither pass nor fail"
+  assert_grep 'first-party code in the live worktree' "$dir/stderr" \
+    "js-root-shadow: the reason must name the live-tree link so it is actionable"
+  assert_grep 'fixture' "$dir/stderr" \
+    "js-root-shadow: the reason must name the self-linked package"
+  pass "a node_modules entry linking to the worktree root itself is reported unexecuted, never passed"
+}
+
+test_jest_clean_run_exits_zero() {
+  local dir out code
+  require_jest_env jest-clean
+  dir=$(make_js_repo jest-clean jest)
+  ln -s "$JEST_ENV/node_modules" "$dir/node_modules"
+  printf 'module.exports.greet = function greet() {\n  const value = "Z";\n  return value;\n};\n' > "$dir/src/mod.js"
+  commit_all "$dir" "refactor greet, behavior preserved"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "jest-clean: the base's JS assertion still passes, so exit must be zero"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0' \
+    "jest-clean: a real jest run must report zero in every class"
+  pass "a jest base test that passes against the branch exits zero"
+}
+
+test_jest_rewritten_assertion_caught() {
+  local dir out code
+  require_jest_env jest-rewrite
+  dir=$(make_js_repo jest-rewrite jest)
+  ln -s "$JEST_ENV/node_modules" "$dir/node_modules"
+  write_js_tree "$dir" jest K K
+  commit_all "$dir" "resolver takes K in both src/mod.js and the test"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "jest-rewrite: a rewritten JS assertion body must exit non-zero"
+  assert_contains "$out" 'failing: mod.test.js::greet > x behaves' \
+    "jest-rewrite: check 2 must report main's assertion as failing under the composed title"
+  assert_not_contains "$out" 'missing:' \
+    "jest-rewrite: check 1 must NOT flag anything (the names survived), proving check 2 caught it"
+  assert_not_contains "$out" 'unexecuted:' \
+    "jest-rewrite: the verdict must come from a real run, not a fallback"
+  pass "a rewritten jest assertion body is caught by check 2 where check 1 passes"
+}
+
+test_jest_explicit_skip_is_visible() {
+  local dir out code
+  require_jest_env jest-skip
+  dir="$TMP_ROOT/jest-skip"
+  init_repo_at "$dir"
+  mkdir -p "$dir/src"
+  cat > "$dir/package.json" <<EOF
+{"name":"fixture","private":true,"devDependencies":{"jest":"$JEST_VERSION"}}
+EOF
+  printf 'node_modules/\n' > "$dir/.gitignore"
+  cat > "$dir/mod.test.js" <<'EOF'
+it.skip('x behaves', () => {
+  expect(false).toBe(true);
+});
+EOF
+  commit_all "$dir" "main: the only test carries an explicit skip"
+  git -C "$dir" checkout -q -b work
+  ln -s "$JEST_ENV/node_modules" "$dir/node_modules"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "jest-skip: a skip-only run must not become a merge-refusing condition"
+  assert_contains "$out" 'skipped: mod.test.js::x behaves' \
+    "jest-skip: jest's pending status must be read as an explicit skip and reported by name"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=1 unaccounted=0' \
+    "jest-skip: a green run that verified nothing must not read as a clean pass"
+  assert_not_contains "$out" 'unaccounted:' \
+    "jest-skip: a reported skip IS a result, so nothing here is unaccounted"
+  pass "a jest test whose only assertion is explicitly skipped is reported skipped, not passed"
+}
+
+test_js_run_never_mutates_the_live_worktree() {
+  local dir before after nm_before nm_after marker touched
+  require_vitest_env js-no-mutation
+  dir=$(make_js_repo js-no-mutation vitest)
+  ln -s "$VITEST_ENV/node_modules" "$dir/node_modules"
+  before="$TMP_ROOT/js-no-mutation.before"
+  after="$TMP_ROOT/js-no-mutation.after"
+  nm_before="$TMP_ROOT/js-no-mutation.nm-before"
+  nm_after="$TMP_ROOT/js-no-mutation.nm-after"
+  marker="$TMP_ROOT/js-no-mutation.marker"
+  # run_explicit puts this harness's own state dir inside the fixture, so create
+  # it up front: the snapshot must isolate what the RUN does to the worktree.
+  mkdir -p "$dir/.state"
+  touch "$dir/.state/.last-watcher-beat"
+  # find stops at the node_modules symlink, so snapshot the linked env itself
+  # too: vitest's results cache writes into node_modules/.vite unless the
+  # runner invocation keeps it disabled, and THROUGH the link that would land
+  # in the live provisioned env this gate promises never to mutate.
+  #
+  # The path-list snapshot alone cannot see that regression, because the env is
+  # SHARED with every other vitest case in this file: an earlier case would
+  # already have created node_modules/.vite, and a later rewrite of the same
+  # paths leaves the name list identical. So stamp a marker immediately before
+  # the run and assert nothing under the env is newer than it - that holds no
+  # matter which cases ran first, and no matter whether the write creates a
+  # path or rewrites one.
+  find "$dir" -path "$dir/.git" -prune -o -print | sort > "$before"
+  find "$VITEST_ENV/node_modules" | sort > "$nm_before"
+  : > "$marker"
+
+  set +e
+  run_explicit "$dir" > /dev/null 2>&1
+  set -e
+
+  touched=$(find "$VITEST_ENV/node_modules" -newer "$marker" -print | sort)
+  [ -z "$touched" ] \
+    || fail "js-no-mutation: the run must not write anything into the linked node_modules it borrows"$'\n'"$touched"
+
+  find "$dir" -path "$dir/.git" -prune -o -print | sort > "$after"
+  diff -u "$before" "$after" > "$TMP_ROOT/js-no-mutation.diff" \
+    || fail "js-no-mutation: the run must not add or remove anything in the live worktree"$'\n'"$(cat "$TMP_ROOT/js-no-mutation.diff")"
+  find "$VITEST_ENV/node_modules" | sort > "$nm_after"
+  diff -u "$nm_before" "$nm_after" > "$TMP_ROOT/js-no-mutation.nm-diff" \
+    || fail "js-no-mutation: the run must not write into the linked node_modules it borrows"$'\n'"$(cat "$TMP_ROOT/js-no-mutation.nm-diff")"
+  pass "a JS check-2 run never mutates the live worktree or the linked node_modules"
+}
+
 test_removed_shell_test_reported_via_meta
 test_removed_python_test_reported
 test_added_tests_removed_none_loses_nothing
@@ -1023,3 +1569,12 @@ test_parametrized_green_test_is_not_unaccounted
 test_parametrized_all_skipped_is_skipped_not_unaccounted
 test_parametrized_one_passing_case_counts_as_passing
 test_parametrized_near_name_does_not_cross_match
+test_vitest_clean_run_exits_zero
+test_vitest_rewritten_assertion_caught
+test_vitest_without_node_modules_is_unexecuted
+test_js_workspace_link_is_unexecuted
+test_js_self_link_to_worktree_root_is_unexecuted
+test_jest_clean_run_exits_zero
+test_jest_rewritten_assertion_caught
+test_jest_explicit_skip_is_visible
+test_js_run_never_mutates_the_live_worktree

@@ -124,11 +124,15 @@ fm_pr_file_identity() {
   printf '%s:%s\n' "$device" "$inode"
 }
 
+# sha256sum is preferred because it is a C binary while shasum is a perl script,
+# measured here at roughly 13x the cost per call on the PR-poll validation path.
+# The shasum branch must stay: stock macOS ships shasum and does not ship sha256sum.
+# Both emit "<hex>  <name>" and "<hex>  -", so field 1 is identical either way.
 fm_pr_sha256() {
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
+  if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
   else
     return 1
   fi

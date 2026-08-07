@@ -16,6 +16,8 @@
 #       name and later fields are runner-specific resolution results:
 #         shell
 #         pytest<TAB><python><TAB><config-dir>
+#         vitest<TAB><node>
+#         jest<TAB><node>
 #       <worktree> is the live worktree the file belongs to; py/js runners
 #       resolve their already-provisioned interpreter from it. Always returns 0.
 #
@@ -27,18 +29,32 @@
 #       (`<file>::<name>`); runners that can execute a subset use them to bound
 #       the run to exactly those tests, and the shell runner ignores them.
 #
-#   passing_idents <spec> <results-out>
+#   passing_idents <spec> <results-out> [<file>]
 #       Print the sorted, unique set of passing test names the runner recorded in
 #       <results-out>. fm-assert composes the full <file>::<name> identifier from
 #       these names; for the shell runner the name is the `ok - <name>` tail.
+#       <file> is the ABSOLUTE path of the test file inside the scratch tree the
+#       run executed from; the JS runners compare it for exact (realpath-
+#       tolerant) equality against the report's per-file path, so names from a
+#       suffix-colliding file a substring filter also matched stay out of this
+#       file's result set in either direction (see the vitest section below).
+#       The other runners ignore it.
 #
-#   skipped_idents <spec> <results-out>
+#   skipped_idents <spec> <results-out> [<file>]
 #       Print the sorted, unique set of test names the runner recorded as an
 #       EXPLICIT skip in <results-out>. fm-assert subtracts these AND
 #       passing_idents from the identifiers the run was bounded to; whatever is
 #       left produced no result at all and is reported `unaccounted:`. The shell
 #       runner's TAP protocol has no skip marker, so it never reports one and an
 #       unrun shell name is therefore unaccounted rather than skipped.
+#
+#   fm_reported_name_accounts <spec> <requested> <reported>
+#       Succeed when one runner-reported name accounts for one check-1 requested
+#       name. The per-runner reconciliation rule between the two namespaces
+#       (equality everywhere; pytest's `<name>[...]` parametrized cases; the JS
+#       runners' composed `a > b` titles matched by whole segment) lives here
+#       with the identifier-scheme notes that justify it, so fm-assert's
+#       accounting loop stays runner-agnostic.
 #
 # Scratch-tree lifecycle (same owner, called by fm-assert around the runs):
 #
@@ -131,6 +147,94 @@
 # string prefix (`test_xy[a]` must not account for a requested `test_x`). Passing
 # takes precedence over skipped, so one passing case of a parametrized name means
 # that name was verified.
+#
+# --- vitest / jest -----------------------------------------------------------
+#
+# Detection reads the NEAREST package.json at or above the test file. v1
+# executes only a single-package layout whose nearest package.json is the repo
+# root: a nested nearest package.json (a workspace or monorepo member) means the
+# config, dependency hoisting, and env-link layout cannot be confidently
+# resolved, so the file is unsupported and fm-assert reports it unexecuted -
+# fail safe, widen coverage from what real projects surface. The runner is
+# vitest or jest per devDependencies/dependencies and the presence of
+# vitest.config.* / jest.config.* (or a "jest" key in package.json); when both
+# runners are signalled, a config file breaks the tie, and vitest is preferred
+# when the tie stands. A `node` on PATH is required (it reads package.json and
+# parses results; the .bin shims also resolve their interpreter through `env
+# node`), and the binary must exist at <worktree>/node_modules/.bin/<runner>.
+# If node_modules or the binary is absent, the file is unsupported and becomes
+# unexecuted, never a silent pass.
+#
+# Invocation runs from the scratch tree root so config discovery, path aliases,
+# and node_modules resolution match the project's own `npm test`:
+#   vitest run --root <scratch> --cache=false --reporter=json \
+#              --outputFile=<results> <file>
+#   jest --rootDir <scratch> --reporters=default --json --outputFile=<results> \
+#        --runTestsByPath <file>
+# `--cache=false` is REQUIRED for vitest: without it a run writes its results
+# cache into node_modules/.vite/, which the env symlink would deliver into the
+# live worktree's real node_modules (verified 2026-08-03, vitest 3.2.7; the
+# flag stops that write, and the JS no-mutation test locks it in). Residual
+# limitation, stated rather than papered over: the flag disables vitest's
+# RESULTS cache only. Vite's cacheDir (default node_modules/.vite) is also
+# written by the dependency optimizer, which a project can turn on with
+# deps.optimizer.* in its vitest config, and there is no CLI override for
+# cacheDir - such a project's run would still write through the env link.
+# jest's cache goes to the OS tmpdir and needs no counterpart. The ambient
+# NODE_PATH and NODE_OPTIONS are stripped for the same reason PYTHONPATH is not
+# inherited: both are resolution and preload backdoors that can reach outside
+# the scratch tree.
+#
+# Results are read from the jest-shaped JSON both runners emit natively
+# (testResults[].assertionResults[] with status/title/ancestorTitles), one
+# parser for both. vitest's JUnit reporter is equally built in, but parsing XML
+# robustly needs a parser bash does not have, while `node` - already required
+# here - parses JSON exactly; same no-new-plugin-dependency intent, sturdier
+# read. A pass is status == "passed"; an EXPLICIT skip is status "skipped",
+# "pending", "todo", or "disabled" (verified 2026-08-03: it.skip reports
+# "skipped" on vitest 3.2.7 and "pending" on jest 30.4.1, test.todo reports
+# "todo" on both). A missing, empty, or unparseable report yields neither set,
+# so every requested name comes back unaccounted at the orchestrator.
+#
+# The reported name is ancestorTitles + title joined with " > ", exactly how
+# vitest composes its own full titles. This is a rendering of the runner's
+# structured fields, not a normalization toward check 1's shape: the runners'
+# own single-string `fullName` joins with plain spaces ("greet x behaves"),
+# which cannot be split back into segments, while the " > " join keeps the
+# describe path recoverable. Check 1's JS extractor emits each it/test/describe
+# first string argument SEPARATELY, so a requested bare name is accounted for
+# when it equals a whole " > "-separated segment of a reported name - describe
+# titles included - and never by bare substring. Two limits are deliberate: a
+# title containing a literal " > " is indistinguishable from a segment
+# boundary, and an it.each/test.each template ("adds %i") never matches its
+# substituted run-time titles, so it lands in unaccounted - both are
+# informational classes that do not affect the exit code.
+#
+# One imprecision is carried consciously: vitest selects files by SUBSTRING
+# filter, so a path that is a suffix of another (mod.test.js beside
+# src/mod.test.js) can pull the colliding file into the run. The result parse
+# filters testcases to the requested file by EXACT path equality against the
+# scratch-absolute file path the caller supplies (realpath-tolerant, since the
+# runners report absolute paths), so passing/skipped sets stay correct in
+# either suffix direction; the residual effect is that a colliding file red on
+# the base can fail that baseline run and report this file unexecuted - fail
+# safe, never a false pass. jest's --runTestsByPath selects exactly the named
+# file.
+#
+# The JS analogue of the editable-install hazard is a linked first-party
+# package: npm/pnpm/yarn workspaces and file:/npm-link dependencies leave a
+# node_modules/<name> symlink pointing at live-worktree source, so a bare
+# specifier import loads the LIVE tree while we believe we are testing scratch.
+# scratch_untrusted_reason therefore scans the worktree's top-level
+# node_modules entries (scoped @*/ included): a symlink resolving inside the
+# live worktree but outside node_modules itself - the worktree ROOT included,
+# which is what `npm install file:.` / `npm link` of the root package leaves
+# behind (node_modules/<self> -> ..) - is first-party live code and the file
+# is reported unexecuted. Links resolving elsewhere (a shared store, a
+# global npm-link target) are third-party env by the same rule that shares
+# site-packages. Node resolves the scratch test file's relative imports inside
+# scratch and its bare specifiers through the scratch node_modules link, so
+# with no such first-party link the scratch tree is authoritative.
 #
 # --- The provisioned environment and the scratch tree ------------------------
 #
@@ -355,6 +459,174 @@ for name in sorted(candidates):
             break
 '
 
+# --- js helper programs ------------------------------------------------------
+# Read by the `node` resolved at detection time, so detection and result
+# parsing use the same interpreter the .bin shims resolve through `env node`.
+
+# Print the runner name (vitest or jest) the package root signals, or nothing.
+# argv[1] is the package root directory.
+FM_JS_DETECT_SRC='
+const fs = require("fs"), path = require("path");
+const root = process.argv[1];
+let pkg;
+try {
+  pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")) || {};
+} catch (e) {
+  process.exit(0);
+}
+const deps = Object.assign({}, pkg.dependencies, pkg.devDependencies);
+let names = [];
+try { names = fs.readdirSync(root); } catch (e) {}
+const hasConfig = (base) => names.some((n) => n.startsWith(base + ".config."));
+const vitestConfig = hasConfig("vitest");
+const jestConfig = hasConfig("jest") || "jest" in pkg;
+const vitest = "vitest" in deps || vitestConfig;
+const jest = "jest" in deps || jestConfig;
+if (vitest && jest) {
+  // A config file breaks the tie; vitest is preferred when the tie stands.
+  console.log(jestConfig && !vitestConfig ? "jest" : "vitest");
+} else if (vitest) {
+  console.log("vitest");
+} else if (jest) {
+  console.log("jest");
+}
+'
+
+# Print each passing (mode "passing") or explicitly skipped (mode "skipped")
+# test name from the jest-shaped JSON report both runners emit. argv[1] is the
+# report path, argv[2] the mode, argv[3] the absolute path of the test file
+# inside the scratch tree the run executed from. Both runners report
+# testResults[].name as the test file's absolute path, so the filter is EXACT
+# path equality (realpath-tolerant on both sides); testcases from any other
+# file a substring filter matched are dropped, in either suffix direction.
+# Names are ancestorTitles + title joined with " > "; see the vitest/jest
+# header section for why that rendering and these statuses.
+FM_JS_RESULTS_SRC='
+const fs = require("fs");
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+} catch (e) {
+  process.exit(0);
+}
+const mode = process.argv[2];
+const target = process.argv[3] || "";
+const real = (p) => {
+  try {
+    return fs.realpathSync(p);
+  } catch (e) {
+    return p;
+  }
+};
+const targetReal = target ? real(target) : "";
+const skipStatuses = new Set(["skipped", "pending", "todo", "disabled"]);
+for (const file of (data && data.testResults) || []) {
+  if (target) {
+    const name = String(file.name || "");
+    if (name !== target && real(name) !== targetReal) continue;
+  }
+  for (const a of file.assertionResults || []) {
+    const wanted = mode === "passing" ? a.status === "passed" : skipStatuses.has(a.status);
+    if (!wanted) continue;
+    const parts = (a.ancestorTitles || []).concat([a.title]).filter(
+      (p) => typeof p === "string" && p.length > 0
+    );
+    if (parts.length) console.log(parts.join(" > "));
+  }
+}
+'
+
+# --- vitest / jest detection -------------------------------------------------
+
+# fm_js_pkg_dir <worktree> <file>: print the worktree-relative directory holding
+# the nearest package.json at or above <file> (empty string for the worktree
+# root), or return 1 when none exists.
+fm_js_pkg_dir() {
+  local wt=$1 dir=${2%/*}
+  [ "$dir" != "$2" ] || dir=
+  while :; do
+    if [ -f "$wt${dir:+/$dir}/package.json" ]; then
+      printf '%s' "$dir"
+      return 0
+    fi
+    [ -n "$dir" ] || return 1
+    case "$dir" in
+      */*) dir=${dir%/*} ;;
+      *) dir= ;;
+    esac
+  done
+}
+
+# fm_js_runner_name <worktree> <node>: print the runner (vitest or jest) the
+# worktree root's package.json signals, or nothing. The answer depends only on
+# <worktree>, so it is memoized; an empty memoized value records "no signal".
+fm_js_runner_name() {
+  local wt=$1 node=$2 out
+  if out=$(fm_cache_get jsrunner "$wt"); then
+    printf '%s' "$out"
+    return 0
+  fi
+  out=$("$node" -e "$FM_JS_DETECT_SRC" "$wt" 2>/dev/null) || out=
+  fm_cache_put jsrunner "$wt" "$out"
+  printf '%s' "$out"
+}
+
+# fm_js_runner_spec <worktree> <file>: print the vitest/jest runner spec for
+# <file>, or nothing when the file is unsupported (nested package root, no
+# node, no runner signal, or no provisioned binary). Always returns 0.
+fm_js_runner_spec() {
+  local wt=$1 f=$2 pkgdir node runner
+  pkgdir=$(fm_js_pkg_dir "$wt" "$f") || return 0
+  # v1 executes only a single-package layout rooted at the repo root; a nested
+  # nearest package.json (workspace/monorepo member) is unsupported, so the
+  # file is reported unexecuted rather than run under the wrong root.
+  [ -z "$pkgdir" ] || return 0
+  node=$(command -v node 2>/dev/null) || return 0
+  runner=$(fm_js_runner_name "$wt" "$node")
+  [ -n "$runner" ] || return 0
+  [ -x "$wt/node_modules/.bin/$runner" ] || return 0
+  printf '%s\t%s\n' "$runner" "$node"
+}
+
+# fm_js_untrusted_reason <worktree>: why a JS run in a scratch tree could not be
+# trusted, or nothing. A top-level (or scoped) node_modules entry that is a
+# symlink resolving INSIDE the live worktree but outside node_modules itself is
+# linked first-party live source - a workspace or file:/npm-link package - and
+# a bare specifier import would load the live tree instead of scratch. The
+# worktree ROOT itself counts: a self-link (node_modules/<self> -> .., left by
+# `npm install file:.` or `npm link` of the root package) resolves to exactly
+# the worktree, and treating that as trusted would be the false pass this
+# probe exists to prevent. The
+# answer depends only on <worktree>, so it is memoized.
+fm_js_untrusted_reason() {
+  local wt=$1 nmreal wtreal entry real name reason
+  if reason=$(fm_cache_get jstrust "$wt"); then
+    printf '%s' "$reason"
+    return 0
+  fi
+  reason=
+  nmreal=$(readlink -f "$wt/node_modules" 2>/dev/null) || nmreal=
+  wtreal=$(readlink -f "$wt" 2>/dev/null) || wtreal=$wt
+  if [ -n "$nmreal" ]; then
+    for entry in "$wt/node_modules"/* "$wt/node_modules"/@*/*; do
+      [ -L "$entry" ] || continue
+      real=$(readlink -f "$entry" 2>/dev/null) || continue
+      case "$real" in
+        "$nmreal" | "$nmreal"/*) continue ;;
+      esac
+      case "$real" in
+        "$wtreal" | "$wtreal"/*)
+          name=${entry#"$wt/node_modules/"}
+          reason="linked package $name resolves to $real, first-party code in the live worktree"
+          break
+          ;;
+      esac
+    done
+  fi
+  fm_cache_put jstrust "$wt" "$reason"
+  printf '%s' "$reason"
+}
+
 # --- pytest detection --------------------------------------------------------
 
 # fm_py_config_dir <worktree> <file>: print the worktree-relative directory
@@ -439,6 +711,11 @@ runner_for_file() {
       printf 'pytest\t%s\t%s\n' "$python" "$configdir"
       return 0
       ;;
+    *.test.js|*.test.jsx|*.test.ts|*.test.tsx|*.test.mjs|*.test.cjs|\
+    *.spec.js|*.spec.jsx|*.spec.ts|*.spec.tsx|*.spec.mjs|*.spec.cjs)
+      fm_js_runner_spec "$wt" "$f"
+      return 0
+      ;;
   esac
   return 0
 }
@@ -501,16 +778,42 @@ run_base_test_file() {
             --junit-xml="$results" "$@"
       ) > "$errout" 2>&1
       ;;
+    vitest)
+      # Like the shell runner, the whole file runs and the trailing identifiers
+      # are ignored; accounting reconciles the result. --cache=false is the
+      # write-back guard for the linked node_modules (see the header section).
+      : > "$results"
+      (
+        cd "$scratch" || exit 125
+        NODE_PATH='' NODE_OPTIONS='' \
+        FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_HOME='' \
+          ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} \
+          "$scratch/node_modules/.bin/vitest" run --root "$scratch" \
+            --cache=false --reporter=json --outputFile="$results" "$f"
+      ) > "$errout" 2>&1
+      ;;
+    jest)
+      : > "$results"
+      (
+        cd "$scratch" || exit 125
+        NODE_PATH='' NODE_OPTIONS='' \
+        FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_HOME='' \
+          ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} \
+          "$scratch/node_modules/.bin/jest" --rootDir "$scratch" \
+            --reporters=default --json --outputFile="$results" \
+            --runTestsByPath "$f"
+      ) > "$errout" 2>&1
+      ;;
     *)
       return 125
       ;;
   esac
 }
 
-# passing_idents <spec> <results-out>: the sorted unique passing test names of
-# one run, read from that runner's machine-readable output.
+# passing_idents <spec> <results-out> [<file>]: the sorted unique passing test
+# names of one run, read from that runner's machine-readable output.
 passing_idents() {
-  local spec=$1 results=$2 runner python
+  local spec=$1 results=$2 f=${3:-} runner python
   IFS=$'\t' read -r runner python _ <<< "$spec"
   case "$runner" in
     shell)
@@ -520,14 +823,18 @@ passing_idents() {
       [ -s "$results" ] || return 0
       PYTHONDONTWRITEBYTECODE=1 "$python" -c "$FM_PY_JUNIT_SRC" "$results" 2>/dev/null | sort -u
       ;;
+    vitest|jest)
+      [ -s "$results" ] || return 0
+      "$python" -e "$FM_JS_RESULTS_SRC" "$results" passing "$f" 2>/dev/null | sort -u
+      ;;
   esac
 }
 
-# skipped_idents <spec> <results-out>: the sorted unique test names one run
-# recorded as an EXPLICIT skip. Everything the run was bounded to that appears in
-# neither this set nor passing_idents produced no result at all.
+# skipped_idents <spec> <results-out> [<file>]: the sorted unique test names one
+# run recorded as an EXPLICIT skip. Everything the run was bounded to that
+# appears in neither this set nor passing_idents produced no result at all.
 skipped_idents() {
-  local spec=$1 results=$2 runner python
+  local spec=$1 results=$2 f=${3:-} runner python
   IFS=$'\t' read -r runner python _ <<< "$spec"
   case "$runner" in
     shell)
@@ -539,7 +846,42 @@ skipped_idents() {
       [ -s "$results" ] || return 0
       PYTHONDONTWRITEBYTECODE=1 "$python" -c "$FM_PY_JUNIT_SKIPPED_SRC" "$results" 2>/dev/null | sort -u
       ;;
+    vitest|jest)
+      [ -s "$results" ] || return 0
+      "$python" -e "$FM_JS_RESULTS_SRC" "$results" skipped "$f" 2>/dev/null | sort -u
+      ;;
   esac
+}
+
+# fm_reported_name_accounts <spec> <requested> <reported>: succeed when the
+# runner-reported name <reported> accounts for check 1's requested bare name.
+# Equality accounts everywhere. pytest additionally accounts a requested name
+# followed IMMEDIATELY by a literal `[` (its parametrized cases; the bracket
+# must be the very next character so `test_xy[a]` never accounts for a
+# requested `test_x`), and the shell runner keeps that same rule its accounting
+# has always used. The JS runners report composed `a > b > c` titles while
+# check 1 requests each segment separately, so a requested name is accounted by
+# any whole " > "-separated segment - never by bare substring, so a near-name
+# pair cannot cross-match.
+fm_reported_name_accounts() {
+  local spec=$1 name=$2 reported=$3 runner seg rest
+  IFS=$'\t' read -r runner _ <<< "$spec"
+  [ "$reported" != "$name" ] || return 0
+  case "$runner" in
+    shell|pytest)
+      case "$reported" in "${name}["*) return 0 ;; esac
+      ;;
+    vitest|jest)
+      rest=$reported
+      while :; do
+        seg=${rest%% > *}
+        [ "$seg" != "$name" ] || return 0
+        [ "$seg" != "$rest" ] || break
+        rest=${rest#* > }
+      done
+      ;;
+  esac
+  return 1
 }
 
 # --- scratch-tree lifecycle --------------------------------------------------
@@ -551,7 +893,7 @@ prepare_scratch_env() {
   local spec=$1 scratch=$2 wt=$3 runner name
   IFS=$'\t' read -r runner _ <<< "$spec"
   case "$runner" in
-    pytest) ;;
+    pytest|vitest|jest) ;;
     *) return 0 ;;
   esac
   for name in "${FM_ENV_LINK_NAMES[@]}"; do
@@ -577,6 +919,10 @@ scratch_untrusted_reason() {
   IFS=$'\t' read -r runner python configdir <<< "$spec"
   case "$runner" in
     pytest) ;;
+    vitest|jest)
+      fm_js_untrusted_reason "$wt"
+      return 0
+      ;;
     *) return 0 ;;
   esac
   pythonpath=$(fm_py_pythonpath "$scratch" "$configdir" "$f")

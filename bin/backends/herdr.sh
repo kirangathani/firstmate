@@ -747,8 +747,9 @@ FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES=${FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES:
 
 fm_backend_herdr_pi_separator_row() {  # <plain-row>
   local row=$1
-  row="${row#"${row%%[![:space:]]*}"}"
-  row="${row%"${row##*[![:space:]]}"}"
+  # fm_composer_normalize_trim, not a bare `[[:space:]]` strip: a separator row
+  # padded with U+00A0 or another FM_COMPOSER_BLANKS blank must still trim clean.
+  fm_composer_normalize_trim "$row" row
   [ "${#row}" -ge 8 ] || return 1
   [ -z "${row//─/}" ]
 }
@@ -821,8 +822,10 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   while IFS= read -r line; do
     row=$((row + 1))
     trimmed=$(fm_backend_herdr_strip_ansi "$line")
-    trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
-    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    # fm_composer_normalize_trim, not a bare `[[:space:]]` strip, so a
+    # Unicode-blank-padded row still matches the border shape and the
+    # bare-prompt regex below instead of misshaping before the classifier.
+    fm_composer_normalize_trim "$trimmed" trimmed
     [ -n "$trimmed" ] || continue
     case "$trimmed" in
       '│'*'│'|'┃'*'┃'|'|'*'|')
@@ -886,15 +889,13 @@ EOF
   # dark box border too, which is why the bordered flag was read from the plain
   # shape above, not from this ghost-stripped content.
   stripped=$(printf '%s\n' "$raw_match" | fm_composer_strip_ghost)
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  fm_composer_normalize_trim "$stripped" stripped
   if [ "$shape" = bordered ]; then
     bordered=1
     stripped=${stripped//│/}
     stripped=${stripped//┃/}
     stripped=${stripped//|/}
-    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-    stripped="${stripped%"${stripped##*[![:space:]]}"}"
+    fm_composer_normalize_trim "$stripped" stripped
   elif [ "$shape" = separated ]; then
     # The native Pi identity plus the complete separator pair is the genuine
     # composer container, equivalent to a bordered box for shared content
