@@ -94,7 +94,11 @@
 # Environment:
 #   FM_TEST_SUITE_DIR   directory holding *.test.sh (default: tests). Exists so
 #                        tests/fm-test.test.sh can point this runner at fixture
-#                        suites; the gates never set it.
+#                        suites; the gates never set it. Set FM_TEST_NO_CACHE=1
+#                        alongside it: the sidecar this run writes is the real
+#                        SHARED one, and a throwaway suite's paths stay in it
+#                        forever (see record_timings). tests/fm-test.test.sh
+#                        asserts the pairing on every such call site.
 #   FM_TEST_BASE        git ref --local diffs against (default: the first of
 #                        origin/main, main, origin/master, master that resolves).
 #   FM_TEST_CHANGED     path to a file listing changed paths, bypassing git
