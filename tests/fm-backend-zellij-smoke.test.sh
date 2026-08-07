@@ -54,7 +54,11 @@ pass "real zellij: version_check accepts the installed binary's version"
 
 CONTAINER=$(fm_backend_zellij_container_ensure) || fail "container_ensure failed"
 [ "$CONTAINER" = "$SESSION" ] || fail "container_ensure should echo the isolated session name, got '$CONTAINER'"
-pass "real zellij: container_ensure starts the isolated background session ($CONTAINER)"
+# The runtime session name is evidence, so it is printed - but never baked into the
+# pass NAME, which must be a constant string for bin/fm-assert-tests-kept.sh to
+# resolve it statically (data/turnend-timing-block-h7/report.md §3).
+echo "note: isolated background session: $CONTAINER" >&2
+pass "real zellij: container_ensure starts the isolated background session"
 
 # A second container_ensure must reuse the same session (idempotent, no error).
 CONTAINER2=$(fm_backend_zellij_container_ensure) || fail "second container_ensure failed"

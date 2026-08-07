@@ -102,13 +102,13 @@ fm_supersession_approved() {
     fi
     if [ "$kind_seen" -eq 1 ]; then
       case "$entry_kind" in
-        missing|failing|unexecuted|any) ;;
+        missing|failing|unexecuted|unstable|any) ;;
         "")
           echo "warning: ignoring supersession entry with an empty field: $line" >&2
           continue
           ;;
         *)
-          echo "warning: ignoring supersession entry whose kind is not missing, failing, unexecuted, or any: $line" >&2
+          echo "warning: ignoring supersession entry whose kind is not missing, failing, unexecuted, unstable, or any: $line" >&2
           continue
           ;;
       esac

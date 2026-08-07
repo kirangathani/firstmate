@@ -541,7 +541,13 @@ test_hook_runs_fast() {
   run_hook "$dir" false >/dev/null
   elapsed_s=$((SECONDS - start))
   [ "$elapsed_s" -lt 3 ] || fail "hook took ${elapsed_s}s, expected well under a second (generous 3s CI margin)"
-  pass "fm-turnend-guard: runs well under the generous timing margin (${elapsed_s}s)"
+  # The measured value stays OUT of the pass name and in the fail message: an
+  # assertion's identifier must be a constant string, or bin/fm-assert-tests-kept.sh
+  # reads the same passing assertion under two names across its two runs. $SECONDS
+  # is a whole-second wall clock, so this 25-280ms hook records 1 whenever it
+  # straddles a second boundary (~11% of merge attempts on a quiet box, ~35%
+  # under load; measured 2026-08-07, data/turnend-timing-block-h7/report.md).
+  pass "fm-turnend-guard: runs well under the generous timing margin"
 }
 
 test_grok_adapter_forces_one_resume_when_unhealthy() {

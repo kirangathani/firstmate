@@ -57,6 +57,12 @@
 #       explicit skip "pending") and still exits zero
 #   (cc) a JS run never mutates the live worktree or the linked node_modules
 #       (vitest's results cache must stay disabled)
+#   (dd) an assertion whose NAME is built from a runtime value: check 2 refuses to
+#       compare a name it cannot resolve in check 1's static extraction and
+#       reports `unstable:` rather than a false `failing:`; that refusal never
+#       swallows a genuinely failing assertion or masks a deleted one in the same
+#       file; and the constant-named fix is both compared cleanly AND finally
+#       accounted for, which the unexpanded form never could be
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1545,6 +1551,143 @@ test_js_run_never_mutates_the_live_worktree() {
   pass "a JS check-2 run never mutates the live worktree or the linked node_modules"
 }
 
+make_moving_name_repo() {
+  local dir="$TMP_ROOT/$1" body=$2
+  mkdir -p "$dir/tests"
+  git init -q -b main "$dir" 2>/dev/null || {
+    git init -q "$dir"
+    git -C "$dir" checkout -q -b main
+  }
+  printf 'Z\n' > "$dir/tag.txt"
+  printf '#!/usr/bin/env bash\necho Z\n' > "$dir/app.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf "pass() { printf 'ok - %%s\\\\n' \"\$1\"; }\n"
+    printf "fail() { printf 'not ok - %%s\\\\n' \"\$1\" >&2; exit 1; }\n"
+    printf 'tag=$(cat ./tag.txt)\n'
+    printf '%s' "$body"
+  } > "$dir/tests/m.test.sh"
+  commit_all "$dir" "main: the test names an assertion with a value read from the tree"
+  git -C "$dir" checkout -q -b work
+  printf '%s\n' "$dir"
+}
+
+test_moving_assertion_name_is_unstable_not_a_vanished_assertion() {
+  local dir out code
+  # The base test names its own assertion with a value it reads from the tree, so
+  # check 2's two runs of that ONE file report two different names for one
+  # passing assertion. Nothing vanished and nothing failed; the identity moved.
+  dir=$(make_moving_name_repo moving-name '
+pass "tag is readable ($tag)"
+pass "unrelated assertion holds"
+')
+  printf 'K\n' > "$dir/tag.txt"
+  commit_all "$dir" "the branch changes the value the base test reads"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "moving-name: an unresolvable identity must refuse, not pass"
+  assert_contains "$out" 'unstable: tests/m.test.sh::tag is readable (Z)' \
+    "moving-name: the base run's own reported name must be named as unstable"
+  assert_not_contains "$out" 'failing:' \
+    "moving-name: a moving name must NOT be reported as a vanished/failing assertion - both runs were green"
+  assert_not_contains "$out" 'missing:' \
+    "moving-name: check 1 sees the same literal source on both sides, so nothing is missing"
+  assert_contains "$out" 'unstable=1' \
+    "moving-name: the summary must count the unstable finding"
+  # The same root cause, seen from check 1's side: it requests the LITERAL
+  # unexpanded source string, which no run can ever report, so this assertion has
+  # never actually been verified by the gate either.
+  assert_contains "$out" 'unaccounted: tests/m.test.sh::tag is readable ($tag)' \
+    "moving-name: the unexpanded identifier check 1 requested is never accounted for by any run"
+  assert_contains "$(cat "$dir/stderr")" 'UNSTABLE IDENTITY: tests/m.test.sh' \
+    "moving-name: stderr must name the offending test file"
+  assert_contains "$(cat "$dir/stderr")" 'defect in the TEST' \
+    "moving-name: stderr must say the fix belongs in the test, not in the branch"
+  pass "a moving assertion name is reported as an unstable identity, not as a vanished assertion"
+}
+
+test_unstable_name_does_not_swallow_a_real_failing_assertion() {
+  local dir out code
+  # One file, two assertions: one whose name moves, one whose name is constant and
+  # whose behavior the branch genuinely breaks. Refusing to compare the first must
+  # not blind check 2 to the second.
+  dir=$(make_moving_name_repo unstable-plus-failing '
+pass "tag is readable ($tag)"
+observed=$(bash ./app.sh)
+[ "$observed" = Z ] || fail "app produces Z"
+pass "app produces Z"
+')
+  printf 'K\n' > "$dir/tag.txt"
+  printf '#!/usr/bin/env bash\necho K\n' > "$dir/app.sh"
+  commit_all "$dir" "the branch changes the read value AND breaks app.sh's behavior"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "unstable-plus-failing: a genuinely broken assertion must still refuse"
+  assert_contains "$out" 'failing: tests/m.test.sh::app produces Z' \
+    "unstable-plus-failing: the constant-named assertion the branch broke must still be reported as failing"
+  assert_contains "$out" 'unstable: tests/m.test.sh::tag is readable (Z)' \
+    "unstable-plus-failing: the moving name must be reported as unstable alongside it"
+  pass "an unstable identity in a file never swallows a genuinely failing assertion in the same file"
+}
+
+test_unstable_name_does_not_mask_a_deleted_assertion() {
+  local dir out code
+  # The other direction: the branch DELETES an assertion outright from a file that
+  # also holds a moving name. Check 1 must still report the deletion.
+  dir=$(make_moving_name_repo unstable-plus-missing '
+pass "tag is readable ($tag)"
+pass "assertion the branch deletes"
+')
+  printf 'K\n' > "$dir/tag.txt"
+  grep -v 'assertion the branch deletes' "$dir/tests/m.test.sh" > "$dir/tests/m.test.sh.new"
+  mv "$dir/tests/m.test.sh.new" "$dir/tests/m.test.sh"
+  commit_all "$dir" "the branch deletes an assertion and changes the read value"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "unstable-plus-missing: a deleted assertion must still refuse"
+  assert_contains "$out" 'missing: tests/m.test.sh::assertion the branch deletes' \
+    "unstable-plus-missing: check 1 must still report the outright deletion"
+  assert_contains "$out" 'unstable: tests/m.test.sh::tag is readable (Z)' \
+    "unstable-plus-missing: the moving name must be reported as unstable alongside it"
+  pass "an unstable identity in a file never masks an assertion the branch deleted"
+}
+
+test_constant_name_over_a_changed_value_is_fully_verified() {
+  local dir out code
+  # The fix this class asks for, asserted end to end: the runtime value moves to
+  # the FAIL message and the name is a constant string. The gate then compares the
+  # two runs cleanly AND finally accounts for the assertion, which the unexpanded
+  # form above could never be.
+  dir=$(make_moving_name_repo constant-name '
+[ -n "$tag" ] || fail "tag is readable (got: $tag)"
+pass "tag is readable"
+')
+  printf 'K\n' > "$dir/tag.txt"
+  commit_all "$dir" "the branch changes the value the base test reads"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "constant-name: a constant identity over a changed value must exit zero"
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0 unstable=0' \
+    "constant-name: every class must be zero, including the unaccounted one the dynamic name always landed in"
+  pass "a constant assertion name over a changed runtime value is compared cleanly and actually accounted for"
+}
+
 test_removed_shell_test_reported_via_meta
 test_removed_python_test_reported
 test_added_tests_removed_none_loses_nothing
@@ -1578,3 +1721,7 @@ test_jest_clean_run_exits_zero
 test_jest_rewritten_assertion_caught
 test_jest_explicit_skip_is_visible
 test_js_run_never_mutates_the_live_worktree
+test_moving_assertion_name_is_unstable_not_a_vanished_assertion
+test_unstable_name_does_not_swallow_a_real_failing_assertion
+test_unstable_name_does_not_mask_a_deleted_assertion
+test_constant_name_over_a_changed_value_is_fully_verified

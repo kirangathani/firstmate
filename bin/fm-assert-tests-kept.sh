@@ -30,6 +30,23 @@
 # baseline recorded as passing that the branch run does not is a failing
 # assertion.
 #
+# Check 2 compares names the two runs EMITTED, so it only means anything while
+# those names are stable. A name built from a runtime value - a measured
+# duration, a pane or container id, a count derived from the tree under test - is
+# a different string on every run, and a set difference then reads one passing
+# assertion as an assertion that vanished. So check 2 refuses to compare a name
+# it cannot also resolve in check 1's STATIC extraction of the same base file,
+# and reports it as `unstable:` instead of `failing:`. That refusal is the
+# script's own stated invariant applied to check 2 (identifiers are stable NAMES,
+# see check 1 above), and it blocks like the other check-2 classes: an assertion
+# whose identity moves is one the gate has never been able to verify - check 1
+# requests the literal unexpanded source string, which no run can ever report,
+# so it lands in `unaccounted:` on every run - and a green result over a name
+# that means something different each time reads as verified while proving
+# nothing. Turning that into a non-blocking note would trade a loud wrong answer
+# for a quiet no-answer. The fix belongs in the TEST: name the assertion with a
+# constant string and put the runtime value in its fail message.
+#
 # A base test file check 2 could not actually execute is NOT a pass. Each of its
 # identifiers is reported as `unexecuted:`, because a bare green result that
 # means "nothing was run" reads as verified while catching nothing - the precise
@@ -87,7 +104,7 @@
 #       Explicit mode: enumerate <base> vs <ref> (default HEAD) in <path>.
 #
 # Output and exit status. stdout is strictly line-oriented so a gate or a viewer
-# can parse it; the human-facing diagnostic blobs go to stderr. Five finding
+# can parse it; the human-facing diagnostic blobs go to stderr. Six finding
 # prefixes and one summary line are the stable contract:
 #   - `missing: <file>::<name>` per identifier present on the base and absent
 #     from the branch (check 1).
@@ -99,14 +116,21 @@
 #     explicit skip for.
 #   - `unaccounted: <file>::<name>` per identifier a green baseline run produced
 #     no result for at all.
+#   - `unstable: <file>::<name>` per base-run assertion name check 2 could not
+#     resolve in check 1's static extraction of the same file, so the two runs
+#     could not be compared over it. <name> is the name the BASE RUN reported,
+#     which is evidence of what actually moved rather than a static identifier;
+#     it differs run to run by definition, so a supersession over one needs the
+#     `ids:` glob form, and fixing the test is the real answer.
 #   - `summary: missing=<n> failing=<n> unexecuted=<n> skipped=<n>
-#     unaccounted=<n>` always, as the last line, whether or not anything was
-#     found.
-#   - Exit 1 when ANY of `missing:`, `failing:` or `unexecuted:` is non-empty,
-#     exit 0 when all three are empty. `skipped:` and `unaccounted:` are
-#     reported but do NOT affect the exit code. This script reports; it does not
-#     decide which classes block a merge (that is bin/fm-pr-merge.sh's contract,
-#     not this one's).
+#     unaccounted=<n> unstable=<n>` always, as the last line, whether or not
+#     anything was found. `unstable=` is appended LAST so every existing prefix
+#     match of this line keeps working.
+#   - Exit 1 when ANY of `missing:`, `failing:`, `unexecuted:` or `unstable:` is
+#     non-empty, exit 0 when all four are empty. `skipped:` and `unaccounted:`
+#     are reported but do NOT affect the exit code. This script reports; it does
+#     not decide which classes block a merge (that is bin/fm-pr-merge.sh's
+#     contract, not this one's).
 #   - Exit 2 when the check cannot run at all (bad usage, missing meta,
 #     missing worktree or project, unresolvable refs), so a caller gating on
 #     this script can tell "assertions vanished" from "could not verify".
@@ -369,6 +393,8 @@ comm -23 "$TMPD/base" "$TMPD/branch" > "$TMPD/missing"
 : > "$TMPD/execfiles"
 : > "$TMPD/skipped"
 : > "$TMPD/unaccounted"
+: > "$TMPD/unstable"
+: > "$TMPD/unstable-report"
 
 # idents_for_file <file>: the check-1 identifiers the base enumerated for <file>.
 # They are both what a run is bounded to and what an unexecuted file reports.
@@ -392,6 +418,39 @@ name_accounted() {
     fi
   done < "$file"
   return 1
+}
+
+# runtime_name_resolves <spec> <file> <reported>: succeed when check 1's STATIC
+# extraction of <file> holds an identifier that accounts for the runtime name
+# <reported>. This is name_accounted's predicate run in the other direction, and
+# it is what stops check 2 comparing a name it cannot statically resolve. Reads
+# $TMPD/requested, so that file must already hold this file's identifiers.
+runtime_name_resolves() {
+  local spec=$1 f=$2 reported=$3 ident
+  while IFS= read -r ident; do
+    [ -n "$ident" ] || continue
+    if fm_reported_name_accounts "$spec" "${ident#"$f::"}" "$reported"; then
+      return 0
+    fi
+  done < "$TMPD/requested"
+  return 1
+}
+
+# mark_unstable <file> <reported>: report one base-run name check 2 could not
+# resolve statically, and record the human-facing explanation.
+mark_unstable() {
+  local f=$1 reported=$2
+  printf '%s::%s\n' "$f" "$reported" >> "$TMPD/unstable"
+  {
+    printf 'UNSTABLE IDENTITY: %s\n' "$f"
+    printf '  the base run reported this passing assertion: %s\n' "$reported"
+    printf '  the branch run of the SAME (base) test file reported no such name, and\n'
+    printf "  check 1's static extraction of that file cannot resolve it either, so the\n"
+    printf '  two runs named one assertion two different ways and nothing was compared.\n'
+    printf '  This is a defect in the TEST, not in the branch under review: make the\n'
+    printf "  assertion's name a constant string and move the runtime value into its\n"
+    printf '  fail message, which is where a measured number is diagnostic.\n'
+  } >> "$TMPD/unstable-report"
 }
 
 # record_ident <dest> <ident>: append <ident> to <dest>, dropping one check 1
@@ -460,6 +519,9 @@ if [ -s "$TMPD/execfiles" ]; then
     while IFS= read -r ident; do
       idents+=("$ident")
     done < <(idents_for_file "$f")
+    # The same set as a file, needed BEFORE the runs by runtime_name_resolves and
+    # again after them by the accounting loop below.
+    idents_for_file "$f" | sort -u > "$TMPD/requested"
     # Run against the branch worktree's already-provisioned environment, linked
     # into the scratch trees so the live worktree is never mutated.
     prepare_scratch_env "$spec" "$TMPD/base-tree" "$WT"
@@ -494,11 +556,21 @@ if [ -s "$TMPD/execfiles" ]; then
     delta_seen=0
     while IFS= read -r name; do
       [ -n "$name" ] || continue
-      delta_seen=1
       # A file check 1 already reported as missing this name would double-report.
       if grep -qxF "$f::$name" "$TMPD/missing"; then
+        delta_seen=1
         continue
       fi
+      # A name check 1's static extraction cannot resolve is not comparable: the
+      # two runs may simply have named one assertion two ways (header contract).
+      # It deliberately does NOT count as an attributed delta, so a non-zero
+      # branch run alongside only unstable names still reports its unnamed
+      # failure below rather than being explained away by a naming defect.
+      if ! runtime_name_resolves "$spec" "$f" "$name"; then
+        mark_unstable "$f" "$name"
+        continue
+      fi
+      delta_seen=1
       printf '%s::%s\n' "$f" "$name" >> "$TMPD/failing"
     done < "$TMPD/ok-delta"
     if [ "$branch_rc" -ne 0 ] && [ "$delta_seen" -eq 0 ]; then
@@ -514,7 +586,6 @@ if [ -s "$TMPD/execfiles" ]; then
     # classifies each requested identifier in turn rather than using comm.
     # Passing wins outright: one passing case of a parametrized name means the
     # baseline verified that name, whatever its other cases did.
-    idents_for_file "$f" | sort -u > "$TMPD/requested"
     skipped_idents "$spec" "$TMPD/run-base" "$TMPD/base-tree/$f" > "$TMPD/skip-base"
     while IFS= read -r ident; do
       [ -n "$ident" ] || continue
@@ -535,6 +606,18 @@ sort -u "$TMPD/failing" > "$TMPD/failing.sorted"
 sort -u "$TMPD/unexec" > "$TMPD/unexec.sorted"
 sort -u "$TMPD/skipped" > "$TMPD/skipped.sorted"
 sort -u "$TMPD/unaccounted" > "$TMPD/unaccounted.sorted"
+sort -u "$TMPD/unstable" > "$TMPD/unstable.sorted"
+
+if [ -s "$TMPD/unstable-report" ]; then
+  {
+    echo "WARNING: check 2 could not COMPARE these assertions, because the base test"
+    echo "WARNING: file named them differently on its two runs. Each is reported as"
+    echo "WARNING: 'unstable:' on stdout and blocks like any other check-2 finding: an"
+    echo "WARNING: assertion whose name moves has never been verifiable by this gate,"
+    echo "WARNING: and a green run over a name that changes every time proves nothing."
+    cat "$TMPD/unstable-report"
+  } >&2
+fi
 
 if [ -s "$TMPD/unexec-report" ]; then
   {
@@ -561,18 +644,23 @@ done < "$TMPD/skipped.sorted"
 while IFS= read -r line; do
   printf 'unaccounted: %s\n' "$line"
 done < "$TMPD/unaccounted.sorted"
+while IFS= read -r line; do
+  printf 'unstable: %s\n' "$line"
+done < "$TMPD/unstable.sorted"
 
 MISSING_COUNT=$(grep -c . "$TMPD/missing" || true)
 FAILING_COUNT=$(grep -c . "$TMPD/failing.sorted" || true)
 UNEXEC_COUNT=$(grep -c . "$TMPD/unexec.sorted" || true)
 SKIPPED_COUNT=$(grep -c . "$TMPD/skipped.sorted" || true)
 UNACCOUNTED_COUNT=$(grep -c . "$TMPD/unaccounted.sorted" || true)
-printf 'summary: missing=%s failing=%s unexecuted=%s skipped=%s unaccounted=%s\n' \
+UNSTABLE_COUNT=$(grep -c . "$TMPD/unstable.sorted" || true)
+printf 'summary: missing=%s failing=%s unexecuted=%s skipped=%s unaccounted=%s unstable=%s\n' \
   "$MISSING_COUNT" "$FAILING_COUNT" "$UNEXEC_COUNT" \
-  "$SKIPPED_COUNT" "$UNACCOUNTED_COUNT"
+  "$SKIPPED_COUNT" "$UNACCOUNTED_COUNT" "$UNSTABLE_COUNT"
 
-if [ "$MISSING_COUNT" -eq 0 ] && [ "$FAILING_COUNT" -eq 0 ] && [ "$UNEXEC_COUNT" -eq 0 ]; then
+if [ "$MISSING_COUNT" -eq 0 ] && [ "$FAILING_COUNT" -eq 0 ] && [ "$UNEXEC_COUNT" -eq 0 ] \
+  && [ "$UNSTABLE_COUNT" -eq 0 ]; then
   exit 0
 fi
-echo "error: $MISSING_COUNT test identifier(s) present on $BASE are missing from $COMPARE_LABEL, $FAILING_COUNT of $BASE's assertion(s) do not pass against $COMPARE_LABEL, and $UNEXEC_COUNT could not be executed at all" >&2
+echo "error: $MISSING_COUNT test identifier(s) present on $BASE are missing from $COMPARE_LABEL, $FAILING_COUNT of $BASE's assertion(s) do not pass against $COMPARE_LABEL, $UNEXEC_COUNT could not be executed at all, and $UNSTABLE_COUNT could not be compared because the base test file named them differently on its two runs" >&2
 exit 1
