@@ -66,14 +66,24 @@ want="$want]"
 pass "CI runs every shard 1..$DENOM of the denominator it invokes"
 
 # --- fan-in gate: a skipped/cancelled shard fails, never passes -------------
+# The gate now fans in the CI testing waiver too, because a verified waiver
+# skips the shards deliberately. That gives it a second way to be wrong: a
+# waiver check that crashed also leaves the shards unrun, and the shard result
+# alone cannot tell the two apart. So the gate must depend on both jobs and
+# must fail on a waiver job that did not itself succeed.
 
-assert_grep 'needs: tests' "$CI" "the tests-complete gate must depend on the shard matrix"
+assert_grep 'needs: [tests, ci-waiver]' "$CI" \
+  "the tests-complete gate must depend on the shard matrix and on the waiver verdict"
 assert_grep 'if: always()' "$CI" "the gate must report a verdict even when shards fail or are cancelled"
 assert_grep 'needs.tests.result' "$CI" "the gate must test the aggregate shard result"
-# shellcheck disable=SC2016 # $result must stay literal: it is the gate's own shell text.
-assert_grep 'if [ "$result" != "success" ]; then' "$CI" \
+assert_grep 'needs.ci-waiver.result' "$CI" "the gate must test whether the waiver check itself completed"
+# shellcheck disable=SC2016 # the expansions must stay literal: this is the gate's own shell text.
+assert_grep 'if [ "$TESTS_RESULT" != "success" ]; then' "$CI" \
   "the gate must fail on anything but every-shard-success (including skipped and cancelled)"
-pass "tests-complete gate turns non-success shard outcomes into failures"
+# shellcheck disable=SC2016
+assert_grep 'if [ "$WAIVER_RESULT" != "success" ]; then' "$CI" \
+  "the gate must fail when the waiver check did not complete, never read unrun shards as an authorized skip"
+pass "tests-complete gate turns non-success shard and waiver outcomes into failures"
 
 # --- partition parity on the real suite -------------------------------------
 # The union of shards 1..N must be byte-identical to the whole set, the shard

@@ -176,8 +176,42 @@ test_tmux_reader_matches_on_the_live_rows() {
   pass "fm_tmux_composer_state: the live-captured rows classify empty/empty/pending"
 }
 
+# Unicode blank padding at the reader's own structural trims (task
+# fm-nbsp-adapters): fm_tmux_composer_state's row-shape and border-strip trims
+# run BEFORE the shared classifier, and a bare `[[:space:]]` trim leaves U+00A0
+# and the other FM_COMPOSER_BLANKS in place, so a blank-padded BORDERED row
+# failed the border match and misshaped before the classifier ever saw it (the
+# bare `❯` rows above were already saved by the classifier's own
+# normalization). These rows are synthetic edge-paddings of the bordered-box
+# shape, pinning that every covered blank classifies identically to its
+# ASCII-space twin.
+test_tmux_reader_blank_padded_border_rows_match_ascii() {
+  local dir fb out ascii_out ch i=0 nbsp
+  nbsp=$(printf '\302\240')
+  dir="$TMP_ROOT/border-blank"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir")
+  : > "$dir/tmux.log"
+  ascii_out=$(PATH="$fb:$PATH" FM_TMUX_LOG="$dir/tmux.log" FM_FAKE_ROW=" │ ❯  │ "$'\n' \
+        fm_tmux_composer_state "sess:win")
+  [ "$ascii_out" = empty ] || fail "the ASCII-space-padded empty bordered row must read empty, got '$ascii_out'"
+  for ch in "${FM_COMPOSER_BLANKS[@]}"; do
+    i=$((i + 1))
+    out=$(PATH="$fb:$PATH" FM_TMUX_LOG="$dir/tmux.log" FM_FAKE_ROW="${ch}│ ❯ ${ch}│${ch}"$'\n' \
+          fm_tmux_composer_state "sess:win")
+    [ "$out" = "$ascii_out" ] \
+      || fail "blank #$i-padded bordered row must classify like its ASCII-space twin ('$ascii_out'), got '$out'"
+  done
+  # The other direction: real text on a blank-padded bordered row stays pending.
+  out=$(PATH="$fb:$PATH" FM_TMUX_LOG="$dir/tmux.log" \
+        FM_FAKE_ROW="${nbsp}│ ❯ real text ${nbsp}│${nbsp}"$'\n' \
+        fm_tmux_composer_state "sess:win")
+  [ "$out" = pending ] || fail "real text on a U+00A0-padded bordered row must stay pending, got '$out'"
+  pass "fm_tmux_composer_state: Unicode-blank-padded bordered rows classify identically to ASCII-space-padded rows"
+}
+
 test_submitted_message_exits_zero
 test_submitted_message_with_ghost_exits_zero
 test_swallowed_enter_still_exits_nonzero
 test_swallow_types_once_and_retries_enter_only
 test_tmux_reader_matches_on_the_live_rows
+test_tmux_reader_blank_padded_border_rows_match_ascii
