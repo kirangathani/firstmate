@@ -48,12 +48,16 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state and preserves the existing Stop registration.
 
-## OpenCode arm coalescing: measured behavior, 2026-08-03
+## OpenCode arm coalescing: measured behavior, 2026-08-03 and 2026-08-04
 
 `.opencode/plugins/fm-primary-watch-arm.js` guards launches with a module-level `launchInFlight` promise, and the `session.idle` handler calls `ensureArm` fire-and-forget, so a second request can arrive while the first is still running its asynchronous precondition checks.
 `beginArm` refuses with `read-only` when the session does not own the fleet lock.
 Before this fix, a second request made after the session acquired the lock was served that first request's `read-only` refusal, so it never armed and nothing on that path retried.
 The guard coalesced two requests whose lock-ownership preconditions differed.
+
+`ensureArm` now re-launches once when a coalesced answer is `read-only` that the current lock state contradicts, bounded at two attempts and without recursion.
+It reads the lock only on that refusal, so ordinary coalescing pays nothing extra.
+The single-flight guard itself stays, because it is what prevents duplicate launches.
 
 This is what made `tests/fm-pi-watch-extension.test.sh`'s OpenCode session-lock case fail, and the widely repeated explanation for that failure was wrong.
 It was recorded as a load-sensitive flake that missed the test's fixed 5-second arming poll under load.
