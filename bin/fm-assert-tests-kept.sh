@@ -94,7 +94,7 @@
 # make a green-but-empty run VISIBLE where it previously read as verified, not to
 # add a merge-refusing condition.
 #
-# Three limits are carried forward here rather than hidden:
+# Four limits are carried forward here rather than hidden:
 #   (i)   a skipif that is true only because of the SCRATCH environment is
 #         indistinguishable from a deliberate skip in the runner's report, so it
 #         lands in `skipped:`; this change does not close that.
@@ -111,6 +111,14 @@
 #         than folded into the pass, and why the two cases firstmate can see -
 #         a CI-waived task and a project with no PR CI - do not get the flag at
 #         all (bin/fm-pr-merge.sh's contract).
+#   (iv)  that premise names a COMMIT and not merely a suite, so it is exact
+#         only while the compare side IS the head those checks ran on. It is,
+#         whenever pr_head= resolves - the ordinary path. When it does not, the
+#         compare side falls back to the local branch (see Usage below), which
+#         can carry commits the PR's checks never saw, and an identical file is
+#         then skipped on a suite that ran against slightly older code. The
+#         fallback already warns on its own account; this is the narrower claim
+#         the flag makes underneath that warning.
 #
 # The per-language detect/run/parse mechanics of check 2, the scratch-tree
 # lifecycle, and the reason a scratch tree can fail to be authoritative are all
