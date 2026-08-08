@@ -3,7 +3,7 @@ name: firstmate-coding-guidelines
 description: >-
   Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
   Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
-  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and backend-verification evidence).
+  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, jq payloads off argv, colocated tests sized from the limit they guard, and backend-verification evidence).
 user-invocable: false
 metadata:
   internal: true
@@ -82,7 +82,10 @@ Keep instructions as the authority and discovery layer, but make repeated execut
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
+- Never hand jq a payload that grows with the fleet through `--argjson`/`--arg`; use `fm_jq_object` from `bin/fm-jq-lib.sh`, whose header owns the contract.
+- An argv payload dies at a size threshold rather than degrading, so it fails permanently and silently once crossed: `bin/fm-fleet-snapshot.sh --json` emitted zero bytes and exited 126 at 19 tasks and a 68737-byte backlog, taking the fleet view and bearings down with it (evidence 2026-08-08, `bin/fm-jq-lib.sh`).
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
+- Size a boundary test from the limit it guards, read at runtime, not from a number that happened to work: a test at today's scale passes on exactly the code that today's scale broke.
 - Commit a new `tests/*.test.sh` with its executable bit set (mode 100755), like every sibling: `bin/fm-test.sh`, the single owner of the behavior-suite definition that CI and the no-mistakes gate both run, executes each file directly, so a 100644 file exits 126 and fails the run.
 - A fixture standing in for real terminal or tool output must be the exact bytes captured from the real thing, never a hand-written approximation of them, and the test should say where the capture came from.
 - A hand-written approximation tests a shape the real tool may not emit, so the suite goes green while the real path fails: every composer fixture had been written with an ASCII space where claude actually emits a U+00A0, which hid a 100%-reproducible `bin/fm-send.sh` failure behind a green suite (evidence 2026-07-30, `docs/herdr-backend.md`).
