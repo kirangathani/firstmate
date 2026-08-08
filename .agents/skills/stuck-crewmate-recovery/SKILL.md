@@ -23,7 +23,8 @@ Load `secondmate-provisioning` instead for `kind=secondmate` recovery.
 
 Treat the digest's endpoint result as a presence signal, not proof that the task's work or validation run is gone.
 Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding to relaunch.
-A branch-matched no-mistakes run remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.
+A no-mistakes run matched to the task's own `fm/<id>` branch remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.
+A `worktree not on fm/<id>` observation on that line means the recorded worktree may have been re-leased to another task, so treat it as unreconciled ownership rather than as this task's work, and expect `unknown` instead of `working` wherever the reader could not prove a live agent behind the signal.
 
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.
 Use `treehouse status` for treehouse-backed tmux, herdr, zellij, or cmux tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.

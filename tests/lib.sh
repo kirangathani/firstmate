@@ -6,8 +6,9 @@
 #   . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #
 # It provides the boilerplate every test file used to re-roll: ok/not-ok
-# reporters, a self-cleaning temp root, fakebin/PATH-shim helpers, deterministic
-# git identity and fixture builders, state/<id>.meta writers, and the common
+# reporters, a self-cleaning temp root, fakebin/PATH-shim helpers, resolvers for
+# the shared per-repo cache paths bin/fm-test.sh owns, deterministic git identity
+# and fixture builders, state/<id>.meta writers, and the common
 # string/exit-code/file assertions. It deliberately does NOT bundle the
 # behavior-specific fake tmux/treehouse/no-mistakes mocks: those encode terminal
 # and lifecycle assumptions that differ per suite and belong with the tests that
@@ -98,6 +99,70 @@ exit 0
 SH
     chmod +x "$fakebin/$tool"
   done
+}
+
+# fm_no_mistakes_stub_bin: echo a dir holding a healthy `no-mistakes` stub.
+# Cases that run bin/fm-bootstrap.sh on the ambient PATH (rather than a pinned
+# BASE_PATH) must prepend it, so bootstrap's version check and daemon probe
+# never shell out to this machine's real, shared no-mistakes daemon.
+#
+# Callers invoke this from a command substitution (`PATH="$(...):$PATH"`), so
+# it must never route through fm_test_tmproot: that registers an EXIT trap,
+# which fires when the substitution's own subshell exits and deletes the dir
+# before the caller can use it. The path is derived from the caller's TMP_ROOT
+# and the writes are idempotent, so repeat calls are cheap and return the same
+# directory without needing memo state (which a subshell could not keep anyway).
+fm_no_mistakes_stub_bin() {
+  local stub="${TMP_ROOT:?fm_no_mistakes_stub_bin needs TMP_ROOT}/fm-nm-stub-bin"
+  mkdir -p "$stub"
+  cat > "$stub/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'no-mistakes version v1.31.2 (fake) 2026-06-27T00:02:18Z'
+  exit 0
+fi
+if [ "${1:-}" = daemon ] && [ "${2:-}" = status ]; then
+  printf '  \xe2\x97\x8f daemon running (pid 1)\n'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$stub/no-mistakes"
+  printf '%s\n' "$stub"
+}
+
+# --- the shared, per-repo cache location ------------------------------------
+#
+# bin/fm-test.sh keeps its sidecars under the git COMMON dir so every linked
+# worktree shares one copy. Tests that assert something about those sidecars
+# have to resolve the same path, and a private copy of the resolution rule that
+# drifts from the runner's would silently point at a path that never exists -
+# which turns those assertions vacuous instead of red. So the rule lives here
+# once, spelled exactly as bin/fm-test.sh spells it.
+
+# fm_test_git_common_dir <fallback>: echo the repo's git common dir, or
+# <fallback> when rev-parse yields nothing. rev-parse is read with the cwd at
+# ROOT and a relative answer (a primary checkout answers plain ".git") is
+# resolved against ROOT, because the runner resolves it that way too.
+fm_test_git_common_dir() {
+  local fallback=$1 dir
+  dir=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)
+  case "$dir" in
+    '') dir=$fallback ;;
+    /*) ;;
+    *) dir="$ROOT/$dir" ;;
+  esac
+  printf '%s\n' "$dir"
+}
+
+# fm_test_timings_file: echo the path of the shared measured-durations sidecar
+# bin/fm-test.sh reads and writes, honouring FM_TEST_CACHE_DIR exactly as the
+# runner does. The path is returned whether or not it exists; a sidecar is
+# absent until some run records into it.
+fm_test_timings_file() {
+  local cache=${FM_TEST_CACHE_DIR:-}
+  [ -n "$cache" ] || cache="$(fm_test_git_common_dir "$ROOT/.fm-test")/fm-test-cache"
+  printf '%s/timings\n' "$cache"
 }
 
 # --- deterministic git identity and fixtures --------------------------------

@@ -390,18 +390,30 @@ function armAttempt(status, armChild, includeArmChild) {
   return includeArmChild ? { status, armChild } : status;
 }
 
+// Coalescing onto an in-flight launch is only sound when that launch answered the
+// same lock-ownership precondition this call has. `beginArm` refuses with
+// "read-only" when the session did not own the fleet lock, and that refusal is a
+// snapshot of the lock at the moment it was taken, not a standing answer. Serving
+// it to a call made AFTER the session acquired the lock silently denies arming for
+// that event, and nothing on this path retries, so supervision stays off while every
+// surface reports fine. A refusal that the current lock state contradicts is
+// therefore re-launched once against that current state instead of being reused.
 async function ensureArm(paths, sessionID, client, predecessorArmPid = "", includeArmChild = false) {
   let launchResult = null;
-  if (!launchInFlight) {
-    const launch = beginArm(paths, sessionID, client, predecessorArmPid);
-    launchInFlight = launch;
-    try {
-      launchResult = await launch;
-    } finally {
-      if (launchInFlight === launch) launchInFlight = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (!launchInFlight) {
+      const launch = beginArm(paths, sessionID, client, predecessorArmPid);
+      launchInFlight = launch;
+      try {
+        launchResult = await launch;
+      } finally {
+        if (launchInFlight === launch) launchInFlight = null;
+      }
+      break;
     }
-  } else {
     launchResult = await launchInFlight;
+    if (launchResult.status !== "read-only") break;
+    if (!(await sessionOwnsLock(paths))) break;
   }
   const armChild = launchResult.armChild;
   if (!armChild) {

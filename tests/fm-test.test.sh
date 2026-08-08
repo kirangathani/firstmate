@@ -66,14 +66,24 @@ want="$want]"
 pass "CI runs every shard 1..$DENOM of the denominator it invokes"
 
 # --- fan-in gate: a skipped/cancelled shard fails, never passes -------------
+# The gate now fans in the CI testing waiver too, because a verified waiver
+# skips the shards deliberately. That gives it a second way to be wrong: a
+# waiver check that crashed also leaves the shards unrun, and the shard result
+# alone cannot tell the two apart. So the gate must depend on both jobs and
+# must fail on a waiver job that did not itself succeed.
 
-assert_grep 'needs: tests' "$CI" "the tests-complete gate must depend on the shard matrix"
+assert_grep 'needs: [tests, ci-waiver]' "$CI" \
+  "the tests-complete gate must depend on the shard matrix and on the waiver verdict"
 assert_grep 'if: always()' "$CI" "the gate must report a verdict even when shards fail or are cancelled"
 assert_grep 'needs.tests.result' "$CI" "the gate must test the aggregate shard result"
-# shellcheck disable=SC2016 # $result must stay literal: it is the gate's own shell text.
-assert_grep 'if [ "$result" != "success" ]; then' "$CI" \
+assert_grep 'needs.ci-waiver.result' "$CI" "the gate must test whether the waiver check itself completed"
+# shellcheck disable=SC2016 # the expansions must stay literal: this is the gate's own shell text.
+assert_grep 'if [ "$TESTS_RESULT" != "success" ]; then' "$CI" \
   "the gate must fail on anything but every-shard-success (including skipped and cancelled)"
-pass "tests-complete gate turns non-success shard outcomes into failures"
+# shellcheck disable=SC2016
+assert_grep 'if [ "$WAIVER_RESULT" != "success" ]; then' "$CI" \
+  "the gate must fail when the waiver check did not complete, never read unrun shards as an authorized skip"
+pass "tests-complete gate turns non-success shard and waiver outcomes into failures"
 
 # --- partition parity on the real suite -------------------------------------
 # The union of shards 1..N must be byte-identical to the whole set, the shard
@@ -114,6 +124,20 @@ pass "shard listing is deterministic"
 # --- execution rules, on a fixture suite ------------------------------------
 # FM_TEST_SUITE_DIR points the runner at a throwaway suite so the failure
 # paths run in milliseconds instead of re-running the real 86-file suite.
+#
+# Every one of these invocations is the REAL bin/fm-test.sh, so its ROOT is the
+# real repo and its timings sidecar is the real, SHARED one under the git common
+# dir. Without FM_TEST_NO_CACHE=1 each run writes the fixture files' absolute
+# /tmp paths into that sidecar, where nothing ever removes them: the packer's
+# fallback cost for an unmeasured file is sum-of-known/count-of-known, so every
+# near-zero junk entry drags it down permanently. The guard belongs on every
+# fixture invocation; the assertions at the bottom of this section hold it there.
+
+# The real, shared sidecar the fixture runs below must be proven not to have
+# polluted. Its path is resolved by the one helper in tests/lib.sh that spells
+# the runner's own rule, so a change to that rule cannot leave this test
+# pointing at a path that never exists and passing vacuously.
+REAL_TIMINGS=$(fm_test_timings_file)
 
 TMPROOT=$(fm_test_tmproot fm-test-fixture)
 FX="$TMPROOT/suite"
@@ -128,7 +152,7 @@ chmod +x "$FX"/*.test.sh
 
 # A deliberately failing test must fail its shard, name the shard, the file,
 # and the exit status, and must not stop the shard's remaining files.
-out=$(FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 2/2 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 2/2 2>&1)
 rc=$?
 [ "$rc" -eq 1 ] || fail "a failing test file must fail its shard (got rc=$rc)"
 assert_contains "$out" "FAILED in shard 2/2" "the failure must name the shard it came from"
@@ -138,14 +162,14 @@ assert_contains "$out" "2 run, 1 passed, 1 failed, 0 skipped" "the accounting li
 pass "a deliberately failing test fails its shard with full attribution"
 
 # The sibling shard without the failing file passes with explicit accounting.
-out=$(FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 1/2 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 1/2 2>&1)
 rc=$?
 [ "$rc" -eq 0 ] || fail "the all-green shard must pass (got rc=$rc): $out"
 assert_contains "$out" "2 run, 2 passed, 0 failed, 0 skipped" "the green shard must still print its accounting"
 pass "an all-green shard passes with explicit accounting"
 
 # The whole-set mode reports the same failure, so the pre-push gate catches it.
-out=$(FM_TEST_SUITE_DIR="$FX" "$RUNNER" 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" 2>&1)
 rc=$?
 [ "$rc" -eq 1 ] || fail "the whole-set run must fail on a failing file (got rc=$rc)"
 assert_contains "$out" "FAILED in whole set" "the whole-set run must report the failure"
@@ -154,7 +178,7 @@ pass "the whole-set mode fails on the same failing file"
 # A file without its executable bit must fail loudly (exit 126), preserving
 # the mode-100755 invariant CI has always enforced by direct execution.
 chmod -x "$FX/cc.test.sh"
-out=$(FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 1/2 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 1/2 2>&1)
 rc=$?
 chmod +x "$FX/cc.test.sh"
 [ "$rc" -eq 1 ] || fail "a non-executable test file must fail its shard (got rc=$rc)"
@@ -164,7 +188,7 @@ pass "a test file missing its executable bit fails, never silently passes"
 # An empty suite must refuse rather than report green.
 EMPTY="$TMPROOT/empty"
 mkdir -p "$EMPTY"
-out=$(FM_TEST_SUITE_DIR="$EMPTY" "$RUNNER" 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$EMPTY" "$RUNNER" 2>&1)
 rc=$?
 [ "$rc" -eq 2 ] || fail "an empty suite must refuse with rc=2 (got rc=$rc)"
 assert_contains "$out" "refusing to report an empty suite as green" "the empty-suite refusal must be loud"
@@ -172,11 +196,56 @@ pass "an empty suite refuses instead of passing vacuously"
 
 # Out-of-range and malformed shard specs must be usage errors, not runs.
 for spec in 0/4 5/4 x/4 4 4/ /4 1/2/3; do
-  FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard "$spec" >/dev/null 2>&1
+  FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard "$spec" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "--shard $spec must be rejected with rc=2 (got rc=$rc)"
 done
 pass "malformed and out-of-range shard specs are rejected"
+
+# --- the fixture runs must not touch the real, shared timings sidecar -------
+# Behavioural half: every fixture invocation above has now run against the real
+# runner, so an unguarded one would have recorded this run's throwaway files -
+# and their paths are always absolute, under this run's own mktemp root. That is
+# exactly the claim asserted, rather than "the file did not change": the sidecar
+# is shared by every worktree of the repo and another worktree's legitimate run
+# may land in it at any moment. Such a run only ever writes repo-relative paths,
+# so it cannot forge this failure, and cannot mask it either.
+# An absent sidecar satisfies the claim trivially - it must not be created here.
+if [ -f "$REAL_TIMINGS" ]; then
+  LEAKED=$(awk -F'\t' -v root="$TMPROOT/" 'index($1, root) == 1 { print $1 }' "$REAL_TIMINGS")
+  [ -z "$LEAKED" ] \
+    || fail "fixture-suite paths leaked into the shared timings sidecar ($REAL_TIMINGS); every real-runner invocation pointed at a throwaway suite must set FM_TEST_NO_CACHE=1. Leaked: $LEAKED"
+fi
+pass "fixture-suite runs record no throwaway paths in the shared timings sidecar"
+
+# Static half: the behavioural check above only covers the invocations that
+# already ran. This one covers every fixture invocation in this file, including
+# any added later, so an unguarded new one fails here instead of quietly
+# polluting the sidecar for the rest of the repo's life.
+#
+# Line-based on purpose: an invocation whose env assignment and runner sit on
+# different source lines is NOT covered, because matching across lines needs a
+# parse fragile enough to be its own defect. Keep such invocations on one line.
+# The runner is matched by PATH, not by the "$RUNNER" spelling alone, so a call
+# site written out in full is caught too; that also matches the fixture-copied
+# runners, which is harmless, since the guard they would then have to carry is
+# the one they already carry. The two patterns are applied on SEPARATE source
+# lines, which is what keeps this guard from matching its own text.
+CALLS_FILE="$TMPROOT/fixture-call-sites"
+# shellcheck disable=SC2016 # literal source text being matched, not expansions.
+grep -nE '"\$RUNNER"|bin/fm-test\.sh' "${BASH_SOURCE[0]}" \
+  | grep 'FM_TEST_SUITE_DIR=' >"$CALLS_FILE" || true
+# A pattern that quietly stops matching would make the check above pass while
+# proving nothing, so the known guarded call sites are counted, not assumed.
+# Deleting a fixture invocation is meant to require lowering this number.
+KNOWN_GUARDED=6
+GUARDED=$(grep -c 'FM_TEST_NO_CACHE=1' "$CALLS_FILE" || true)
+[ "$GUARDED" -ge "$KNOWN_GUARDED" ] \
+  || fail "the fixture-invocation guard matched only $GUARDED of the $KNOWN_GUARDED known guarded call sites; its pattern has stopped matching and it is no longer checking anything"
+UNGUARDED=$(grep -v 'FM_TEST_NO_CACHE=1' "$CALLS_FILE" || true)
+[ -z "$UNGUARDED" ] \
+  || fail "these real-runner fixture invocations lack FM_TEST_NO_CACHE=1 and would write throwaway paths into the shared sidecar: $UNGUARDED"
+pass "every real-runner fixture invocation in this file sets FM_TEST_NO_CACHE=1"
 
 # ===========================================================================
 # Local mode: closure selection and selected-vs-whole-set parity

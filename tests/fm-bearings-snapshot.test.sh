@@ -925,6 +925,59 @@ test_include_prs_is_the_only_fetch_path() {
   pass "--include-prs is the only path that fetches, and it enriches correctly"
 }
 
+# A recorded PR link and a live worktree origin can name the SAME repository in
+# two spellings. GitHub treats owner and repo case-insensitively, so the two must
+# collapse to one repository - otherwise it is queried twice, counted twice, and
+# eats two slots of the repository cap - while the label still reads as the
+# source that was seen first spelled it.
+# Both candidate sources are covered, and each is covered against ITSELF as well
+# as against the other: the two loops share one accumulate-and-dedupe helper, so
+# a fix applied to one and missed in the other is exactly what this case exists
+# to catch.
+test_case_differing_repository_identities_collapse_to_one() {
+  local home fakebin wt calls
+  home=$(make_home repo-identity-fold); write_fixture "$home"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  wt="$home/projects/fold-wt"
+  mkdir -p "$wt"
+  git init -q "$wt"
+  git -C "$wt" remote add origin git@github.com:acme/repo.git
+  fm_write_meta "$home/state/fold-task.meta" \
+    "window=firstmate:fm-fold-task" \
+    "worktree=$wt" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=https://github.com/Acme/Repo/pull/1"
+  printf 'working: folding\n' > "$home/state/fold-task.status"
+
+  # A second task naming the same repository in a third spelling, on a second
+  # worktree whose origin uses a fourth: the PR-link loop and the origin loop
+  # each now see a duplicate of their OWN making, not just of the other's.
+  wt="$home/projects/zz-fold-wt"
+  mkdir -p "$wt"
+  git init -q "$wt"
+  git -C "$wt" remote add origin https://github.com/AcMe/rEpO.git
+  fm_write_meta "$home/state/zz-fold-task.meta" \
+    "window=firstmate:fm-zz-fold-task" \
+    "worktree=$wt" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=https://github.com/ACME/REPO/pull/2"
+  printf 'working: folding again\n' > "$home/state/zz-fold-task.status"
+
+  run "$home" "$fakebin" --include-prs --json >/dev/null
+  calls=$(grep -ci '^gh pr list --repo acme/repo ' "$home/net.log" || true)
+  [ "$calls" = 1 ] \
+    || fail "the folded repository must be queried exactly once, got $calls: $(cat "$home/net.log")"
+  grep -q '^gh pr list --repo Acme/Repo ' "$home/net.log" \
+    || fail "the one query must use the first-seen spelling: $(cat "$home/net.log")"
+  pass "repository identities differing only in case collapse to one, keeping the first-seen spelling"
+}
+
 test_partial_github_failure_degrades() {
   local home fakebin json rc
   home=$(make_home partial); write_fixture "$home"
@@ -1427,6 +1480,7 @@ test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
 test_superseded_queued_item_dropped_by_default
 test_include_prs_is_the_only_fetch_path
+test_case_differing_repository_identities_collapse_to_one
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags

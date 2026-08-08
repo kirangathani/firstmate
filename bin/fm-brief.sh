@@ -7,6 +7,7 @@
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+#                    [--local-skip|--ci-skip|--all-testing-skip]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -21,6 +22,17 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --local-skip, --ci-skip, and --all-testing-skip mirror the same flags on
+#   fm-brief.sh's sibling bin/fm-spawn.sh, which owns their meaning, their
+#   enforcement, and the accepted flag/delivery-mode matrix; pass a ship task the
+#   SAME flag here and there. This script writes only the worker-facing half: a
+#   --local-skip brief replaces the pipeline definition of done with push-and-PR
+#   (the shim on the worker's PATH is what actually stops the pipeline), and a
+#   --ci-skip brief adds the waiver handshake the worker must follow to obtain a
+#   commit-bound signature from firstmate. Passing the flag to only one of the two
+#   scripts is safe in both directions and never grants a skip: a brief without
+#   the spawn flag asks for a signature bin/fm-ci-waiver.sh will refuse, and a
+#   spawn without the brief flag leaves the worker running the ordinary path.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
@@ -74,6 +86,8 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-testing-skip-lib.sh
+. "$SCRIPT_DIR/fm-testing-skip-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -82,6 +96,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+fm_testing_skip_reset
 POS=()
 for a in "$@"; do
   case "$a" in
@@ -89,10 +104,18 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --local-skip|--ci-skip|--all-testing-skip) fm_testing_skip_note "$a" ;;
     *) POS+=("$a") ;;
   esac
 done
 ID=${POS[0]}
+
+# Same argument-only refusals as bin/fm-spawn.sh, so a brief can never be
+# scaffolded for a combination that spawn will then refuse to launch.
+fm_testing_skip_check_args "$KIND" brief || exit 1
+LOCAL_SKIP=$FM_TESTING_SKIP_LOCAL
+CI_SKIP=$FM_TESTING_SKIP_CI
+SKIP_FLAGS=$FM_TESTING_SKIP_FLAGS
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -285,6 +308,49 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# Same delivery-mode refusals as bin/fm-spawn.sh, whose header owns the matrix
+# and the reasoning behind each row.
+fm_testing_skip_check_mode "$MODE" || exit 1
+
+# The waiver handshake, appended to whichever definition of done applies. Its
+# order is load-bearing: the signature covers the head commit, so it cannot exist
+# before the final commit, and CI must see it on the PR's FIRST run because
+# editing a PR body afterwards does not re-run the workflow. Pushing a feature
+# branch triggers no workflow, so pushing before the PR costs nothing.
+# The definition-of-done sentence and the waiver handshake below must not each
+# give their own PR order. The handshake is the only authority when it applies:
+# the signature covers the head commit and CI must see it on the PR's FIRST run,
+# so a worker that opened the PR on the DOD sentence's word would get a PR the
+# waiver can never cover. A brief that states two orders is exactly the "the
+# agent decides" failure the mechanical skip exists to remove, so the DOD
+# sentence stops at push and defers to the handshake whenever one follows.
+if [ "$CI_SKIP" = on ]; then
+  PR_ORDER='push your branch, then follow the CI waiver handshake below for when and how to open the PR.'
+else
+  # shellcheck disable=SC2016 # {url} and the backticks are literal brief text, not expansions.
+  PR_ORDER='push your branch and open a PR with `gh-axi`, then append `done: PR {url}` to the status file and stop.'
+fi
+
+if [ "$CI_SKIP" = on ]; then
+CI_SKIP_SECTION=$(cat <<EOF
+
+## CI waiver handshake - follow this order exactly
+CI's expensive jobs are waived for this task, but only by a signature you cannot produce and must not try to produce.
+It is computed from a secret only the captain's machine holds, and it covers your exact head commit, so it can only be issued after your final commit.
+1. Commit everything, then push your branch: \`git push -u origin fm/$ID\`. Pushing a branch runs no CI, so this step is free.
+2. Read your head commit: \`git rev-parse HEAD\`.
+3. Append \`blocked: ci-waiver needed for {full-40-char-sha} on {owner}/{repo}\` to the status file and stop. Firstmate replies with a single line.
+   Name the repository as well as the commit: a waiver is signed with a key derived for one repository, so firstmate needs both to issue the right line.
+4. When that line arrives, append \`resolved: ci waiver received\`, then open the PR with \`gh-axi\` and put the line VERBATIM on its own line in the PR body.
+5. If you push again afterwards, the head commit changes and the old line no longer covers it. Repeat steps 2-4 for a fresh one before that push can be waived.
+Never invent, guess, edit, reformat, or reuse a line for another commit.
+A wrong or stale line is not a failure - CI simply runs in full - so there is nothing to be gained by improvising one.
+EOF
+)
+else
+CI_SKIP_SECTION=""
+fi
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -293,8 +359,9 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, $PR_ORDER
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+$CI_SKIP_SECTION
 EOF
 )
     ;;
@@ -312,6 +379,23 @@ EOF
 )
     ;;
   *)  # no-mistakes (default)
+    if [ "$LOCAL_SKIP" = on ]; then
+    # The pipeline is off, so the doctor/init setup step would only send the
+    # worker into the shim it is not meant to fight.
+    SETUP2=""
+    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    DOD=$(cat <<EOF
+# Definition of done
+This task was dispatched with **local testing skipped**: the captain switched the local validation pipeline off for it.
+That skip is enforced, not requested - the \`no-mistakes\` on your PATH is a shim that explains the skip and exits without running anything.
+Nothing is broken. Do not look for another copy of it, do not install one, do not change your PATH, and do not touch the shared daemon.
+The task is complete only when committed on your branch.
+When it is implemented and committed, $PR_ORDER
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+$CI_SKIP_SECTION
+EOF
+)
+    else
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
@@ -333,6 +417,7 @@ Two firstmate-specific rules layer on top of that guidance:
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
+    fi
     ;;
 esac
 
@@ -389,4 +474,4 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+echo "scaffolded: $BRIEF (ship, mode=$MODE${SKIP_FLAGS:+, $SKIP_FLAGS}; replace {TASK})"

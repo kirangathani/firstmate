@@ -211,6 +211,38 @@ test_composer_state_bare_shell_prompt_is_unknown() {
   pass "fm_backend_orca_composer_state: a bare dead-shell prompt reads unknown (unsafe-for-injection), never empty"
 }
 
+# Unicode blank padding (task fm-nbsp-adapters): the adapter's structural scan
+# trims run BEFORE the shared classifier, and a bare `[[:space:]]` trim leaves
+# U+00A0 and the other FM_COMPOSER_BLANKS in place, so a blank-padded row failed
+# the border-shape match and read `unknown` without the classifier ever seeing
+# it. U+00A0 is the pad claude really draws (hex-dumped from a live pane
+# 2026-07-30, see bin/fm-composer-lib.sh); the rows below take the ASCII
+# fixtures above and swap their edge padding for each covered blank, pinning
+# that the verdict is identical to the ASCII-space-padded row.
+test_composer_state_blank_padded_rows_match_ascii() {
+  local out ch i=0 nbsp
+  # shellcheck source=bin/fm-composer-lib.sh
+  . "$ROOT/bin/fm-composer-lib.sh"
+  nbsp=$(printf '\302\240')
+  orca_case composer-blank-pad
+  for ch in "${FM_COMPOSER_BLANKS[@]}"; do
+    i=$((i + 1))
+    rm -f "$RESP/.count"
+    printf '{"ok":true,"result":{"terminal":{"tail":["%s│ ❯      │%s"]}}}\n' "$ch" "$ch" > "$RESP/1.out"
+    out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
+    [ "$out" = empty ] \
+      || fail "blank #$i-padded empty bordered composer must read empty like its ASCII-space twin, got '$out'"
+  done
+  # The other direction: real text on a blank-padded row is still pending.
+  rm -f "$RESP/.count"
+  printf '{"ok":true,"result":{"terminal":{"tail":["%s│ ❯ hello captain │%s"]}}}\n' "$nbsp" "$nbsp" > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
+  [ "$out" = pending ] || fail "real text on a U+00A0-padded bordered row must stay pending, got '$out'"
+  pass "fm_backend_orca_composer_state: Unicode-blank-padded rows classify identically to ASCII-space-padded rows"
+}
+
 test_send_text_submit_popup_autocomplete_requires_second_enter() {
   local out log_text enter_count
   orca_case send-submit-popup-autocomplete
@@ -1288,6 +1320,7 @@ test_send_text_submit_keeps_current_tail_when_limited
 test_send_text_submit_retries_when_composer_stays_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_bare_shell_prompt_is_unknown
+test_composer_state_blank_padded_rows_match_ascii
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_literal_constructs_non_enter_send
 test_send_text_submit_reports_send_failed

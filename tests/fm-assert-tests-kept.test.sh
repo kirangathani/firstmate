@@ -57,6 +57,26 @@
 #       explicit skip "pending") and still exits zero
 #   (cc) a JS run never mutates the live worktree or the linked node_modules
 #       (vitest's results cache must stay disabled)
+#   (dd) base resolution: a PR stacked on a NON-default branch is compared
+#        against the branch it targets, in both directions - the assertion its
+#        own base had and the branch dropped is reported, and one only the
+#        default branch had is not; a recorded PR whose base cannot be read
+#        REFUSES (exit 2) rather than falling back to the default, naming the
+#        cause gh reported rather than swallowing it; a recorded PR that lives
+#        in a GitHub repository OTHER than origin's REFUSES before any fetch,
+#        naming both sides, since both PR-derived refs are fetched from origin,
+#        and that refusal names owner/repo only, never origin's raw address,
+#        which can carry an embedded credential; a recorded pr= that is not a
+#        readable PR link REFUSES before any gh call or fetch, naming the value
+#        it could not read, because an unidentifiable link cannot be checked
+#        against origin at all; the repository sense of that refusal is spelled
+#        "lives in", never "targets", which means the PR's BASE BRANCH
+#        everywhere else in the script;
+#        an origin that is not a GitHub URL at all is NOT a determinable
+#        mismatch and must still resolve normally, which every other case here
+#        covers implicitly because their origin is a local path; a task with
+#        no recorded PR still resolves the default branch; and explicit mode
+#        takes the caller's --base verbatim without consulting GitHub
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -65,6 +85,118 @@ fm_git_identity fmtest fmtest@example.invalid
 
 ASSERT_KEPT="$ROOT/bin/fm-assert-tests-kept.sh"
 TMP_ROOT=$(fm_test_tmproot fm-assert-tests-kept-tests)
+
+# --- the shared pinned-runtime cache ----------------------------------------
+# The vitest, jest and pytest environments below are real installs of pinned
+# third-party runners. Rebuilding them into the per-run $TMP_ROOT cost about 29s
+# of this file's ~50s on every single local run, so they now live in a stable
+# directory keyed on the pinned version instead.
+#
+# THE COVERAGE TRADE, DECIDED DELIBERATELY. Caching them means the default local
+# run stops exercising the npm-install and venv-creation path every time: after
+# this change that path runs on the first run after a version bump, whenever the
+# cache is missing or broken, and in CI, which always starts cold. The captain
+# weighed that and accepted it, because CI is exhaustive by design and is the
+# gate that has to catch a broken provisioning path. This is a chosen posture,
+# not something that drifted - if you are tempted to "restore" the per-run
+# rebuild, the trade is recorded in the backlog decision
+# fm-testperf-profile-t3-decision-js-py-env-cache. What did NOT change: the
+# cases still install and execute real vitest, jest and pytest against real
+# trees, and a host that cannot provision one still fails loudly rather than
+# quietly skipping the coverage.
+#
+# Correctness rules the builders below keep:
+#   - the pinned version is part of the directory NAME, so a version bump names
+#     a directory that does not exist yet and is rebuilt, never reused;
+#   - every environment is built under a private staging path and published by
+#     a single rename, so a concurrent local shard either sees no environment or
+#     a complete one, never a half-installed one.
+#
+# Kept beside the timings sidecar under the shared git common dir, which
+# bin/fm-test.sh already establishes as never tracked and never shipped, so a
+# stale or hostile cache cannot ride into the repo or into CI.
+ENV_CACHE="${FM_TEST_ENV_CACHE_DIR:-}"
+if [ -z "$ENV_CACHE" ]; then
+  ENV_CACHE="$(fm_test_git_common_dir "$TMP_ROOT")/fm-test-env-cache"
+fi
+
+# Every pin lives here and is written ONCE. The cache directory's NAME and the
+# version handed to npm/pip are both derived from the same variable, so they
+# cannot drift apart and leave a stale tree served under a bumped pin's name.
+# Bump a runner by editing only its version variable below.
+#
+# These are the versions the runner behavior in bin/fm-test-exec-lib.sh was
+# verified against (vitest/jest on 2026-08-03, pytest on 2026-08-05). pytest is
+# pinned for the same reason vitest and jest are: unpinned, a months-old local
+# venv keeps serving an old pytest while CI, always cold, resolves the newest,
+# so a skip/pending spelling or JUnit-XML shape change would go red in CI and
+# stay green locally forever with no key to invalidate.
+VITEST_VERSION=3.2.7
+JEST_VERSION=30.4.1
+PYTEST_VERSION=9.1.1
+VITEST_ENV="$ENV_CACHE/vitest-$VITEST_VERSION"
+JEST_ENV="$ENV_CACHE/jest-$JEST_VERSION"
+# A venv additionally bakes in the interpreter it was built against and is not
+# portable across CPython versions, so that joins the pinned pytest in the key.
+PYTEST_VENV_KEY=$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || true)
+if [ -n "$PYTEST_VENV_KEY" ]; then
+  PYTEST_VENV="$ENV_CACHE/pytest-$PYTEST_VERSION-py$PYTEST_VENV_KEY"
+else
+  # No usable python3 to key on; stay per-run and let ensure_pytest_venv fail.
+  PYTEST_VENV="$TMP_ROOT/_pytest-venv"
+fi
+
+# Every failure path below removes its own staging tree, but a run KILLED
+# mid-install cannot, and each orphan is a whole node_modules or venv sitting in
+# the cache forever. Sweep only entries carrying the private `.build.<6 chars>`
+# marker that nothing has touched for six hours - two orders of magnitude longer
+# than the slowest install here, so a concurrently building shard is never in
+# range and a published environment never matches the pattern at all.
+if [ -d "$ENV_CACHE" ]; then
+  find "$ENV_CACHE" -maxdepth 1 -type d -name '*.build.??????' -mmin +360 \
+    -exec rm -rf {} + 2>/dev/null || true
+fi
+
+# publish_env <staging> <final>: move a fully built environment into place with
+# one rename, so no reader ever observes a partial tree. Returns non-zero and
+# leaves nothing behind when another shard published first.
+publish_env() {
+  local staging=$1 final=$2 leftover
+  leftover=$(basename "$staging")
+  [ -n "$leftover" ] || return 1
+  mkdir -p "$(dirname "$final")" 2>/dev/null || true
+  if [ -e "$final" ] || ! mv "$staging" "$final" 2>/dev/null; then
+    rm -rf "$staging" 2>/dev/null || true
+  fi
+  # A shard can win the rename between the test above and the mv, in which case
+  # mv put the staging tree INSIDE the winner's directory. The staging name is
+  # unique to this process, so removing it can never touch a real cache entry.
+  rm -rf "${final:?}/$leftover" 2>/dev/null || true
+  [ -e "$final" ]
+}
+
+# relocate_venv_paths <staging> <final>: a venv bakes its own absolute path into
+# its console-script shebangs, its activate scripts and pyvenv.cfg. A venv built
+# at one path and then renamed leaves `bin/pytest` pointing at a path that no
+# longer exists, and bin/fm-test-exec-lib.sh uses exactly that script as its
+# interpreter fallback. Rewrite the baked paths to the FINAL location while the
+# tree is still private, so the publishing rename remains the only step a
+# concurrent reader can observe. `bin/python` itself is a symlink to the system
+# interpreter and needs no repair; a moved venv resolves its own prefix from the
+# executable's real path, so `bin/python -m pytest` was never the broken part.
+relocate_venv_paths() {
+  local staging=$1 final=$2 f body
+  for f in "$staging"/pyvenv.cfg "$staging"/bin/*; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    body=$(cat "$f" 2>/dev/null) || continue
+    case "$body" in
+      *"$staging"*) ;;
+      *) continue ;;
+    esac
+    printf '%s\n' "${body//"$staging"/$final}" > "$f" || return 1
+  done
+  return 0
+}
 
 # write_baseline <dir>: the three-language test corpus every case starts from.
 write_baseline() {
@@ -118,6 +250,307 @@ run_explicit() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$dir/.state" \
     "$ASSERT_KEPT" --worktree "$dir" --base main --branch work
+}
+
+# --- the PR-base fixtures ----------------------------------------------------
+# A PR is not necessarily stacked on the default branch, and the gate's verdict
+# is only meaningful against the tree the PR was actually built on. These cases
+# build an origin whose `feature-base` branch DELIBERATELY diverges from main in
+# both directions, so a run against the wrong base is visible either way:
+#   - feature-base drops main's tests/mainonly.test.sh, so a run against main
+#     reports a `missing:` the PR never caused (a sound PR refused);
+#   - feature-base adds tests/feature.test.sh, so a run against main cannot see
+#     the branch dropping it (a genuine loss missed).
+# Every test file is self-contained (its own pass/fail helpers) so check 2 can
+# actually execute it and the case's exit code stays about the base, not about
+# an unexecutable fixture.
+pr_base_test_file() {
+  cat <<EOF
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "\$1"; }
+fail() { printf 'not ok - %s\n' "\$1" >&2; exit 1; }
+pass "$1"
+EOF
+}
+
+# make_pr_base_case <name>: origin.git with main and feature-base as above, a
+# project clone, and a task worktree on fm/task-pb branched from feature-base
+# with tests/feature.test.sh removed. Echoes the case dir.
+make_pr_base_case() {
+  local case_dir="$TMP_ROOT/$1"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin"
+
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
+  mkdir -p "$case_dir/_seed/tests"
+  pr_base_test_file 'alpha holds' > "$case_dir/_seed/tests/app.test.sh"
+  pr_base_test_file 'mainonly holds' > "$case_dir/_seed/tests/mainonly.test.sh"
+  commit_all "$case_dir/_seed" baseline
+  git -C "$case_dir/_seed" push -q origin HEAD:main
+  git -C "$case_dir/_seed" checkout -q -b feature-base
+  rm "$case_dir/_seed/tests/mainonly.test.sh"
+  pr_base_test_file 'feature holds' > "$case_dir/_seed/tests/feature.test.sh"
+  commit_all "$case_dir/_seed" "feature base"
+  git -C "$case_dir/_seed" push -q origin HEAD:feature-base
+  rm -rf "$case_dir/_seed"
+
+  git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/project" worktree add -q -b fm/task-pb "$case_dir/wt" \
+    origin/feature-base
+  rm "$case_dir/wt/tests/feature.test.sh"
+  commit_all "$case_dir/wt" "drop the feature assertion"
+
+  fm_write_meta "$case_dir/state/task-pb.meta" \
+    "window=fm-task-pb" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "pr=https://github.com/o/r/pull/7"
+  touch "$case_dir/state/.last-watcher-beat"
+  printf '%s\n' "$case_dir"
+}
+
+# write_pr_base_gh <case_dir> <baseRefName-or-empty>: a gh stub answering the
+# base-branch lookup. An empty second argument makes the lookup FAIL, standing
+# in for an unreachable or unauthenticated GitHub.
+write_pr_base_gh() {
+  local case_dir=$1 base=$2
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" baseRefName "*)
+    [ -n '$base' ] || { echo 'mock: base lookup failed' >&2; exit 1; }
+    printf '%s\n' '$base'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+run_pr_base_case() {
+  local case_dir=$1
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$ASSERT_KEPT" task-pb
+}
+
+test_pr_base_branch_is_compared_against_the_pr_target() {
+  local case_dir out code
+  case_dir=$(make_pr_base_case pr-base-nondefault)
+  write_pr_base_gh "$case_dir" feature-base
+
+  set +e
+  out=$(run_pr_base_case "$case_dir" 2> "$case_dir/stderr")
+  code=$?
+  set -e
+
+  assert_contains "$out" 'base: origin/feature-base' \
+    "pr-base-nondefault: the base must be the branch the PR targets"
+  expect_code 1 "$code" \
+    "pr-base-nondefault: the assertion dropped from the PR's own base must exit non-zero"
+  assert_contains "$out" 'missing: tests/feature.test.sh::feature holds' \
+    "pr-base-nondefault: an assertion the PR's base had and the branch dropped must be reported"
+  assert_not_contains "$out" 'missing: tests/mainonly.test.sh::mainonly holds' \
+    "pr-base-nondefault: an assertion only the DEFAULT branch had must not be reported"
+  pass "a PR stacked on a non-default branch is compared against that branch"
+}
+
+test_unreadable_pr_base_refuses_rather_than_assuming_default() {
+  local case_dir out err code
+  case_dir=$(make_pr_base_case pr-base-unreadable)
+  write_pr_base_gh "$case_dir" ''
+
+  set +e
+  out=$(run_pr_base_case "$case_dir" 2> "$case_dir/stderr")
+  code=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 2 "$code" \
+    "pr-base-unreadable: an unreadable PR base must refuse as 'cannot verify', not report findings"
+  assert_contains "$err" 'https://github.com/o/r/pull/7' \
+    "pr-base-unreadable: the refusal must name the PR whose base could not be read"
+  assert_not_contains "$out" 'missing:' \
+    "pr-base-unreadable: refusing must not produce findings measured against an assumed base"
+  assert_not_contains "$out" 'base: origin/main' \
+    "pr-base-unreadable: refusing must never fall back to the default branch"
+  assert_contains "$err" 'the gh query failed' \
+    "pr-base-unreadable: the refusal must classify the cause, not fold every failure into one"
+  assert_contains "$err" 'mock: base lookup failed' \
+    "pr-base-unreadable: gh's own stderr must reach the operator, not be discarded"
+  pass "a recorded PR whose base cannot be read refuses instead of assuming the default branch"
+}
+
+test_pr_in_another_github_repo_refuses_before_any_fetch() {
+  local case_dir out err code
+  case_dir=$(make_pr_base_case pr-base-wrong-repo)
+  write_pr_base_gh "$case_dir" feature-base
+  # A GitHub origin that is NOT the PR's repository. The fixture then has no
+  # fetchable remote at all, which is the point: the assertion must refuse
+  # BEFORE either PR-derived fetch, so reaching one would fail differently.
+  git -C "$case_dir/project" remote set-url origin \
+    https://github.com/someone-else/other-repo.git
+
+  set +e
+  out=$(run_pr_base_case "$case_dir" 2> "$case_dir/stderr")
+  code=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 2 "$code" \
+    "pr-base-wrong-repo: a PR in another GitHub repository must refuse as 'cannot verify'"
+  assert_contains "$err" 'lives in o/r' \
+    "pr-base-wrong-repo: the refusal must name the PR URL's own owner/repo"
+  # "targets" means the PR's BASE BRANCH everywhere else in the script and its
+  # header, so the repository sense must never reclaim the word: an operator
+  # hitting this merge-blocking refusal would go looking at the wrong thing.
+  assert_not_contains "$err" 'targets' \
+    "pr-base-wrong-repo: the repository sense must not be spelled 'targets'"
+  assert_contains "$err" 'someone-else/other-repo' \
+    "pr-base-wrong-repo: the refusal must name origin's owner/repo"
+  assert_not_contains "$out" 'missing:' \
+    "pr-base-wrong-repo: refusing must not produce findings measured against the wrong repository"
+  assert_not_contains "$out" 'base:' \
+    "pr-base-wrong-repo: refusing must never name a base resolved from the wrong repository"
+  pass "a PR whose repository is not origin's refuses rather than fetching a same-named branch"
+}
+
+# The only writer of pr= validates it with this same parser first, so nothing
+# reaches this today - which is exactly why it is asserted. This script is the
+# last gate before a merge and must not trust an input it cannot identify, and
+# a hand-edited meta file is the one route in.
+test_unparseable_recorded_pr_refuses_before_any_github_call() {
+  local case_dir out err code
+  case_dir=$(make_pr_base_case pr-base-unparseable)
+  write_pr_base_gh "$case_dir" feature-base
+  # Every gh call and every fetch is logged, so "refused BEFORE any of them" is
+  # asserted from evidence rather than from the exit code alone.
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf 'gh %s\n' "\$*" >> "$case_dir/net.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
+  cat > "$case_dir/fakebin/git" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" fetch "*) printf 'git %s\n' "\$*" >> "$case_dir/net.log" ;;
+esac
+exec $(command -v git) "\$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+  : > "$case_dir/net.log"
+  fm_write_meta "$case_dir/state/task-pb.meta" \
+    "window=fm-task-pb" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "pr=https://github.example.com/o/r/pull/7"
+
+  set +e
+  out=$(run_pr_base_case "$case_dir" 2> "$case_dir/stderr")
+  code=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 2 "$code" \
+    "pr-base-unparseable: a recorded pr= that is not a PR link must refuse as 'cannot verify'"
+  assert_contains "$err" 'https://github.example.com/o/r/pull/7' \
+    "pr-base-unparseable: the refusal must name the value it could not read"
+  assert_not_contains "$out" 'missing:' \
+    "pr-base-unparseable: refusing must not produce findings measured against an assumed base"
+  assert_not_contains "$out" 'base:' \
+    "pr-base-unparseable: refusing must never name a base at all"
+  [ ! -s "$case_dir/net.log" ] || fail \
+    "pr-base-unparseable: refused only after touching the network: $(cat "$case_dir/net.log")"
+  pass "a recorded pr= that is not a readable PR link refuses before any gh call or fetch"
+}
+
+test_pr_repo_mismatch_refusal_never_leaks_origin_credentials() {
+  local case_dir err code
+  case_dir=$(make_pr_base_case pr-base-credentialed-origin)
+  write_pr_base_gh "$case_dir" feature-base
+  # A credentialed remote is a supported GitHub form, so the mismatch IS
+  # determinable and must refuse - while bin/fm-pr-merge.sh leaves this script's
+  # stderr unredirected, so anything echoed here reaches the merge output and any
+  # CI log.
+  git -C "$case_dir/project" remote set-url origin \
+    https://x-access-token:ghs_notarealtoken@github.com/someone-else/other-repo.git
+
+  set +e
+  run_pr_base_case "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  code=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 2 "$code" \
+    "pr-base-credentialed-origin: a credentialed origin must still refuse on a mismatch"
+  assert_contains "$err" 'someone-else/other-repo' \
+    "pr-base-credentialed-origin: the refusal must still name origin's owner/repo"
+  assert_not_contains "$err" 'ghs_notarealtoken' \
+    "pr-base-credentialed-origin: the refusal must never echo origin's embedded credential"
+  assert_not_contains "$err" 'x-access-token' \
+    "pr-base-credentialed-origin: the refusal must never echo origin's raw address"
+  pass "a mismatch refusal names both repositories without leaking origin's credential"
+}
+
+test_task_without_a_pr_still_resolves_the_default_branch() {
+  local case_dir out code
+  case_dir=$(make_pr_base_case pr-base-absent)
+  # No PR recorded: the local-only path, which must keep resolving the default.
+  fm_write_meta "$case_dir/state/task-pb.meta" \
+    "window=fm-task-pb" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project"
+  # A gh that fails everything proves the no-PR path never depends on GitHub.
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo 'mock: gh must not be consulted without a recorded PR' >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+
+  set +e
+  out=$(run_pr_base_case "$case_dir" 2> "$case_dir/stderr")
+  code=$?
+  set -e
+
+  assert_contains "$out" 'base: origin/main (default branch of' \
+    "pr-base-absent: with no PR recorded the base must still be the project's default branch"
+  expect_code 1 "$code" \
+    "pr-base-absent: the default branch's dropped assertion must still exit non-zero"
+  assert_contains "$out" 'missing: tests/mainonly.test.sh::mainonly holds' \
+    "pr-base-absent: the default branch's own assertions must still be checked"
+  pass "a task with no recorded PR still resolves the project's default branch"
+}
+
+test_explicit_mode_never_consults_github() {
+  local dir out code
+  dir=$(make_repo explicit-base-untouched)
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo 'mock: explicit mode must not consult GitHub' >&2
+exit 1
+SH
+  chmod +x "$dir/fakebin/gh"
+  mkdir -p "$dir/.state"
+  touch "$dir/.state/.last-watcher-beat"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/.state" \
+    PATH="$dir/fakebin:$PATH" \
+    "$ASSERT_KEPT" --worktree "$dir" --base main --branch work 2>/dev/null)
+  code=$?
+  set -e
+
+  assert_contains "$out" 'base: main (explicit --base)' \
+    "explicit-base-untouched: explicit mode must take the caller's ref verbatim"
+  [ "$code" -ne 2 ] \
+    || fail "explicit-base-untouched: explicit mode must not fail on a GitHub lookup"
+  pass "explicit mode takes the caller's base verbatim and never consults GitHub"
 }
 
 test_removed_shell_test_reported_via_meta() {
@@ -395,29 +828,79 @@ test_unexecutable_files_are_reported_not_passed() {
 
 # The provisioned environment the Python fixtures link in, exactly as a
 # pipeline-provisioned worktree's .venv is linked at the real gate. Built once
-# per suite run and shared, so the per-case cost is a symlink.
-PYTEST_VENV="$TMP_ROOT/_pytest-venv"
+# and shared, so the per-case cost is a symlink. $PYTEST_VERSION and
+# $PYTEST_VENV are set with the other pins under "the shared pinned-runtime
+# cache" at the top of this file; that is also where the key rule and the
+# coverage trade are recorded.
+PYTEST_VENV_READY=0
 
-# ensure_pytest_venv: build $PYTEST_VENV if absent. Returns non-zero when the
-# host cannot provide pytest at all, so the caller fails loudly instead of
-# silently dropping the coverage that proves assertions really execute.
+# pytest_venv_usable <venv>: the venv exists AND resolves the PINNED pytest.
+# Version-checking, not presence-checking: `-m pytest --version` passes for ANY
+# pytest, so a venv built with --system-site-packages against whatever the host
+# happens to carry would sail through while serving a version the directory name
+# promises it is not. A mismatch is a cache miss, so the pin is what the cases
+# actually run.
+pytest_venv_usable() {
+  [ -x "$1/bin/python" ] || return 1
+  [ "$("$1/bin/python" -c 'import pytest; print(pytest.__version__)' 2>/dev/null)" \
+    = "$PYTEST_VERSION" ]
+}
+
+# ensure_pytest_venv: build $PYTEST_VENV if absent or unusable. Returns non-zero
+# when the host cannot provide the pinned pytest, so the caller fails loudly
+# instead of silently dropping the coverage that proves assertions really
+# execute, and never falls back to some other version.
+#
+# A cached venv is verified once per run rather than trusted on the strength of
+# its interpreter existing: it may have been built with --system-site-packages
+# against a host pytest that has since gone away or been upgraded past the pin.
+# An unusable one is rebuilt, never patched around.
 ensure_pytest_venv() {
-  if [ -x "$PYTEST_VENV/bin/python" ]; then
+  local staging
+  if [ "$PYTEST_VENV_READY" = 1 ]; then
     return 0
   fi
-  if python3 -c 'import pytest' >/dev/null 2>&1; then
-    # Already available on the host: reuse it and stay off the network.
-    python3 -m venv --system-site-packages "$PYTEST_VENV" >/dev/null 2>&1 || return 1
-  else
-    python3 -m venv "$PYTEST_VENV" >/dev/null 2>&1 || return 1
-    "$PYTEST_VENV/bin/python" -m pip install --quiet --disable-pip-version-check pytest \
-      >/dev/null 2>&1 || return 1
+  if pytest_venv_usable "$PYTEST_VENV"; then
+    PYTEST_VENV_READY=1
+    return 0
   fi
-  "$PYTEST_VENV/bin/python" -m pytest --version >/dev/null 2>&1
+  mkdir -p "$(dirname "$PYTEST_VENV")" 2>/dev/null || return 1
+  # mktemp creates the directory; `venv` re-uses an existing empty one, so the
+  # name stays claimed for the whole build and no second process can take it.
+  staging=$(mktemp -d "$PYTEST_VENV.build.XXXXXX" 2>/dev/null) || return 1
+  if [ "$(python3 -c 'import pytest; print(pytest.__version__)' 2>/dev/null)" = "$PYTEST_VERSION" ]; then
+    # The host already carries EXACTLY the pin: reuse it and stay off the
+    # network. Gated on the version, never on bare importability - borrowing
+    # whatever pytest the host has would quietly defeat the pin.
+    python3 -m venv --system-site-packages "$staging" >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
+  else
+    python3 -m venv "$staging" >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
+    "$staging/bin/python" -m pip install --quiet --disable-pip-version-check "pytest==$PYTEST_VERSION" \
+      >/dev/null 2>&1 || { rm -rf "$staging"; return 1; }
+  fi
+  pytest_venv_usable "$staging" || { rm -rf "$staging"; return 1; }
+  relocate_venv_paths "$staging" "$PYTEST_VENV" || { rm -rf "$staging"; return 1; }
+  # Another shard may have published a good venv while this one was building,
+  # and the fixtures symlink their .venv straight at it - removing it here would
+  # pull a live interpreter out from under a case that is already running. So
+  # re-probe first and, if the published tree is now good, throw away THIS build
+  # rather than the tree in use. Only a still-unusable predecessor is dropped,
+  # and only once the replacement is built and proven.
+  if pytest_venv_usable "$PYTEST_VENV"; then
+    rm -rf "$staging"
+    PYTEST_VENV_READY=1
+    return 0
+  fi
+  if [ -e "$PYTEST_VENV" ]; then
+    rm -rf "$PYTEST_VENV"
+  fi
+  publish_env "$staging" "$PYTEST_VENV" || return 1
+  pytest_venv_usable "$PYTEST_VENV" || return 1
+  PYTEST_VENV_READY=1
 }
 
 require_pytest_venv() {
-  ensure_pytest_venv || fail "$1: could not provision a venv with pytest (needs python3 with venv, and pip or an importable pytest); the pytest runner cannot be verified without one"
+  ensure_pytest_venv || fail "$1: could not provision a venv with pytest==$PYTEST_VERSION (needs python3 with venv, plus a pip able to install that exact version - so an interpreter that version still supports, and network or a matching cached wheel; an importable host pytest skips the install only when it is already exactly $PYTEST_VERSION); the pytest runner cannot be verified without one"
 }
 
 # write_py_tree <dir> <behavior> <asserted> [<pkg-parent>]: the plan's Z/K
@@ -1017,41 +1500,55 @@ EOF
 
 # The provisioned environments the JS fixtures link in, exactly as a
 # pipeline-provisioned worktree's node_modules is linked at the real gate.
-# Built once per suite run by a real `npm install` (versions pinned for
-# determinism: vitest 3.2.7 / jest 30.4.1, the versions the runner behavior in
-# bin/fm-test-exec-lib.sh was verified against on 2026-08-03) and shared, so
-# the per-case cost is a symlink. The install needs node, npm, and network or
-# a warm npm cache; CI provides all three, and the suite is self-contained
-# with no workflow-side installs.
-VITEST_ENV="$TMP_ROOT/_vitest-env"
-JEST_ENV="$TMP_ROOT/_jest-env"
+# Built by a real `npm install` at $VITEST_VERSION / $JEST_VERSION and shared,
+# so the per-case cost is a symlink. The install needs node, npm, and network or
+# a warm npm cache; CI provides all three, and the suite is self-contained with
+# no workflow-side installs.
+#
+# The pinned version is part of the cache directory's NAME, so bumping a version
+# names a directory that does not exist yet and gets a fresh install; a tree
+# installed against the old pin can never be served for the new one.
+# $VITEST_VERSION / $JEST_VERSION and the directories they key are set with the
+# other pins under "the shared pinned-runtime cache" at the top of this file;
+# bump a pin there and nowhere else.
 
 # ensure_js_env <env-dir> <package> <version> <bin>: build the shared env if
 # absent. Returns non-zero when the host cannot provide it, so the caller fails
 # loudly instead of silently dropping the coverage that proves JS assertions
 # really execute.
+#
+# Installed under a private staging path and published with one rename, so a
+# concurrent shard either finds no environment and installs its own or finds a
+# complete one, and never links a half-installed node_modules into a fixture.
+# Unlike a venv, an npm tree bakes in no absolute paths - `node_modules/.bin`
+# entries are relative symlinks - so it survives the rename untouched.
 ensure_js_env() {
-  local env=$1 pkg=$2 version=$3 bin=$4
+  local env=$1 pkg=$2 version=$3 bin=$4 staging
   if [ -x "$env/node_modules/.bin/$bin" ]; then
     return 0
   fi
   command -v node >/dev/null 2>&1 || return 1
   command -v npm >/dev/null 2>&1 || return 1
-  mkdir -p "$env"
+  mkdir -p "$(dirname "$env")" 2>/dev/null || return 1
+  staging=$(mktemp -d "$env.build.XXXXXX" 2>/dev/null) || return 1
   printf '{"name":"fm-%s-env","private":true,"devDependencies":{"%s":"%s"}}\n' \
-    "$pkg" "$pkg" "$version" > "$env/package.json"
-  npm install --prefix "$env" --no-audit --no-fund --loglevel=error \
-    >/dev/null 2>&1 || return 1
+    "$pkg" "$pkg" "$version" > "$staging/package.json"
+  if ! npm install --prefix "$staging" --no-audit --no-fund --loglevel=error \
+      >/dev/null 2>&1 || [ ! -x "$staging/node_modules/.bin/$bin" ]; then
+    rm -rf "$staging"
+    return 1
+  fi
+  publish_env "$staging" "$env" || return 1
   [ -x "$env/node_modules/.bin/$bin" ]
 }
 
 require_vitest_env() {
-  ensure_js_env "$VITEST_ENV" vitest 3.2.7 vitest \
+  ensure_js_env "$VITEST_ENV" vitest "$VITEST_VERSION" vitest \
     || fail "$1: could not provision a node_modules with vitest (needs node and npm, plus network or a warm npm cache); the vitest runner cannot be verified without one"
 }
 
 require_jest_env() {
-  ensure_js_env "$JEST_ENV" jest 30.4.1 jest \
+  ensure_js_env "$JEST_ENV" jest "$JEST_VERSION" jest \
     || fail "$1: could not provision a node_modules with jest (needs node and npm, plus network or a warm npm cache); the jest runner cannot be verified without one"
 }
 
@@ -1065,8 +1562,8 @@ write_js_tree() {
   local dir=$1 runner=$2 behavior=$3 asserted=$4
   mkdir -p "$dir/src"
   if [ "$runner" = vitest ]; then
-    cat > "$dir/package.json" <<'EOF'
-{"name":"fixture","private":true,"type":"module","devDependencies":{"vitest":"3.2.7"}}
+    cat > "$dir/package.json" <<EOF
+{"name":"fixture","private":true,"type":"module","devDependencies":{"vitest":"$VITEST_VERSION"}}
 EOF
     printf 'export function greet() {\n  return "%s";\n}\n' "$behavior" > "$dir/src/mod.js"
     cat > "$dir/mod.test.js" <<EOF
@@ -1080,8 +1577,8 @@ describe('greet', () => {
 });
 EOF
   else
-    cat > "$dir/package.json" <<'EOF'
-{"name":"fixture","private":true,"devDependencies":{"jest":"30.4.1"}}
+    cat > "$dir/package.json" <<EOF
+{"name":"fixture","private":true,"devDependencies":{"jest":"$JEST_VERSION"}}
 EOF
     printf 'module.exports.greet = function greet() {\n  return "%s";\n};\n' "$behavior" > "$dir/src/mod.js"
     cat > "$dir/mod.test.js" <<EOF
@@ -1288,8 +1785,8 @@ test_jest_explicit_skip_is_visible() {
   dir="$TMP_ROOT/jest-skip"
   init_repo_at "$dir"
   mkdir -p "$dir/src"
-  cat > "$dir/package.json" <<'EOF'
-{"name":"fixture","private":true,"devDependencies":{"jest":"30.4.1"}}
+  cat > "$dir/package.json" <<EOF
+{"name":"fixture","private":true,"devDependencies":{"jest":"$JEST_VERSION"}}
 EOF
   printf 'node_modules/\n' > "$dir/.gitignore"
   cat > "$dir/mod.test.js" <<'EOF'
@@ -1363,6 +1860,13 @@ test_js_run_never_mutates_the_live_worktree() {
   pass "a JS check-2 run never mutates the live worktree or the linked node_modules"
 }
 
+test_pr_base_branch_is_compared_against_the_pr_target
+test_unreadable_pr_base_refuses_rather_than_assuming_default
+test_pr_in_another_github_repo_refuses_before_any_fetch
+test_unparseable_recorded_pr_refuses_before_any_github_call
+test_pr_repo_mismatch_refusal_never_leaks_origin_credentials
+test_task_without_a_pr_still_resolves_the_default_branch
+test_explicit_mode_never_consults_github
 test_removed_shell_test_reported_via_meta
 test_removed_python_test_reported
 test_added_tests_removed_none_loses_nothing

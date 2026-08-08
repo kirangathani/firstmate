@@ -117,6 +117,71 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+# Testing-skip briefs (bin/fm-spawn.sh owns the flags' meaning and the accepted
+# flag/delivery-mode matrix; this covers only the worker-facing half fm-brief.sh
+# writes). The point of each assertion is that the worker is told the skip is
+# deliberate and told exactly what to do instead, because an agent that reads a
+# missing pipeline as a fault will try to repair it.
+test_testing_skip_briefs() {
+  local home id brief out status
+  home="$TMP_ROOT/skip-home"
+  write_registry "$home"
+
+  id="brief-localskip-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj --local-skip >/dev/null 2>&1
+  expect_code 0 $? "--local-skip brief should scaffold for a no-mistakes project"
+  brief="$home/data/$id/brief.md"
+  assert_grep "local testing skipped" "$brief" "--local-skip brief did not say testing is skipped"
+  assert_grep "enforced, not requested" "$brief" "--local-skip brief did not say the skip is enforced"
+  assert_grep "Do NOT run /no-mistakes" "$brief" "--local-skip brief still points at the pipeline"
+  assert_no_grep "no-mistakes doctor" "$brief" "--local-skip brief kept the pipeline setup step"
+  assert_no_grep "CI waiver handshake" "$brief" "--local-skip alone must not add the CI handshake"
+  assert_no_grep "EOF" "$brief" "--local-skip brief leaked a heredoc marker"
+
+  id="brief-ciskip-c2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --ci-skip >/dev/null 2>&1
+  expect_code 0 $? "--ci-skip brief should scaffold for a direct-PR project"
+  brief="$home/data/$id/brief.md"
+  assert_grep "CI waiver handshake" "$brief" "--ci-skip brief lost the waiver handshake"
+  assert_grep "git rev-parse HEAD" "$brief" "handshake did not tell the worker how to read its head commit"
+  assert_grep "blocked: ci-waiver needed for" "$brief" "handshake did not tell the worker how to ask for a signature"
+  assert_grep "VERBATIM" "$brief" "handshake did not require the line to be copied verbatim"
+  assert_grep "you cannot produce and must not try to produce" "$brief" \
+    "handshake did not tell the worker the signature is not its to make"
+  assert_no_grep "local testing skipped" "$brief" "--ci-skip must not claim the local pipeline was skipped"
+  assert_no_grep "EOF" "$brief" "--ci-skip brief leaked a heredoc marker"
+
+  id="brief-allskip-c3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj --all-testing-skip >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "local testing skipped" "$brief" "--all-testing-skip brief lost the local skip"
+  assert_grep "CI waiver handshake" "$brief" "--all-testing-skip brief lost the CI handshake"
+
+  # The same refusals bin/fm-spawn.sh applies, so a brief can never exist for a
+  # combination the spawn will refuse to launch.
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-skip-bad-c4 local-proj --ci-skip 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "--ci-skip on a local-only project should refuse"
+  assert_contains "$out" "does not apply to a local-only project" "local-only refusal wording"
+  assert_absent "$home/data/brief-skip-bad-c4/brief.md" "a refused brief was still written"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-skip-bad-c5 no-registry-proj --ci-skip 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "--ci-skip alone on a no-mistakes project should refuse"
+  assert_contains "$out" "cannot be honoured for a no-mistakes project" "no-mistakes ci-skip refusal wording"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-skip-bad-c6 direct-proj --local-skip 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "--local-skip on a direct-PR project should refuse"
+  assert_contains "$out" "already runs no local pipeline" "direct-PR local-skip refusal wording"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-skip-bad-c7 no-registry-proj --scout --local-skip 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a scout brief should refuse a skip flag"
+  assert_contains "$out" "applies only to a ship brief" "scout refusal wording"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-skip-bad-c8 no-registry-proj --local-skip --ci-skip 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "two skip flags at once should refuse"
+  assert_contains "$out" "pass exactly one testing-skip flag" "two-flag refusal wording"
+  pass "fm-brief.sh: testing-skip briefs render the enforced skip and the waiver handshake, and refuse the rest"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -364,11 +429,35 @@ test_commit_cadence_is_scaffold_text() {
   pass "fm-brief: commit-early cadence is scaffold text in every ship mode; scouts carry the incremental-report rule"
 }
 
+# The lockstep property finding 3 is about: bin/fm-brief.sh and bin/fm-spawn.sh
+# must refuse the same combinations with the same words, so a brief can never be
+# scaffolded for a combination spawn will then refuse. They drifted while each
+# held its own copy, so this asserts the matrix is stated in exactly ONE place
+# and both scripts consume it - the structural fact, not just today's strings.
+test_skip_matrix_has_exactly_one_owner() {
+  local lib="$ROOT/bin/fm-testing-skip-lib.sh" f n
+  assert_present "$lib" "the shared testing-skip owner is missing"
+  for f in bin/fm-brief.sh bin/fm-spawn.sh; do
+    assert_grep 'fm-testing-skip-lib.sh' "$ROOT/$f" "$f must consume the shared testing-skip owner"
+    assert_grep 'fm_testing_skip_check_mode' "$ROOT/$f" "$f must use the shared delivery-mode matrix"
+    assert_grep 'fm_testing_skip_check_args' "$ROOT/$f" "$f must use the shared argument-only rules"
+    # The refusal text must exist only in the owner, never re-spelled downstream.
+    n=$(grep -c 'cannot be honoured for a no-mistakes project' "$ROOT/$f" || true)
+    [ "$n" -eq 0 ] || fail "$f re-spells the no-mistakes refusal; it belongs only in bin/fm-testing-skip-lib.sh"
+  done
+  n=$(grep -c 'cannot be honoured for a no-mistakes project' "$lib" || true)
+  [ "$n" -eq 1 ] || fail "the no-mistakes refusal must be stated exactly once in the owner, found $n"
+  pass "testing-skip matrix: stated once, consumed by both brief and spawn"
+}
+
+
+test_skip_matrix_has_exactly_one_owner
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_testing_skip_briefs
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
