@@ -914,12 +914,21 @@ run_tests_gate() {
   # The scratch dir is created BEFORE the base is resolved, because resolving a
   # PR-recorded base needs somewhere private to put the query's output and its
   # diagnostic, and this dir is the one thing the EXIT trap already removes.
-  local tmpd
-  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-flow.XXXXXX") || {
+  #
+  # The trap-visible global is the assignment target ITSELF, not a local that is
+  # published to it a line later: bash runs a pending signal trap BETWEEN
+  # commands, so a two-step "assign to a local, then copy to the global" leaves a
+  # window in which the directory already exists and the EXIT trap still reads an
+  # empty MGATE_TMPD - and the scratch dir leaks. The failure branch clears the
+  # global explicitly, because a failed command substitution can leave it holding
+  # partial output that clean_tmpd would then rm -rf without this having created
+  # it.
+  MGATE_TMPD=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-flow.XXXXXX") || {
+    MGATE_TMPD=""
     MGATE_ANN="prior-tests: pending (tmp unavailable)"
     return
   }
-  MGATE_TMPD=$tmpd
+  local tmpd=$MGATE_TMPD
   if ! tests_gate_base "$tmpd"; then
     MGATE_ANN="prior-tests: pending (no base ref found)"
     clean_tmpd
