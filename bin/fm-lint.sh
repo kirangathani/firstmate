@@ -161,6 +161,13 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-lint.XXXXXX")
 # shared by every worktree of the repository and is long lived: a run killed
 # mid-publish would otherwise leave its staging file there for good, and enough
 # interrupted crewmate runs would silt the directory up.
+#
+# A trap cannot run on SIGKILL, an OOM kill, or host loss, so a staging file can
+# still survive those. That residue is accepted rather than swept: an
+# unconditional sweep of manifest.*/discovery.* could delete a CONCURRENT run's
+# live staging file, which is exactly the cross-run interference the per-process
+# names exist to remove. A leaked file is inert - neither reader ever parses
+# those names, and PID reuse overwrites it.
 DISC_STAGED=
 MAN_STAGED=
 trap 'rm -rf "$TMP"
@@ -251,6 +258,22 @@ USE_CACHE=1
 [ -n "$HASHER" ] || USE_CACHE=0
 [ "${FM_LINT_NO_CACHE:-0}" = 1 ] && USE_CACHE=0
 
+# Creating the directory is the first cache write and, under `set -e`, the only
+# one that could abort the run - with mkdir's status 1, which this script's
+# contract reserves for "ShellCheck reported a finding". That would report a
+# lint failure with no lint having run. The cache exists only to make the gate
+# fast, so like both publications below it degrades instead of aborting: a
+# failure here turns the cache off wholesale, so every later read and write is
+# skipped consistently rather than pointing at a directory that is not there.
+# The exposure is real now the cache lives in the repository's COMMON git dir,
+# which can be read only, or owned by another user, where the worktree's private
+# dir was always writable by whoever could run git in it.
+if [ "$USE_CACHE" = 1 ] && ! mkdir -p "$CACHE_DIR" 2>/dev/null; then
+  printf 'fm-lint.sh: could not create the cache directory %s; linting uncached.\n' \
+    "$CACHE_DIR" >&2
+  USE_CACHE=0
+fi
+
 JOBS="${FM_LINT_JOBS:-}"
 if [ -z "$JOBS" ]; then
   JOBS=$(nproc 2>/dev/null || sysctl -n hw.physicalcpu 2>/dev/null || echo 4)
@@ -284,7 +307,6 @@ DISC_CACHE="$CACHE_DIR/discovery"
 : >"$TMP/edges"
 : >"$TMP/disc.keep"
 if [ "$USE_CACHE" = 1 ]; then
-  mkdir -p "$CACHE_DIR"
   # shellcheck disable=SC2046
   $HASHER $(cat "$TMP/files") >"$TMP/hashes" 2>/dev/null || : >"$TMP/hashes"
   # The reader below tolerates a missing cache file (awk's getline returns -1 and
