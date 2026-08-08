@@ -115,22 +115,24 @@ Grok takes the global-hook route for the same reason its turn-end hook does: Gro
 The global hook is therefore a no-op for every Grok session that is not a firstmate crewmate worktree: it fires only when the workspace holds a `.fm-grok-turnend` pointer whose token matches the firstmate-owned registry.
 Every `$VAR` in a Grok hook command string must carry an inline `:-default` or the hook fails to load at all, so the tracked command references none directly.
 
-### Known gap: Codex project-hook trust
+### Codex crewmates launch with hook trust bypassed
 
-**Unverified and flagged.** Codex gates project hooks on folder hook-trust, and `bin/fm-spawn.sh`'s Codex crewmate launch (`codex --dangerously-bypass-approvals-and-sandbox`) does not establish it; the recorded validations elsewhere in `docs/` reached Codex project hooks only by passing `--dangerously-bypass-hook-trust` explicitly.
-In a worktree Codex has not been trusted for hooks, `<worktree>/.codex/hooks.json` is inert rather than wrong: the seatbelt simply does not fire, exactly as if the file were absent.
-Codex was not installed in the environment where this was built, so neither the loading nor the non-loading was confirmed live.
+Codex gates project hooks on folder hook-trust, and the recorded validations elsewhere in `docs/` reached Codex project hooks only by passing `--dangerously-bypass-hook-trust` explicitly.
+`bin/fm-spawn.sh` will not establish that trust by writing Codex's managed trust store, so without the flag `<worktree>/.codex/hooks.json` would be inert rather than wrong: the seatbelt simply would not fire, exactly as if the file were absent.
 
-Closing it means adding `--dangerously-bypass-hook-trust` to the Codex crewmate launch template.
-That is a launch-time trust posture change with its own blast radius: it would also trust a project's own `.codex/hooks.json`, so every Codex worker would run a repository's hook code at launch with no trust check.
+**So the Codex CREWMATE launch template in `bin/fm-spawn.sh` now passes `--dangerously-bypass-hook-trust`.**
+This is stated here rather than buried in the script because it is a launch-time trust posture change, not a detail.
+The cost was put to the captain before he ruled, and he accepted it: a Codex crewmate runs a repository's own hook code at launch with no trust check, in any repo this fleet clones, which is a standing route for a hostile repository to execute code at launch.
 
-**This was escalated and the captain has ruled: add the flag**, accepting that stated cost.
-The ruling covers the Codex CREWMATE launch only.
-It does not extend to any other harness, to any other Codex safety flag, or to a Codex secondmate launch.
+The ruling covers the Codex crewmate launch only.
+It does not extend to any other harness, to any other Codex safety flag, or to a Codex secondmate launch, which still launches without the flag.
 
-**The flag is not implemented as of this commit, so the fix-instructions seatbelt is NOT active on Codex yet.**
-That is stated here rather than left quiet because no surface may imply an enforcement it is not performing.
-Whether the flag in fact makes the hook fire on Codex is an inference from Codex's documented trust gate, not a measurement; the first session with Codex installed should confirm it.
+**Unverified, and it must stay labelled that way.** Codex was not installed in the environment where this was built, so whether the flag in fact makes the hook fire on Codex was never observed here.
+It follows from Codex's documented trust gate, which is an inference, not a measurement.
+The first session with Codex installed should confirm it.
+`tests/fm-fix-instructions-check.test.sh` pins the flag's presence on the crewmate launch and its absence on the secondmate launch, so the scope cannot be silently widened or the flag silently dropped, but a passing test proves only what `fm-spawn` emits, never that Codex honors it.
+
+If the flag is ever removed or fails to apply, this section and the enforcement's own reporting must say the seatbelt is NOT active on that launch rather than staying quiet.
 
 ## Part B: the pinned run intent
 

@@ -296,7 +296,19 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys|kill-window) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys)
+    # Record the literal (-l) payload so a test can assert on the launch command
+    # fm-spawn actually typed into the pane.
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      prev=
+      for a in "$@"; do
+        [ "$prev" = "-l" ] && printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -306,24 +318,28 @@ SH
 }
 
 # Spawns a real crewmate for <harness> against fake tmux/treehouse and echoes
-# "<case_dir>|<home>|<worktree>|<grok_home>|<id>".
+# "<case_dir>|<home>|<worktree>|<grok_home>|<id>". The launch command fm-spawn
+# typed is captured at <case_dir>/launch.log. An optional <label> gives a second
+# spawn of the same harness its own case directory.
 spawn_crewmate() {
-  local harness=$1 case_dir home proj wt fakebin grok_home id out rc
-  case_dir="$TMP_ROOT/spawn-$harness"
+  local harness=$1 label=${2:-$1} case_dir home proj wt fakebin grok_home id out rc
+  case_dir="$TMP_ROOT/spawn-$label"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
   grok_home="$case_dir/grok"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  id="fixgate-$harness-x1"
+  id="fixgate-$label-x1"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$grok_home"
   printf 'brief\n' > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   touch "$home/state/.last-watcher-beat"
+  : > "$case_dir/launch.log"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     GROK_HOME="$grok_home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" "$harness" 2>&1)
   rc=$?
@@ -395,6 +411,60 @@ EOF
   git -C "$wt" status --porcelain | grep -q '\.codex' \
     && fail "codex hooks.json is visible to git; it must be excluded like every other worktree hook"
   pass "codex: fm-spawn writes an excluded .codex/hooks.json that denies/allows end to end"
+}
+
+# Spawns a real codex SECONDMATE against fake tmux and echoes the launch command
+# fm-spawn typed. The hook-trust ruling is scoped to crewmates, so this launch
+# must not carry the bypass flag.
+spawn_codex_secondmate_launch() {
+  local case_dir home sm launchlog fakebin
+  case_dir="$TMP_ROOT/spawn-codex-secondmate"
+  home="$case_dir/home"
+  sm="$case_dir/sm"
+  launchlog="$case_dir/launch.log"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  mkdir -p "$home/state" "$home/data" "$home/config" "$sm/bin" "$sm/data"
+  printf '# Firstmate\n' > "$sm/AGENTS.md"
+  printf 'sm\n' > "$sm/.fm-secondmate-home"
+  printf 'charter\n' > "$sm/data/charter.md"
+  : > "$launchlog"
+  PATH="$fakebin:$PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    "$SPAWN" fixgate-sm "$sm" codex --secondmate >/dev/null 2>&1
+  cat "$launchlog"
+}
+
+# The codex crewmate launch must carry --dangerously-bypass-hook-trust, and the
+# codex secondmate launch must not. Codex gates project hooks on folder
+# hook-trust, so without the flag the .codex/hooks.json written above is present
+# but inert and every surface would read as though the seatbelt were enforced.
+# The flag is a captain ruling with an accepted cost (a codex crewmate runs a
+# repository's own hook code at launch with no trust check), scoped to the
+# crewmate launch only; docs/fix-instructions-gate.md owns the contract. This
+# pins both halves of that scope so it cannot be silently dropped or widened.
+# It proves only what fm-spawn emits: codex is not installed here, so that the
+# flag makes the hook fire is an inference, not a measurement.
+test_codex_launch_hook_trust_scope() {
+  local rec case_dir home wt grok_home id crew_launch sm_launch
+  rec=$(spawn_crewmate codex codex-hooktrust)
+  IFS='|' read -r case_dir home wt grok_home id <<EOF
+$rec
+EOF
+  : "$home" "$wt" "$grok_home" "$id"
+  crew_launch=$(cat "$case_dir/launch.log")
+  assert_contains "$crew_launch" 'codex ' "the captured codex crewmate launch must be a codex launch"
+  assert_contains "$crew_launch" '--dangerously-bypass-hook-trust' \
+    "codex crewmate launch must bypass hook trust or the fix-instructions seatbelt is inert there"
+  assert_contains "$crew_launch" '--dangerously-bypass-approvals-and-sandbox' \
+    "codex crewmate launch must keep its existing autonomy flag"
+  sm_launch=$(spawn_codex_secondmate_launch)
+  assert_contains "$sm_launch" 'codex ' "the captured codex secondmate launch must be a codex launch"
+  assert_not_contains "$sm_launch" '--dangerously-bypass-hook-trust' \
+    "the hook-trust ruling covers crewmates only; a codex secondmate launch must not carry the flag"
+  pass "codex: the hook-trust bypass is on the crewmate launch and absent from the secondmate launch"
 }
 
 test_grok_spawn_wiring() {
@@ -541,6 +611,7 @@ test_prefilter_is_a_strict_superset
 test_policy_cli_direct
 test_claude_spawn_wiring
 test_codex_spawn_wiring
+test_codex_launch_hook_trust_scope
 test_grok_spawn_wiring
 test_opencode_spawn_wiring
 test_pi_spawn_wiring

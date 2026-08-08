@@ -325,11 +325,20 @@ launch_template() {
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # --dangerously-bypass-hook-trust is on the CREWMATE launch only, by explicit
+    # captain ruling recorded in docs/fix-instructions-gate.md. Codex gates project
+    # hooks on folder hook-trust, which this launch does not otherwise establish, so
+    # without it the fix-instructions seatbelt written to <worktree>/.codex/hooks.json
+    # is inert and every surface would read as though the rule were enforced. The
+    # accepted cost, stated before the ruling: a codex crewmate then runs a
+    # repository's own hook code at launch with no trust check, in any repo we clone.
+    # The ruling does NOT extend to the secondmate launch below, to any other
+    # harness, or to any other codex safety flag.
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
@@ -977,11 +986,13 @@ EOF
       # so this is the one harness whose worktree carried no hook file before the
       # fix-instructions seatbelt. Codex blocks on exit 2 and displays stderr, and
       # reads project hooks from <project-root>/.codex/hooks.json - the same shape
-      # the firstmate primary uses. CAVEAT, recorded in docs/fix-instructions-gate.md:
-      # codex gates project hooks on folder hook-trust, and this launch does not
-      # establish it (fm-spawn will not write codex's managed trust store). In a
-      # worktree codex has not been trusted for hooks, the file is inert rather
-      # than wrong: the seatbelt simply does not fire, exactly as if absent.
+      # the firstmate primary uses. codex gates project hooks on folder hook-trust,
+      # which fm-spawn will not establish by writing codex's managed trust store, so
+      # the crewmate launch template above passes --dangerously-bypass-hook-trust to
+      # make this file load. That flag is a captain ruling with an accepted cost; see
+      # launch_template's codex comment and docs/fix-instructions-gate.md. UNVERIFIED:
+      # codex is not installed here, so that the flag makes this hook fire is an
+      # inference from codex's documented trust gate, not a measurement.
       mkdir -p "$WT/.codex"
       cat > "$WT/.codex/hooks.json" <<EOF
 {"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash -lc 'payload=\$(cat 2>/dev/null || true); [ -n \"\$payload\" ] || exit 0; printf \"%s\" \"\$payload\" | $(json_escape "$(shell_quote "$FIXCHECK")")'","timeout":10}]}]}}
