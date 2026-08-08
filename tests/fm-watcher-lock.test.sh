@@ -788,6 +788,7 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
 
 test_cycle_exit_ledger_links_successor_and_stays_bounded() {
   local dir state fakebin armout check_file first_arm successor_arm successor_pid i size iteration
+  local first_bytes steady_bytes cap keep_lines bounded_cycles records
   dir=$(make_case cycle-ledger)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -825,12 +826,31 @@ SH
   kill -HUP "$successor_arm" 2>/dev/null || true
   wait "$successor_arm" 2>/dev/null || true
 
-  # Produce enough short cycles to cross a deliberately small cap. The cap is
-  # applied by the arm layer itself and keeps only complete ledger records.
+  # Cross a deliberately small cap. The cap is applied by the arm layer itself:
+  # it keeps the last FM_WATCH_CYCLE_LOG_KEEP_LINES records, cuts that to
+  # FM_WATCH_CYCLE_LOG_MAX_BYTES, and then drops the record the byte cut
+  # truncated. Both properties have to stay observable, so the cap is DERIVED
+  # from this run's own record sizes rather than hardcoded: record width carries
+  # the absolute worktree path and live pid widths, so a fixed literal drifts
+  # between checkouts and silently stops forcing a cut.
+  #
+  # Two records exist now: the linked actionable record and the successor's.
+  # One more cycle makes three, and the cap is placed midway between "two
+  # records fit" and "three records fit", so the trim keeps three lines, the
+  # byte cut lands inside the oldest, and exactly two complete records survive.
+  # That is the minimum work that leaves the assertion non-vacuous: fewer
+  # surviving records and "only complete records survive" would prove nothing.
+  first_bytes=$(sed -n '1p' "$state/.watch-cycle-exits.log" | wc -c | tr -d '[:space:]')
+  steady_bytes=$(sed -n '2p' "$state/.watch-cycle-exits.log" | wc -c | tr -d '[:space:]')
+  [ "${first_bytes:-0}" -gt 1 ] && [ "${steady_bytes:-0}" -gt 1 ] \
+    || fail "could not measure ledger record widths to derive a cap ($first_bytes/$steady_bytes)"
+  cap=$((first_bytes / 2 + steady_bytes * 2))
+  keep_lines=3
+  bounded_cycles=1
   iteration=0
-  while [ "$iteration" -lt 6 ]; do
+  while [ "$iteration" -lt "$bounded_cycles" ]; do
     armout="$dir/bounded-$iteration.out"
-    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES=1400 FM_WATCH_CYCLE_LOG_KEEP_LINES=2 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES="$cap" FM_WATCH_CYCLE_LOG_KEEP_LINES="$keep_lines" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
     successor_arm=$!
     i=0
     while [ "$i" -lt 80 ]; do
@@ -844,9 +864,19 @@ SH
     iteration=$((iteration + 1))
   done
   size=$(wc -c < "$state/.watch-cycle-exits.log" | tr -d '[:space:]')
-  [ "$size" -le 1400 ] || fail "cycle ledger exceeded its configured cap ($size bytes)"
+  [ "$size" -le "$cap" ] || fail "cycle ledger exceeded its configured cap ($size bytes > $cap)"
   ! grep -v '^arm_pid=.*watcher_pid=.*started_at=.*ended_at=.*exit_code=.*signal=.*reason=.*beacon_age=.*lock_before=.*lock_after=.*successor=' "$state/.watch-cycle-exits.log" | grep . >/dev/null \
     || fail "bounded lifecycle ledger contains a partial or malformed record"
+  # Anti-vacuity pins. The trim kept $keep_lines records and the byte cut
+  # truncated the oldest of them, so exactly $keep_lines-1 COMPLETE records must
+  # remain: any fewer and "only complete records survive" is asserted over a set
+  # too small to mean anything, any more and the byte cut never truncated a
+  # record so the exclusion path was never exercised at all.
+  records=$(grep -c '^arm_pid=' "$state/.watch-cycle-exits.log" 2>/dev/null || true)
+  [ "${records:-0}" -eq $((keep_lines - 1)) ] \
+    || fail "expected exactly $((keep_lines - 1)) complete ledger records after trimming, got $records"
+  ! grep -qE "^arm_pid=${first_arm}[[:space:]]" "$state/.watch-cycle-exits.log" \
+    || fail "cap did not evict the oldest ledger record, so nothing was actually trimmed"
   pass "cycle-exit ledger links a verified successor and remains size-capped"
 }
 

@@ -54,6 +54,10 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 
+# The GitHub address grammar has one owner per input type; see its header.
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
 FM_BEARINGS_LANDED_PER_HOME=${FM_BEARINGS_LANDED_PER_HOME:-$FM_BEARINGS_LANDED}
@@ -176,11 +180,6 @@ PR_REPOS_SHOWN=0
 PR_ROWS_CAPPED=0
 PR_ROWS_MIN_TOTAL=0
 
-# Parse owner/repo from an https or ssh GitHub remote/PR URL; empty if not GitHub.
-repo_slug() {  # <url>
-  printf '%s' "$1" | sed -n 's#.*github\.com[:/]\([^/]*/[^/]*\)#\1#p' | sed 's#\.git$##; s#/pull/.*$##; s#/$##'
-}
-
 # Bounded gh call; prints stdout, non-zero on timeout/failure. gh only.
 gh_bounded() {  # <args...>
   if command -v timeout >/dev/null 2>&1; then
@@ -199,11 +198,35 @@ if [ "$INCLUDE_PRS" = 1 ]; then
     PR_STATUS='unavailable (gh not found)'
   else
     # Candidate repos: recorded pr= URLs plus live worktree origins. Deduped.
+    # Each source is read by the parser that owns its input type: a recorded
+    # pr= value is a PR LINK, a worktree origin is a REMOTE ADDRESS. An address
+    # neither parser accepts contributes no repository rather than a guess, and
+    # the strict rule is deliberate for BOTH sources rather than relaxed for the
+    # one whose input is likelier to be hand-written.
+    # Two accumulators, because the identity a repository is DEDUPED on is not
+    # the string that is displayed: membership is tested on the case-folded
+    # identity, since GitHub treats owner and repo case-insensitively and the
+    # same repository reached by two spellings would otherwise be queried twice
+    # and consume two slots of the repository cap, while repos keeps the
+    # first-seen spelling so the rendered label is the one its source used.
+    # That split has ONE owner below, add_repo_candidate, so the two loops
+    # cannot drift: a future fix to how identity and display relate lands in
+    # both sources or in neither.
     repos=""
+    repo_keys=""
+    add_repo_candidate() {  # <owner> <repo>
+      local owner=$1 repo=$2 key
+      key=$(fm_pr_github_slug_fold "$owner" "$repo")
+      case " $repo_keys " in
+        *" $key "*) return 0 ;;
+      esac
+      repo_keys="$repo_keys $key"
+      repos="$repos $owner/$repo"
+    }
     while IFS= read -r u; do
       [ -n "$u" ] || continue
-      s=$(repo_slug "$u"); [ -n "$s" ] || continue
-      case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
+      fm_pr_url_parse "$u" || continue
+      add_repo_candidate "$FM_PR_OWNER" "$FM_PR_REPO"
     done <<EOF
 $(printf '%s' "$SNAP" | jq -r '.tasks[].pr.url // empty')
 EOF
@@ -211,8 +234,8 @@ EOF
       [ -n "$wt" ] || continue
       [ -d "$wt" ] || continue
       u=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
-      s=$(repo_slug "$u"); [ -n "$s" ] || continue
-      case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
+      fm_pr_remote_parse "$u" || continue
+      add_repo_candidate "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO"
     done <<EOF
 $(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths.worktree.path // empty')
 EOF
