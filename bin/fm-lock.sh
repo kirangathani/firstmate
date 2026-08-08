@@ -6,6 +6,8 @@
 # Acquiring writes the harness (agent) process PID found by walking the shell's
 # ancestry, which lives as long as the firstmate session - unlike the transient
 # subshell PID of any one tool call, which is dead moments after it is written.
+# It writes that PID on line 1 and, where the kernel offers it, that process's
+# start ticks on line 2, so a reused PID cannot be mistaken for the holder.
 # Usage: fm-lock.sh             acquire; exit 1 if another live session holds it
 #        fm-lock.sh status      print holder and liveness; always exits 0
 #        fm-lock.sh ownership   print owned|other|missing for the CALLING
@@ -32,19 +34,26 @@ fi
 
 if [ "${1:-}" = "status" ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
-  old=$(cat "$LOCK")
-  if fm_session_lock_holder_is_harness "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  if fm_session_lock_read "$STATE" \
+    && fm_session_lock_holder_is_harness "$FM_SESSION_LOCK_PID" "$FM_SESSION_LOCK_TICKS"; then
+    echo "lock: held by live harness pid $FM_SESSION_LOCK_PID"
+  else
+    echo "lock: stale (pid ${FM_SESSION_LOCK_PID:-unreadable} dead, reused, or not a harness)"
+  fi
   exit 0
 fi
 
 mkdir -p "$STATE"
 me=$(fm_session_harness_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
-if [ -f "$LOCK" ]; then
-  old=$(cat "$LOCK")
-  if [ "$old" != "$me" ] && fm_session_lock_holder_is_harness "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
+# The recorded start ticks are part of the holder's identity, so a pid the kernel
+# has since handed to an unrelated process reads as stale here exactly as it does
+# in fm_session_lock_ownership.
+if fm_session_lock_read "$STATE"; then
+  if [ "$FM_SESSION_LOCK_PID" != "$me" ] \
+    && fm_session_lock_holder_is_harness "$FM_SESSION_LOCK_PID" "$FM_SESSION_LOCK_TICKS"; then
+    echo "error: another live firstmate session holds the lock (pid $FM_SESSION_LOCK_PID); operate read-only until resolved" >&2
     exit 1
   fi
 fi
-echo "$me" > "$LOCK"
+fm_session_lock_write "$STATE" "$me"
 echo "lock acquired: harness pid $me"

@@ -102,6 +102,20 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Status-line composition (config/statusline-base / FM_STATUSLINE_BASE)
+
+`bin/fm-statusline.sh` prints one line saying whether this session is in control of the current home's fleet, and Claude Code runs it through the `statusLine` setting in the tracked `.claude/settings.json`.
+Because that file is tracked and shared, it would otherwise replace whatever status line the operator already runs globally, in every worktree of this repo.
+So the script composes instead of replacing: it runs an optional base status-line command first and prints the fleet line beneath that command's output.
+
+`config/statusline-base` is a local, gitignored file whose first line is the path to that base command; `FM_STATUSLINE_BASE` overrides it.
+The path is deliberately never named in tracked material, because it is machine-specific.
+An absent, empty, or non-executable base command simply means no base line, silently and with no error.
+The harness's status-line JSON payload is captured once and forwarded to the base command on stdin, so a base command that reads it behaves exactly as it does when run directly.
+
+Composition applies even where the fleet line is absent.
+In a crewmate or scout task worktree there is no `state/` directory, so the fleet line is deliberately silent, and the base command's output is printed alone rather than leaving the status line blank.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` as `bin/fm-test.sh --local` so no-mistakes runs firstmate's bash behavior suite directly.

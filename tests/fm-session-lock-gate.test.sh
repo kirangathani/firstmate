@@ -7,7 +7,10 @@
 #                               adapters call instead of their own copies
 #   bin/fm-watch-arm.sh         refuses to arm from a session that does not own
 #                               the fleet, and still arms for one that does
-#   bin/fm-statusline.sh        the persistent in/not-in-control indicator
+#   bin/fm-watch-checkpoint.sh  Codex's bounded foreground protocol, the second
+#                               entry point that takes the watcher singleton
+#   bin/fm-statusline.sh        the persistent in/not-in-control indicator,
+#                               composed beneath the operator's own status line
 #
 # The regression these guard: before the gate existed, only the OpenCode and Pi
 # adapters checked ownership. A second Claude Code session could arm a watcher
@@ -23,8 +26,17 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
+WATCH_CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
 LOCK_CLI="$ROOT/bin/fm-lock.sh"
 STATUSLINE="$ROOT/bin/fm-statusline.sh"
+
+# The kernel start ticks that identify a lock holder are Linux-only (/proc), and
+# every code path treats them as optional. Where they are unavailable, the
+# pid-reuse assertions below do not apply and the legacy pid-only behavior is
+# what is asserted instead.
+start_ticks_available() {
+  [ -r "/proc/$$/stat" ]
+}
 
 TMP_ROOT=$(fm_test_tmproot fm-session-lock-gate)
 
@@ -129,6 +141,49 @@ test_ownership_cli_classifies_and_writes_nothing() {
   [ "$out" = missing ] || fail "a malformed session lock must classify as missing, got: $out"
 
   pass "fm-lock.sh ownership: classifies owned/other/missing and never writes state"
+}
+
+test_lock_holder_identity_and_file_format() {
+  local dir state other out ticks
+  dir="$TMP_ROOT/lock-identity"
+  state="$dir/state"
+  mkdir -p "$state"
+
+  # A lock whose only line carries NO trailing newline still names a holder.
+  # Validating on read's exit status instead of the parsed value read it as
+  # "missing", which would arm over a live rival owner.
+  other=$(start_other_session)
+  printf '%s' "$other" > "$state/.lock"
+  out=$(FM_STATE_OVERRIDE="$state" "$LOCK_CLI" ownership)
+  [ "$out" = other ] || fail "a newline-free session lock must still name its holder, got: $out"
+
+  # A LEGACY pid-only lock (no recorded ticks) keeps working on the pid alone.
+  printf '%s\n' "$other" > "$state/.lock"
+  out=$(FM_STATE_OVERRIDE="$state" "$LOCK_CLI" ownership)
+  [ "$out" = other ] || fail "a legacy pid-only lock must still resolve a live rival as other, got: $out"
+  printf '%s\n' "$$" > "$state/.lock"
+  out=$(FM_STATE_OVERRIDE="$state" "$LOCK_CLI" ownership)
+  [ "$out" = owned ] || fail "a legacy pid-only lock must still resolve an ancestor as owned, got: $out"
+
+  if start_ticks_available; then
+    ticks=$(bash -c '. "$1"; fm_pid_start_ticks "$2"' _ "$ROOT/bin/fm-session-lock-lib.sh" "$$") \
+      || fail "could not read this process's start ticks"
+    printf '%s\n%s\n' "$$" "$ticks" > "$state/.lock"
+    out=$(FM_STATE_OVERRIDE="$state" "$LOCK_CLI" ownership)
+    [ "$out" = owned ] || fail "matching start ticks must still resolve as owned, got: $out"
+
+    # The pid is live, but the kernel says it started at a different time, so it
+    # is a REUSED pid rather than the session that took the lock. That must read
+    # as a stale lock, not as a live rival: refusing there would leave the home
+    # unsupervised with the blind-turn alarm silenced.
+    printf '%s\n%s\n' "$other" 1 > "$state/.lock"
+    out=$(FM_STATE_OVERRIDE="$state" "$LOCK_CLI" ownership)
+    [ "$out" = missing ] || fail "a live pid with mismatched start ticks must resolve as missing, got: $out"
+  fi
+
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  pass "fm-session-lock-lib: holder identity is pid plus optional start ticks, parsed from the value not the read status"
 }
 
 # --- bin/fm-watch-arm.sh gate ------------------------------------------------
@@ -290,6 +345,80 @@ test_arm_still_arms_without_a_lock_holder_and_says_so() {
   pass "fm-watch-arm: an absent, dead-holder, or malformed session lock arms but is announced"
 }
 
+test_arm_arms_when_the_lock_holder_pid_was_reused() {
+  local dir state other out armpid
+  # After a reboot state/.lock survives (state/ is not tmpfs) and its pid is
+  # very likely handed to an unrelated live process. Reading that as a live rival
+  # would refuse to arm AND silence the blind-turn alarm at the same time, so the
+  # home would run unsupervised with nothing complaining.
+  start_ticks_available || {
+    pass "fm-watch-arm: pid-reuse detection needs /proc start ticks; not available here"
+    return 0
+  }
+  dir=$(make_case gate-arm-reused-pid)
+  state="$dir/state"
+  out="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  other=$(start_other_session)
+  printf '%s\n%s\n' "$other" 1 > "$state/.lock"
+
+  armpid=$(start_arm_background "$state" "$out")
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  grep -qF 'watcher: started pid=' "$out" || {
+    stop_arm_background "$armpid" "$state"
+    fail "a reused holder pid blocked a legitimate arm: $(cat "$out")"
+  }
+  assert_contains "$(cat "$out")" "no live session holds this home's session lock" \
+    "a reused holder pid must be announced as a stale lock, never a silent grant"
+  assert_not_contains "$(cat "$out")" "read-only" "a reused holder pid must not read as a live rival"
+  stop_arm_background "$armpid" "$state"
+  pass "fm-watch-arm: a live pid the kernel says is a different process is a stale lock, so the home still arms"
+}
+
+# --- bin/fm-watch-checkpoint.sh gate -----------------------------------------
+# Codex's documented watcher protocol is the second entry point that takes the
+# watcher singleton, so it carries the same gate. bin/fm-watch.sh itself is NOT
+# gated: the arm and the away-mode daemon fork it as a legitimate child.
+
+run_checkpoint() {  # <state> [args...]
+  local state=$1
+  shift
+  timeout 30 env PATH="$(dirname "$state")/fakebin:$PATH" \
+    FM_STATE_OVERRIDE="$state" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_CHECKPOINT" --seconds 1 "$@" 2>&1
+}
+
+test_checkpoint_is_gated_on_the_session_lock() {
+  local dir state other out status
+  dir=$(make_case gate-checkpoint)
+  state="$dir/state"
+  mark_pr_check_migration_complete "$state"
+
+  other=$(start_other_session)
+  printf '%s\n' "$other" > "$state/.lock"
+  out=$(run_checkpoint "$state"); status=$?
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 0 "$status" "a non-owning checkpoint declining is correct, not a failure"
+  assert_contains "$out" "read-only" "the checkpoint refusal must say the session is read-only"
+  assert_contains "$out" "not arming" "the checkpoint refusal must say it did not arm"
+  assert_not_contains "$out" "watcher: FAILED" "declining a checkpoint must not be a supervision failure"
+  if watch_singleton_present "$state"; then
+    fail "a non-owning checkpoint took the watcher singleton (state/.watch.lock)"
+  fi
+  [ ! -e "$state/.last-watcher-beat" ] || fail "a non-owning checkpoint ran a watcher (beacon was touched)"
+
+  # The owning session runs its checkpoint exactly as before.
+  printf '%s\n' "$$" > "$state/.lock"
+  out=$(run_checkpoint "$state"); status=$?
+  expect_code 124 "$status" "the owning session's quiet checkpoint must still time out normally"
+  assert_contains "$out" "checkpoint: no actionable wake within 1s" "the owning session's checkpoint did not run"
+  assert_not_contains "$out" "read-only" "the owning session's checkpoint must not be refused"
+  pass "fm-watch-checkpoint: gated on the session lock the same way, so Codex inherits the rule too"
+}
+
 # --- bin/fm-statusline.sh ----------------------------------------------------
 
 run_statusline() {  # <home>
@@ -334,6 +463,89 @@ test_statusline_is_silent_and_writes_nothing_without_fleet_state() {
   pass "fm-statusline: silent, and creates nothing, where there is no fleet state"
 }
 
+install_statusline_base() {  # <home> <base path>
+  local home=$1 base=$2
+  mkdir -p "$home/config"
+  cat > "$base" <<'SH'
+#!/usr/bin/env bash
+payload=$(cat)
+printf 'base line payload=%s\n' "$payload"
+SH
+  chmod +x "$base"
+  printf '%s\n' "$base" > "$home/config/statusline-base"
+}
+
+test_statusline_composes_with_the_operators_own_status_line() {
+  local home base out status
+  # .claude/settings.json is tracked and shared, so wiring this script there
+  # would otherwise REPLACE whatever status line the operator already runs, in
+  # every worktree of this repo. It composes instead: the operator's line first,
+  # the fleet line beneath it.
+  home="$TMP_ROOT/statusline-compose"
+  base="$TMP_ROOT/statusline-base.sh"
+  mkdir -p "$home/state"
+  install_statusline_base "$home" "$base"
+  printf '%s\n' "$$" > "$home/state/.lock"
+
+  out=$(run_statusline "$home"); status=$?
+  expect_code 0 "$status" "composing must still always exit 0"
+  assert_contains "$out" "base line" "the operator's own status line must still be printed"
+  assert_contains "$out" "in control of fleet" "the fleet line must still be printed"
+  assert_contains "$out" 'payload={"session_id":"test"}' "the harness payload must be forwarded to the base command"
+  [ "$(printf '%s\n' "$out" | sed -n '1p')" = 'base line payload={"session_id":"test"}' ] \
+    || fail "the base line must come first, got: $out"
+  printf '%s\n' "$out" | sed -n '2p' | grep -qF 'in control of fleet' \
+    || fail "the fleet line must come second, got: $out"
+
+  # A crewmate or scout task worktree carries the tracked script but no fleet
+  # state. The fleet line is silent there, and going blank instead of showing the
+  # operator's own line is the complaint this composition answers.
+  home="$TMP_ROOT/statusline-compose-no-state"
+  mkdir -p "$home"
+  install_statusline_base "$home" "$base"
+  out=$(run_statusline "$home"); status=$?
+  expect_code 0 "$status" "composing without fleet state must exit 0"
+  assert_contains "$out" "base line" "the operator's line must print even where there is no fleet state"
+  assert_not_contains "$out" "control of fleet" "there is no fleet here, so there must be no fleet line"
+  [ ! -d "$home/state" ] || fail "composing created the state dir; it must never write to state"
+
+  # An absent, empty, or non-executable base command means no base line, quietly.
+  home="$TMP_ROOT/statusline-base-unusable"
+  mkdir -p "$home/state" "$home/config"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  printf '%s\n' "$TMP_ROOT/statusline-base-does-not-exist.sh" > "$home/config/statusline-base"
+  out=$(run_statusline "$home")
+  assert_contains "$out" "in control of fleet" "a missing base command must not suppress the fleet line"
+  assert_not_contains "$out" "base line" "a missing base command must print nothing of its own"
+
+  printf '%s\n' "$TMP_ROOT/statusline-base-not-executable.sh" > "$home/config/statusline-base"
+  printf '#!/usr/bin/env bash\nprintf "base line\\n"\n' > "$TMP_ROOT/statusline-base-not-executable.sh"
+  chmod 0644 "$TMP_ROOT/statusline-base-not-executable.sh"
+  out=$(run_statusline "$home"); status=$?
+  expect_code 0 "$status" "a non-executable base command must not fail the status line"
+  assert_contains "$out" "in control of fleet" "a non-executable base command must not suppress the fleet line"
+  assert_not_contains "$out" "base line" "a non-executable base command must not be run"
+
+  : > "$home/config/statusline-base"
+  out=$(run_statusline "$home")
+  assert_contains "$out" "in control of fleet" "an empty base setting must not suppress the fleet line"
+  pass "fm-statusline: composes beneath the operator's own status line, and degrades to the fleet line alone"
+}
+
+test_statusline_other_branch_names_a_remedy() {
+  local home other out
+  home="$TMP_ROOT/statusline-other-remedy"
+  mkdir -p "$home/state"
+  other=$(start_other_session)
+  printf '%s\n' "$other" > "$home/state/.lock"
+  out=$(run_statusline "$home")
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  assert_contains "$out" "not in control of fleet" "a rival holder must be shown as not in control"
+  assert_contains "$out" "bin/fm-session-start.sh" "the rival-holder line must name a remedy, like the no-holder line does"
+  pass "fm-statusline: the rival-holder line names a remedy instead of leaving the session with none"
+}
+
 test_statusline_is_wired_into_claude_settings() {
   local settings command
   settings="$ROOT/.claude/settings.json"
@@ -358,7 +570,8 @@ test_ownership_walk_has_exactly_one_implementation() {
   definitions=$(grep -rl 'fm_session_lock_ownership()' "$ROOT/bin" 2>/dev/null | wc -l | tr -d '[:space:]')
   [ "$definitions" = 1 ] || fail "expected exactly one ownership resolver, found $definitions"
 
-  for file in fm-lock.sh fm-watch-arm.sh fm-turnend-guard.sh fm-sessionstart-nudge.sh fm-statusline.sh; do
+  for file in fm-lock.sh fm-watch-arm.sh fm-watch-checkpoint.sh fm-turnend-guard.sh \
+    fm-continuity-pretool-check.sh fm-sessionstart-nudge.sh fm-statusline.sh; do
     text=$(cat "$ROOT/bin/$file")
     assert_contains "$text" 'fm-session-lock-lib.sh' "bin/$file must resolve ownership through the shared library"
     assert_not_contains "$text" 'ps -o ppid=' "bin/$file carries its own session-lock ancestry walk"
@@ -375,12 +588,17 @@ test_ownership_walk_has_exactly_one_implementation() {
 }
 
 test_ownership_cli_classifies_and_writes_nothing
+test_lock_holder_identity_and_file_format
 test_arm_refuses_when_another_session_owns_the_fleet
 test_arm_refuses_restart_when_another_session_owns_the_fleet
 test_arm_starts_for_the_owning_session
 test_arm_recognises_ownership_several_process_levels_down
 test_arm_still_arms_without_a_lock_holder_and_says_so
+test_arm_arms_when_the_lock_holder_pid_was_reused
+test_checkpoint_is_gated_on_the_session_lock
 test_statusline_reports_fleet_control
 test_statusline_is_silent_and_writes_nothing_without_fleet_state
+test_statusline_composes_with_the_operators_own_status_line
+test_statusline_other_branch_names_a_remedy
 test_statusline_is_wired_into_claude_settings
 test_ownership_walk_has_exactly_one_implementation

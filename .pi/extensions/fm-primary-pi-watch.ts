@@ -12,10 +12,13 @@ type ArmResult = {
   message: string;
 };
 
-type LockOwnership = "owned" | "missing" | "other";
+// "unresolved" is not a verdict about the lock: it means the resolver itself
+// failed, which is a different thing from "no live session holds the lock" and
+// must not be answered with advice that cannot fix it.
+type LockOwnership = "owned" | "missing" | "other" | "unresolved";
 
 type CloseClassification = {
-  kind: "actionable" | "failure";
+  kind: "actionable" | "failure" | "read-only";
   message: string;
 };
 
@@ -55,20 +58,32 @@ function positiveInteger(name: string, fallback: number): number {
 // bin/fm-session-lock-lib.sh through `bin/fm-lock.sh ownership`, so this
 // extension carries no second copy of the ancestry walk. The child process runs
 // below this one, so the walk still finds this Pi session among its ancestors.
-// An unresolvable check reads as "missing", which declines to arm and points at
-// session start rather than silently arming.
+//
+// Only a recognised word on stdout is a verdict. A missing or non-executable
+// bin/fm-lock.sh, or a spawn error, is a RESOLVER failure: reading it as
+// "missing" would answer it with "run bin/fm-session-start.sh", advice that
+// cannot fix a missing script, so it resolves to "unresolved" and the real cause
+// is surfaced instead.
+let lastOwnershipError = "";
+
 function lockOwnership(): LockOwnership {
   const result = spawnSync(`${fmRoot}/bin/fm-lock.sh`, ["ownership"], {
     encoding: "utf8",
     env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state },
   });
-  if (result.status !== 0) return "missing";
-  const ownership = result.stdout.trim();
-  return ownership === "owned" || ownership === "other" ? ownership : "missing";
+  const ownership = (result.stdout || "").trim();
+  if (ownership === "owned" || ownership === "other" || ownership === "missing") return ownership;
+  const detail = result.error?.message
+    || (result.stderr || "").trim()
+    || `no ownership verdict on stdout${ownership ? `: ${ownership}` : ""}`;
+  lastOwnershipError = `${fmRoot}/bin/fm-lock.sh ownership failed (exit ${result.status ?? "none"}): ${detail}`;
+  return "unresolved";
 }
 
-function markLoaded(): void {
-  if (lockOwnership() === "other") return;
+// The verdict is resolved once per arm and passed in, so a single arm does not
+// spawn bin/fm-lock.sh twice for the same question.
+function markLoaded(ownership: LockOwnership = lockOwnership()): void {
+  if (ownership === "other") return;
   mkdirSync(state, { recursive: true });
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
@@ -82,6 +97,11 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
   if (reason) return { kind: "actionable", message: reason };
+  // The arm's own session-lock gate can refuse after this extension's pre-check,
+  // if the lock changed in between. That refusal is exit 0 with no actionable
+  // line and is correct behavior, never a watcher failure.
+  const readOnly = combined.split(/\r?\n/).find((line) => /^watcher: read-only\b/.test(line));
+  if (readOnly) return { kind: "read-only", message: readOnly };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -202,6 +222,10 @@ export default function (pi: ExtensionAPI) {
   function scheduleRetry(message: string, predecessorArmPid: string): void {
     if (stopping || child || retryTimer) return;
     const ownership = lockOwnership();
+    if (ownership === "unresolved") {
+      surfaceFailure(`watcher: FAILED - Pi extension could not resolve session-lock ownership, so it did not restore continuity\n${lastOwnershipError}\n${message}`);
+      return;
+    }
     if (ownership !== "owned") {
       surfaceFailure(`watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
       return;
@@ -226,13 +250,19 @@ export default function (pi: ExtensionAPI) {
     if (stopping) return { ok: false, message: "watcher: not armed - Pi session is shutting down" };
     const ownership = lockOwnership();
     if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
+    if (ownership === "unresolved") {
+      return {
+        ok: false,
+        message: `watcher: not armed - could not resolve session-lock ownership, so supervision was not armed\n${lastOwnershipError}`,
+      };
+    }
     if (ownership === "missing") {
       return {
         ok: false,
         message: "watcher: not armed - no live session holds the lock; run bin/fm-session-start.sh to reclaim it, then call fm_watch_arm_pi to re-arm",
       };
     }
-    markLoaded();
+    markLoaded(ownership);
     if (child) return { ok: true, message: "watcher: healthy - Pi extension already has an arm child" };
     if (retryTimer) return { ok: true, message: "watcher: continuity retry already scheduled by the Pi extension" };
     const id = ++seq;
@@ -294,6 +324,11 @@ export default function (pi: ExtensionAPI) {
       if (stopping) return;
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
+      if (classification.kind === "read-only") {
+        // The arm declined for a lock this session does not hold. Retrying would
+        // only decline again, and it is not a supervision failure to report.
+        return;
+      }
       if (classification.kind === "actionable") {
         retryFailures = 0;
         restoring = true;

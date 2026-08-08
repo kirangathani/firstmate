@@ -29,10 +29,14 @@ They remain the final backstop rather than the normal continuity mechanism.
 
 ## Arm-layer cycle contract
 
-`bin/fm-watch-arm.sh` never returns a clean empty success.
+`bin/fm-watch-arm.sh` has exactly four outcomes, and only one of them is a clean empty success.
 An actionable child output returns that reason normally.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 An attached arm follows verified identity-matched successors and reports the same typed failure if that chain ends without one.
+The fourth outcome is the session-lock refusal: when this home's session lock (`state/.lock`) is held by another live session, the arm prints one `watcher: read-only ... not arming` line and exits 0 without an actionable line.
+That is a correct refusal, not a failure, so both close classifiers - `classifyArmClose` in `.opencode/plugins/fm-primary-watch-arm.js` and `classifyClose` in `.pi/extensions/fm-primary-pi-watch.ts` - match that line explicitly and neither retries it nor reports `watcher: FAILED`.
+Without that case an adapter whose pre-check saw ownership change between the check and the arm's own gate would surface a supervision failure for correct behavior.
+`bin/fm-watch-checkpoint.sh`, Codex's bounded foreground protocol, applies the same gate with the same three-way decision and the same wording, because it is the second entry point that takes the watcher singleton.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.

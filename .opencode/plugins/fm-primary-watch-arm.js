@@ -108,21 +108,36 @@ function shouldArm(paths) {
 // Session-lock ownership (state/.lock: which session controls this home's
 // fleet) is resolved by bin/fm-session-lock-lib.sh through `bin/fm-lock.sh
 // ownership`, never reimplemented here. The walk runs from the spawned child, so
-// this plugin's own process is still one of the ancestors it finds. An
-// unresolvable check counts as not owned, which only declines to arm - the arm
-// script applies the same gate itself.
-async function sessionOwnsLock(paths) {
+// this plugin's own process is still one of the ancestors it finds.
+//
+// A RESOLVER FAILURE is not a verdict. Delegating to a subprocess adds a failure
+// mode the previous in-process read could not have: a missing or non-executable
+// bin/fm-lock.sh, or a spawn error, would otherwise be indistinguishable from
+// "not owned", so supervision would silently never arm with no diagnostic naming
+// the real cause. Only a recognised word on stdout is a verdict; anything else
+// resolves to "unresolved" and is surfaced with the resolver's own error.
+let lastOwnershipError = "";
+
+async function resolveSessionOwnership(paths) {
   const result = await runProcess(`${paths.root}/bin/fm-lock.sh`, ["ownership"], {
     env: { ...process.env, FM_HOME: paths.home, FM_STATE_OVERRIDE: paths.state },
   });
-  if (result.code !== 0) return false;
-  return result.stdout.trim() === "owned";
+  const verdict = result.stdout.trim();
+  if (verdict === "owned" || verdict === "other" || verdict === "missing") return verdict;
+  const detail = result.stderr.trim() || `no ownership verdict on stdout${verdict ? `: ${verdict}` : ""}`;
+  lastOwnershipError = `${paths.root}/bin/fm-lock.sh ownership failed (exit ${result.code}): ${detail}`;
+  return "unresolved";
 }
 
 function classifyArmClose(stdout, stderr, code, signal) {
   const combined = `${stdout}\n${stderr}`;
   const reason = combined.split(/\r?\n/).find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line));
   if (reason) return { kind: "actionable", message: reason };
+  // The arm's own session-lock gate can refuse after this plugin's pre-check, if
+  // the lock changed in between. That refusal is exit 0 with no actionable line
+  // and is correct behavior, so it must never be reported as a watcher failure.
+  const readOnly = combined.split(/\r?\n/).find((line) => /^watcher: read-only\b/.test(line));
+  if (readOnly) return { kind: "read-only", message: readOnly };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -160,6 +175,11 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
   if (combined.split(/\r?\n/).some((line) => /^watcher: (?:started|attached)\b/.test(line))) {
     setArmStatus("armed");
     settleReadiness("armed");
+    return;
+  }
+  if (combined.split(/\r?\n/).some((line) => /^watcher: read-only\b/.test(line))) {
+    setArmStatus("read-only");
+    settleReadiness("read-only");
     return;
   }
   if (combined.split(/\r?\n/).some((line) => /^watcher: healthy\b/.test(line))) {
@@ -226,6 +246,9 @@ function restorationFailure(status) {
   if (status === "read-only") {
     return "watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock";
   }
+  if (status === "ownership-unresolved") {
+    return `watcher: FAILED - OpenCode could not resolve session-lock ownership, so it did not arm\n${lastOwnershipError || "bin/fm-lock.sh ownership produced no verdict"}`;
+  }
   return `watcher: FAILED - OpenCode could not verify a ready successor watcher (${status || "idle"})`;
 }
 
@@ -252,7 +275,13 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
 
 async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid) {
   if (child || retryTimer) return;
-  if (!(await sessionOwnsLock(paths))) {
+  const ownership = await resolveSessionOwnership(paths);
+  if (ownership === "unresolved") {
+    setArmStatus("failed");
+    surfaceFailure(client, sessionID, `${restorationFailure("ownership-unresolved")}\n${reason}`);
+    return;
+  }
+  if (ownership !== "owned") {
     setArmStatus("failed");
     surfaceFailure(client, sessionID, `watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock\n${reason}`);
     return;
@@ -326,8 +355,14 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     const classification = classifyArmClose(stdout, stderr, code, signal);
-    settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
+    settleReadiness(classification.kind === "actionable" ? "wake" : classification.kind === "read-only" ? "read-only" : "failed");
     const predecessor = String(armChild.pid ?? "");
+    if (classification.kind === "read-only") {
+      // The arm declined for a lock this session does not hold. Retrying would
+      // only decline again, and it is not a supervision failure to report.
+      setArmStatus("read-only");
+      return;
+    }
     if (classification.kind === "actionable") {
       retryFailures = 0;
       setArmStatus("wake");
@@ -374,7 +409,9 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
 async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!sessionID) return { status: "skipped", armChild: null };
   if (!(await isPrimaryRoot(paths.root, paths.home))) return { status: "not-primary", armChild: null };
-  if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
+  const ownership = await resolveSessionOwnership(paths);
+  if (ownership === "unresolved") return { status: "ownership-unresolved", armChild: null };
+  if (ownership !== "owned") return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
   if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
@@ -408,7 +445,7 @@ async function ensureArm(paths, sessionID, client, predecessorArmPid = "", inclu
     }
     launchResult = await launchInFlight;
     if (launchResult.status !== "read-only") break;
-    if (!(await sessionOwnsLock(paths))) break;
+    if ((await resolveSessionOwnership(paths)) !== "owned") break;
   }
   const armChild = launchResult.armChild;
   if (!armChild) {

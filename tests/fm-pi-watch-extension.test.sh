@@ -64,9 +64,22 @@ test_tracked_extension_present_and_self_hashing() {
   # marker) is now the resolver's rule; the extension must pass that answer
   # through rather than collapse it into the live-other refusal.
   # test_pi_arm_distinguishes_session_lock_ownership proves it end to end.
-  assert_contains "$text" 'ownership === "owned" || ownership === "other" ? ownership : "missing"' "tracked extension does not allow a pre-lock load marker"
-  assert_contains "$text" 'if (lockOwnership() === "other") return' "tracked extension overwrites another live session marker"
+  assert_contains "$text" 'if (ownership === "owned" || ownership === "other" || ownership === "missing") return ownership' "tracked extension does not allow a pre-lock load marker"
+  # A resolver FAILURE (missing or non-executable bin/fm-lock.sh, spawn error,
+  # no verdict on stdout) is not a verdict about the lock, and answering it with
+  # "run bin/fm-session-start.sh" is advice that cannot fix it.
+  assert_contains "$text" 'return "unresolved"' "tracked extension collapses a failed ownership resolver into a lock verdict"
+  assert_contains "$text" 'ownership failed (exit' "tracked extension does not surface the real ownership-resolver failure"
+  assert_contains "$text" 'if (ownership === "unresolved")' "tracked extension arm does not distinguish a failed resolver from a missing lock"
+  assert_contains "$text" 'if (ownership === "other") return' "tracked extension overwrites another live session marker"
   assert_contains "$text" 'const ownership = lockOwnership()' "tracked extension arm does not inspect the distinct lock ownership state"
+  # One arm resolves ownership once: markLoaded takes the verdict startArm
+  # already paid for instead of spawning bin/fm-lock.sh a second time.
+  assert_contains "$text" 'function markLoaded(ownership: LockOwnership = lockOwnership())' "tracked extension does not accept an already-resolved ownership verdict"
+  assert_contains "$text" 'markLoaded(ownership)' "tracked extension arm resolves session-lock ownership twice per arm"
+  # The arm's own session-lock gate can refuse after this pre-check; that
+  # refusal is exit 0 with no actionable line and is correct, not a failure.
+  assert_contains "$text" 'kind: "read-only", message: readOnly' "tracked extension reports the arm's correct read-only refusal as a watcher failure"
   assert_contains "$text" 'if (ownership === "other") return { ok: false' "tracked extension arm does not preserve the live-other read-only refusal"
   assert_contains "$text" 'if (ownership === "missing")' "tracked extension arm collapses a stale or absent lock into the live-other refusal"
   assert_contains "$text" "no live session holds the lock" "tracked extension arm missing stale-lock recovery guidance"
@@ -904,7 +917,14 @@ test_opencode_primary_watch_plugin_static_wiring() {
   assert_contains "$text" "promptAsync" "OpenCode plugin does not wake with promptAsync"
   assert_contains "$text" ".fm-secondmate-home" "OpenCode plugin does not scope out secondmate homes"
   assert_contains "$text" "rev-parse\", \"--git-dir" "OpenCode plugin does not check linked worktree scope"
-  assert_contains "$text" "sessionOwnsLock" "OpenCode plugin does not gate arm attempts on the session lock"
+  assert_contains "$text" "resolveSessionOwnership" "OpenCode plugin does not gate arm attempts on the session lock"
+  # A resolver FAILURE is not "not owned": a missing or non-executable
+  # bin/fm-lock.sh would otherwise silently mean supervision is never armed,
+  # with no diagnostic naming the real cause.
+  assert_contains "$text" 'return "unresolved"' "OpenCode plugin collapses a failed ownership resolver into a lock verdict"
+  assert_contains "$text" 'ownership failed (exit' "OpenCode plugin does not surface the real ownership-resolver failure"
+  assert_contains "$text" 'status === "ownership-unresolved"' "OpenCode plugin does not distinguish a failed resolver from a read-only refusal"
+  assert_contains "$text" 'kind: "read-only", message: readOnly' "OpenCode plugin reports the arm's correct read-only refusal as a watcher failure"
   assert_contains "$text" 'fm-watch-arm.sh" --restart' "OpenCode plugin does not restart into its own watcher child"
   assert_contains "$text" 'setArmStatus("external")' "OpenCode plugin still treats an external healthy watcher as armed"
   pass "OpenCode primary watcher plugin has the verified TUI wake wiring"
@@ -1094,6 +1114,11 @@ test_opencode_arm_does_not_reuse_a_stale_read_only_refusal() {
   release="$TMP_ROOT/opencode-stale-refusal.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config" "$shim"
   git init -q "$repo"
+  # Ownership now resolves through `bin/fm-lock.sh ownership`, so the ancestry
+  # walk this test pins with its ps shim runs in that subprocess. Without the
+  # real scripts the spawn simply fails, the walk never reaches ps, and the
+  # coalescing window this test depends on is never established.
+  install_session_lock_cli "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
