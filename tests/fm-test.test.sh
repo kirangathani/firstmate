@@ -493,4 +493,7 @@ assert_contains "$err" 'listing the canonical whole set instead' "the listing mu
 assert_not_contains "$err" 'assigned' "a listing must not report a run it never performed"
 pass "an escalating --list-local lists the whole set instead of running it"
 
-printf 'ok - fm-test parity suite complete\n'
+# Through pass(), not a raw printf of the same bytes: check 1 extracts pass calls
+# lexically, so a hand-written `ok -` line is a name the run reports that no static
+# identifier accounts for - exactly what check 2 now refuses to compare.
+pass "fm-test parity suite complete"
