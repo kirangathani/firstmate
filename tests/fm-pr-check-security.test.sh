@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Security and regression tests for canonical PR parsing, static merge polls,
+# Security and regression tests for canonical PR-link and git-remote parsing,
+# static merge polls,
 # private atomic artifacts, non-executing migration, and teardown cleanup.
 set -u
 
@@ -411,6 +412,63 @@ EOF
   fm_pr_task_id_valid "$id" || fail "operational validator rejected a path-safe legacy task ID"
   ! fm_task_id_creation_valid "$id" || fail "creation validator accepted an overlong task ID"
   pass "raw-byte parser accepts canonical URLs and rejects the complete adversarial matrix"
+}
+
+# The remote-address parser is the sibling of the PR-link parser above: a
+# different input type, judged by the same shared host and owner/repo rule. A
+# git remote is not a canonical recorded artifact, so it legitimately accepts
+# the forms a link never may - scp-style, ssh, a port, an embedded credential,
+# a trailing .git and any host spelling - while still answering only for GitHub.
+test_remote_parser_matrix() {
+  local row url owner repo
+  while IFS='|' read -r url owner repo; do
+    [ -n "$url" ] || continue
+    FM_PR_NUMBER=sentinel
+    fm_pr_remote_parse "$url" || fail "remote parser rejected a valid GitHub remote: $url"
+    [ "$FM_PR_REMOTE_URL" = "$url" ] || fail "remote parser changed the raw remote: $url"
+    [ "$FM_PR_REMOTE_OWNER" = "$owner" ] || fail "remote parser returned wrong owner: $url"
+    [ "$FM_PR_REMOTE_REPO" = "$repo" ] || fail "remote parser returned wrong repository: $url"
+    [ "$FM_PR_NUMBER" = sentinel ] \
+      || fail "remote parser invented a PR number a remote address does not carry: $url"
+  done <<'EOF'
+https://github.com/o/r|o|r
+https://github.com/o/r.git|o|r
+https://github.com/Owner/Repo-Name.git|Owner|Repo-Name
+https://x-access-token:ghs_secret@github.com/o/r.git|o|r
+https://GITHUB.COM/o/r.git|o|r
+ssh://git@github.com/o/r|o|r
+ssh://git@github.com/o/r.git|o|r
+ssh://git@github.com:22/o/r.git|o|r
+git@github.com:o/r|o|r
+git@github.com:o/r.git|o|r
+git@GitHub.com:someone-else/other.git|someone-else|other
+EOF
+  # A PR link is not a remote address: the parser must not mine one out of it.
+  for row in \
+    /srv/mirrors/origin.git \
+    ../relative/origin.git \
+    https://gitlab.com/o/r.git \
+    https://github.com.evil/o/r.git \
+    https://evilgithub.com/o/r.git \
+    git@evil.com:o/r.git \
+    'https://github.com/o' \
+    'https://github.com/o/r/extra.git' \
+    'https://github.com/-bad/r.git' \
+    'https://github.com/bad--owner/r.git' \
+    'https://github.com/o/..' \
+    'https://github.com/o/r$z.git' \
+    'https://github.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r.git' \
+    'https://github.com/o/r/pull/1'
+  do
+    ! fm_pr_remote_parse "$row" || fail "remote parser accepted a non-GitHub or malformed remote: $row"
+    [ -z "$FM_PR_REMOTE_URL" ] && [ -z "$FM_PR_REMOTE_OWNER" ] && [ -z "$FM_PR_REMOTE_REPO" ] \
+      || fail "a rejected remote left a partial identity behind: $row"
+  done
+  # The fold is what two identities are compared on, and it is the only place
+  # case is allowed to stop mattering.
+  [ "$(fm_pr_github_slug_fold Owner Repo-Name)" = owner/repo-name ] \
+    || fail "the identity fold did not fold case"
+  pass "the remote-address parser accepts every git remote form, rejects non-GitHub, and returns no PR number"
 }
 
 test_invalid_entrypoints_have_zero_side_effects() {
@@ -2724,6 +2782,7 @@ SH
 }
 
 test_parser_matrix
+test_remote_parser_matrix
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

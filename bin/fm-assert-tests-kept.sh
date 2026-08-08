@@ -103,8 +103,13 @@
 #       than origin's REFUSES with exit 2 before either fetch, naming both sides.
 #       Fetching there would compare the branch against a same-named branch in
 #       the wrong repository, the same class of wrong-base verdict as assuming
-#       the default. The URL is parsed by bin/fm-pr-lib.sh's fm_pr_url_parse,
-#       the one owner of that grammar.
+#       the default. Each side is read by the bin/fm-pr-lib.sh parser that owns
+#       its input type - fm_pr_url_parse for the PR link, fm_pr_remote_parse for
+#       origin's address - and compared through fm_pr_github_slug_fold, so the
+#       host and owner/repo rule has one owner rather than a copy per caller.
+#       The refusal names both owner/repo pairs and never origin's raw address,
+#       which can carry an embedded credential that this script's unredirected
+#       stderr would then put in the merge output and any CI log.
 #       DELIBERATE BOUNDARY: when origin's URL is not a GitHub owner/repo at all
 #       (a local path, a bare mirror, a self-hosted or non-GitHub remote) the
 #       mismatch is not determinable, so the check does NOT refuse and fetching
@@ -312,58 +317,28 @@ else
     printf '%s' "$name"
   }
 
-  # github_owner_repo <remote-url>: print <owner>/<repo>, lowercased, when the
-  # URL names a GitHub repository in one of the forms git accepts, and print
-  # NOTHING when it does not. Printing nothing is the "not determinable" answer,
-  # never a mismatch: see this script's header for why a non-GitHub origin must
-  # not refuse. GitHub treats owner and repo case-insensitively, so the caller
-  # compares the lowercased forms.
-  github_owner_repo() {
-    local url=$1 rest host owner repo
-    case "$url" in
-      *://*)
-        rest=${url#*://}
-        case "${rest%%/*}" in
-          *@*) rest=${rest#*@} ;;
-        esac
-        host=${rest%%/*}
-        host=${host%%:*}
-        [ "$host" = github.com ] || return 0
-        rest=${rest#*/}
-        ;;
-      *:*)
-        host=${url%%:*}
-        host=${host#*@}
-        [ "$host" = github.com ] || return 0
-        rest=${url#*:}
-        ;;
-      *) return 0 ;;
-    esac
-    rest=${rest#/}
-    rest=${rest%/}
-    rest=${rest%.git}
-    case "$rest" in */*) ;; *) return 0 ;; esac
-    owner=${rest%%/*}
-    repo=${rest#*/}
-    [ -n "$owner" ] || return 0
-    case "$repo" in ''|*/*) return 0 ;; esac
-    printf '%s/%s' "$owner" "$repo" | tr '[:upper:]' '[:lower:]'
-  }
-
   # assert_pr_repo_is_origin <pr-url>: refuse when the PR lives in a GitHub
   # repository other than the one origin points at. Both PR-derived fetches
   # below read from origin, so a determinable mismatch would silently measure
   # the verdict against a same-named branch in the wrong repository.
+  # Each side is read by the bin/fm-pr-lib.sh parser that owns ITS input type -
+  # a PR link and a git remote address are different grammars - and the two are
+  # compared through that library's fold, so the host and owner/repo rule cannot
+  # be read one way here and another way there.
+  # Origin's raw address is deliberately NOT echoed: it can carry an embedded
+  # credential, and bin/fm-pr-merge.sh redirects this script's stdout but not its
+  # stderr, so the token would reach the merge output and any CI log. The
+  # owner/repo pair already names the side that is wrong.
   assert_pr_repo_is_origin() {
     local pr_url=$1 origin_url pr_slug origin_slug
     fm_pr_url_parse "$pr_url" || return 0
-    pr_slug=$(printf '%s/%s' "$FM_PR_OWNER" "$FM_PR_REPO" | tr '[:upper:]' '[:lower:]')
+    pr_slug=$(fm_pr_github_slug_fold "$FM_PR_OWNER" "$FM_PR_REPO")
     origin_url=$(git -C "$WT" remote get-url origin 2>/dev/null || true)
     [ -n "$origin_url" ] || return 0
-    origin_slug=$(github_owner_repo "$origin_url")
-    [ -n "$origin_slug" ] || return 0
+    fm_pr_remote_parse "$origin_url" || return 0
+    origin_slug=$(fm_pr_github_slug_fold "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO")
     [ "$pr_slug" != "$origin_slug" ] || return 0
-    echo "error: PR $pr_url targets $FM_PR_OWNER/$FM_PR_REPO but this worktree's origin is $origin_slug ($origin_url); refusing rather than fetching a same-named branch from the wrong repository" >&2
+    echo "error: PR $pr_url targets $FM_PR_OWNER/$FM_PR_REPO but this worktree's origin is $FM_PR_REMOTE_OWNER/$FM_PR_REMOTE_REPO; refusing rather than fetching a same-named branch from the wrong repository" >&2
     exit 2
   }
 

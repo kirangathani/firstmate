@@ -54,6 +54,10 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 
+# The GitHub address grammar has one owner per input type; see its header.
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
 FM_BEARINGS_LANDED_PER_HOME=${FM_BEARINGS_LANDED_PER_HOME:-$FM_BEARINGS_LANDED}
@@ -176,11 +180,6 @@ PR_REPOS_SHOWN=0
 PR_ROWS_CAPPED=0
 PR_ROWS_MIN_TOTAL=0
 
-# Parse owner/repo from an https or ssh GitHub remote/PR URL; empty if not GitHub.
-repo_slug() {  # <url>
-  printf '%s' "$1" | sed -n 's#.*github\.com[:/]\([^/]*/[^/]*\)#\1#p' | sed 's#\.git$##; s#/pull/.*$##; s#/$##'
-}
-
 # Bounded gh call; prints stdout, non-zero on timeout/failure. gh only.
 gh_bounded() {  # <args...>
   if command -v timeout >/dev/null 2>&1; then
@@ -199,10 +198,14 @@ if [ "$INCLUDE_PRS" = 1 ]; then
     PR_STATUS='unavailable (gh not found)'
   else
     # Candidate repos: recorded pr= URLs plus live worktree origins. Deduped.
+    # Each source is read by the parser that owns its input type: a recorded
+    # pr= value is a PR LINK, a worktree origin is a REMOTE ADDRESS. An address
+    # neither parser accepts contributes no repository rather than a guess.
     repos=""
     while IFS= read -r u; do
       [ -n "$u" ] || continue
-      s=$(repo_slug "$u"); [ -n "$s" ] || continue
+      fm_pr_url_parse "$u" || continue
+      s="$FM_PR_OWNER/$FM_PR_REPO"
       case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
     done <<EOF
 $(printf '%s' "$SNAP" | jq -r '.tasks[].pr.url // empty')
@@ -211,7 +214,8 @@ EOF
       [ -n "$wt" ] || continue
       [ -d "$wt" ] || continue
       u=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
-      s=$(repo_slug "$u"); [ -n "$s" ] || continue
+      fm_pr_remote_parse "$u" || continue
+      s="$FM_PR_REMOTE_OWNER/$FM_PR_REMOTE_REPO"
       case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
     done <<EOF
 $(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths.worktree.path // empty')

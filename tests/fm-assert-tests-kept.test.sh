@@ -64,7 +64,9 @@
 #        REFUSES (exit 2) rather than falling back to the default, naming the
 #        cause gh reported rather than swallowing it; a recorded PR that lives
 #        in a GitHub repository OTHER than origin's REFUSES before any fetch,
-#        naming both sides, since both PR-derived refs are fetched from origin;
+#        naming both sides, since both PR-derived refs are fetched from origin,
+#        and that refusal names owner/repo only, never origin's raw address,
+#        which can carry an embedded credential;
 #        an origin that is not a GitHub URL at all is NOT a determinable
 #        mismatch and must still resolve normally, which every other case here
 #        covers implicitly because their origin is a local path; a task with
@@ -410,6 +412,34 @@ test_pr_in_another_github_repo_refuses_before_any_fetch() {
   assert_not_contains "$out" 'base:' \
     "pr-base-wrong-repo: refusing must never name a base resolved from the wrong repository"
   pass "a PR whose repository is not origin's refuses rather than fetching a same-named branch"
+}
+
+test_pr_repo_mismatch_refusal_never_leaks_origin_credentials() {
+  local case_dir err code
+  case_dir=$(make_pr_base_case pr-base-credentialed-origin)
+  write_pr_base_gh "$case_dir" feature-base
+  # A credentialed remote is a supported GitHub form, so the mismatch IS
+  # determinable and must refuse - while bin/fm-pr-merge.sh leaves this script's
+  # stderr unredirected, so anything echoed here reaches the merge output and any
+  # CI log.
+  git -C "$case_dir/project" remote set-url origin \
+    https://x-access-token:ghs_notarealtoken@github.com/someone-else/other-repo.git
+
+  set +e
+  run_pr_base_case "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  code=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 2 "$code" \
+    "pr-base-credentialed-origin: a credentialed origin must still refuse on a mismatch"
+  assert_contains "$err" 'someone-else/other-repo' \
+    "pr-base-credentialed-origin: the refusal must still name origin's owner/repo"
+  assert_not_contains "$err" 'ghs_notarealtoken' \
+    "pr-base-credentialed-origin: the refusal must never echo origin's embedded credential"
+  assert_not_contains "$err" 'x-access-token' \
+    "pr-base-credentialed-origin: the refusal must never echo origin's raw address"
+  pass "a mismatch refusal names both repositories without leaking origin's credential"
 }
 
 test_task_without_a_pr_still_resolves_the_default_branch() {
@@ -1779,6 +1809,7 @@ test_js_run_never_mutates_the_live_worktree() {
 test_pr_base_branch_is_compared_against_the_pr_target
 test_unreadable_pr_base_refuses_rather_than_assuming_default
 test_pr_in_another_github_repo_refuses_before_any_fetch
+test_pr_repo_mismatch_refusal_never_leaks_origin_credentials
 test_task_without_a_pr_still_resolves_the_default_branch
 test_explicit_mode_never_consults_github
 test_removed_shell_test_reported_via_meta

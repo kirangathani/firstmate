@@ -2,11 +2,27 @@
 # Shared validation and atomic artifact helpers for GitHub PR merge polling.
 # Callers must validate task IDs and raw PR URLs before constructing task paths
 # or performing any side effect.
+#
+# This file is the ONE owner of the GitHub address grammar, split by INPUT TYPE
+# and not by strictness. There is one parser per input type and one identity
+# rule underneath both, so no caller has to write a third reading of "is this
+# GitHub, and which repository is it":
+#   - fm_pr_url_parse         a PR LINK, the canonical recorded artifact.
+#   - fm_pr_remote_parse      a GIT REMOTE ADDRESS, what `git remote get-url`
+#                             prints. It carries no PR number and returns none.
+#   - fm_pr_github_identity_valid  the shared host and owner/repo rule both of
+#                             the above judge their extracted parts by.
+#   - fm_pr_github_slug_fold  the folded form two identities are COMPARED on,
+#                             since GitHub treats owner and repo
+#                             case-insensitively.
 
 FM_PR_URL=
 FM_PR_OWNER=
 FM_PR_REPO=
 FM_PR_NUMBER=
+FM_PR_REMOTE_URL=
+FM_PR_REMOTE_OWNER=
+FM_PR_REMOTE_REPO=
 FM_PR_DATA_URL=
 FM_PR_DATA_OWNER=
 FM_PR_DATA_REPO=
@@ -61,21 +77,110 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
+# fm_pr_github_identity_valid <host> <owner> <repo>: the ONE rule for which
+# host counts as GitHub and which owner/repo names are real, applied to parts a
+# parser has already extracted. Both parsers call it, so "is this GitHub" cannot
+# be read two different ways.
+# The host is matched case-insensitively because hostnames are; owner and repo
+# are judged, not folded, so each parser can return the spelling its input used
+# and a caller that COMPARES two identities folds both through
+# fm_pr_github_slug_fold instead of trusting either spelling.
+fm_pr_github_identity_valid() {
+  local host=${1-} owner=${2-} repo=${3-} pattern
+  local LC_ALL=C
+  case "$host" in
+    [Gg][Ii][Tt][Hh][Uu][Bb]"."[Cc][Oo][Mm]) ;;
+    *) return 1 ;;
+  esac
+  pattern='^([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])$'
+  [[ "$owner" =~ $pattern ]] || return 1
+  [[ "$owner" != *--* ]] || return 1
+  [[ "$repo" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || return 1
+  [ "$repo" != . ] && [ "$repo" != .. ] || return 1
+}
+
+# fm_pr_github_slug_fold <owner> <repo>: print the form two identities are
+# compared on. GitHub treats owner and repo case-insensitively, so a comparison
+# that does not fold case answers "a different repository" for the same one.
+fm_pr_github_slug_fold() {
+  printf '%s/%s' "${1-}" "${2-}" | tr '[:upper:]' '[:lower:]'
+}
+
+# fm_pr_url_parse <raw>: the sole PR-LINK parser. It takes a PR link and returns
+# owner, repo and number, rejecting anything that is not PR-shaped.
+# The shape is matched here and the identity is judged by
+# fm_pr_github_identity_valid; the literal lowercase `https://github.com/`
+# prefix is this parser's OWN additional requirement, on top of the shared rule
+# rather than instead of it. A recorded link is a canonical artifact that is
+# later compared byte for byte, so a differently-spelled host is a different
+# string and is rejected rather than silently canonicalized.
 fm_pr_url_parse() {
-  local raw=${1-} pattern
+  local raw=${1-} pattern owner repo number
   local LC_ALL=C
   FM_PR_URL=
   FM_PR_OWNER=
   FM_PR_REPO=
   FM_PR_NUMBER=
-  pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
+  pattern='^https://github\.com/([^/]+)/([^/]+)/pull/([1-9][0-9]*)$'
   [[ "$raw" =~ $pattern ]] || return 1
-  [[ "${BASH_REMATCH[1]}" != *--* ]] || return 1
-  [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
+  # Captured before the shared rule runs: its own [[ =~ ]] would clobber
+  # BASH_REMATCH.
+  owner=${BASH_REMATCH[1]}
+  repo=${BASH_REMATCH[2]}
+  number=${BASH_REMATCH[3]}
+  fm_pr_github_identity_valid github.com "$owner" "$repo" || return 1
   FM_PR_URL=$raw
-  FM_PR_OWNER=${BASH_REMATCH[1]}
-  FM_PR_REPO=${BASH_REMATCH[2]}
-  FM_PR_NUMBER=${BASH_REMATCH[3]}
+  FM_PR_OWNER=$owner
+  FM_PR_REPO=$repo
+  FM_PR_NUMBER=$number
+}
+
+# fm_pr_remote_parse <raw>: the sole GIT REMOTE ADDRESS parser, for what
+# `git remote get-url` prints. It accepts the scp-style git@host:owner/repo, the
+# ssh:// and https:// forms, an optional embedded credential, an optional port,
+# and an optional trailing .git.
+# A remote address carries no PR number, so this parser returns none and never
+# touches FM_PR_NUMBER: a caller holding a parsed PR link and a parsed remote at
+# once keeps both.
+# An address that is not GitHub at all is a plain non-zero return with the
+# FM_PR_REMOTE_* set left empty, so a caller can never read a partial answer as
+# an identity.
+# shellcheck disable=SC2034  # FM_PR_REMOTE_* are this parser's return values, read by its callers.
+fm_pr_remote_parse() {
+  local raw=${1-} rest host owner repo
+  local LC_ALL=C
+  FM_PR_REMOTE_URL=
+  FM_PR_REMOTE_OWNER=
+  FM_PR_REMOTE_REPO=
+  case "$raw" in
+    *://*)
+      rest=${raw#*://}
+      # A userinfo@ segment belongs to the authority, so it is stripped only
+      # when it appears before the first path separator.
+      case "${rest%%/*}" in
+        *@*) rest=${rest#*@} ;;
+      esac
+      host=${rest%%/*}
+      host=${host%%:*}
+      case "$rest" in */*) rest=${rest#*/} ;; *) return 1 ;; esac
+      ;;
+    *:*)
+      host=${raw%%:*}
+      host=${host##*@}
+      rest=${raw#*:}
+      ;;
+    *) return 1 ;;
+  esac
+  rest=${rest#/}
+  rest=${rest%/}
+  rest=${rest%.git}
+  case "$rest" in */*) ;; *) return 1 ;; esac
+  owner=${rest%%/*}
+  repo=${rest#*/}
+  fm_pr_github_identity_valid "$host" "$owner" "$repo" || return 1
+  FM_PR_REMOTE_URL=$raw
+  FM_PR_REMOTE_OWNER=$owner
+  FM_PR_REMOTE_REPO=$repo
 }
 
 fm_pr_head_valid() {
