@@ -21,6 +21,14 @@
 # an empty cache manifest inverted an awk NR==FNR lookup, the work set came out
 # empty, and the gate reported all 152 files clean without running ShellCheck at
 # all. A lint gate that silently passes everything is worse than a slow one.
+#
+# Third contract, added when the cache moved from the worktree-private git dir
+# to the repository's common one: the cache is only worth having if it survives
+# the way this gate is actually run, which is once per fresh disposable
+# worktree. The worktree cases below assert the shared location, the resulting
+# cross-worktree hit, and the two documented escape hatches. Sharing one
+# directory also means two runs can publish at once, so the last two cases pin
+# the atomic-publication rule that makes that safe.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -90,6 +98,25 @@ set -eu
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 printf '%s\n' "$TEST_LIB"
 SH
+}
+
+# fm_lint_worktree_fixture <tmp> [n]: build the fixture at "$tmp/repo" as a REAL
+# git repository and add <n> LINKED worktrees at "$tmp/w1".."$tmp/wN".
+# The whole point of the cache-directory contract is the difference between a
+# linked worktree's PRIVATE git dir and the repository's COMMON one, and that
+# difference only exists in a genuine linked worktree, so these tests create one
+# rather than simulating the paths.
+fm_lint_worktree_fixture() {
+  local tmp=$1 n=${2:-2} i=0
+  fm_lint_fixture "$tmp/repo"
+  git -C "$tmp/repo" init -q
+  git -C "$tmp/repo" add -A
+  git -C "$tmp/repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm fixture
+  while [ "$i" -lt "$n" ]; do
+    i=$((i + 1))
+    git -C "$tmp/repo" worktree add --quiet --detach "$tmp/w$i" HEAD
+  done
 }
 
 # A genuine default-severity finding (SC1007), appended to any fixture file.
@@ -474,6 +501,200 @@ test_unmodelled_directive_falls_back_to_whole_set() {
   pass "an unmodelled shellcheck directive falls back to the whole-set command"
 }
 
+test_cache_lives_in_the_shared_common_git_dir() {
+  if ! pinned_ready; then
+    pass "SKIP (pinned ShellCheck not resolved): shared-cache location check"
+    return
+  fi
+  # `git rev-parse --git-dir` in a linked worktree is that worktree's PRIVATE
+  # directory. Every crewmate runs this gate in a fresh disposable worktree, so
+  # a private cache was cold on every single run and the gate always paid full
+  # price. The cache must resolve from the COMMON git dir instead, which every
+  # worktree of the repository shares.
+  local tmp out rc private
+  tmp=$(fm_test_tmproot fm-lint-commondir)
+  fm_lint_worktree_fixture "$tmp" 1
+  private="$(git -C "$tmp/w1" rev-parse --git-dir)/fm-lint-cache"
+  rc=0
+  out=$(cd "$tmp/w1" && ./bin/fm-lint.sh 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "clean fixture failed its first lint in a linked worktree (exit $rc)"$'\n'"$out"
+  assert_present "$tmp/repo/.git/fm-lint-cache/manifest" \
+    "a linked worktree did not record its clean result in the repository's common .git"
+  assert_absent "$private" \
+    "a linked worktree wrote a per-worktree private cache, which is cold on every fresh worktree"
+  pass "the cache resolves to the repository's common git dir, not a worktree-private one"
+}
+
+test_one_worktree_warms_the_next() {
+  if ! pinned_ready; then
+    pass "SKIP (pinned ShellCheck not resolved): cross-worktree cache-hit check"
+    return
+  fi
+  # The consequence the shared directory exists for: a clean result recorded by
+  # one worktree must serve an identical tree in a DIFFERENT worktree. This is
+  # exactly the crewmate case - each task gets its own fresh worktree of the
+  # same repository - so a private cache made every run a cold run.
+  local tmp out rc
+  tmp=$(fm_test_tmproot fm-lint-crosswt)
+  fm_lint_worktree_fixture "$tmp" 2
+  rc=0
+  out=$(cd "$tmp/w1" && ./bin/fm-lint.sh 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "clean fixture failed its first lint in worktree 1 (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "(0 cached clean)" \
+    "the first worktree's run was not cold, so the second worktree's hit would prove nothing"
+  rc=0
+  out=$(cd "$tmp/w2" && ./bin/fm-lint.sh 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "clean fixture failed its lint in worktree 2 (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "unchanged since their last clean lint" \
+    "a second worktree of the same repository did not reuse the first worktree's clean result"
+  pass "a clean result recorded in one worktree serves an identical tree in another"
+}
+
+test_cache_dir_override_and_disable_survive_the_shared_default() {
+  if ! pinned_ready; then
+    pass "SKIP (pinned ShellCheck not resolved): cache override/disable check"
+    return
+  fi
+  # Sharing the default location must not quietly change the two documented
+  # escape hatches: FM_LINT_CACHE_DIR still wins outright (and nothing is then
+  # written to the common git dir), and FM_LINT_NO_CACHE=1 still reads and
+  # writes nothing at all, in a linked worktree just as anywhere else.
+  local tmp out rc common
+  tmp=$(fm_test_tmproot fm-lint-override)
+  fm_lint_worktree_fixture "$tmp" 2
+  common="$tmp/repo/.git/fm-lint-cache"
+  rc=0
+  out=$(cd "$tmp/w1" && FM_LINT_CACHE_DIR="$tmp/elsewhere" ./bin/fm-lint.sh 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "overridden-cache run failed on a clean fixture (exit $rc)"$'\n'"$out"
+  assert_present "$tmp/elsewhere/manifest" "FM_LINT_CACHE_DIR did not receive the clean result"
+  assert_absent "$common" "FM_LINT_CACHE_DIR was overridden yet the common git dir was still written"
+  # The override is a real cache, not just a directory that got created.
+  rc=0
+  out=$(cd "$tmp/w2" && FM_LINT_CACHE_DIR="$tmp/elsewhere" ./bin/fm-lint.sh 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "second overridden-cache run failed (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "unchanged since their last clean lint" \
+    "an overridden cache directory did not serve its recorded clean result"
+  # Disabled: no hits read from the populated override, and nothing written.
+  rc=0
+  out=$(cd "$tmp/w2" && FM_LINT_NO_CACHE=1 FM_LINT_CACHE_DIR="$tmp/elsewhere" ./bin/fm-lint.sh 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "cache-disabled run failed on a clean fixture (exit $rc)"$'\n'"$out"
+  assert_not_contains "$out" "unchanged since their last clean lint" \
+    "FM_LINT_NO_CACHE=1 still served results from the cache"
+  assert_contains "$out" "(0 cached clean)" "FM_LINT_NO_CACHE=1 still counted cache hits"
+  rc=0
+  out=$(cd "$tmp/w1" && FM_LINT_NO_CACHE=1 ./bin/fm-lint.sh 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "cache-disabled default-location run failed (exit $rc)"$'\n'"$out"
+  assert_absent "$common" "FM_LINT_NO_CACHE=1 still created the shared cache directory"
+  pass "FM_LINT_CACHE_DIR and FM_LINT_NO_CACHE=1 behave as documented under the shared default"
+}
+
+test_publication_never_uses_a_fixed_staging_name() {
+  if ! pinned_ready; then
+    pass "SKIP (pinned ShellCheck not resolved): staging-name check"
+    return
+  fi
+  # Sharing one cache directory between worktrees means two runs can publish at
+  # the same moment. Both files are published by writing a staging file and
+  # renaming it, and the rename is atomic - but only if each run owns its own
+  # staging file. With the fixed "<file>.new" both used, two runs write the SAME
+  # staging path and the atomic rename then publishes a spliced mixture of both.
+  #
+  # A race window is probabilistic, so this asserts the property deterministically
+  # instead: a sentinel parked at each old fixed staging path must survive a full
+  # clean run untouched, and the run must leave no staging file of its own behind.
+  local tmp cache out rc leftovers
+  tmp=$(fm_test_tmproot fm-lint-staging)
+  cache="$tmp/cache"
+  fm_lint_fixture "$tmp/repo"
+  mkdir -p "$cache"
+  printf 'sentinel-manifest\n' > "$cache/manifest.new"
+  printf 'sentinel-discovery\n' > "$cache/discovery.new"
+  rc=0
+  out=$(FM_LINT_CACHE_DIR="$cache" "$tmp/repo/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "clean fixture failed its lint (exit $rc)"$'\n'"$out"
+  [ "$(cat "$cache/manifest.new")" = "sentinel-manifest" ] \
+    || fail "the manifest was published through the fixed staging name two concurrent runs would share"
+  [ "$(cat "$cache/discovery.new")" = "sentinel-discovery" ] \
+    || fail "the discovery cache was published through the fixed staging name two concurrent runs would share"
+  assert_present "$cache/manifest" "the run did not publish a manifest at all"
+  assert_present "$cache/discovery" "the run did not publish a discovery cache at all"
+  leftovers=$(find "$cache" -mindepth 1 -maxdepth 1 \
+    ! -name manifest ! -name discovery ! -name manifest.new ! -name discovery.new -print)
+  [ -z "$leftovers" ] || fail "the run left staging files behind in the shared cache directory:"$'\n'"$leftovers"
+  pass "each run publishes through its own staging file, not a shared fixed name"
+}
+
+test_concurrent_runs_publish_a_whole_cache_not_a_spliced_one() {
+  if ! pinned_ready; then
+    pass "SKIP (pinned ShellCheck not resolved): concurrent-publication check"
+    return
+  fi
+  # End-to-end companion to the staging-name check: several trees publishing to
+  # ONE shared cache directory at once must leave a cache that is exactly one
+  # run's complete publication, never a mixture. Each fixture carries a distinct
+  # extra file, so the trees' manifests genuinely differ and a splice cannot
+  # coincidentally match. Every run must also still reach a clean verdict.
+  local tmp n i rc pids p out manifest
+  tmp=$(fm_test_tmproot fm-lint-concurrent)
+  n=6
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    i=$((i + 1))
+    fm_lint_fixture "$tmp/r$i"
+    # Distinct contents AND a distinct path, so run i's manifest can never be a
+    # line-for-line match for run j's.
+    printf '#!/usr/bin/env bash\nUNIQ_%s=%s\nexport UNIQ_%s\n' "$i" "$i" "$i" > "$tmp/r$i/bin/uniq-$i.sh"
+    # Capture what run i publishes when it is the only writer: the manifest is
+    # derived from that tree alone, so this is the exact byte sequence a
+    # concurrent run of it must publish too.
+    rc=0
+    FM_LINT_CACHE_DIR="$tmp/solo$i" "$tmp/r$i/bin/fm-lint.sh" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] || fail "concurrency fixture $i failed its solo lint (exit $rc)"
+  done
+  pids=
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    i=$((i + 1))
+    (
+      FM_LINT_CACHE_DIR="$tmp/shared" "$tmp/r$i/bin/fm-lint.sh" >"$tmp/out.$i" 2>&1
+      printf '%s\n' "$?" > "$tmp/rc.$i"
+    ) &
+    pids="$pids $!"
+  done
+  for p in $pids; do
+    wait "$p" || true
+  done
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    i=$((i + 1))
+    [ -f "$tmp/rc.$i" ] || fail "concurrent run $i produced no exit status"
+    rc=$(cat "$tmp/rc.$i")
+    [ "$rc" -eq 0 ] || fail "concurrent run $i did not reach a clean verdict (exit $rc)"$'\n'"$(cat "$tmp/out.$i")"
+  done
+  manifest="$tmp/shared/manifest"
+  assert_present "$manifest" "concurrent runs published no manifest at all"
+  i=0
+  out=
+  while [ "$i" -lt "$n" ]; do
+    i=$((i + 1))
+    if cmp -s "$manifest" "$tmp/solo$i/manifest"; then
+      out=matched
+      break
+    fi
+  done
+  [ "$out" = matched ] || \
+    fail "the shared manifest matches no single run's publication, so concurrent writers spliced it:"$'\n'"$(cat "$manifest")"
+  # The discovery cache's contents legitimately depend on what a run read, so
+  # only its shape is fixed: one "<version> <flags> <sha256>\t<edges>" record per
+  # line. A splice shows up here as a line that does not parse.
+  awk -F'\t' -v VER="$REQUIRED" '
+    NF < 2 || $1 !~ ("^" VER " --norc [0-9a-f][0-9a-f]*$") { print "malformed: " $0; bad = 1 }
+    END { exit bad ? 1 : 0 }
+  ' "$tmp/shared/discovery" \
+    || fail "concurrent runs left a spliced discovery cache:"$'\n'"$(cat "$tmp/shared/discovery")"
+  pass "concurrent runs on one shared cache publish whole files, never a splice"
+}
+
 test_owner_exists_and_executable() {
   assert_present "$LINT" "bin/fm-lint.sh is missing"
   [ -x "$LINT" ] || fail "bin/fm-lint.sh must be executable so CI/gate can run it directly"
@@ -643,3 +864,8 @@ test_unclassifiable_disable_falls_back_to_whole_set
 test_verify_parity_fails_when_fast_path_falls_back
 test_exec_lines_carry_exactly_lint_flags
 test_unmodelled_directive_falls_back_to_whole_set
+test_cache_lives_in_the_shared_common_git_dir
+test_one_worktree_warms_the_next
+test_cache_dir_override_and_disable_survive_the_shared_default
+test_publication_never_uses_a_fixed_staging_name
+test_concurrent_runs_publish_a_whole_cache_not_a_spliced_one

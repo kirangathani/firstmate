@@ -99,6 +99,29 @@
 #                      diagram carries anyway) first, then the space between each
 #                      label and its count, and only then lets the line wrap -
 #                      it never spends a digit.
+#                      The base is resolved HERE, by this caller, and the probe
+#                      is then handed it as --base: the gate this box previews
+#                      compares against the branch the task's recorded PR
+#                      actually targets, so this box resolves that same branch
+#                      first (through bin/fm-pr-lib.sh's fm_pr_base_branch_read,
+#                      the one owner of that question) and only falls through to
+#                      origin/HEAD and then main|master when there is no PR or
+#                      its base cannot be read. A preview that contradicted the
+#                      gate it previews would show `!!` on a sound stacked PR, or
+#                      a clean row while the merge gate refuses - the exact
+#                      wrong-base class the gate was changed to stop producing.
+#                      Resolving it here rather than in the probe is deliberate:
+#                      the probe keeps running in explicit --worktree/--base
+#                      mode, which never consults GitHub.
+#                      That single GitHub query is bounded by
+#                      FM_NM_FLOW_PR_BASE_TIMEOUT (default 15s) exactly as the
+#                      probe is, and rides along with the probe's one run per
+#                      invocation, so no watch frame repeats it.
+#                      Where the gate REFUSES on a PR base it cannot read, this
+#                      box DEGRADES, because it blocks nothing: it falls back to
+#                      the default branch and the base legend line SAYS the PR's
+#                      base was not read, so a fallback can never be mistaken for
+#                      a PR-derived verdict.
 #                      Explicit mode never fetches, so the base may lag origin;
 #                      it executes the base's own test files (check 2), so
 #                      it costs real time - that is why it is opt-in, why the
@@ -107,10 +130,13 @@
 #                      by FM_NM_FLOW_TESTS_TIMEOUT (default 300s) and refuses to
 #                      run at all when nothing on the host can bound it, and why
 #                      three legend lines under the diagram qualify the result
-#                      the row is showing: which base it compared against and
-#                      that that base is a LOCAL ref this viewer deliberately
-#                      never fetched (the merge gate refetches it, so the two can
-#                      disagree); the DATE, time and pipeline step the snapshot
+#                      the row is showing: which base it compared against, where
+#                      that base came from (the PR's own base, a fallback because
+#                      the PR's base could not be read, or the project default
+#                      when no PR is recorded) and that it is a LOCAL ref this
+#                      viewer deliberately never fetched (the merge gate refetches
+#                      it, so the two can disagree); the DATE, time and pipeline
+#                      step the snapshot
 #                      was taken at (the probe runs ONCE per invocation, so every
 #                      later watch frame re-renders that same point-in-time
 #                      result, never a live verdict on current HEAD, and a bare
@@ -198,8 +224,11 @@
 #
 # Read-only guarantee: this viewer only ever runs `no-mistakes axi status`,
 # `no-mistakes axi logs`, `no-mistakes runs`, git ref reads, plain reads of the
-# captain's supersession record and exec-gate marker, and (opt-in) the
-# report-only fm-assert-tests-kept.sh explicit mode. It never responds to
+# captain's supersession record and exec-gate marker, (opt-in) the
+# report-only fm-assert-tests-kept.sh explicit mode, and (opt-in, only when the
+# task recorded a PR) one `gh pr view <url> --json baseRefName` read bounded by
+# FM_NM_FLOW_PR_BASE_TIMEOUT - the only outbound network call this script makes,
+# and a read that mutates nothing. It never responds to
 # gates, never writes outside its own mktemp dir, and never mutates task state.
 # The probe is run with FM_GUARD_READ_ONLY=1 AND FM_STATE_OVERRIDE pointed at
 # the probe's own scratch dir for that last claim to be literally true.
@@ -241,6 +270,11 @@ NM_TIMEOUT=${FM_NM_FLOW_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*|0) NM_TIMEOUT=10 ;; esac
 TESTS_TIMEOUT=${FM_NM_FLOW_TESTS_TIMEOUT:-300}
 case "$TESTS_TIMEOUT" in ''|*[!0-9]*|0) TESTS_TIMEOUT=300 ;; esac
+# Its own bound, much shorter than the probe's: this one is a single GitHub
+# query, so a value sized for running a test suite would leave the box blank for
+# minutes on an unreachable network.
+PR_BASE_TIMEOUT=${FM_NM_FLOW_PR_BASE_TIMEOUT:-15}
+case "$PR_BASE_TIMEOUT" in ''|*[!0-9]*|0) PR_BASE_TIMEOUT=15 ;; esac
 
 usage() {
   cat <<'EOF'
@@ -538,18 +572,92 @@ nm_runs_status_for_branch() {  # <branch>
 
 # --- optional merge-gate probe (opt-in, once per invocation) -----------------
 
-# Explicit-mode base ref: origin's default branch when a remote-tracking ref is
-# present (never fetched here - read-only), else the local main/master.
-tests_gate_base() {
-  local sym cand
+# tests_gate_pr_base <scratch-dir>: the branch the task's recorded PR targets,
+# printed on stdout, or non-zero when it cannot be read.
+# The question is asked through bin/fm-pr-lib.sh's fm_pr_base_branch_read, the
+# ONE owner of it, because this box previews bin/fm-assert-tests-kept.sh and a
+# preview that read the base its own way would preview a different gate.
+# The library call is reached through a child `bash -c` for one reason: it is a
+# NETWORK call that can hang, and run_bounded_bg is how this viewer bounds
+# anything that can - but its arm must stay a SIMPLE command for $! to be the
+# bounding tool itself (see run_bounded_bg), and a shell function is not one.
+# Sourcing the library in the child is what keeps the one-owner rule and the
+# bound compatible.
+# The query rides along with the probe, which runs ONCE per invocation, so no
+# watch frame ever repeats it: resolving per frame would put a network call on
+# the render path of a viewer that refreshes on a timer.
+# The answer is returned through TESTS_GATE_PR_BASE rather than on stdout, and
+# the caller must NOT invoke this in a command substitution: run_bounded_bg sets
+# the global PROBE_PID that on_int_term kills, and a subshell's assignment never
+# reaches the parent, so a Ctrl-C during the query would kill nothing and orphan
+# the bounded child. Bash starts background jobs with SIGINT ignored, so the
+# terminal's own signal would not reach it either.
+TESTS_GATE_PR_BASE=""
+tests_gate_pr_base() {  # <scratch-dir>
+  local scratch=$1
+  TESTS_GATE_PR_BASE=""
+  # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
+  run_bounded_bg "$PR_BASE_TIMEOUT" bash -c \
+    '. "$1" || exit 1; fm_pr_base_branch_read "$2" "$3" "$4"' \
+    fm-nm-flow-pr-base "$SCRIPT_DIR/fm-pr-lib.sh" "$WT" "$PR_URL" "$scratch/prbase.cause" \
+    > "$scratch/prbase.name" 2>/dev/null || return 1
+  TESTS_GATE_PR_BASE=$(cat "$scratch/prbase.name" 2>/dev/null || true)
+  [ -n "$TESTS_GATE_PR_BASE" ] || return 1
+}
+
+# The base ref the probe compares against, in TESTS_GATE_BASE, with where it
+# came from in TESTS_GATE_BASE_SRC (pr, fallback or default). Returns non-zero
+# when no base ref resolves at all.
+# The gate this box previews resolves the base from the PR the task recorded, so
+# this resolves it the same way FIRST: a preview that contradicts the gate it
+# previews is worse than no preview, and the default branch is exactly the
+# assumption the gate was changed to stop making.
+# The gate REFUSES when a recorded PR's base cannot be read, because it blocks a
+# merge. This is a VIEWER, so it degrades instead: it falls through to the same
+# default-branch chain it has always used and marks the row `fallback`, so the
+# box never shows a default-branch verdict while silently implying a PR-derived
+# one. The resolution stays in this caller, so the probe below keeps running
+# fm-assert-tests-kept.sh in explicit --worktree/--base mode, which never
+# consults GitHub.
+# The fallback chain itself is unchanged: origin's default branch when a
+# remote-tracking ref is present (never fetched here - read-only), else the
+# local main/master.
+TESTS_GATE_BASE=""
+TESTS_GATE_BASE_SRC=""
+tests_gate_base() {  # <scratch-dir>
+  local scratch=$1 sym cand pr_branch
+  TESTS_GATE_BASE=""
+  TESTS_GATE_BASE_SRC='default'
+  if [ -n "$PR_URL" ]; then
+    TESTS_GATE_BASE_SRC='fallback'
+    # Called WITHOUT a command substitution on purpose - see tests_gate_pr_base.
+    if tests_gate_pr_base "$scratch"; then
+      pr_branch=$TESTS_GATE_PR_BASE
+      # Read-only holds here too: the PR's base is used only if a ref for it is
+      # ALREADY present locally, never fetched to make it resolve.
+      for cand in "origin/$pr_branch" "$pr_branch"; do
+        if git -C "$WT" rev-parse --verify --quiet "$cand" >/dev/null 2>&1; then
+          TESTS_GATE_BASE=$cand
+          TESTS_GATE_BASE_SRC='pr'
+          return 0
+        fi
+      done
+      # GitHub answered, but no ref for that branch is here yet. That is a
+      # different problem from a failed read and has a different remedy - a
+      # fetch the operator runs, since this path never fetches - so it must not
+      # share the `fallback` label that sends them to check GitHub access.
+      TESTS_GATE_BASE_SRC='unfetched'
+      TESTS_GATE_PR_BASE=$pr_branch
+    fi
+  fi
   sym=$(git -C "$WT" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$sym" ]; then
-    printf '%s' "${sym#refs/remotes/}"
+    TESTS_GATE_BASE=${sym#refs/remotes/}
     return 0
   fi
   for cand in origin/main origin/master main master; do
     if git -C "$WT" rev-parse --verify --quiet "$cand" >/dev/null 2>&1; then
-      printf '%s' "$cand"
+      TESTS_GATE_BASE=$cand
       return 0
     fi
   done
@@ -559,6 +667,12 @@ tests_gate_base() {
 MGATE_ANN="prior-tests: pending (checked at merge)"
 MGATE_NAMEONLY=0
 MGATE_BASE=""
+# Where MGATE_BASE came from: `pr` when it is the branch the recorded PR
+# targets, `fallback` when a PR is recorded but its base could not be resolved,
+# `default` when no PR is recorded at all. The box names it, because the same
+# ref name means a different thing in each case and a fallback that did not say
+# so would be the silent default-branch verdict this preview exists to stop.
+MGATE_BASE_SRC=""
 # When and where the single probe ran. The probe runs ONCE per invocation by
 # design, so every watch frame after it re-renders the same numbers: the stamp
 # is what keeps that from reading as a live verdict on whatever HEAD has become
@@ -794,6 +908,7 @@ mgate_step_label() {
 run_tests_gate() {
   local base out_file missing failing unexec excused skipped unacct unstable summary
   MGATE_BASE=""
+  MGATE_BASE_SRC=""
   # Date AND time: a pane left open overnight would otherwise stamp a bare
   # clock reading that scans as this morning's, which is exactly the age at
   # which the staleness matters most.
@@ -807,16 +922,30 @@ run_tests_gate() {
     MGATE_NAMEONLY=0
     return
   fi
-  if ! base=$(tests_gate_base); then
-    MGATE_ANN="prior-tests: pending (no base ref found)"
-    return
-  fi
-  local tmpd
-  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-flow.XXXXXX") || {
+  # The scratch dir is created BEFORE the base is resolved, because resolving a
+  # PR-recorded base needs somewhere private to put the query's output and its
+  # diagnostic, and this dir is the one thing the EXIT trap already removes.
+  #
+  # The trap-visible global is the assignment target ITSELF, not a local that is
+  # published to it a line later: bash runs a pending signal trap BETWEEN
+  # commands, so a two-step "assign to a local, then copy to the global" leaves a
+  # window in which the directory already exists and the EXIT trap still reads an
+  # empty MGATE_TMPD - and the scratch dir leaks. The failure branch clears the
+  # global explicitly, because a failed command substitution can leave it holding
+  # partial output that clean_tmpd would then rm -rf without this having created
+  # it.
+  MGATE_TMPD=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-flow.XXXXXX") || {
+    MGATE_TMPD=""
     MGATE_ANN="prior-tests: pending (tmp unavailable)"
     return
   }
-  MGATE_TMPD=$tmpd
+  local tmpd=$MGATE_TMPD
+  if ! tests_gate_base "$tmpd"; then
+    MGATE_ANN="prior-tests: pending (no base ref found)"
+    clean_tmpd
+    return
+  fi
+  base=$TESTS_GATE_BASE
   out_file="$tmpd/kept.out"
   local rc=0
   # TWO mechanisms hold this viewer's read-only claim up, and NEITHER is
@@ -924,6 +1053,7 @@ run_tests_gate() {
     local d_excused=$excused
     [ "$EX_EVAL" -eq 0 ] && d_excused='-'
     MGATE_BASE=$base
+    MGATE_BASE_SRC=$TESTS_GATE_BASE_SRC
     MGATE_ANN=$(mgate_counts_ann "$missing" "$failing" "$unexec" "$d_excused" \
       "$skipped" "$unacct" "$unstable")
   fi
@@ -1258,8 +1388,8 @@ line_rows() {  # <line>
   printf '%s' $(( ${#s} == 0 ? 1 : (${#s} - 1) / COLS + 1 ))
 }
 
-build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files>
-  local ann=$1 mbase=$2 nameonly=$3
+build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files> <mgate-base-src>
+  local ann=$1 mbase=$2 nameonly=$3 mbase_src=${4:-}
   FRAME_LINES=()
   FRAME_RANK=()
   FRAME_MEASURED=0
@@ -1311,12 +1441,40 @@ build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files>
   # counts outrank the prose that qualifies them. Do not split one of these into
   # two for readability without re-checking the 24-row budget in render().
   if [ -n "$mbase" ]; then
-    # The base is whatever refs/remotes/origin/HEAD points at LOCALLY: this
-    # viewer deliberately never fetches (that is what keeps it read-only and
-    # cheap), so the ref can be a day stale while the row reads as agreement
-    # with current main. The gate refetches, so the two can disagree and this
-    # row is never proof the merge will be allowed.
-    core_line "prior-tests: base $mbase: LOCAL, never fetched; the gate refetches it"
+    # Whatever ref it is, it is read LOCALLY: this viewer deliberately never
+    # fetches (that is what keeps it read-only and cheap), so the ref can be a
+    # day stale while the row reads as agreement with current main. The gate
+    # refetches, so the two can disagree and this row is never proof the merge
+    # will be allowed.
+    #
+    # WHERE the ref came from is named in the same line rather than on a fourth
+    # one, and the 24-row budget below is why: a plain 80x24 pane has exactly
+    # one row of slack over the core block, and spending it here would cost
+    # every PR-backed task its last legend line. The three cases read
+    # differently and must not be collapsed - a PR-derived base is the branch
+    # the merge gate will really use, a fallback is this viewer failing to reach
+    # that branch and showing the default instead, and a plain default is a task
+    # with no PR at all.
+    # Every suffix is budgeted against the LONGEST, not written to read best on
+    # its own: this is an undroppable core row, so one over-long suffix wraps at
+    # COLS=80 and trips the CORE_ROWS check that collapses the whole box, losing
+    # all six counts. `origin/feature-base` is an ordinary stacked-PR base and
+    # is what the budget has to survive, so no suffix here may exceed the 39
+    # characters of the longest below.
+    case "$mbase_src" in
+      pr)
+        core_line "prior-tests: base $mbase: the PR's own base, LOCAL; gate refetches"
+        ;;
+      fallback)
+        core_line "prior-tests: base $mbase: no PR base read, LOCAL; gate refetches"
+        ;;
+      unfetched)
+        core_line "prior-tests: base $mbase: PR base not local; gate refetches"
+        ;;
+      *)
+        core_line "prior-tests: base $mbase: LOCAL, never fetched; gate refetches"
+        ;;
+    esac
     # The probe runs once per invocation, so in watch mode this same result is
     # re-rendered for every later frame while the pipeline keeps committing.
     # Stamping the date, the time and the step it was taken at is what stops an
@@ -1377,7 +1535,7 @@ frame_measure() {
 }
 
 render() {
-  build_frame "$MGATE_ANN" "$MGATE_BASE" "$MGATE_NAMEONLY"
+  build_frame "$MGATE_ANN" "$MGATE_BASE" "$MGATE_NAMEONLY" "$MGATE_BASE_SRC"
   # The backstop behind the undroppable qualifiers: a pane too short to carry
   # the result, its qualifiers AND the mandatory drop notice gets none of them
   # - the box degrades to a non-committal pending form for the frame, so no
@@ -1389,7 +1547,7 @@ render() {
   if [ "$WATCH" = 1 ] && [ -n "$MGATE_BASE" ]; then
     frame_measure
     if [ "$TOTAL_ROWS" -gt "$ROWS" ] && [ $((CORE_ROWS + 1)) -gt "$ROWS" ]; then
-      build_frame "prior-tests: pending (pane too short to qualify)" "" 0
+      build_frame "prior-tests: pending (pane too short to qualify)" "" 0 ""
     fi
   fi
   emit_frame

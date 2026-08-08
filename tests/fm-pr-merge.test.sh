@@ -136,6 +136,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *baseRefName*) printf '%s\n' 'main' ; exit 0 ;;
       *statusCheckRollup*)
         if [ -e '$case_dir/pr-checks-unreadable' ]; then
           echo 'mock: rollup query failed' >&2
@@ -174,6 +175,7 @@ SH
 #!/usr/bin/env bash
 case " $* " in
   *statusCheckRollup*) printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tmock-default-ci\n' ;;
+  *baseRefName*) printf 'main\n' ;;
 esac
 exit 0
 SH
