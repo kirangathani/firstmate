@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assert a rebase never reduces the test assertions main already had.
+# Assert a rebase never reduces the test assertions the base already had.
 #
 # The one step where an agent can silently discard work that is not its own is
 # rebase conflict resolution. When two branches change the same function, both
@@ -74,7 +74,8 @@
 # owned by bin/fm-test-exec-lib.sh; this script orchestrates them.
 #
 # Report only: a legitimately renamed or intentionally removed test IS reported,
-# because removing an assertion main already had must be justified, not silent.
+# because removing an assertion the base already had must be justified, not
+# silent.
 # There is no suppression mechanism; the script reports, it does not decide
 # (the captain-approved supersession record consulted by bin/fm-pr-merge.sh is
 # that script's contract, not this one's).
@@ -148,9 +149,12 @@
 #     reported but do NOT affect the exit code. This script reports; it does not
 #     decide which classes block a merge (that is bin/fm-pr-merge.sh's contract,
 #     not this one's).
-#   - Exit 2 when the check cannot run at all (bad usage, missing meta,
-#     missing worktree or project, unresolvable refs), so a caller gating on
-#     this script can tell "assertions vanished" from "could not verify".
+#   - Exit 2 when the check cannot run at all, so a caller gating on this
+#     script can tell "assertions vanished" from "could not verify": bad usage,
+#     missing meta, missing worktree or project, unresolvable refs, and every
+#     way the base itself cannot be established honestly - an unreadable PR base
+#     branch, a recorded PR in a GitHub repository other than origin's, or a
+#     base branch that could not be fetched from origin.
 #
 # FM_ASSERT_TESTS_TIMEOUT caps each executed test file's runtime in seconds
 # (default 300) when a `timeout` binary exists; a timed-out branch run counts
