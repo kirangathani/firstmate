@@ -61,6 +61,16 @@
 #   (z7) an unreadable rollup (gh query failure) refuses as unverified
 #   (z8) an entry the classification table cannot classify refuses as
 #        unverified rather than guessed at
+#
+# Testing-waiver disclosure (contract in bin/fm-pr-merge.sh's header), driven off
+# the skip fields bin/fm-spawn.sh records in the task's own meta:
+#   (w1) a waived PR merges and prints the banner both before the gates and on
+#        the line before the merge
+#   (w2) an unflagged task's merge log is byte-unchanged
+#   (w3) the waiver does not excuse a red PR
+#   (w4) the waiver does not excuse a PR reporting zero checks
+#   (w5) the kept-tests gate still runs, and still refuses, under every
+#        skip-flag combination
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -126,6 +136,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *baseRefName*) printf '%s\n' 'main' ; exit 0 ;;
       *statusCheckRollup*)
         if [ -e '$case_dir/pr-checks-unreadable' ]; then
           echo 'mock: rollup query failed' >&2
@@ -164,6 +175,7 @@ SH
 #!/usr/bin/env bash
 case " $* " in
   *statusCheckRollup*) printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tmock-default-ci\n' ;;
+  *baseRefName*) printf 'main\n' ;;
 esac
 exit 0
 SH
@@ -1294,6 +1306,135 @@ test_unclassifiable_check_refuses_unverified() {
   pass "a check the classification table cannot classify refuses as unverified"
 }
 
+# --- testing-waiver disclosure (contract in bin/fm-pr-merge.sh's header) ------
+#
+# A waived PR must be mergeable, must never look like a tested one in the log,
+# and must not have loosened any gate on its way through.
+
+# add_skip_flags <case_dir> <meta line>...: record a dispatch-time testing skip
+# on the task, exactly as bin/fm-spawn.sh writes it. It is appended to the task's
+# own meta on purpose: the disclosure is read from firstmate's durable record on
+# the captain's machine, never from anything the PR carries.
+add_skip_flags() {
+  local case_dir=$1 line
+  shift
+  for line in "$@"; do
+    printf '%s\n' "$line" >> "$case_dir/state/task-x1.meta"
+  done
+}
+
+test_waived_pr_merges_but_announces_the_waiver() {
+  local case_dir rc
+  case_dir=$(make_case waiver-announced)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" a100000000000000000000000000000000000001
+  : > "$case_dir/gh-axi.log"
+  add_skip_flags "$case_dir" 'local_skip=on' 'ci_skip=on'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/80 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "waiver-announced: a waived PR must still be mergeable"
+  grep -qxF 'pr merge 80 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "waiver-announced: the waived PR was not merged"
+  assert_grep 'TESTING WAIVER' "$case_dir/stderr" "waiver-announced: no waiver banner was printed"
+  assert_grep 'local pipeline:  SKIPPED' "$case_dir/stderr" "waiver-announced: the local skip was not named"
+  assert_grep 'CI test jobs:    WAIVED' "$case_dir/stderr" "waiver-announced: the CI waiver was not named"
+  assert_grep 'MERGING NOW' "$case_dir/stderr" "waiver-announced: the banner was not repeated at the merge"
+  pass "a waived PR merges and says so loudly, twice"
+}
+
+test_unwaived_pr_prints_no_waiver_banner() {
+  local case_dir
+  case_dir=$(make_case waiver-absent)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" a100000000000000000000000000000000000002
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/81 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "waiver-absent: an ordinary merge failed"
+  assert_no_grep 'TESTING WAIVER' "$case_dir/stderr" \
+    "waiver-absent: an ordinary PR was labelled as waived"
+  pass "an unflagged task's merge log is unchanged"
+}
+
+test_waiver_does_not_excuse_a_red_pr() {
+  local case_dir rc
+  case_dir=$(make_case waiver-red)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" a100000000000000000000000000000000000003
+  : > "$case_dir/gh-axi.log"
+  add_skip_flags "$case_dir" 'local_skip=on' 'ci_skip=on'
+  write_pr_checks "$case_dir" $'CheckRun\tCOMPLETED\tFAILURE\t-\tinvariants'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "waiver-red: a waiver must not make a red PR mergeable"
+  assert_grep 'PR check is failing: invariants' "$case_dir/stderr" \
+    "waiver-red: the failing check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "waiver-red: a red waived PR was merged"
+  pass "a testing waiver does not excuse a red PR"
+}
+
+test_waiver_does_not_excuse_zero_checks() {
+  local case_dir rc
+  case_dir=$(make_case waiver-zero-checks)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" a100000000000000000000000000000000000004
+  : > "$case_dir/gh-axi.log"
+  add_skip_flags "$case_dir" 'ci_skip=on'
+  write_pr_checks "$case_dir" ''
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/83 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "waiver-zero-checks: a waiver must not turn absent CI into green CI"
+  assert_grep 'refusing to treat absent CI as green' "$case_dir/stderr" \
+    "waiver-zero-checks: the zero-checks refusal did not fire"
+  pass "a testing waiver does not excuse a PR that reports no checks at all"
+}
+
+# The kept-tests gate is the one check that survives every skip, because it is
+# firstmate-side and it catches what a PR with no test evidence cannot.
+test_kept_tests_gate_still_runs_under_every_skip() {
+  local case_dir rc flags label
+  for flags in 'local_skip=on' 'ci_skip=on' 'local_skip=on ci_skip=on'; do
+    label=${flags// /+}
+    case_dir=$(make_zk_case "waiver-kept-${label//=/}")
+    add_gh_mocks "$case_dir" a100000000000000000000000000000000000005
+    : > "$case_dir/gh-axi.log"
+    # shellcheck disable=SC2086  # flags is an intentional word-split list
+    add_skip_flags "$case_dir" $flags
+    rewrite_zk_branch "$case_dir"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/84 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "waiver-kept ($flags): the kept-tests gate must still refuse"
+    assert_grep 'no captain-approved supersession entry covers' "$case_dir/stderr" \
+      "waiver-kept ($flags): the kept-tests finding was not reported"
+    assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+      "waiver-kept ($flags): a branch that ate a base assertion was merged under a skip flag"
+    assert_grep 'TESTING WAIVER' "$case_dir/stderr" \
+      "waiver-kept ($flags): the waiver banner must print even when the merge is refused"
+  done
+  pass "the kept-tests gate runs, and still refuses, under every skip-flag combination"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -1336,3 +1477,8 @@ test_zero_checks_without_marker_refuses
 test_zero_checks_with_marker_merges
 test_unreadable_rollup_refuses_unverified
 test_unclassifiable_check_refuses_unverified
+test_waived_pr_merges_but_announces_the_waiver
+test_unwaived_pr_prints_no_waiver_banner
+test_waiver_does_not_excuse_a_red_pr
+test_waiver_does_not_excuse_zero_checks
+test_kept_tests_gate_still_runs_under_every_skip

@@ -34,6 +34,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
+| `fm-testing-skip-lib.sh` | Own the captain-only testing-skip flags and both refusal matrices, shared by the brief scaffold and the spawn so they cannot drift |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
@@ -58,10 +59,12 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target and backend for the daemon and launcher       |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
+| `fm-nm-flow.sh`          | Render the read-only live flow diagram of a task's no-mistakes delivery pipeline      |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
+| `fm-bounded-lib.sh`      | Shared wall-clock bound (timeout/gtimeout/perl ladder) for external calls that can hang |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inherited local-material propagation                  |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes, emit bounded best-effort status-event annotations, then assert watcher liveness |
@@ -72,13 +75,17 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
-| `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll and provenance publication |
+| `fm-pr-lib.sh`           | Own canonical task validation, the GitHub PR-link and git-remote-address grammars, the read of which branch a PR targets, plus private atomic PR-poll and provenance publication |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR-poll sidecars              |
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, gate on `fm-assert-tests-kept.sh` and on the PR's checks being green, then merge a task's canonical full GitHub URL |
 | `fm-assert-tests-kept.sh` | Report the base's test assertions the branch under review lost, broke, or could not execute at all (its header owns the finding classes and exit codes) |
-| `fm-test-exec-lib.sh`   | Shared per-language test runners (shell, pytest) and scratch-tree environment lifecycle that `fm-assert-tests-kept.sh` check 2 drives |
+| `fm-test-exec-lib.sh`   | Shared per-language test runners (shell, pytest, vitest, jest) and scratch-tree environment lifecycle that `fm-assert-tests-kept.sh` check 2 drives |
+| `fm-supersession-lib.sh` | Single matcher for the captain-approved supersession record, shared by the merge gate that enforces it and the viewer that displays it (`fm-pr-merge.sh`'s header owns the entry grammar) |
+| `fm-ci-waiver.sh`        | Generate, publish, and sign the CI testing waiver, refusing to sign for a task the captain did not dispatch with a CI skip |
+| `fm-ci-waiver-verify.sh` | Decide in CI whether a published waiver line covers the pull request's current head commit |
+| `fm-ci-waiver-lib.sh`    | Own the waiver's signed payload, per-repository key derivation, published line grammar, and constant-time comparison, shared by signer and verifier |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |

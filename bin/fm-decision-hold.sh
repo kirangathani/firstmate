@@ -80,11 +80,13 @@ validate_one_line() {  # <label> <value>
   esac
 }
 
+# sha256sum first because it is a C binary and shasum is a perl script; see
+# bin/fm-pr-lib.sh's fm_pr_sha256 for the measurement and the macOS fallback rule.
 sha256_text() {  # <text>
-  if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
+  if command -v sha256sum >/dev/null 2>&1; then
     printf '%s' "$1" | sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
   else
     fail "shasum or sha256sum is required"
   fi

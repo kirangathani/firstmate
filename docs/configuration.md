@@ -104,10 +104,89 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` as `bin/fm-test.sh --local` so no-mistakes runs firstmate's bash behavior suite directly.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
-That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
-It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating the test step to an agent.
+`bin/fm-test.sh` is the single owner of the behavior-suite definition (the `tests/*.test.sh` file set, the execution rules, the selection, and the shard partition), and its header comment owns the details.
+The argument-less form is still the canonical whole-set serial run and the definition of the suite: it executes every test file directly, runs them all even after a failure, and fails if any exited non-zero or went unrun.
+`--local`, the form the gate runs, is a selection and scheduling change over that same file set with the same per-file verdict: it runs only the tests the working change can affect, selected through the reference closure `bin/fm-test-plan.awk` builds over the tracked repo, in parallel cost-packed shards, because the whole serial suite is slow enough locally to be worth routing around and a gate developers route around is worse than no gate.
+No pass is ever cached, and anything the planner cannot attribute to a test escalates the run to the whole set; the two files' header comments own the selection rules and their safety argument.
+Every mode requires `tmux` on `PATH` and prints `tmux -V`.
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs that same script as `--shard K/N` across parallel jobs instead of delegating the test step to an agent, and stays exhaustive with no change-based selection, because CI is the authority that catches the host-dependence class of bug a local run passes by construction.
+`tests/fm-test.test.sh` asserts both that the shards' union is exactly this whole set and that the selected, sharded local path returns the whole set's verdict for every file it runs, so the gate and CI cannot diverge.
+
+## The CI testing waiver secret (config/ci-waiver-secret)
+
+A repository's expensive CI jobs can be waived for one commit, but only by a keyed signature the captain issues, never by a marker string anyone can type into a PR body.
+This section owns the secret's configuration and provisioning; `bin/fm-ci-waiver-lib.sh` owns the signed payload and the published line's grammar, and `bin/fm-ci-waiver-verify.sh` owns the verdict rules.
+
+`config/ci-waiver-secret` is a local, gitignored, mode-600 file holding one 32-byte random MASTER key per firstmate home.
+The master is never published anywhere.
+What each repository receives as the Actions repository secret `FM_CI_WAIVER_SECRET` is a key derived for that repository alone, `HMAC(master, "fm-ci-waiver-repo.v1", <owner/repo>)`.
+
+That containment is deliberate rather than incidental: the `ci-waiver` job necessarily holds the secret in its environment, and on a pull-request build it sits beside PR-authored code, so a repository key is the realistic thing to lose.
+Because it is derived, a stolen repository key reveals nothing about the master and therefore nothing about any other repository's key, so the theft is contained to the repository it came from.
+A single shared secret would instead have handed over every repository at once and stayed valid until a rotate plus a re-publish everywhere.
+The dispatch token keeps using the master, so a stolen repository key cannot mint one either.
+
+Create the master with `bin/fm-ci-waiver.sh init` and enrol a repository with `bin/fm-ci-waiver.sh publish <owner/repo>`, once per repository whose CI must honour waivers; both paths keep every value out of terminals, argv, and environment variables, so nothing is ever committed, printed, or given to a worker.
+`--rotate` is the only way to replace an existing master, because rotating invalidates every signature already published on an open PR and requires re-publishing to every repository.
+The master is not inherited by secondmate homes: a home that dispatches its own waived work runs its own `init` and `publish`.
+
+Until a repository holds the secret the feature is inert there: a waiver line cannot be verified, so the verifier refuses it loudly and the full suite runs, which is exactly the behaviour without this feature at all.
+`bin/fm-ci-waiver.sh sign <task-id> <sha> <owner/repo>` prints the publishable line, signed with that repository's derived key, and it refuses unless the task's own `state/<id>.meta` records `ci_skip=on` together with a `ci_skip_auth=` dispatch token the master reproduces for that task id.
+It names the repository explicitly rather than inferring one, because a signature has to select a key and a wrong guess would produce a line that silently never verifies.
+That pair is the whole authorization model, and both halves are load-bearing: a worker appends its status lines into the same `state/` directory, so it could append the flag line to its own record, and the token is an HMAC it cannot compute.
+The signature covers the commit as well as the task id, so it is bound to exactly one head commit and every further push needs a fresh one; publishing the line is harmless, since it reveals nothing about the secret.
+
+The only thing that writes that pair is `bin/fm-spawn.sh --ci-skip` (or `--all-testing-skip`) at dispatch, on the captain's machine; "Testing skips" below owns those flags, and `sign` refuses any task dispatched without one.
+
+In [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) the cheap `ci-waiver` job gates the expensive behaviour-test and macOS jobs, while `lint`, `invariants`, and the required `tests-complete` verdict always run, so a fully waived PR still reports checks and never reaches `bin/fm-pr-merge.sh`'s zero-checks refusal looking like CI that never ran.
+`lint` is ungated for the same reason as `invariants`: a minute of ShellCheck is not an expensive job, so there is nothing worth skipping, and a waived PR should still get static analysis rather than nothing looking at its shell at all.
+A project adopting this pattern must keep at least one always-running check for the same reason.
+On push to `main` there is no pull-request body, so the verdict is always "not waived" and post-merge CI on main is never skippable.
+
+[`.github/workflows/no-mistakes-required.yml`](../.github/workflows/no-mistakes-required.yml) fails any PR whose body lacks the pipeline's own attestation, and a waived pipeline never writes one, so it carries the same `ci-waiver` job for the same reason.
+Only a verified waiver exempts it, and the exemption is deliberately not a second marker string, because the attestation is already a literal string the PR author writes and a second one would be forgeable by the same agent.
+Its `check` job keeps reporting instead of being skipped by a failed dependency, and hard-fails when the waiver job did not complete, because a skipped check reads as passing to `bin/fm-pr-merge.sh` and a required check that never reports leaves branch protection pending forever.
+It uses `!cancelled()` rather than `always()` so a superseded run does not leave a spurious red required check behind.
+
+Both `ci-waiver` jobs check out the base ref rather than the default pull-request merge ref, so PR-authored code cannot replace the verifier that decides whether its own checks may be skipped.
+That does not close the broader path where a PR edits the workflow file itself, which is inherent to `pull_request` events and is mitigated by branch protection rather than here.
+When the checked-out base predates the waiver and carries no verifier at all, both jobs report "not waived" and run everything rather than failing on the missing script, because a base with no verifier has no waiver capability to honour.
+
+## Testing skips (bin/fm-spawn.sh --local-skip / --ci-skip / --all-testing-skip)
+
+A ship task can be dispatched with testing switched off, but only by the captain and only mechanically: the skip is enforced by code and by a keyed signature, never by an instruction a worker can decline and never by a string a worker can type.
+They are a third axis, orthogonal to delivery mode and to `yolo`, and `yolo` never grants one.
+Pass the same flag to `bin/fm-brief.sh`, which writes the worker-facing half; `bin/fm-testing-skip-lib.sh` is the single owner of the flags, the accepted matrix, and every refusal, so the two scripts cannot drift.
+
+`--local-skip` switches off the local pipeline, `--ci-skip` waives CI's expensive jobs for the PR, and `--all-testing-skip` does both.
+Each is recorded in `state/<id>.meta` only when on, as `local_skip=on` and/or `ci_skip=on` with its `ci_skip_auth=` token, so an unflagged task's record is byte-identical to one from before the feature existed.
+
+A local skip is enforced rather than requested.
+`bin/fm-spawn.sh` writes a `no-mistakes` shim into the task's own temp root and puts that directory first on the worker's PATH, so a flagged worker cannot run the pipeline even if it tries.
+The shim exits 0 deliberately: a non-zero exit reads to an agent as a broken toolchain, and the repair it would reach for - reinstalling no-mistakes, hunting another copy, or restarting the shared daemon that serves every other lane - is worse than the skip itself.
+The directory is mode 700 and the spawn refuses when the temp root already exists owned by another user, because it shadows a real tool at the front of an agent's PATH and its path is predictable.
+The shim is scoped to that one pane's environment, so it reaches no other task and not the captain's own shell, and teardown removes it.
+
+A CI skip additionally mints the `ci_skip_auth=` dispatch token described in the waiver-secret section above.
+It is required because a worker appends its status lines into the same `state/` directory and could otherwise append the flag to its own record; the token is an HMAC it cannot compute.
+Because the token is minted at dispatch, `--ci-skip` refuses when the home has no waiver secret yet, while `--local-skip` needs none.
+
+Which flag a delivery mode can honour, refused loudly rather than silently ignored:
+
+| Delivery mode | accepted | refused, and why |
+|---|---|---|
+| `no-mistakes` | `--local-skip`, `--all-testing-skip` | `--ci-skip` alone: the pipeline owns the push and the PR and may add fix commits, so the head commit a waiver must cover is unknown until the PR exists, and a later body edit does not re-run CI. |
+| `direct-PR` | `--ci-skip` | `--local-skip`, `--all-testing-skip`: that mode already runs no local pipeline, so the flag would be a no-op. |
+| `local-only` | none | no pipeline, no PR, no CI to waive. |
+| scout, secondmate | none | neither runs a local pipeline nor opens a PR. |
+
+Two skip flags on one command line also refuse, naming `--all-testing-skip`.
+The argument-only rules are checked before any filesystem or backend work, and the delivery-mode rules before any worktree or backend container exists, so a refusal never leaves an orphan window behind.
+
+No skip flag relaxes a merge gate.
+`bin/fm-pr-merge.sh` still refuses a red, pending, unclassifiable, or zero-check PR under every flag, the kept-tests gate still runs, and the merge prints a loud waiver banner read from the task's own record on the captain's machine rather than from anything in the PR.
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
@@ -244,6 +323,10 @@ When X mode is opted in, bootstrap also requires `curl` and `jq` before arming t
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
 An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; `bin/fm-dispatch-select.sh` still degrades to the first profile at runtime when quota data is unavailable.
+When `no-mistakes` is installed but its shared daemon is down, bootstrap reports `NO_MISTAKES_DAEMON: not running (start: no-mistakes daemon start)`, because every ship task's validation pipeline needs that daemon.
+The probe is detection only: bootstrap never starts or restarts the daemon itself, since one instance serves every lane and home and restarting it would kill other lanes' in-flight pipeline runs.
+It stays silent when the daemon is up or when the binary is absent entirely (the `MISSING: no-mistakes` line above already owns that case).
+On a host with `timeout`, `gtimeout`, or `perl` the probe is bounded by `FM_BOOTSTRAP_NM_DAEMON_TIMEOUT` seconds (default 5) so it cannot slow session start; a host with none of the three runs it unwrapped, which `bin/fm-bounded-lib.sh` owns as the deliberate fallback.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
@@ -375,6 +458,13 @@ FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in C
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-branch attribution falls back from axi status
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FM_NM_FLOW_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-nm-flow.sh
+FM_NM_FLOW_TESTS_TIMEOUT=300   # seconds bounding fm-nm-flow.sh's opt-in --tests-gate probe of fm-assert-tests-kept.sh
+FM_NM_FLOW_PR_BASE_TIMEOUT=15   # seconds bounding the single GitHub base-branch read the --tests-gate box makes when the task recorded a PR
+FM_PR_GH_TIMEOUT=15     # seconds bounding fm-pr-lib.sh's GitHub base-branch read, shared by the merge gate and its preview
+FM_NM_FLOW_COLS=        # fm-nm-flow.sh render-width override (40-1000); unset uses a tty width above the 80-column baseline, else 80
+FM_NM_FLOW_ROWS=        # fm-nm-flow.sh watch-frame row budget (10-1000); unset uses the tty height on a tty, else 24; one-shot renders are never trimmed
+FM_NM_FLOW_WATCH_MAX=   # test hook: bound fm-nm-flow.sh --watch to n frames
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env
@@ -405,6 +495,7 @@ FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wa
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
+FM_BOOTSTRAP_NM_DAEMON_TIMEOUT=5     # seconds allowed for bootstrap's `no-mistakes daemon status` probe; blank or non-numeric falls back to 5
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
