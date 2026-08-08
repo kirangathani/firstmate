@@ -200,13 +200,26 @@ if [ "$INCLUDE_PRS" = 1 ]; then
     # Candidate repos: recorded pr= URLs plus live worktree origins. Deduped.
     # Each source is read by the parser that owns its input type: a recorded
     # pr= value is a PR LINK, a worktree origin is a REMOTE ADDRESS. An address
-    # neither parser accepts contributes no repository rather than a guess.
+    # neither parser accepts contributes no repository rather than a guess, and
+    # the strict rule is deliberate for BOTH sources rather than relaxed for the
+    # one whose input is likelier to be hand-written.
+    # Two accumulators, because the identity a repository is DEDUPED on is not
+    # the string that is displayed: membership is tested on the case-folded
+    # identity, since GitHub treats owner and repo case-insensitively and the
+    # same repository reached by two spellings would otherwise be queried twice
+    # and consume two slots of the repository cap, while repos keeps the
+    # first-seen spelling so the rendered label is the one its source used.
     repos=""
+    repo_keys=""
     while IFS= read -r u; do
       [ -n "$u" ] || continue
       fm_pr_url_parse "$u" || continue
       s="$FM_PR_OWNER/$FM_PR_REPO"
-      case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
+      k=$(fm_pr_github_slug_fold "$FM_PR_OWNER" "$FM_PR_REPO")
+      case " $repo_keys " in
+        *" $k "*) : ;;
+        *) repo_keys="$repo_keys $k"; repos="$repos $s" ;;
+      esac
     done <<EOF
 $(printf '%s' "$SNAP" | jq -r '.tasks[].pr.url // empty')
 EOF
@@ -216,7 +229,11 @@ EOF
       u=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
       fm_pr_remote_parse "$u" || continue
       s="$FM_PR_REMOTE_OWNER/$FM_PR_REMOTE_REPO"
-      case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
+      k=$(fm_pr_github_slug_fold "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO")
+      case " $repo_keys " in
+        *" $k "*) : ;;
+        *) repo_keys="$repo_keys $k"; repos="$repos $s" ;;
+      esac
     done <<EOF
 $(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths.worktree.path // empty')
 EOF
