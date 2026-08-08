@@ -33,6 +33,40 @@
 # baseline recorded as passing that the branch run does not is a failing
 # assertion.
 #
+# --assume-branch-suite-green is check 2's one cost control, and it is OPT-IN
+# because it trades execution for a premise the caller must actually hold. When
+# it is passed, a base test file whose blob at the SAME path is byte-identical
+# on the compare side is not run here, because the branch's own test suite runs
+# that identical file against that same branch code, and the caller has asserted
+# that suite is verified green. Re-running it would only reproduce a result the
+# pipeline already has - which on firstmate itself is ~90 files run twice each,
+# 20-35 minutes at merge time.
+#   - What is still run, unchanged: a base test file whose content DIFFERS from
+#     the branch's copy (the motivating scenario - a branch that keeps a name and
+#     weakens or rewrites the assertion body always differs), and one the branch
+#     DELETED or MOVED (no branch copy for its suite to have run). Identity is
+#     the blob at the same path, so a moved file is a delete plus an add and
+#     both sides run.
+#   - Identity of the TEST FILE alone is the right condition, not identity of
+#     the tree: check 2 already runs the base's test file against the BRANCH's
+#     tree, which is exactly what the branch's own suite ran. The changed source
+#     under the test - the regression this gate catches - is present on both
+#     sides of that comparison, so skipping never trades it away.
+#   - The skip is never silent. Every identifier in a skipped file is reported
+#     as `assumed-covered:`, its own class, so a green-but-empty result can never
+#     read as verified - the same reason `unexecuted:` exists.
+# WITHOUT the flag, nothing is skipped and check 2 behaves exactly as it always
+# has. The flag is not defaulted on, because explicit --worktree callers (an
+# operator, bin/fm-nm-flow.sh's read-only merge-gate preview) hold no CI premise
+# at all, and a check that assumed one nobody established is the precise failure
+# this script exists to prevent. bin/fm-pr-merge.sh is the caller that DOES hold
+# it: its own checks-green gate refuses to merge a PR whose checks are failing,
+# pending, or unreadable, so within one merge command a skip made under this flag
+# can never carry a merge whose suite was not verified green. That script owns
+# the two cases where it must NOT pass the flag (a CI-waived task, and a project
+# marked as running no PR CI), because in both the checks-green gate cannot
+# supply the premise; see its header.
+#
 # A base test file check 2 could not actually execute is NOT a pass. Each of its
 # identifiers is reported as `unexecuted:`, because a bare green result that
 # means "nothing was run" reads as verified while catching nothing - the precise
@@ -60,14 +94,23 @@
 # make a green-but-empty run VISIBLE where it previously read as verified, not to
 # add a merge-refusing condition.
 #
-# Two limits are carried forward here rather than hidden:
-#   (i)  a skipif that is true only because of the SCRATCH environment is
-#        indistinguishable from a deliberate skip in the runner's report, so it
-#        lands in `skipped:`; this change does not close that.
-#   (ii) a missing or unparseable results file lands in `unaccounted:` rather
-#        than `unexecuted:` precisely because that would be a new merge-refusing
-#        condition; mapping finding classes to what blocks a merge is
-#        bin/fm-pr-merge.sh's contract.
+# Three limits are carried forward here rather than hidden:
+#   (i)   a skipif that is true only because of the SCRATCH environment is
+#         indistinguishable from a deliberate skip in the runner's report, so it
+#         lands in `skipped:`; this change does not close that.
+#   (ii)  a missing or unparseable results file lands in `unaccounted:` rather
+#         than `unexecuted:` precisely because that would be a new merge-refusing
+#         condition; mapping finding classes to what blocks a merge is
+#         bin/fm-pr-merge.sh's contract.
+#   (iii) `assumed-covered:` rests on "the branch's green suite ran this file",
+#         and nothing here can see WHICH files a project's CI actually ran. A
+#         workflow that runs only a subset, or whose test job reports a
+#         conclusion the merge gate's table counts as passing without having run
+#         (SKIPPED, NEUTRAL), would leave an assumed-covered identifier verified
+#         by name alone. That is why the class is printed per identifier rather
+#         than folded into the pass, and why the two cases firstmate can see -
+#         a CI-waived task and a project with no PR CI - do not get the flag at
+#         all (bin/fm-pr-merge.sh's contract).
 #
 # The per-language detect/run/parse mechanics of check 2, the scratch-tree
 # lifecycle, and the reason a scratch tree can fail to be authoritative are all
@@ -81,6 +124,12 @@
 # that script's contract, not this one's).
 #
 # Usage:
+#   --assume-branch-suite-green may be passed in EITHER mode, in any argument
+#   position. It asserts that the compare side's own test suite is verified
+#   green for this run, which is what lets check 2 skip a base test file the
+#   branch's copy matches byte for byte (see check 2 above). Only a caller that
+#   actually holds that guarantee may pass it.
+#
 #   fm-assert-tests-kept.sh <task-id>
 #       Resolve worktree=, project=, and pr=/pr_head= from state/<id>.meta. The
 #       compare side is the PR head when pr= is recorded and resolvable, falling
@@ -137,7 +186,7 @@
 #
 # Output and exit status. stdout is strictly line-oriented so a gate or a viewer
 # can parse it; the human-facing diagnostic blobs go to stderr. One base line,
-# five finding prefixes and one summary line are the stable contract:
+# six finding prefixes and one summary line are the stable contract:
 #   - `base: <ref> (<origin>)` always, as the FIRST line, naming the ref both
 #     checks compared against and where that ref came from - the PR's own base
 #     branch, the project's default branch, or the caller's explicit --base - so
@@ -153,14 +202,18 @@
 #     explicit skip for.
 #   - `unaccounted: <file>::<name>` per identifier a green baseline run produced
 #     no result for at all.
+#   - `assumed-covered: <file>::<name>` per identifier check 2 deliberately did
+#     not run because --assume-branch-suite-green was passed and the branch's
+#     copy of its test file is byte-identical. Absent entirely without the flag.
 #   - `summary: missing=<n> failing=<n> unexecuted=<n> skipped=<n>
-#     unaccounted=<n>` always, as the last line, whether or not anything was
-#     found.
+#     unaccounted=<n> assumed-covered=<n>` always, as the last line, whether or
+#     not anything was found. assumed-covered is appended LAST so the five
+#     older fields keep their positions for anything already reading them.
 #   - Exit 1 when ANY of `missing:`, `failing:` or `unexecuted:` is non-empty,
-#     exit 0 when all three are empty. `skipped:` and `unaccounted:` are
-#     reported but do NOT affect the exit code. This script reports; it does not
-#     decide which classes block a merge (that is bin/fm-pr-merge.sh's contract,
-#     not this one's).
+#     exit 0 when all three are empty. `skipped:`, `unaccounted:` and
+#     `assumed-covered:` are reported but do NOT affect the exit code. This
+#     script reports; it does not decide which classes block a merge (that is
+#     bin/fm-pr-merge.sh's contract, not this one's).
 #   - Exit 2 when the check cannot run at all, so a caller gating on this
 #     script can tell "assertions vanished" from "could not verify": bad usage,
 #     missing meta, missing worktree or project, unresolvable refs, and every
@@ -189,14 +242,31 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 export LC_ALL=C
 
 usage() {
-  echo "usage: fm-assert-tests-kept.sh <task-id>" >&2
-  echo "       fm-assert-tests-kept.sh --worktree <path> --base <ref> [--branch <ref>]" >&2
+  echo "usage: fm-assert-tests-kept.sh [--assume-branch-suite-green] <task-id>" >&2
+  echo "       fm-assert-tests-kept.sh [--assume-branch-suite-green] --worktree <path> --base <ref> [--branch <ref>]" >&2
+  echo "       --assume-branch-suite-green: the caller GUARANTEES the compare side's own" >&2
+  echo "         test suite is verified green for this run, which lets check 2 skip a base" >&2
+  echo "         test file the branch's copy matches byte for byte. Skipped identifiers are" >&2
+  echo "         reported as 'assumed-covered:', never as a pass. Off by default." >&2
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   usage
   exit 0
 fi
+
+# The premise flag is stripped BEFORE the mode dispatch below, so it is accepted
+# in either mode and in any position without either mode's rigid positional
+# grammar having to grow an optional slot it would then have to skip over.
+ASSUME_GREEN=0
+POSITIONAL=()
+for arg in "$@"; do
+  case "$arg" in
+    --assume-branch-suite-green) ASSUME_GREEN=1 ;;
+    *) POSITIONAL+=("$arg") ;;
+  esac
+done
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 
 WT=
 BASE=
@@ -514,6 +584,7 @@ comm -23 "$TMPD/base" "$TMPD/branch" > "$TMPD/missing"
 : > "$TMPD/execfiles"
 : > "$TMPD/skipped"
 : > "$TMPD/unaccounted"
+: > "$TMPD/assumed"
 
 # idents_for_file <file>: the check-1 identifiers the base enumerated for <file>.
 # They are both what a run is bounded to and what an unexecuted file reports.
@@ -573,6 +644,33 @@ mark_unexecuted() {
   } >> "$TMPD/unexec-report"
 }
 
+# mark_assumed_covered <file>: report every check-1 identifier in <file> as
+# assumed-covered, the class for an assertion check 2 deliberately did not run
+# because the branch's byte-identical copy was already run by the branch's own
+# verified-green suite.
+mark_assumed_covered() {
+  local f=$1 ident
+  while IFS= read -r ident; do
+    record_ident "$TMPD/assumed" "$ident"
+  done < <(idents_for_file "$f")
+}
+
+# base_file_identical_on_branch <path>: 0 iff the compare side holds a blob at
+# that EXACT path whose content is byte-identical to the base's. Blob object
+# ids are compared rather than file bytes because git has already content-
+# addressed both sides, so this is an index read rather than a diff, and it is
+# exact by construction.
+# A path the compare side does not hold at all - deleted, or moved, since a
+# move is a delete plus an add at a different path - returns non-zero, so the
+# base's file is executed exactly as it is today: the branch's own suite never
+# ran a file that is not there.
+base_file_identical_on_branch() {
+  local f=$1 base_oid branch_oid
+  base_oid=$(git -C "$WT" rev-parse --verify --quiet "$BASE:$f") || return 1
+  branch_oid=$(git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF:$f") || return 1
+  [ -n "$base_oid" ] && [ "$base_oid" = "$branch_oid" ]
+}
+
 git -C "$WT" ls-tree -r -z --name-only "$BASE" |
   while IFS= read -r -d '' f; do
     lang=$(lang_for_file "$f")
@@ -585,6 +683,26 @@ git -C "$WT" ls-tree -r -z --name-only "$BASE" |
     # The spec's own fields are tab-separated, so the file goes last.
     printf '%s\t%s\n' "$spec" "$f" >> "$TMPD/execfiles"
   done
+
+# The premise-gated skip is applied AFTER runner resolution, deliberately: a
+# file no runner resolves for keeps reporting `unexecuted:` exactly as it does
+# today, because "the branch's suite ran it" says nothing about whether a runner
+# resolves HERE, and unexecuted is a merge-refusing class for an exec-gated
+# project. Only files check 2 would otherwise have executed are skipped.
+# It is also applied BEFORE either tree is materialized, so a run whose every
+# executable file is identical does no archive/extract work at all.
+if [ "$ASSUME_GREEN" -eq 1 ] && [ -s "$TMPD/execfiles" ]; then
+  : > "$TMPD/execfiles.run"
+  while IFS= read -r entry; do
+    f=${entry##*$'\t'}
+    if base_file_identical_on_branch "$f"; then
+      mark_assumed_covered "$f"
+    else
+      printf '%s\n' "$entry" >> "$TMPD/execfiles.run"
+    fi
+  done < "$TMPD/execfiles"
+  mv "$TMPD/execfiles.run" "$TMPD/execfiles"
+fi
 
 if [ -s "$TMPD/execfiles" ]; then
   mkdir -p "$TMPD/base-tree" "$TMPD/branch-tree"
@@ -680,6 +798,7 @@ sort -u "$TMPD/failing" > "$TMPD/failing.sorted"
 sort -u "$TMPD/unexec" > "$TMPD/unexec.sorted"
 sort -u "$TMPD/skipped" > "$TMPD/skipped.sorted"
 sort -u "$TMPD/unaccounted" > "$TMPD/unaccounted.sorted"
+sort -u "$TMPD/assumed" > "$TMPD/assumed.sorted"
 
 if [ -s "$TMPD/unexec-report" ]; then
   {
@@ -706,15 +825,19 @@ done < "$TMPD/skipped.sorted"
 while IFS= read -r line; do
   printf 'unaccounted: %s\n' "$line"
 done < "$TMPD/unaccounted.sorted"
+while IFS= read -r line; do
+  printf 'assumed-covered: %s\n' "$line"
+done < "$TMPD/assumed.sorted"
 
 MISSING_COUNT=$(grep -c . "$TMPD/missing" || true)
 FAILING_COUNT=$(grep -c . "$TMPD/failing.sorted" || true)
 UNEXEC_COUNT=$(grep -c . "$TMPD/unexec.sorted" || true)
 SKIPPED_COUNT=$(grep -c . "$TMPD/skipped.sorted" || true)
 UNACCOUNTED_COUNT=$(grep -c . "$TMPD/unaccounted.sorted" || true)
-printf 'summary: missing=%s failing=%s unexecuted=%s skipped=%s unaccounted=%s\n' \
+ASSUMED_COUNT=$(grep -c . "$TMPD/assumed.sorted" || true)
+printf 'summary: missing=%s failing=%s unexecuted=%s skipped=%s unaccounted=%s assumed-covered=%s\n' \
   "$MISSING_COUNT" "$FAILING_COUNT" "$UNEXEC_COUNT" \
-  "$SKIPPED_COUNT" "$UNACCOUNTED_COUNT"
+  "$SKIPPED_COUNT" "$UNACCOUNTED_COUNT" "$ASSUMED_COUNT"
 
 if [ "$MISSING_COUNT" -eq 0 ] && [ "$FAILING_COUNT" -eq 0 ] && [ "$UNEXEC_COUNT" -eq 0 ]; then
   exit 0
