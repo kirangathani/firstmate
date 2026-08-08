@@ -2,11 +2,31 @@
 # Shared validation and atomic artifact helpers for GitHub PR merge polling.
 # Callers must validate task IDs and raw PR URLs before constructing task paths
 # or performing any side effect.
+#
+# This file is the ONE owner of the GitHub address grammar, split by INPUT TYPE
+# and not by strictness. There is one parser per input type and one identity
+# rule underneath both, so no caller has to write a third reading of "is this
+# GitHub, and which repository is it":
+#   - fm_pr_url_parse         a PR LINK, the canonical recorded artifact.
+#   - fm_pr_remote_parse      a GIT REMOTE ADDRESS, what `git remote get-url`
+#                             prints. It carries no PR number and returns none.
+#   - fm_pr_github_identity_valid  the shared host and owner/repo rule both of
+#                             the above judge their extracted parts by.
+#   - fm_pr_github_slug_fold  the folded form two identities are COMPARED on,
+#                             since GitHub treats owner and repo
+#                             case-insensitively.
+#
+# It is also the ONE reader of which BRANCH a PR targets
+# (fm_pr_base_branch_read), for the same reason: a merge gate and the preview of
+# that gate must resolve one base, not two.
 
 FM_PR_URL=
 FM_PR_OWNER=
 FM_PR_REPO=
 FM_PR_NUMBER=
+FM_PR_REMOTE_URL=
+FM_PR_REMOTE_OWNER=
+FM_PR_REMOTE_REPO=
 FM_PR_DATA_URL=
 FM_PR_DATA_OWNER=
 FM_PR_DATA_REPO=
@@ -61,21 +81,217 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
+# fm_pr_github_identity_valid <host> <owner> <repo>: the ONE rule for which
+# host counts as GitHub and which owner/repo names are real, applied to parts a
+# parser has already extracted. Both parsers call it, so "is this GitHub" cannot
+# be read two different ways.
+# The host is matched case-insensitively because hostnames are; owner and repo
+# are judged, not folded, so each parser can return the spelling its input used
+# and a caller that COMPARES two identities folds both through
+# fm_pr_github_slug_fold instead of trusting either spelling.
+fm_pr_github_identity_valid() {
+  local host=${1-} owner=${2-} repo=${3-} pattern
+  local LC_ALL=C
+  case "$host" in
+    [Gg][Ii][Tt][Hh][Uu][Bb]"."[Cc][Oo][Mm]) ;;
+    *) return 1 ;;
+  esac
+  pattern='^([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])$'
+  [[ "$owner" =~ $pattern ]] || return 1
+  [[ "$owner" != *--* ]] || return 1
+  [[ "$repo" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || return 1
+  [ "$repo" != . ] && [ "$repo" != .. ] || return 1
+}
+
+# fm_pr_github_slug_fold <owner> <repo>: print the form two identities are
+# compared on. GitHub treats owner and repo case-insensitively, so a comparison
+# that does not fold case answers "a different repository" for the same one.
+fm_pr_github_slug_fold() {
+  printf '%s/%s' "${1-}" "${2-}" | tr '[:upper:]' '[:lower:]'
+}
+
+# fm_pr_url_parse <raw>: the sole PR-LINK parser. It takes a PR link and returns
+# owner, repo and number, rejecting anything that is not PR-shaped.
+# The shape is matched here and the identity is judged by
+# fm_pr_github_identity_valid; the literal lowercase `https://github.com/`
+# prefix is this parser's OWN additional requirement, on top of the shared rule
+# rather than instead of it. A recorded link is a canonical artifact that is
+# later compared byte for byte, so a differently-spelled host is a different
+# string and is rejected rather than silently canonicalized.
 fm_pr_url_parse() {
-  local raw=${1-} pattern
+  local raw=${1-} pattern owner repo number
   local LC_ALL=C
   FM_PR_URL=
   FM_PR_OWNER=
   FM_PR_REPO=
   FM_PR_NUMBER=
-  pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
+  pattern='^https://github\.com/([^/]+)/([^/]+)/pull/([1-9][0-9]*)$'
   [[ "$raw" =~ $pattern ]] || return 1
-  [[ "${BASH_REMATCH[1]}" != *--* ]] || return 1
-  [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
+  # Captured before the shared rule runs: its own [[ =~ ]] would clobber
+  # BASH_REMATCH.
+  owner=${BASH_REMATCH[1]}
+  repo=${BASH_REMATCH[2]}
+  number=${BASH_REMATCH[3]}
+  fm_pr_github_identity_valid github.com "$owner" "$repo" || return 1
   FM_PR_URL=$raw
-  FM_PR_OWNER=${BASH_REMATCH[1]}
-  FM_PR_REPO=${BASH_REMATCH[2]}
-  FM_PR_NUMBER=${BASH_REMATCH[3]}
+  FM_PR_OWNER=$owner
+  FM_PR_REPO=$repo
+  FM_PR_NUMBER=$number
+}
+
+# fm_pr_remote_parse <raw>: the sole GIT REMOTE ADDRESS parser, for what
+# `git remote get-url` prints. It accepts the scp-style git@host:owner/repo, the
+# ssh:// and https:// forms, an optional embedded credential, an optional port,
+# and an optional trailing .git.
+# A remote address carries no PR number, so this parser returns none and never
+# touches FM_PR_NUMBER: a caller holding a parsed PR link and a parsed remote at
+# once keeps both.
+# An address that is not GitHub at all is a plain non-zero return with the
+# FM_PR_REMOTE_* set left empty, so a caller can never read a partial answer as
+# an identity.
+# shellcheck disable=SC2034  # FM_PR_REMOTE_* are this parser's return values, read by its callers.
+fm_pr_remote_parse() {
+  local raw=${1-} rest host owner repo
+  local LC_ALL=C
+  FM_PR_REMOTE_URL=
+  FM_PR_REMOTE_OWNER=
+  FM_PR_REMOTE_REPO=
+  case "$raw" in
+    *://*)
+      rest=${raw#*://}
+      # A userinfo@ segment belongs to the authority, so it is stripped only
+      # when it appears before the first path separator.
+      case "${rest%%/*}" in
+        *@*) rest=${rest#*@} ;;
+      esac
+      host=${rest%%/*}
+      host=${host%%:*}
+      case "$rest" in */*) rest=${rest#*/} ;; *) return 1 ;; esac
+      ;;
+    *:*)
+      host=${raw%%:*}
+      host=${host##*@}
+      rest=${raw#*:}
+      ;;
+    *) return 1 ;;
+  esac
+  rest=${rest#/}
+  rest=${rest%/}
+  rest=${rest%.git}
+  case "$rest" in */*) ;; *) return 1 ;; esac
+  owner=${rest%%/*}
+  repo=${rest#*/}
+  fm_pr_github_identity_valid "$host" "$owner" "$repo" || return 1
+  FM_PR_REMOTE_URL=$raw
+  FM_PR_REMOTE_OWNER=$owner
+  FM_PR_REMOTE_REPO=$repo
+}
+
+# fm_pr_bounded <command...>: run <command> under a wall-clock bound when a
+# timeout tool exists, and unbounded when none does. FM_PR_GH_TIMEOUT (default
+# 15) is the bound. A missing timeout tool must not stop the command running at
+# all, because the callers' alternative is no GitHub answer whatsoever.
+fm_pr_bounded() {
+  local secs=${FM_PR_GH_TIMEOUT:-15}
+  case "$secs" in ''|*[!0-9]*|0) secs=15 ;; esac
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
+# fm_pr_repo_matches_origin <worktree> <pr-url>: succeed when the PR link and
+# the worktree's origin name the same GitHub repository, and when the question
+# is not decidable at all.
+# NOT DECIDABLE IS NOT A MISMATCH, deliberately: an origin that is not a GitHub
+# address (a local path, a bare mirror, a self-hosted remote) cannot be compared
+# with a GitHub PR link, and refusing there would break every legitimate
+# non-GitHub setup. This closes the wrong-GitHub-repository hole; it is not a
+# general remote-identity check.
+# On a decidable MISMATCH it returns non-zero with FM_PR_OWNER/FM_PR_REPO and
+# FM_PR_REMOTE_OWNER/FM_PR_REMOTE_REPO left set to the two sides, so a caller can
+# name both without re-parsing either. Origin's RAW address is never among them,
+# because it can carry an embedded credential.
+fm_pr_repo_matches_origin() {
+  local wt=${1-} pr_url=${2-} origin_url
+  fm_pr_url_parse "$pr_url" || return 1
+  origin_url=$(git -C "$wt" remote get-url origin 2>/dev/null || true)
+  [ -n "$origin_url" ] || return 0
+  fm_pr_remote_parse "$origin_url" || return 0
+  [ "$(fm_pr_github_slug_fold "$FM_PR_OWNER" "$FM_PR_REPO")" \
+    != "$(fm_pr_github_slug_fold "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO")" ] || return 0
+  # The two parsers clear disjoint variable sets, so both sides are still set.
+  return 1
+}
+
+# fm_pr_base_branch_read <worktree> <pr-url> <diagnostic-file>: the sole reader
+# of which BRANCH a pull request targets, printed on stdout.
+# Two callers ask that question and must never answer it differently: the merge
+# gate (bin/fm-assert-tests-kept.sh) measures its verdict against this branch,
+# and the merge-gate preview (bin/fm-nm-flow.sh) shows the captain what that
+# verdict will be. A second reading of "which base" would put the preview and
+# the gate it previews on different trees, which is the same wrong-base class
+# both were written to eliminate.
+# gh-axi is this repo's GitHub interface for ACTIONS, but its `pr view` exposes
+# no baseRefName field, so this is a raw-gh JSON read exactly as
+# bin/fm-pr-check.sh's headRefOid lookup is. The URL fully qualifies the repo;
+# the cd into the worktree only supplies gh's repo context if it ever needs one.
+# This function DECIDES NOTHING on failure, because its callers legitimately
+# differ: the gate refuses because it blocks a merge, the viewer degrades
+# because it does not. So every distinguishable cause, together with gh's own
+# verbatim stderr, is written to <diagnostic-file> and the caller chooses what
+# to do with it. gh's stderr is captured into the sibling <diagnostic-file>.gh,
+# so a caller must own a private directory for both rather than a bare temp
+# name a second user could pre-create as a symlink.
+# The link itself is judged by the parser that owns its input type BEFORE any
+# network call, so a value that is not a PR link at all costs no query.
+fm_pr_base_branch_read() {
+  local wt=${1-} pr_url=${2-} diag=${3-} err name rc=0
+  err="$diag.gh"
+  : > "$diag" || return 1
+  : > "$err" || return 1
+  if ! fm_pr_url_parse "$pr_url"; then
+    printf '%s is not a GitHub pull request link\n' "$pr_url" > "$diag"
+    return 1
+  fi
+  # The answer is a branch name in the PR's OWN repository, and every caller
+  # resolves it against the worktree's origin, so a PR living somewhere else
+  # would name a same-branch in the wrong repository. Checking it HERE is what
+  # keeps the gate and its preview from disagreeing: a caller that had to
+  # remember the check separately is a caller that can forget it.
+  if ! fm_pr_repo_matches_origin "$wt" "$pr_url"; then
+    printf 'the PR lives in %s/%s but this local copy points at %s/%s\n' \
+      "$FM_PR_OWNER" "$FM_PR_REPO" \
+      "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO" > "$diag"
+    return 1
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    printf 'gh is not installed\n' > "$diag"
+    return 1
+  fi
+  # A network read with no bound hangs whoever called it, and one caller is the
+  # merge gate, where a silent indefinite hang is worst. Bound it here so both
+  # callers inherit it; the viewer's own outer bound is a separate layer that
+  # also covers this function's non-network work.
+  name=$(cd "$wt" && fm_pr_bounded gh pr view "$pr_url" --json baseRefName -q .baseRefName 2>"$err") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    { printf 'the gh query failed (exit %s)\n' "$rc"; cat "$err"; } > "$diag"
+    return 1
+  fi
+  if [ -z "$name" ]; then
+    { printf 'the gh query succeeded but reported no base branch name\n'; cat "$err"; } > "$diag"
+    return 1
+  fi
+  # The name goes into a refspec, so it must be a name git itself accepts as a
+  # branch; anything else is rejected rather than interpolated.
+  if ! git check-ref-format "refs/heads/$name" 2>"$err"; then
+    { printf 'gh reported %s, which git does not accept as a branch name\n' "$name"; cat "$err"; } > "$diag"
+    return 1
+  fi
+  printf '%s' "$name"
 }
 
 fm_pr_head_valid() {

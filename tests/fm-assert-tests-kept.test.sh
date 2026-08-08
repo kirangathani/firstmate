@@ -57,6 +57,26 @@
 #       explicit skip "pending") and still exits zero
 #   (cc) a JS run never mutates the live worktree or the linked node_modules
 #       (vitest's results cache must stay disabled)
+#   (dd) base resolution: a PR stacked on a NON-default branch is compared
+#        against the branch it targets, in both directions - the assertion its
+#        own base had and the branch dropped is reported, and one only the
+#        default branch had is not; a recorded PR whose base cannot be read
+#        REFUSES (exit 2) rather than falling back to the default, naming the
+#        cause gh reported rather than swallowing it; a recorded PR that lives
+#        in a GitHub repository OTHER than origin's REFUSES before any fetch,
+#        naming both sides, since both PR-derived refs are fetched from origin,
+#        and that refusal names owner/repo only, never origin's raw address,
+#        which can carry an embedded credential; a recorded pr= that is not a
+#        readable PR link REFUSES before any gh call or fetch, naming the value
+#        it could not read, because an unidentifiable link cannot be checked
+#        against origin at all; the repository sense of that refusal is spelled
+#        "lives in", never "targets", which means the PR's BASE BRANCH
+#        everywhere else in the script;
+#        an origin that is not a GitHub URL at all is NOT a determinable
+#        mismatch and must still resolve normally, which every other case here
+#        covers implicitly because their origin is a local path; a task with
+#        no recorded PR still resolves the default branch; and explicit mode
+#        takes the caller's --base verbatim without consulting GitHub
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -230,6 +250,307 @@ run_explicit() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$dir/.state" \
     "$ASSERT_KEPT" --worktree "$dir" --base main --branch work
+}
+
+# --- the PR-base fixtures ----------------------------------------------------
+# A PR is not necessarily stacked on the default branch, and the gate's verdict
+# is only meaningful against the tree the PR was actually built on. These cases
+# build an origin whose `feature-base` branch DELIBERATELY diverges from main in
+# both directions, so a run against the wrong base is visible either way:
+#   - feature-base drops main's tests/mainonly.test.sh, so a run against main
+#     reports a `missing:` the PR never caused (a sound PR refused);
+#   - feature-base adds tests/feature.test.sh, so a run against main cannot see
+#     the branch dropping it (a genuine loss missed).
+# Every test file is self-contained (its own pass/fail helpers) so check 2 can
+# actually execute it and the case's exit code stays about the base, not about
+# an unexecutable fixture.
+pr_base_test_file() {
+  cat <<EOF
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "\$1"; }
+fail() { printf 'not ok - %s\n' "\$1" >&2; exit 1; }
+pass "$1"
+EOF
+}
+
+# make_pr_base_case <name>: origin.git with main and feature-base as above, a
+# project clone, and a task worktree on fm/task-pb branched from feature-base
+# with tests/feature.test.sh removed. Echoes the case dir.
+make_pr_base_case() {
+  local case_dir="$TMP_ROOT/$1"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin"
+
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
+  mkdir -p "$case_dir/_seed/tests"
+  pr_base_test_file 'alpha holds' > "$case_dir/_seed/tests/app.test.sh"
+  pr_base_test_file 'mainonly holds' > "$case_dir/_seed/tests/mainonly.test.sh"
+  commit_all "$case_dir/_seed" baseline
+  git -C "$case_dir/_seed" push -q origin HEAD:main
+  git -C "$case_dir/_seed" checkout -q -b feature-base
+  rm "$case_dir/_seed/tests/mainonly.test.sh"
+  pr_base_test_file 'feature holds' > "$case_dir/_seed/tests/feature.test.sh"
+  commit_all "$case_dir/_seed" "feature base"
+  git -C "$case_dir/_seed" push -q origin HEAD:feature-base
+  rm -rf "$case_dir/_seed"
+
+  git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/project" worktree add -q -b fm/task-pb "$case_dir/wt" \
+    origin/feature-base
+  rm "$case_dir/wt/tests/feature.test.sh"
+  commit_all "$case_dir/wt" "drop the feature assertion"
+
+  fm_write_meta "$case_dir/state/task-pb.meta" \
+    "window=fm-task-pb" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "pr=https://github.com/o/r/pull/7"
+  touch "$case_dir/state/.last-watcher-beat"
+  printf '%s\n' "$case_dir"
+}
+
+# write_pr_base_gh <case_dir> <baseRefName-or-empty>: a gh stub answering the
+# base-branch lookup. An empty second argument makes the lookup FAIL, standing
+# in for an unreachable or unauthenticated GitHub.
+write_pr_base_gh() {
+  local case_dir=$1 base=$2
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" baseRefName "*)
+    [ -n '$base' ] || { echo 'mock: base lookup failed' >&2; exit 1; }
+    printf '%s\n' '$base'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+run_pr_base_case() {
+  local case_dir=$1
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$ASSERT_KEPT" task-pb
+}
+
+test_pr_base_branch_is_compared_against_the_pr_target() {
+  local case_dir out code
+  case_dir=$(make_pr_base_case pr-base-nondefault)
+  write_pr_base_gh "$case_dir" feature-base
+
+  set +e
+  out=$(run_pr_base_case "$case_dir" 2> "$case_dir/stderr")
+  code=$?
+  set -e
+
+  assert_contains "$out" 'base: origin/feature-base' \
+    "pr-base-nondefault: the base must be the branch the PR targets"
+  expect_code 1 "$code" \
+    "pr-base-nondefault: the assertion dropped from the PR's own base must exit non-zero"
+  assert_contains "$out" 'missing: tests/feature.test.sh::feature holds' \
+    "pr-base-nondefault: an assertion the PR's base had and the branch dropped must be reported"
+  assert_not_contains "$out" 'missing: tests/mainonly.test.sh::mainonly holds' \
+    "pr-base-nondefault: an assertion only the DEFAULT branch had must not be reported"
+  pass "a PR stacked on a non-default branch is compared against that branch"
+}
+
+test_unreadable_pr_base_refuses_rather_than_assuming_default() {
+  local case_dir out err code
+  case_dir=$(make_pr_base_case pr-base-unreadable)
+  write_pr_base_gh "$case_dir" ''
+
+  set +e
+  out=$(run_pr_base_case "$case_dir" 2> "$case_dir/stderr")
+  code=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 2 "$code" \
+    "pr-base-unreadable: an unreadable PR base must refuse as 'cannot verify', not report findings"
+  assert_contains "$err" 'https://github.com/o/r/pull/7' \
+    "pr-base-unreadable: the refusal must name the PR whose base could not be read"
+  assert_not_contains "$out" 'missing:' \
+    "pr-base-unreadable: refusing must not produce findings measured against an assumed base"
+  assert_not_contains "$out" 'base: origin/main' \
+    "pr-base-unreadable: refusing must never fall back to the default branch"
+  assert_contains "$err" 'the gh query failed' \
+    "pr-base-unreadable: the refusal must classify the cause, not fold every failure into one"
+  assert_contains "$err" 'mock: base lookup failed' \
+    "pr-base-unreadable: gh's own stderr must reach the operator, not be discarded"
+  pass "a recorded PR whose base cannot be read refuses instead of assuming the default branch"
+}
+
+test_pr_in_another_github_repo_refuses_before_any_fetch() {
+  local case_dir out err code
+  case_dir=$(make_pr_base_case pr-base-wrong-repo)
+  write_pr_base_gh "$case_dir" feature-base
+  # A GitHub origin that is NOT the PR's repository. The fixture then has no
+  # fetchable remote at all, which is the point: the assertion must refuse
+  # BEFORE either PR-derived fetch, so reaching one would fail differently.
+  git -C "$case_dir/project" remote set-url origin \
+    https://github.com/someone-else/other-repo.git
+
+  set +e
+  out=$(run_pr_base_case "$case_dir" 2> "$case_dir/stderr")
+  code=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 2 "$code" \
+    "pr-base-wrong-repo: a PR in another GitHub repository must refuse as 'cannot verify'"
+  assert_contains "$err" 'lives in o/r' \
+    "pr-base-wrong-repo: the refusal must name the PR URL's own owner/repo"
+  # "targets" means the PR's BASE BRANCH everywhere else in the script and its
+  # header, so the repository sense must never reclaim the word: an operator
+  # hitting this merge-blocking refusal would go looking at the wrong thing.
+  assert_not_contains "$err" 'targets' \
+    "pr-base-wrong-repo: the repository sense must not be spelled 'targets'"
+  assert_contains "$err" 'someone-else/other-repo' \
+    "pr-base-wrong-repo: the refusal must name origin's owner/repo"
+  assert_not_contains "$out" 'missing:' \
+    "pr-base-wrong-repo: refusing must not produce findings measured against the wrong repository"
+  assert_not_contains "$out" 'base:' \
+    "pr-base-wrong-repo: refusing must never name a base resolved from the wrong repository"
+  pass "a PR whose repository is not origin's refuses rather than fetching a same-named branch"
+}
+
+# The only writer of pr= validates it with this same parser first, so nothing
+# reaches this today - which is exactly why it is asserted. This script is the
+# last gate before a merge and must not trust an input it cannot identify, and
+# a hand-edited meta file is the one route in.
+test_unparseable_recorded_pr_refuses_before_any_github_call() {
+  local case_dir out err code
+  case_dir=$(make_pr_base_case pr-base-unparseable)
+  write_pr_base_gh "$case_dir" feature-base
+  # Every gh call and every fetch is logged, so "refused BEFORE any of them" is
+  # asserted from evidence rather than from the exit code alone.
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf 'gh %s\n' "\$*" >> "$case_dir/net.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
+  cat > "$case_dir/fakebin/git" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" fetch "*) printf 'git %s\n' "\$*" >> "$case_dir/net.log" ;;
+esac
+exec $(command -v git) "\$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+  : > "$case_dir/net.log"
+  fm_write_meta "$case_dir/state/task-pb.meta" \
+    "window=fm-task-pb" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "pr=https://github.example.com/o/r/pull/7"
+
+  set +e
+  out=$(run_pr_base_case "$case_dir" 2> "$case_dir/stderr")
+  code=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 2 "$code" \
+    "pr-base-unparseable: a recorded pr= that is not a PR link must refuse as 'cannot verify'"
+  assert_contains "$err" 'https://github.example.com/o/r/pull/7' \
+    "pr-base-unparseable: the refusal must name the value it could not read"
+  assert_not_contains "$out" 'missing:' \
+    "pr-base-unparseable: refusing must not produce findings measured against an assumed base"
+  assert_not_contains "$out" 'base:' \
+    "pr-base-unparseable: refusing must never name a base at all"
+  [ ! -s "$case_dir/net.log" ] || fail \
+    "pr-base-unparseable: refused only after touching the network: $(cat "$case_dir/net.log")"
+  pass "a recorded pr= that is not a readable PR link refuses before any gh call or fetch"
+}
+
+test_pr_repo_mismatch_refusal_never_leaks_origin_credentials() {
+  local case_dir err code
+  case_dir=$(make_pr_base_case pr-base-credentialed-origin)
+  write_pr_base_gh "$case_dir" feature-base
+  # A credentialed remote is a supported GitHub form, so the mismatch IS
+  # determinable and must refuse - while bin/fm-pr-merge.sh leaves this script's
+  # stderr unredirected, so anything echoed here reaches the merge output and any
+  # CI log.
+  git -C "$case_dir/project" remote set-url origin \
+    https://x-access-token:ghs_notarealtoken@github.com/someone-else/other-repo.git
+
+  set +e
+  run_pr_base_case "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  code=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 2 "$code" \
+    "pr-base-credentialed-origin: a credentialed origin must still refuse on a mismatch"
+  assert_contains "$err" 'someone-else/other-repo' \
+    "pr-base-credentialed-origin: the refusal must still name origin's owner/repo"
+  assert_not_contains "$err" 'ghs_notarealtoken' \
+    "pr-base-credentialed-origin: the refusal must never echo origin's embedded credential"
+  assert_not_contains "$err" 'x-access-token' \
+    "pr-base-credentialed-origin: the refusal must never echo origin's raw address"
+  pass "a mismatch refusal names both repositories without leaking origin's credential"
+}
+
+test_task_without_a_pr_still_resolves_the_default_branch() {
+  local case_dir out code
+  case_dir=$(make_pr_base_case pr-base-absent)
+  # No PR recorded: the local-only path, which must keep resolving the default.
+  fm_write_meta "$case_dir/state/task-pb.meta" \
+    "window=fm-task-pb" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project"
+  # A gh that fails everything proves the no-PR path never depends on GitHub.
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo 'mock: gh must not be consulted without a recorded PR' >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+
+  set +e
+  out=$(run_pr_base_case "$case_dir" 2> "$case_dir/stderr")
+  code=$?
+  set -e
+
+  assert_contains "$out" 'base: origin/main (default branch of' \
+    "pr-base-absent: with no PR recorded the base must still be the project's default branch"
+  expect_code 1 "$code" \
+    "pr-base-absent: the default branch's dropped assertion must still exit non-zero"
+  assert_contains "$out" 'missing: tests/mainonly.test.sh::mainonly holds' \
+    "pr-base-absent: the default branch's own assertions must still be checked"
+  pass "a task with no recorded PR still resolves the project's default branch"
+}
+
+test_explicit_mode_never_consults_github() {
+  local dir out code
+  dir=$(make_repo explicit-base-untouched)
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo 'mock: explicit mode must not consult GitHub' >&2
+exit 1
+SH
+  chmod +x "$dir/fakebin/gh"
+  mkdir -p "$dir/.state"
+  touch "$dir/.state/.last-watcher-beat"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/.state" \
+    PATH="$dir/fakebin:$PATH" \
+    "$ASSERT_KEPT" --worktree "$dir" --base main --branch work 2>/dev/null)
+  code=$?
+  set -e
+
+  assert_contains "$out" 'base: main (explicit --base)' \
+    "explicit-base-untouched: explicit mode must take the caller's ref verbatim"
+  [ "$code" -ne 2 ] \
+    || fail "explicit-base-untouched: explicit mode must not fail on a GitHub lookup"
+  pass "explicit mode takes the caller's base verbatim and never consults GitHub"
 }
 
 test_removed_shell_test_reported_via_meta() {
@@ -1539,6 +1860,13 @@ test_js_run_never_mutates_the_live_worktree() {
   pass "a JS check-2 run never mutates the live worktree or the linked node_modules"
 }
 
+test_pr_base_branch_is_compared_against_the_pr_target
+test_unreadable_pr_base_refuses_rather_than_assuming_default
+test_pr_in_another_github_repo_refuses_before_any_fetch
+test_unparseable_recorded_pr_refuses_before_any_github_call
+test_pr_repo_mismatch_refusal_never_leaks_origin_credentials
+test_task_without_a_pr_still_resolves_the_default_branch
+test_explicit_mode_never_consults_github
 test_removed_shell_test_reported_via_meta
 test_removed_python_test_reported
 test_added_tests_removed_none_loses_nothing
