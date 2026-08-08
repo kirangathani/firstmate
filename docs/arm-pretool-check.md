@@ -21,6 +21,8 @@ Claude also registers `bin/fm-continuity-pretool-check.sh` for Bash PreToolUse e
 This is a separate, tightly bounded recovery gate rather than another watcher-shape policy.
 It runs only in a primary home, and it denies only an executed `bin/fm-*.sh` command other than `bin/fm-wake-drain.sh` or `bin/fm-watch-arm.sh` when task metadata is in flight and no identity-matched live watcher holds that home's lock.
 Ordinary shell commands, fleet-script names used as data, all commands in an idle fleet, child worktrees, wake drain, and watcher arm remain allowed.
+A session that does not hold this home's session lock (`state/.lock`) is also allowed through, matching the same exemption in `bin/fm-turnend-guard.sh`: the denial's only remedy is `bin/fm-watch-arm.sh`, which correctly declines to arm for a non-owner, so denying there would wedge that session out of every fleet command with no in-session escape.
+The denial still stands for the lock holder, and for a dead or absent holder, because that session is the one that should arm.
 The exact denial tells Claude to run `bin/fm-wake-drain.sh` and then re-arm through a tracked Claude background task before retrying the blocked fleet command.
 `bin/fm-continuity-command-policy.mjs` reuses this document's shell lexer and command-position analysis but owns the recovery-versus-other-fleet classification.
 Malformed transport or opaque dynamic syntax fails open so this narrow gate cannot become a blanket Bash block.

@@ -54,6 +54,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 `tests/fm-pi-watch-extension.test.sh` simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, proves an in-flight `read-only` refusal is not served to a request made after the lock was acquired, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state and preserves the existing Stop registration.
+`tests/fm-session-lock-gate.test.sh` owns the session-lock gate itself: the `bin/fm-lock.sh ownership` verdicts and their read-only contract, the arm and checkpoint refusing for a live rival owner while still arming for an absent, dead, or pid-reused holder, ownership recognized several process levels down, the status line, and an assertion that only `bin/fm-session-lock-lib.sh` implements the walk.
 
 ## OpenCode arm coalescing: measured behavior, 2026-08-03 and 2026-08-04
 
@@ -101,7 +102,8 @@ It armed in 3 of 3 runs, and the control with no `.meta` file at any point corre
 The reason is structural.
 `shouldArm` is the last check in `beginArm` and is fully synchronous, so its answer is computed after every await has already resolved, at the latest possible instant.
 A coalesced caller therefore receives an answer that a launch starting at that same instant would also produce.
-`read-only` is broken for the opposite reason: `sessionOwnsLock` reads the lock file at the START of a long `ps` ancestry walk, so its answer can be older than the coalescing that inherits it.
+`read-only` is broken for the opposite reason: the ownership check reads the lock at the START of a long ancestry walk, so its answer can be older than the coalescing that inherits it.
+That check was the plugin's own `sessionOwnsLock` when this was measured; it is now `resolveSessionOwnership`, which delegates the same walk to `bin/fm-lock.sh ownership`, so the read-to-answer distance it describes is unchanged.
 The gap being fixed here is that distance between reading a precondition and answering with it, and `shouldArm` has no such distance.
 
 Two consequences worth stating, because the shape looks identical from a distance and will invite the same fix again.
