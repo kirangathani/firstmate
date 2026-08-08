@@ -94,7 +94,11 @@
 # Environment:
 #   FM_TEST_SUITE_DIR   directory holding *.test.sh (default: tests). Exists so
 #                        tests/fm-test.test.sh can point this runner at fixture
-#                        suites; the gates never set it.
+#                        suites; the gates never set it. Set FM_TEST_NO_CACHE=1
+#                        alongside it: the sidecar this run writes is the real
+#                        SHARED one, and a throwaway suite's paths stay in it
+#                        forever (see record_timings). tests/fm-test.test.sh
+#                        asserts the pairing on every such call site.
 #   FM_TEST_BASE        git ref --local diffs against (default: the first of
 #                        origin/main, main, origin/master, master that resolves).
 #   FM_TEST_CHANGED     path to a file listing changed paths, bypassing git
@@ -196,6 +200,18 @@ fi
 # record_timings <verdict file>: merge this run's measured durations into the
 # sidecar, keeping entries for files this run did not execute. Best effort - a
 # failure to record must never change a verdict.
+#
+# It deliberately does NOT prune entries whose path no longer exists on disk.
+# The sidecar is keyed to the git COMMON dir precisely so several worktrees on
+# DIFFERENT branches share it, so "absent from this checkout" does not mean
+# "dead": a test file that exists only on another branch would be dropped by
+# every run of every other branch and re-measured on its own, which costs the
+# packer the real measurement it was about to use. A stale entry costs far less,
+# because bin/fm-test-plan.awk looks costs up by path: an unmatched path can
+# never mis-schedule a selected file, and only shifts the sum/count fallback for
+# files with no measurement at all. Callers pointing this runner at a throwaway
+# suite must set FM_TEST_NO_CACHE=1 instead - that stops the junk at the source,
+# which is where it is cheap to stop.
 record_timings() {
   [ "$USE_CACHE" = 1 ] || return 0
   [ -s "$1" ] || return 0

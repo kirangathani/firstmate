@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Security and regression tests for canonical PR parsing, static merge polls,
+# Security and regression tests for canonical PR-link and git-remote parsing,
+# static merge polls,
 # private atomic artifacts, non-executing migration, and teardown cleanup.
 set -u
 
@@ -74,6 +75,9 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  # fm-assert-tests-kept.sh reads the PR's own base branch rather than assuming
+  # the default; these fixtures all build their project on main.
+  *" baseRefName "*) printf '%s\n' "${FM_TEST_GH_BASE:-main}" ;;
   *statusCheckRollup*)
     # Green rollup so fm-pr-merge.sh's checks-green gate passes; this suite
     # exercises URL/ID safety, not check classification (tests/fm-pr-merge.test.sh
@@ -408,6 +412,106 @@ EOF
   fm_pr_task_id_valid "$id" || fail "operational validator rejected a path-safe legacy task ID"
   ! fm_task_id_creation_valid "$id" || fail "creation validator accepted an overlong task ID"
   pass "raw-byte parser accepts canonical URLs and rejects the complete adversarial matrix"
+}
+
+# The remote-address parser is the sibling of the PR-link parser above: a
+# different input type, judged by the same shared host and owner/repo rule. A
+# git remote is not a canonical recorded artifact, so it legitimately accepts
+# the forms a link never may - scp-style, ssh, a port, an embedded credential,
+# a trailing .git and any host spelling - while still answering only for GitHub.
+test_remote_parser_matrix() {
+  local row url owner repo
+  while IFS='|' read -r url owner repo; do
+    [ -n "$url" ] || continue
+    FM_PR_NUMBER=sentinel
+    fm_pr_remote_parse "$url" || fail "remote parser rejected a valid GitHub remote: $url"
+    [ "$FM_PR_REMOTE_URL" = "$url" ] || fail "remote parser changed the raw remote: $url"
+    [ "$FM_PR_REMOTE_OWNER" = "$owner" ] || fail "remote parser returned wrong owner: $url"
+    [ "$FM_PR_REMOTE_REPO" = "$repo" ] || fail "remote parser returned wrong repository: $url"
+    [ "$FM_PR_NUMBER" = sentinel ] \
+      || fail "remote parser invented a PR number a remote address does not carry: $url"
+  done <<'EOF'
+https://github.com/o/r|o|r
+https://github.com/o/r.git|o|r
+https://github.com/Owner/Repo-Name.git|Owner|Repo-Name
+https://x-access-token:ghs_secret@github.com/o/r.git|o|r
+https://GITHUB.COM/o/r.git|o|r
+ssh://git@github.com/o/r|o|r
+ssh://git@github.com/o/r.git|o|r
+ssh://git@github.com:22/o/r.git|o|r
+git@github.com:o/r|o|r
+git@github.com:o/r.git|o|r
+git@GitHub.com:someone-else/other.git|someone-else|other
+EOF
+  # A PR link is not a remote address: the parser must not mine one out of it.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the dollar sign is literal rejection fixture data
+  for row in \
+    /srv/mirrors/origin.git \
+    ../relative/origin.git \
+    https://gitlab.com/o/r.git \
+    https://github.com.evil/o/r.git \
+    https://evilgithub.com/o/r.git \
+    git@evil.com:o/r.git \
+    'https://github.com/o' \
+    'https://github.com/o/r/extra.git' \
+    'https://github.com/-bad/r.git' \
+    'https://github.com/bad--owner/r.git' \
+    'https://github.com/o/..' \
+    'https://github.com/o/r$z.git' \
+    'https://github.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r.git' \
+    'https://github.com/o/r/pull/1'
+  do
+    ! fm_pr_remote_parse "$row" || fail "remote parser accepted a non-GitHub or malformed remote: $row"
+    [ -z "$FM_PR_REMOTE_URL" ] && [ -z "$FM_PR_REMOTE_OWNER" ] && [ -z "$FM_PR_REMOTE_REPO" ] \
+      || fail "a rejected remote left a partial identity behind: $row"
+  done
+  # The fold is what two identities are compared on, and it is the only place
+  # case is allowed to stop mattering.
+  [ "$(fm_pr_github_slug_fold Owner Repo-Name)" = owner/repo-name ] \
+    || fail "the identity fold did not fold case"
+  pass "the remote-address parser accepts every git remote form, rejects non-GitHub, and returns no PR number"
+}
+
+# The identity check lives in the library, not in one caller, so the merge gate
+# and the preview of that gate cannot disagree about which repository a PR is
+# in. A caller that had to remember the check separately is one that can forget
+# it, which is how the preview came to render a base from the wrong repository.
+test_repo_matches_origin_predicate() {
+  local dir
+  dir="$TMP_ROOT/repo-matches-origin"
+  git init -q -b main "$dir" 2>/dev/null || { git init -q "$dir"; git -C "$dir" checkout -q -b main; }
+
+  # No origin at all, and a non-GitHub origin: NOT DECIDABLE is not a mismatch,
+  # or every local-path and self-hosted setup would refuse.
+  fm_pr_repo_matches_origin "$dir" https://github.com/o/r/pull/1 \
+    || fail "a worktree with no origin must not read as a mismatch"
+  git -C "$dir" remote add origin /srv/mirrors/origin.git
+  fm_pr_repo_matches_origin "$dir" https://github.com/o/r/pull/1 \
+    || fail "a non-GitHub origin is not a determinable mismatch"
+
+  # Same repository, including a spelling that differs only in case and a
+  # credentialed remote, which must be compared on the fold rather than raw.
+  git -C "$dir" remote set-url origin https://github.com/o/r.git
+  fm_pr_repo_matches_origin "$dir" https://github.com/o/r/pull/1 \
+    || fail "a matching origin must not read as a mismatch"
+  git -C "$dir" remote set-url origin git@GitHub.com:O/R.git
+  fm_pr_repo_matches_origin "$dir" https://github.com/o/r/pull/1 \
+    || fail "identities differing only in case must compare equal"
+  git -C "$dir" remote set-url origin https://x-access-token:ghs_secret@github.com/o/r.git
+  fm_pr_repo_matches_origin "$dir" https://github.com/o/r/pull/1 \
+    || fail "an embedded credential must not change the identity comparison"
+
+  # A genuinely different GitHub repository, and an unparseable link.
+  git -C "$dir" remote set-url origin https://github.com/someone-else/other.git
+  ! fm_pr_repo_matches_origin "$dir" https://github.com/o/r/pull/1 \
+    || fail "a PR in a different GitHub repository must read as a mismatch"
+  [ "$FM_PR_OWNER/$FM_PR_REPO" = o/r ] \
+    || fail "a mismatch must leave the PR side set for the caller's message"
+  [ "$FM_PR_REMOTE_OWNER/$FM_PR_REMOTE_REPO" = someone-else/other ] \
+    || fail "a mismatch must leave origin's side set for the caller's message"
+  ! fm_pr_repo_matches_origin "$dir" 'not-a-pr-link' \
+    || fail "an unidentifiable PR link must never read as a match"
+  pass "the shared identity check answers for both the merge gate and its preview"
 }
 
 test_invalid_entrypoints_have_zero_side_effects() {
@@ -2721,6 +2825,8 @@ SH
 }
 
 test_parser_matrix
+test_remote_parser_matrix
+test_repo_matches_origin_predicate
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
