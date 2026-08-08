@@ -1047,6 +1047,103 @@ EOF
   pass "OpenCode watcher plugin requires session lock ownership"
 }
 
+test_opencode_arm_does_not_reuse_a_stale_read_only_refusal() {
+  local plugin repo home log shim marker release real_ps out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-stale-refusal-root"
+  home="$TMP_ROOT/opencode-stale-refusal-home"
+  log="$TMP_ROOT/opencode-stale-refusal.log"
+  shim="$TMP_ROOT/opencode-stale-refusal-shim"
+  marker="$TMP_ROOT/opencode-stale-refusal.ps"
+  release="$TMP_ROOT/opencode-stale-refusal.release"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$shim"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  real_ps=$(command -v ps) || real_ps=""
+  [ -n "$real_ps" ] || fail "OpenCode stale-refusal test needs ps on PATH"
+  # The lock-ownership check walks the process ancestry with ps. Blocking only the
+  # FIRST ps call, announcing it through a marker file, and holding it there until
+  # the driver writes a release file pins the first launch inside that walk AFTER
+  # it has already read the unowned lock, for exactly as long as the driver needs.
+  # The driver takes the lock and fires the second idle event before releasing, so
+  # the second event provably arrives while the first launch is still in flight,
+  # with no timing assumption at all. The wait is bounded so a driver bug cannot
+  # wedge the suite.
+  cat > "$shim/ps" <<SH
+#!/usr/bin/env bash
+if [ ! -e "\${FM_PS_MARKER:?}" ]; then
+  : > "\$FM_PS_MARKER"
+  waited=0
+  while [ ! -e "\${FM_PS_RELEASE:?}" ] && [ "\$waited" -lt 3000 ]; do
+    sleep 0.01
+    waited=\$((waited + 1))
+  done
+  # The ceiling exists only so a driver bug cannot wedge the suite. Reaching it
+  # means the coalescing window was never established, so fail loudly rather than
+  # proceeding into a run that would look like a pass without testing anything.
+  if [ ! -e "\$FM_PS_RELEASE" ]; then
+    printf 'ps shim: driver never released the ownership walk within 30s\n' >&2
+    exit 1
+  fi
+fi
+exec $real_ps "\$@"
+SH
+  chmod +x "$shim/ps"
+  out=$(PATH="$shim:$PATH" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" \
+    FM_PS_MARKER="$marker" FM_PS_RELEASE="$release" node 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const waitFor = async (path, budgetMs) => {
+  for (let waited = 0; waited < budgetMs; waited += 20) {
+    if (existsSync(path)) return true;
+    await sleep(20);
+  }
+  return existsSync(path);
+};
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
+await hooks.event(event);
+if (!(await waitFor(process.env.FM_PS_MARKER, 15000))) {
+  console.error("the first launch never reached the lock-ownership walk");
+  process.exit(1);
+}
+if (existsSync(process.env.FM_ARM_LOG)) {
+  console.error("watch arm ran without owning the session lock");
+  process.exit(1);
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event(event);
+writeFileSync(process.env.FM_PS_RELEASE, "");
+if (!(await waitFor(process.env.FM_ARM_LOG, 20000))) {
+  console.error("a post-lock idle event was denied arming by the in-flight read-only refusal");
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode arm must not serve an in-flight read-only refusal to a request made after the lock was acquired"
+  [ -z "$out" ] || fail "OpenCode stale-refusal test printed output: $out"
+  pass "OpenCode watcher plugin re-evaluates a stale read-only refusal"
+}
+
 test_opencode_watch_arm_coordinator_respects_primary_scope() {
   local plugin base repo home log out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -1843,6 +1940,7 @@ test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
+test_opencode_arm_does_not_reuse_a_stale_read_only_refusal
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_pre_ready_actionable_close_preserves_its_successor
