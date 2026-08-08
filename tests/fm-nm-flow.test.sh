@@ -491,7 +491,7 @@ SH
     "the compared base is named in full on its own legend line"
   assert_contains "$out" "LOCAL, never fetched" \
     "the base is disclosed as a local ref this viewer never fetched"
-  assert_contains "$out" "the gate refetches it" \
+  assert_contains "$out" "gate refetches" \
     "the legend says plainly that the real gate compares against the remote"
   assert_contains "$out" "prior-tests: snapshot " \
     "the result is stamped as a point-in-time snapshot"
@@ -554,7 +554,7 @@ test_tests_gate_uses_the_pr_base() {
     || fail "the box must ask GitHub which branch the PR targets: $(cat "$d/gh.log" 2>/dev/null)"
   assert_contains "$out" "prior-tests: base feature-base: the PR's own base, LOCAL" \
     "the row names the PR's own base, distinguishably from a default-branch base"
-  assert_contains "$out" "the gate refetches it" \
+  assert_contains "$out" "gate refetches" \
     "the unfetched-base qualifier survives a PR-derived base"
   assert_contains "$out" "miss 0/fail 0/unex 0/excu 0/skip 0/unac 0" \
     "comparing against the PR's base finds nothing missing"
@@ -578,6 +578,55 @@ test_tests_gate_pr_base_unreadable_degrades() {
   assert_contains "$out" "miss 1/fail 0/unex 0/excu 0/skip 0/unac 0 !!" \
     "the fallback really did compare against the default branch"
   pass "an unreadable PR base degrades to the default branch and names the fallback"
+}
+
+# GitHub answering correctly and the branch simply not being here yet is a
+# DIFFERENT problem from a failed read, with a different remedy - a fetch the
+# operator runs, since this path never fetches - so it must not share the
+# fallback label that sends them to check GitHub access.
+test_tests_gate_pr_base_read_but_unfetched() {
+  reset_fakes
+  local d out
+  d=$(make_pr_base_flow_case tests-gate-pr-base-unfetched)
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+  # A base branch gh reports happily and no ref for it exists in this copy.
+  out=$(FM_FAKE_PR_BASE=never-fetched-here FM_FAKE_GH_LOG="$d/gh.log" \
+    run_flow "$d" pr-base-task --tests-gate)
+  assert_contains "$out" "PR base not local" \
+    "a read-but-unfetched base is named as such, not as a failed read"
+  assert_not_contains "$out" "no PR base read" \
+    "a successful read must never be reported as a failed one"
+  assert_not_contains "$out" "the PR's own base" \
+    "an unfetched base was not actually compared against"
+  [ -z "$(git -C "$d/wt" status --porcelain)" ] || fail "the probe dirtied the worktree"
+  pass "a PR base that was read but is not local reads distinctly from a failed read"
+}
+
+# The base legend is an undroppable core row, so a suffix that overflows wraps
+# and trips the row budget that collapses the whole box - losing every count.
+# A stacked PR's base ref is exactly the long name that exposes it, and this
+# branch exists FOR stacked PRs, so the widest label must be proven at 80x24.
+test_tests_gate_pr_base_legend_fits_80_columns() {
+  reset_fakes
+  local d out frame lines
+  d=$(make_pr_base_flow_case tests-gate-pr-base-width)
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+  git -C "$d/wt" branch -f origin/feature-base main 2>/dev/null \
+    || git -C "$d/wt" branch origin/feature-base main
+  out=$(FM_FAKE_PR_BASE=origin/feature-base FM_FAKE_GH_LOG="$d/gh.log" \
+    FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" pr-base-task --tests-gate --watch 1)
+  frame=$(last_frame "$out")
+  lines=$(printf '%s\n' "$frame" | wc -l | tr -d ' ')
+  [ "$lines" -le 24 ] || fail "frame is $lines lines against the default 24-row budget"
+  assert_not_contains "$frame" "pane too short to qualify" \
+    "the widest base legend must not collapse the box on a stock 80x24 pane"
+  while IFS= read -r line; do
+    line=$(strip_sgr "$line")
+    [ "${#line}" -le 80 ] || fail "a rendered line is ${#line} columns wide: $line"
+  done <<EOF
+$frame
+EOF
+  pass "the widest base legend fits a stock 80-column pane"
 }
 
 # (k) watch mode re-renders and honors the frame bound
@@ -1106,7 +1155,7 @@ PY
   assert_contains "$frame" "PR: https://github.com/o/r/pull/7" "the PR line is present"
   assert_contains "$frame" "prior-tests: base main: no PR base read, LOCAL" \
     "the base legend is present, naming the fallback the fake gh forces"
-  assert_contains "$frame" "the gate refetches it" "the unfetched-base qualifier is present"
+  assert_contains "$frame" "gate refetches" "the unfetched-base qualifier is present"
   assert_contains "$frame" "prior-tests: snapshot " "the snapshot qualifier is present"
   assert_contains "$frame" "prior-tests: excu=captain-excused" "the class legend is present"
   assert_contains "$frame" "verified by name only" "the name-only legend is present"
@@ -1132,7 +1181,7 @@ PY
     "the qualified result row survives the drop"
   assert_contains "$frame" "prior-tests: base main: no PR base read, LOCAL" \
     "the base claim is undroppable while a result shows"
-  assert_contains "$frame" "the gate refetches it" \
+  assert_contains "$frame" "gate refetches" \
     "the stale-base qualifier is undroppable while a result shows"
   assert_contains "$frame" "prior-tests: snapshot " \
     "the snapshot qualifier is undroppable while a result shows"
@@ -2011,6 +2060,8 @@ test_coarse_fallback
 test_tests_gate_counts
 test_tests_gate_uses_the_pr_base
 test_tests_gate_pr_base_unreadable_degrades
+test_tests_gate_pr_base_read_but_unfetched
+test_tests_gate_pr_base_legend_fits_80_columns
 test_watch_mode_frames
 test_help_exits_zero
 test_tests_gate_name_check_only

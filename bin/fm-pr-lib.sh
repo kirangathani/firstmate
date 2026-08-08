@@ -187,6 +187,46 @@ fm_pr_remote_parse() {
   FM_PR_REMOTE_REPO=$repo
 }
 
+# fm_pr_bounded <command...>: run <command> under a wall-clock bound when a
+# timeout tool exists, and unbounded when none does. FM_PR_GH_TIMEOUT (default
+# 15) is the bound. A missing timeout tool must not stop the command running at
+# all, because the callers' alternative is no GitHub answer whatsoever.
+fm_pr_bounded() {
+  local secs=${FM_PR_GH_TIMEOUT:-15}
+  case "$secs" in ''|*[!0-9]*|0) secs=15 ;; esac
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
+# fm_pr_repo_matches_origin <worktree> <pr-url>: succeed when the PR link and
+# the worktree's origin name the same GitHub repository, and when the question
+# is not decidable at all.
+# NOT DECIDABLE IS NOT A MISMATCH, deliberately: an origin that is not a GitHub
+# address (a local path, a bare mirror, a self-hosted remote) cannot be compared
+# with a GitHub PR link, and refusing there would break every legitimate
+# non-GitHub setup. This closes the wrong-GitHub-repository hole; it is not a
+# general remote-identity check.
+# On a decidable MISMATCH it returns non-zero with FM_PR_OWNER/FM_PR_REPO and
+# FM_PR_REMOTE_OWNER/FM_PR_REMOTE_REPO left set to the two sides, so a caller can
+# name both without re-parsing either. Origin's RAW address is never among them,
+# because it can carry an embedded credential.
+fm_pr_repo_matches_origin() {
+  local wt=${1-} pr_url=${2-} origin_url
+  fm_pr_url_parse "$pr_url" || return 1
+  origin_url=$(git -C "$wt" remote get-url origin 2>/dev/null || true)
+  [ -n "$origin_url" ] || return 0
+  fm_pr_remote_parse "$origin_url" || return 0
+  [ "$(fm_pr_github_slug_fold "$FM_PR_OWNER" "$FM_PR_REPO")" \
+    != "$(fm_pr_github_slug_fold "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO")" ] || return 0
+  # The two parsers clear disjoint variable sets, so both sides are still set.
+  return 1
+}
+
 # fm_pr_base_branch_read <worktree> <pr-url> <diagnostic-file>: the sole reader
 # of which BRANCH a pull request targets, printed on stdout.
 # Two callers ask that question and must never answer it differently: the merge
@@ -217,11 +257,26 @@ fm_pr_base_branch_read() {
     printf '%s is not a GitHub pull request link\n' "$pr_url" > "$diag"
     return 1
   fi
+  # The answer is a branch name in the PR's OWN repository, and every caller
+  # resolves it against the worktree's origin, so a PR living somewhere else
+  # would name a same-branch in the wrong repository. Checking it HERE is what
+  # keeps the gate and its preview from disagreeing: a caller that had to
+  # remember the check separately is a caller that can forget it.
+  if ! fm_pr_repo_matches_origin "$wt" "$pr_url"; then
+    printf 'the PR lives in %s/%s but this local copy points at %s/%s\n' \
+      "$FM_PR_OWNER" "$FM_PR_REPO" \
+      "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO" > "$diag"
+    return 1
+  fi
   if ! command -v gh >/dev/null 2>&1; then
     printf 'gh is not installed\n' > "$diag"
     return 1
   fi
-  name=$(cd "$wt" && gh pr view "$pr_url" --json baseRefName -q .baseRefName 2>"$err") || rc=$?
+  # A network read with no bound hangs whoever called it, and one caller is the
+  # merge gate, where a silent indefinite hang is worst. Bound it here so both
+  # callers inherit it; the viewer's own outer bound is a separate layer that
+  # also covers this function's non-network work.
+  name=$(cd "$wt" && fm_pr_bounded gh pr view "$pr_url" --json baseRefName -q .baseRefName 2>"$err") || rc=$?
   if [ "$rc" -ne 0 ]; then
     { printf 'the gh query failed (exit %s)\n' "$rc"; cat "$err"; } > "$diag"
     return 1

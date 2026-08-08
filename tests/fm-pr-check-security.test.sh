@@ -472,6 +472,48 @@ EOF
   pass "the remote-address parser accepts every git remote form, rejects non-GitHub, and returns no PR number"
 }
 
+# The identity check lives in the library, not in one caller, so the merge gate
+# and the preview of that gate cannot disagree about which repository a PR is
+# in. A caller that had to remember the check separately is one that can forget
+# it, which is how the preview came to render a base from the wrong repository.
+test_repo_matches_origin_predicate() {
+  local dir
+  dir="$TMP_ROOT/repo-matches-origin"
+  git init -q -b main "$dir" 2>/dev/null || { git init -q "$dir"; git -C "$dir" checkout -q -b main; }
+
+  # No origin at all, and a non-GitHub origin: NOT DECIDABLE is not a mismatch,
+  # or every local-path and self-hosted setup would refuse.
+  fm_pr_repo_matches_origin "$dir" https://github.com/o/r/pull/1 \
+    || fail "a worktree with no origin must not read as a mismatch"
+  git -C "$dir" remote add origin /srv/mirrors/origin.git
+  fm_pr_repo_matches_origin "$dir" https://github.com/o/r/pull/1 \
+    || fail "a non-GitHub origin is not a determinable mismatch"
+
+  # Same repository, including a spelling that differs only in case and a
+  # credentialed remote, which must be compared on the fold rather than raw.
+  git -C "$dir" remote set-url origin https://github.com/o/r.git
+  fm_pr_repo_matches_origin "$dir" https://github.com/o/r/pull/1 \
+    || fail "a matching origin must not read as a mismatch"
+  git -C "$dir" remote set-url origin git@GitHub.com:O/R.git
+  fm_pr_repo_matches_origin "$dir" https://github.com/o/r/pull/1 \
+    || fail "identities differing only in case must compare equal"
+  git -C "$dir" remote set-url origin https://x-access-token:ghs_secret@github.com/o/r.git
+  fm_pr_repo_matches_origin "$dir" https://github.com/o/r/pull/1 \
+    || fail "an embedded credential must not change the identity comparison"
+
+  # A genuinely different GitHub repository, and an unparseable link.
+  git -C "$dir" remote set-url origin https://github.com/someone-else/other.git
+  ! fm_pr_repo_matches_origin "$dir" https://github.com/o/r/pull/1 \
+    || fail "a PR in a different GitHub repository must read as a mismatch"
+  [ "$FM_PR_OWNER/$FM_PR_REPO" = o/r ] \
+    || fail "a mismatch must leave the PR side set for the caller's message"
+  [ "$FM_PR_REMOTE_OWNER/$FM_PR_REMOTE_REPO" = someone-else/other ] \
+    || fail "a mismatch must leave origin's side set for the caller's message"
+  ! fm_pr_repo_matches_origin "$dir" 'not-a-pr-link' \
+    || fail "an unidentifiable PR link must never read as a match"
+  pass "the shared identity check answers for both the merge gate and its preview"
+}
+
 test_invalid_entrypoints_have_zero_side_effects() {
   local dir before after value rc
   dir=$(make_case invalid-entrypoints)
@@ -2784,6 +2826,7 @@ SH
 
 test_parser_matrix
 test_remote_parser_matrix
+test_repo_matches_origin_predicate
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

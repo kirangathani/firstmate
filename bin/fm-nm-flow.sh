@@ -218,8 +218,11 @@
 #
 # Read-only guarantee: this viewer only ever runs `no-mistakes axi status`,
 # `no-mistakes axi logs`, `no-mistakes runs`, git ref reads, plain reads of the
-# captain's supersession record and exec-gate marker, and (opt-in) the
-# report-only fm-assert-tests-kept.sh explicit mode. It never responds to
+# captain's supersession record and exec-gate marker, (opt-in) the
+# report-only fm-assert-tests-kept.sh explicit mode, and (opt-in, only when the
+# task recorded a PR) one `gh pr view <url> --json baseRefName` read bounded by
+# FM_NM_FLOW_PR_BASE_TIMEOUT - the only outbound network call this script makes,
+# and a read that mutates nothing. It never responds to
 # gates, never writes outside its own mktemp dir, and never mutates task state.
 # The probe is run with FM_GUARD_READ_ONLY=1 AND FM_STATE_OVERRIDE pointed at
 # the probe's own scratch dir for that last claim to be literally true.
@@ -577,16 +580,23 @@ nm_runs_status_for_branch() {  # <branch>
 # The query rides along with the probe, which runs ONCE per invocation, so no
 # watch frame ever repeats it: resolving per frame would put a network call on
 # the render path of a viewer that refreshes on a timer.
+# The answer is returned through TESTS_GATE_PR_BASE rather than on stdout, and
+# the caller must NOT invoke this in a command substitution: run_bounded_bg sets
+# the global PROBE_PID that on_int_term kills, and a subshell's assignment never
+# reaches the parent, so a Ctrl-C during the query would kill nothing and orphan
+# the bounded child. Bash starts background jobs with SIGINT ignored, so the
+# terminal's own signal would not reach it either.
+TESTS_GATE_PR_BASE=""
 tests_gate_pr_base() {  # <scratch-dir>
-  local scratch=$1 name
+  local scratch=$1
+  TESTS_GATE_PR_BASE=""
   # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
   run_bounded_bg "$PR_BASE_TIMEOUT" bash -c \
     '. "$1" || exit 1; fm_pr_base_branch_read "$2" "$3" "$4"' \
     fm-nm-flow-pr-base "$SCRIPT_DIR/fm-pr-lib.sh" "$WT" "$PR_URL" "$scratch/prbase.cause" \
     > "$scratch/prbase.name" 2>/dev/null || return 1
-  name=$(cat "$scratch/prbase.name" 2>/dev/null || true)
-  [ -n "$name" ] || return 1
-  printf '%s' "$name"
+  TESTS_GATE_PR_BASE=$(cat "$scratch/prbase.name" 2>/dev/null || true)
+  [ -n "$TESTS_GATE_PR_BASE" ] || return 1
 }
 
 # The base ref the probe compares against, in TESTS_GATE_BASE, with where it
@@ -614,7 +624,9 @@ tests_gate_base() {  # <scratch-dir>
   TESTS_GATE_BASE_SRC='default'
   if [ -n "$PR_URL" ]; then
     TESTS_GATE_BASE_SRC='fallback'
-    if pr_branch=$(tests_gate_pr_base "$scratch"); then
+    # Called WITHOUT a command substitution on purpose - see tests_gate_pr_base.
+    if tests_gate_pr_base "$scratch"; then
+      pr_branch=$TESTS_GATE_PR_BASE
       # Read-only holds here too: the PR's base is used only if a ref for it is
       # ALREADY present locally, never fetched to make it resolve.
       for cand in "origin/$pr_branch" "$pr_branch"; do
@@ -624,6 +636,12 @@ tests_gate_base() {  # <scratch-dir>
           return 0
         fi
       done
+      # GitHub answered, but no ref for that branch is here yet. That is a
+      # different problem from a failed read and has a different remedy - a
+      # fetch the operator runs, since this path never fetches - so it must not
+      # share the `fallback` label that sends them to check GitHub access.
+      TESTS_GATE_BASE_SRC='unfetched'
+      TESTS_GATE_PR_BASE=$pr_branch
     fi
   fi
   sym=$(git -C "$WT" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
@@ -1411,15 +1429,24 @@ build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files> <mgate
     # the merge gate will really use, a fallback is this viewer failing to reach
     # that branch and showing the default instead, and a plain default is a task
     # with no PR at all.
+    # Every suffix is budgeted against the LONGEST, not written to read best on
+    # its own: this is an undroppable core row, so one over-long suffix wraps at
+    # COLS=80 and trips the CORE_ROWS check that collapses the whole box, losing
+    # all six counts. `origin/feature-base` is an ordinary stacked-PR base and
+    # is what the budget has to survive, so no suffix here may exceed the 39
+    # characters of the longest below.
     case "$mbase_src" in
       pr)
-        core_line "prior-tests: base $mbase: the PR's own base, LOCAL; the gate refetches it"
+        core_line "prior-tests: base $mbase: the PR's own base, LOCAL; gate refetches"
         ;;
       fallback)
-        core_line "prior-tests: base $mbase: no PR base read, LOCAL; the gate refetches it"
+        core_line "prior-tests: base $mbase: no PR base read, LOCAL; gate refetches"
+        ;;
+      unfetched)
+        core_line "prior-tests: base $mbase: PR base not local; gate refetches"
         ;;
       *)
-        core_line "prior-tests: base $mbase: LOCAL, never fetched; the gate refetches it"
+        core_line "prior-tests: base $mbase: LOCAL, never fetched; gate refetches"
         ;;
     esac
     # The probe runs once per invocation, so in watch mode this same result is

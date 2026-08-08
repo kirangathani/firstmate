@@ -265,23 +265,10 @@ else
     git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $WT" >&2; exit 2; }
   fi
 
-  pr_number_from_target() {
-    local target=$1 n
-    case "$target" in
-      '' ) return 1 ;;
-      *"/pull/"*)
-        n=${target##*/pull/}
-        n=${n%%[!0-9]*}
-        ;;
-      [0-9]*)
-        n=${target%%[!0-9]*}
-        ;;
-      *) return 1 ;;
-    esac
-    [ -n "$n" ] || return 1
-    printf '%s' "$n"
-  }
-
+  # assert_pr_repo_is_origin below has already run fm_pr_url_parse on this exact
+  # value, so FM_PR_NUMBER is the strictly-parsed number and a second, more
+  # lenient reading of the PR-link grammar would only be able to disagree with
+  # the parser that owns it.
   resolve_pr_head() {
     local pr_url=$1 recorded_head=$2 n resolved
     if [ -n "$recorded_head" ] \
@@ -289,7 +276,8 @@ else
       printf '%s' "$recorded_head"
       return 0
     fi
-    n=$(pr_number_from_target "$pr_url") || return 1
+    fm_pr_url_parse "$pr_url" || return 1
+    n=$FM_PR_NUMBER
     git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
     git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
     resolved=$(git -C "$WT" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
@@ -319,19 +307,15 @@ else
   # the repository sense is spelled "lives in": an operator reading a refusal
   # that blocks their merge must not be sent looking at the wrong thing.
   assert_pr_repo_is_origin() {
-    local pr_url=$1 origin_url pr_slug origin_slug
+    local pr_url=$1
     if ! fm_pr_url_parse "$pr_url"; then
       echo "error: the recorded pr= value '$pr_url' is not a GitHub pull request link; refusing rather than fetching PR refs for a link this check cannot identify" >&2
       exit 2
     fi
-    pr_slug=$(fm_pr_github_slug_fold "$FM_PR_OWNER" "$FM_PR_REPO")
-    origin_url=$(git -C "$WT" remote get-url origin 2>/dev/null || true)
-    [ -n "$origin_url" ] || return 0
-    fm_pr_remote_parse "$origin_url" || return 0
-    origin_slug=$(fm_pr_github_slug_fold "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO")
-    [ "$pr_slug" != "$origin_slug" ] || return 0
-    echo "error: PR $pr_url lives in $FM_PR_OWNER/$FM_PR_REPO but this worktree's origin is $FM_PR_REMOTE_OWNER/$FM_PR_REMOTE_REPO; refusing rather than fetching a same-named branch from the wrong repository" >&2
-    exit 2
+    if ! fm_pr_repo_matches_origin "$WT" "$pr_url"; then
+      echo "error: PR $pr_url lives in $FM_PR_OWNER/$FM_PR_REPO but this worktree's origin is $FM_PR_REMOTE_OWNER/$FM_PR_REMOTE_REPO; refusing rather than fetching a same-named branch from the wrong repository" >&2
+      exit 2
+    fi
   }
 
   PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -361,7 +345,13 @@ else
   if [ -n "$PR_URL" ]; then
     # A private 0700 directory, so the diagnostic and its sibling capture file
     # cannot be pre-created as symlinks by another user on a shared /tmp.
-    PR_BASE_DIAG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-assert-tests-kept-prbase.XXXXXX")
+    # Exit 2, not the 1 a bare assignment under `set -e` would give: a scratch
+    # dir that cannot be created is "could not verify", never "assertions
+    # vanished", and the two codes are this script's documented contract.
+    PR_BASE_DIAG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-assert-tests-kept-prbase.XXXXXX") || {
+      echo "error: cannot create a private scratch directory to record why the PR base could not be read" >&2
+      exit 2
+    }
     PR_BASE_DIAG="$PR_BASE_DIAG_DIR/cause"
     BASE_BRANCH=$(fm_pr_base_branch_read "$WT" "$PR_URL" "$PR_BASE_DIAG") || {
       echo "error: cannot read the base branch of $PR_URL from GitHub; refusing rather than assuming the default branch, which would compare the branch against a base the PR was never built on" >&2
@@ -379,17 +369,31 @@ else
     BASE_ORIGIN="default branch of $PROJ"
   fi
 
+  TMPD_FETCH_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-assert-tests-kept-fetch.XXXXXX") || {
+    echo "error: cannot create a scratch file to capture the base fetch's output" >&2
+    exit 2
+  }
   if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
     # Update the remote-tracking ref itself; a bare single-branch fetch can
     # leave origin/<branch> stale on some Git versions.
-    git -C "$WT" fetch origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" --quiet || {
+    # git's own failure lines print the remote address AS CONFIGURED, which can
+    # carry an embedded credential, and bin/fm-pr-merge.sh redirects this
+    # script's stdout but not its stderr - so an unredacted fatal would put a
+    # token in the merge output and any CI log. The userinfo@ segment of any
+    # URL-shaped token is stripped before the capture is relayed; the branch
+    # name and git's reason survive, which is what an operator needs.
+    if ! git -C "$WT" fetch origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" \
+      --quiet 2>"$TMPD_FETCH_ERR"; then
       echo "error: cannot fetch base branch $BASE_BRANCH ($BASE_ORIGIN) from origin in $WT" >&2
+      sed -E 's#(://)[^/@[:space:]]*@#\1<redacted>@#g' "$TMPD_FETCH_ERR" >&2
+      rm -f "$TMPD_FETCH_ERR"
       exit 2
-    }
+    fi
     BASE="origin/$BASE_BRANCH"
   else
     BASE="$BASE_BRANCH"
   fi
+  rm -f "$TMPD_FETCH_ERR"
 fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not resolve in $WT" >&2; exit 2; }
