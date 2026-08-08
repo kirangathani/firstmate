@@ -75,6 +75,10 @@ done
 
 command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; exit 1; }
 
+# shellcheck source=bin/fm-backend.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-backend.sh"
+
 NOW_EPOCH=${FM_FLOW_SNAPSHOT_NOW_EPOCH:-$(date -u +%s)}
 NOW_ISO=${FM_FLOW_SNAPSHOT_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 
@@ -207,7 +211,7 @@ ci_json() {  # <pr-url>
 }
 
 agent_json() {  # <task-json>
-  local task=$1 id kind mode project worktree window branch endpoint_alive pr_url
+  local task=$1 id kind mode project worktree window branch endpoint_alive agent_alive pr_url
   local idx run_id run_status run_updated axi rc steps actives ci
 
   id=$(printf '%s' "$task" | jq -r '.id')
@@ -217,6 +221,21 @@ agent_json() {  # <task-json>
   worktree=$(printf '%s' "$task" | jq -r '.paths.worktree.path // ""')
   window=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
   endpoint_alive=$(printf '%s' "$task" | jq -r 'if .endpoint.exists then "true" else "false" end')
+  # `endpoint.exists` only says a pane is there. The deeper probe asks what is
+  # RUNNING in it, which distinguishes a torn-down worker from a live one for
+  # about 15ms. fm-fleet-snapshot.sh runs it for secondmates only, so it is
+  # called directly here rather than widened there.
+  #
+  # It reports the pane's foreground command, so it cannot see a WEDGED agent:
+  # a stuck claude is still claude. It upgrades "a pane exists" to "an agent
+  # process exists" and nothing further, which is why the renderer treats
+  # `unknown` as unknown rather than as alive.
+  agent_alive=$(printf '%s' "$task" | jq -r '.endpoint.agent_alive // "not_checked"')
+  if [ "$agent_alive" = "not_checked" ] && [ "$endpoint_alive" = true ] && [ -n "$window" ]; then
+    local backend
+    backend=$(printf '%s' "$task" | jq -r '.backend // "tmux"')
+    agent_alive=$(fm_backend_agent_alive "$backend" "$window" 2>/dev/null || printf 'unknown')
+  fi
   pr_url=$(printf '%s' "$task" | jq -r '.pr.url // ""')
   branch="fm/$id"
 
@@ -269,6 +288,7 @@ agent_json() {  # <task-json>
     --arg pr_url "$pr_url" \
     --arg run_id "$run_id" \
     --arg run_status "$run_status" \
+    --arg agent_alive "$agent_alive" \
     --arg collect_reason "$collect_reason" \
     --arg now_iso "$NOW_ISO" \
     --argjson now_epoch "$NOW_EPOCH" \
@@ -283,6 +303,7 @@ agent_json() {  # <task-json>
       id:$id, branch:$branch, project:$project, worktree:$worktree,
       window:$window, kind:$kind, mode:$mode,
       endpoint_alive:$endpoint_alive,
+      agent_alive:$agent_alive,
       pr:{url:(if $pr_url == "" then null else $pr_url end), number:$pr_num},
       collection:{ok:$collect_ok, reason:$collect_reason, at:$now_iso, epoch:$now_epoch},
       run:{
