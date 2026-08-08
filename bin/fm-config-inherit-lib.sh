@@ -62,11 +62,13 @@ fm_inherit_file_link_count() {
   fi
 }
 
+# sha256sum first because it is a C binary and shasum is a perl script; see
+# bin/fm-pr-lib.sh's fm_pr_sha256 for the measurement and the macOS fallback rule.
 fm_inherit_sha256() {
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
+  if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
   else
     return 1
   fi

@@ -219,10 +219,12 @@ print_status_tail() {
 hash_file() {
   local file=$1
   [ -f "$file" ] || return 1
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$file" | awk '{print "sha256:" $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
+  # sha256sum first because it is a C binary and shasum is a perl script; see
+  # bin/fm-pr-lib.sh's fm_pr_sha256 for the measurement and the macOS fallback rule.
+  if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$file" | awk '{print "sha256:" $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print "sha256:" $1}'
   else
     cksum "$file" | awk '{print "cksum:" $1 ":" $2}'
   fi

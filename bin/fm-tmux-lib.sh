@@ -90,24 +90,25 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
+  # Trims here use the shared fm_composer_normalize_trim (bin/fm-composer-lib.sh),
+  # not a bare `[[:space:]]` strip: `[[:space:]]` leaves U+00A0 and the other
+  # FM_COMPOSER_BLANKS in place, so a Unicode-blank-padded row would fail the
+  # border-shape match and border strip below and reach the classifier misshaped.
   # bordered: from the plain row (borders survive an all-ANSI strip).
   plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
-  plain="${plain#"${plain%%[![:space:]]*}"}"
-  plain="${plain%"${plain##*[![:space:]]}"}"
+  fm_composer_normalize_trim "$plain" plain
   case "$plain" in
     '│'*'│'|'┃'*'┃'|'|'*'|') bordered=1 ;;
   esac
   # content: from the ghost-stripped row (real typed text only).
   stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  fm_composer_normalize_trim "$stripped" stripped
   case "$stripped" in
     '│'*'│') stripped=${stripped#│}; stripped=${stripped%│} ;;
     '┃'*'┃') stripped=${stripped#┃}; stripped=${stripped%┃} ;;
     '|'*'|') stripped=${stripped#|}; stripped=${stripped%|} ;;
   esac
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  fm_composer_normalize_trim "$stripped" stripped
   # A busy footer landing on the cursor line is not pending input (tmux-specific:
   # only tmux captures the raw cursor row, which may BE the footer).
   if [ -n "$stripped" ] \

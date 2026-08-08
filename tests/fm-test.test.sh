@@ -3,13 +3,23 @@
 #
 # bin/fm-test.sh must be the single owner that BOTH CI
 # (.github/workflows/ci.yml, sharded) and the pre-push gate (.no-mistakes.yaml
-# commands.test, whole set) invoke, so the local suite can never diverge from
-# CI. Sharding is a scheduling change only: the union of CI's shards must be
-# exactly the canonical whole set, disjointly, deterministically. These tests
-# assert that directly on the real suite rather than trusting the argument for
-# it, pin the CI matrix to the runner's shard denominator so the two cannot
-# drift apart, and pin the fan-in gate wiring that turns a skipped or
-# cancelled shard into a failure instead of a silent pass.
+# commands.test, change-selected) invoke, so the local suite can never diverge
+# from CI. Two separate contracts are asserted here, because the two gates now
+# run different amounts of work.
+#
+# CI's contract is exhaustiveness: sharding is a scheduling change only, so the
+# union of CI's shards must be exactly the canonical whole set, disjointly and
+# deterministically. That is asserted on the real suite rather than trusting the
+# argument for it, the CI matrix is pinned to the runner's shard denominator so
+# the two cannot drift, and the fan-in gate wiring that turns a skipped or
+# cancelled shard into a failure instead of a silent pass is pinned too.
+#
+# The local gate's contract is stronger, because it deliberately runs FEWER
+# files: selection must follow the reference closure rather than file names, and
+# the selected parallel path must return the whole set's verdict for every file
+# it runs. Both are asserted at the bottom of this file on a fixture repo with
+# a real reference graph, including on a tree that fails - "both modes report
+# green" is the one result that would prove nothing.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -30,9 +40,12 @@ grep -Fq -- '- run: bin/fm-test.sh --shard ${{ matrix.shard }}/' "$CI" \
 assert_no_grep 'for test_script' "$CI" "CI must call fm-test.sh, not re-spell the test loop inline"
 pass "CI behaviour job calls the one-owner script, not an inline loop"
 
-grep -Fqx "  test: 'bin/fm-test.sh'" "$NM" \
-  || fail "no-mistakes commands.test must map exactly to the one-owner script's whole-set mode"
-pass "pre-push gate runs the canonical whole-set mode of the same owner"
+grep -Fqx "  test: 'bin/fm-test.sh --local'" "$NM" \
+  || fail "no-mistakes commands.test must map exactly to the one-owner script's local mode"
+pass "pre-push gate runs the selecting local mode of the same owner"
+
+assert_no_grep '--local' "$CI" "CI must stay exhaustive: no change-based selection in the workflow"
+pass "CI never invokes the selecting local mode"
 
 # --- CI matrix and the runner's denominator cannot drift --------------------
 
@@ -53,14 +66,24 @@ want="$want]"
 pass "CI runs every shard 1..$DENOM of the denominator it invokes"
 
 # --- fan-in gate: a skipped/cancelled shard fails, never passes -------------
+# The gate now fans in the CI testing waiver too, because a verified waiver
+# skips the shards deliberately. That gives it a second way to be wrong: a
+# waiver check that crashed also leaves the shards unrun, and the shard result
+# alone cannot tell the two apart. So the gate must depend on both jobs and
+# must fail on a waiver job that did not itself succeed.
 
-assert_grep 'needs: tests' "$CI" "the tests-complete gate must depend on the shard matrix"
+assert_grep 'needs: [tests, ci-waiver]' "$CI" \
+  "the tests-complete gate must depend on the shard matrix and on the waiver verdict"
 assert_grep 'if: always()' "$CI" "the gate must report a verdict even when shards fail or are cancelled"
 assert_grep 'needs.tests.result' "$CI" "the gate must test the aggregate shard result"
-# shellcheck disable=SC2016 # $result must stay literal: it is the gate's own shell text.
-assert_grep 'if [ "$result" != "success" ]; then' "$CI" \
+assert_grep 'needs.ci-waiver.result' "$CI" "the gate must test whether the waiver check itself completed"
+# shellcheck disable=SC2016 # the expansions must stay literal: this is the gate's own shell text.
+assert_grep 'if [ "$TESTS_RESULT" != "success" ]; then' "$CI" \
   "the gate must fail on anything but every-shard-success (including skipped and cancelled)"
-pass "tests-complete gate turns non-success shard outcomes into failures"
+# shellcheck disable=SC2016
+assert_grep 'if [ "$WAIVER_RESULT" != "success" ]; then' "$CI" \
+  "the gate must fail when the waiver check did not complete, never read unrun shards as an authorized skip"
+pass "tests-complete gate turns non-success shard and waiver outcomes into failures"
 
 # --- partition parity on the real suite -------------------------------------
 # The union of shards 1..N must be byte-identical to the whole set, the shard
@@ -101,6 +124,20 @@ pass "shard listing is deterministic"
 # --- execution rules, on a fixture suite ------------------------------------
 # FM_TEST_SUITE_DIR points the runner at a throwaway suite so the failure
 # paths run in milliseconds instead of re-running the real 86-file suite.
+#
+# Every one of these invocations is the REAL bin/fm-test.sh, so its ROOT is the
+# real repo and its timings sidecar is the real, SHARED one under the git common
+# dir. Without FM_TEST_NO_CACHE=1 each run writes the fixture files' absolute
+# /tmp paths into that sidecar, where nothing ever removes them: the packer's
+# fallback cost for an unmeasured file is sum-of-known/count-of-known, so every
+# near-zero junk entry drags it down permanently. The guard belongs on every
+# fixture invocation; the assertions at the bottom of this section hold it there.
+
+# The real, shared sidecar the fixture runs below must be proven not to have
+# polluted. Its path is resolved by the one helper in tests/lib.sh that spells
+# the runner's own rule, so a change to that rule cannot leave this test
+# pointing at a path that never exists and passing vacuously.
+REAL_TIMINGS=$(fm_test_timings_file)
 
 TMPROOT=$(fm_test_tmproot fm-test-fixture)
 FX="$TMPROOT/suite"
@@ -115,7 +152,7 @@ chmod +x "$FX"/*.test.sh
 
 # A deliberately failing test must fail its shard, name the shard, the file,
 # and the exit status, and must not stop the shard's remaining files.
-out=$(FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 2/2 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 2/2 2>&1)
 rc=$?
 [ "$rc" -eq 1 ] || fail "a failing test file must fail its shard (got rc=$rc)"
 assert_contains "$out" "FAILED in shard 2/2" "the failure must name the shard it came from"
@@ -125,14 +162,14 @@ assert_contains "$out" "2 run, 1 passed, 1 failed, 0 skipped" "the accounting li
 pass "a deliberately failing test fails its shard with full attribution"
 
 # The sibling shard without the failing file passes with explicit accounting.
-out=$(FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 1/2 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 1/2 2>&1)
 rc=$?
 [ "$rc" -eq 0 ] || fail "the all-green shard must pass (got rc=$rc): $out"
 assert_contains "$out" "2 run, 2 passed, 0 failed, 0 skipped" "the green shard must still print its accounting"
 pass "an all-green shard passes with explicit accounting"
 
 # The whole-set mode reports the same failure, so the pre-push gate catches it.
-out=$(FM_TEST_SUITE_DIR="$FX" "$RUNNER" 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" 2>&1)
 rc=$?
 [ "$rc" -eq 1 ] || fail "the whole-set run must fail on a failing file (got rc=$rc)"
 assert_contains "$out" "FAILED in whole set" "the whole-set run must report the failure"
@@ -141,7 +178,7 @@ pass "the whole-set mode fails on the same failing file"
 # A file without its executable bit must fail loudly (exit 126), preserving
 # the mode-100755 invariant CI has always enforced by direct execution.
 chmod -x "$FX/cc.test.sh"
-out=$(FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 1/2 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard 1/2 2>&1)
 rc=$?
 chmod +x "$FX/cc.test.sh"
 [ "$rc" -eq 1 ] || fail "a non-executable test file must fail its shard (got rc=$rc)"
@@ -151,7 +188,7 @@ pass "a test file missing its executable bit fails, never silently passes"
 # An empty suite must refuse rather than report green.
 EMPTY="$TMPROOT/empty"
 mkdir -p "$EMPTY"
-out=$(FM_TEST_SUITE_DIR="$EMPTY" "$RUNNER" 2>&1)
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$EMPTY" "$RUNNER" 2>&1)
 rc=$?
 [ "$rc" -eq 2 ] || fail "an empty suite must refuse with rc=2 (got rc=$rc)"
 assert_contains "$out" "refusing to report an empty suite as green" "the empty-suite refusal must be loud"
@@ -159,10 +196,355 @@ pass "an empty suite refuses instead of passing vacuously"
 
 # Out-of-range and malformed shard specs must be usage errors, not runs.
 for spec in 0/4 5/4 x/4 4 4/ /4 1/2/3; do
-  FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard "$spec" >/dev/null 2>&1
+  FM_TEST_NO_CACHE=1 FM_TEST_SUITE_DIR="$FX" "$RUNNER" --shard "$spec" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "--shard $spec must be rejected with rc=2 (got rc=$rc)"
 done
 pass "malformed and out-of-range shard specs are rejected"
+
+# --- the fixture runs must not touch the real, shared timings sidecar -------
+# Behavioural half: every fixture invocation above has now run against the real
+# runner, so an unguarded one would have recorded this run's throwaway files -
+# and their paths are always absolute, under this run's own mktemp root. That is
+# exactly the claim asserted, rather than "the file did not change": the sidecar
+# is shared by every worktree of the repo and another worktree's legitimate run
+# may land in it at any moment. Such a run only ever writes repo-relative paths,
+# so it cannot forge this failure, and cannot mask it either.
+# An absent sidecar satisfies the claim trivially - it must not be created here.
+if [ -f "$REAL_TIMINGS" ]; then
+  LEAKED=$(awk -F'\t' -v root="$TMPROOT/" 'index($1, root) == 1 { print $1 }' "$REAL_TIMINGS")
+  [ -z "$LEAKED" ] \
+    || fail "fixture-suite paths leaked into the shared timings sidecar ($REAL_TIMINGS); every real-runner invocation pointed at a throwaway suite must set FM_TEST_NO_CACHE=1. Leaked: $LEAKED"
+fi
+pass "fixture-suite runs record no throwaway paths in the shared timings sidecar"
+
+# Static half: the behavioural check above only covers the invocations that
+# already ran. This one covers every fixture invocation in this file, including
+# any added later, so an unguarded new one fails here instead of quietly
+# polluting the sidecar for the rest of the repo's life.
+#
+# Line-based on purpose: an invocation whose env assignment and runner sit on
+# different source lines is NOT covered, because matching across lines needs a
+# parse fragile enough to be its own defect. Keep such invocations on one line.
+# The runner is matched by PATH, not by the "$RUNNER" spelling alone, so a call
+# site written out in full is caught too; that also matches the fixture-copied
+# runners, which is harmless, since the guard they would then have to carry is
+# the one they already carry. The two patterns are applied on SEPARATE source
+# lines, which is what keeps this guard from matching its own text.
+CALLS_FILE="$TMPROOT/fixture-call-sites"
+# shellcheck disable=SC2016 # literal source text being matched, not expansions.
+grep -nE '"\$RUNNER"|bin/fm-test\.sh' "${BASH_SOURCE[0]}" \
+  | grep 'FM_TEST_SUITE_DIR=' >"$CALLS_FILE" || true
+# A pattern that quietly stops matching would make the check above pass while
+# proving nothing, so the known guarded call sites are counted, not assumed.
+# Deleting a fixture invocation is meant to require lowering this number.
+KNOWN_GUARDED=6
+GUARDED=$(grep -c 'FM_TEST_NO_CACHE=1' "$CALLS_FILE" || true)
+[ "$GUARDED" -ge "$KNOWN_GUARDED" ] \
+  || fail "the fixture-invocation guard matched only $GUARDED of the $KNOWN_GUARDED known guarded call sites; its pattern has stopped matching and it is no longer checking anything"
+UNGUARDED=$(grep -v 'FM_TEST_NO_CACHE=1' "$CALLS_FILE" || true)
+[ -z "$UNGUARDED" ] \
+  || fail "these real-runner fixture invocations lack FM_TEST_NO_CACHE=1 and would write throwaway paths into the shared sidecar: $UNGUARDED"
+pass "every real-runner fixture invocation in this file sets FM_TEST_NO_CACHE=1"
+
+# ===========================================================================
+# Local mode: closure selection and selected-vs-whole-set parity
+# ===========================================================================
+#
+# The local gate runs FEWER files than CI, so it needs a stronger guard than
+# the shard partition does, and the guard has to be about the SELECTION rule
+# rather than about file names. Two claims are load-bearing and both are
+# asserted below on a real fixture repo with a real reference graph:
+#   1. a test that exercises an edited script is selected even though the test
+#      file itself is untouched and its name resembles nothing that changed;
+#   2. the selected, sharded, parallel path returns the whole-set path's verdict
+#      for every file it runs, so narrowing never turns a failure into a pass.
+# A third guard covers the approximation itself: the planner reads a static
+# reference graph, so any changed file that graph cannot attribute to a test
+# must escalate to the canonical whole set rather than quietly run less.
+
+# fm_test_local_fixture <dir>: a miniature repo with the canonical layout and a
+# REAL reference graph, so selection is exercised rather than mocked.
+#   tests/aa -> bin/tool.sh -> bin/lib-core.sh   (the transitive case)
+#   tests/bb -> bin/other.sh                     (must NOT be dragged in)
+#   tests/cc -> nothing
+#   tests/dd -> docs/notes.md, which NAMES bin/tool.sh in prose
+# fm-test.sh resolves its root from its own location, so the fixture gets its
+# own copy of the runner and the planner.
+fm_test_local_fixture() {
+  local root=$1
+  mkdir -p "$root/bin" "$root/tests" "$root/docs"
+  cp "$RUNNER" "$root/bin/fm-test.sh"
+  cp "$ROOT/bin/fm-test-plan.awk" "$root/bin/fm-test-plan.awk"
+  chmod +x "$root/bin/fm-test.sh"
+
+  printf '#!/usr/bin/env bash\ncore_ready() { printf "ready\\n"; }\n' > "$root/bin/lib-core.sh"
+  cat > "$root/bin/tool.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib-core.sh"
+core_ready
+SH
+  printf '#!/usr/bin/env bash\nprintf "other\\n"\n' > "$root/bin/other.sh"
+  chmod +x "$root/bin/tool.sh" "$root/bin/other.sh"
+
+  # Prose that names a script. A doc is a legitimate dependency TARGET for the
+  # test that reads it, and never a source of edges: editing bin/tool.sh does
+  # not change what this file says.
+  printf '# Notes\n\nThe tool lives at bin/tool.sh and it prints ready.\n' > "$root/docs/notes.md"
+  # Referenced by nothing at all. README.md is prose, so "no test reaches it" is
+  # a positive finding; bin/orphan.sh is code, which can also be reached by
+  # execution through a computed name, so the same absence proves nothing.
+  printf '# Fixture\n' > "$root/README.md"
+  printf '#!/usr/bin/env bash\nprintf "orphan\\n"\n' > "$root/bin/orphan.sh"
+  chmod +x "$root/bin/orphan.sh"
+
+  printf '#!/usr/bin/env bash\nFIXTURE_LIB=1\nexport FIXTURE_LIB\n' > "$root/tests/lib.sh"
+  cat > "$root/tests/aa.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+"$ROOT/bin/tool.sh" >/dev/null
+SH
+  cat > "$root/tests/bb.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+"$ROOT/bin/other.sh" >/dev/null
+SH
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$root/tests/cc.test.sh"
+  cat > "$root/tests/dd.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+grep -q Notes "$ROOT/docs/notes.md"
+SH
+  chmod +x "$root/tests"/*.test.sh
+
+  git -C "$root" init -q
+  git -C "$root" add -A
+  git -C "$root" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm fixture
+}
+
+# fm_test_local_list <fixture> <changed path>...: the files --local would run
+# for that exact change set.
+fm_test_local_list() {
+  local fx=$1
+  shift
+  printf '%s\n' "$@" > "$CHANGEFILE"
+  FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$CHANGEFILE" "$fx/bin/fm-test.sh" --list-local 2>/dev/null
+}
+
+LOCALROOT=$(fm_test_tmproot fm-test-local)
+FXL="$LOCALROOT/repo"
+# Scratch files live OUTSIDE the fixture repo. The git-derived cases below take
+# their change set from the repo itself, and an untracked scratch file inside it
+# would be a changed file no test reaches, escalating those runs to the whole
+# set and quietly destroying what they assert.
+SCRATCH="$LOCALROOT/scratch"
+mkdir -p "$SCRATCH"
+CHANGEFILE="$SCRATCH/changed"
+VERDICTFILE="$SCRATCH/verdicts"
+fm_test_local_fixture "$FXL"
+
+# --- selection follows the closure, not the file name -----------------------
+# bin/lib-core.sh is named by NO test file. It reaches tests/aa.test.sh only
+# through bin/tool.sh. This is the case filename matching gets wrong.
+sel=$(fm_test_local_list "$FXL" bin/lib-core.sh)
+assert_contains "$sel" 'tests/aa.test.sh' \
+  "a test exercising an edited script must be selected even though the test file is untouched"
+assert_not_contains "$sel" 'tests/bb.test.sh' "an unrelated test must not be selected"
+assert_not_contains "$sel" 'tests/cc.test.sh' "an unrelated test must not be selected"
+assert_not_contains "$sel" 'tests/dd.test.sh' "an unrelated test must not be selected"
+pass "selection is closure-derived: an edited library selects its transitive test only"
+
+# The directly-invoked script selects the same test, and nothing more.
+sel=$(fm_test_local_list "$FXL" bin/other.sh)
+[ "$sel" = 'tests/bb.test.sh' ] || fail "editing bin/other.sh must select exactly tests/bb.test.sh, got: $sel"
+pass "a directly-invoked script selects exactly its own test"
+
+# A changed test file selects itself even though nothing depends on it.
+sel=$(fm_test_local_list "$FXL" tests/cc.test.sh)
+[ "$sel" = 'tests/cc.test.sh' ] || fail "a changed test file must select itself, got: $sel"
+pass "a changed test file selects itself"
+
+# --- prose is a dependency target, never a source of edges ------------------
+# docs/notes.md names bin/tool.sh. The test that READS the doc must run when the
+# doc changes, and must NOT run merely because the doc mentions something else
+# that changed - otherwise every file cited anywhere in the documentation drags
+# the whole suite in, which is what a whole-set run already does for free.
+sel=$(fm_test_local_list "$FXL" docs/notes.md)
+[ "$sel" = 'tests/dd.test.sh' ] || fail "a changed doc must select the test that reads it, got: $sel"
+sel=$(fm_test_local_list "$FXL" bin/tool.sh)
+assert_contains "$sel" 'tests/aa.test.sh' "the script's own test must be selected"
+assert_not_contains "$sel" 'tests/dd.test.sh' \
+  "a doc merely NAMING the changed script must not drag its reader in"
+pass "prose is a dependency target, not a source of edges"
+
+# --- an unattributable change escalates to the whole set --------------------
+# The planner reads a static graph, so it cannot prove it saw every route to a
+# file. It CAN prove a changed file is on no route at all, and that is the case
+# where running less would be a guess.
+printf '%s\n' bin/orphan.sh > "$CHANGEFILE"
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$CHANGEFILE" "$FXL/bin/fm-test.sh" --local 2>&1)
+rc=$?
+[ "$rc" -eq 0 ] || fail "the escalated whole-set run must still pass on a green fixture (rc=$rc): $out"
+assert_contains "$out" 'running the canonical whole set instead' \
+  "an unreferenced SCRIPT must escalate: it can still be reached by a computed name"
+assert_contains "$out" 'whole set: 4 assigned, 4 run' "the escalation must run every file"
+pass "an unreferenced script escalates to the whole set"
+
+# Prose is the exception, and only because the evidence is genuinely different:
+# a doc affects a test only by being read, and a test that reads a doc names it.
+# Escalating here instead would put every documentation-only edit through the
+# full suite, which is the slow gate this mode exists to remove.
+printf '%s\n' README.md > "$CHANGEFILE"
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$CHANGEFILE" "$FXL/bin/fm-test.sh" --local 2>&1)
+rc=$?
+[ "$rc" -eq 0 ] || fail "an unread doc must not fail the run (rc=$rc): $out"
+assert_not_contains "$out" 'running the canonical whole set instead' \
+  "an unread doc must not escalate: no test reads it, so no test can be affected"
+assert_contains "$out" 'no test reads README.md' "the narrowed run must name what it ruled out"
+assert_contains "$out" '0 of 4 files run' "an unread doc must run nothing"
+pass "an unread doc runs nothing and names itself, instead of escalating"
+
+# The asymmetry must not leak: a doc a test DOES read still selects that test.
+sel=$(fm_test_local_list "$FXL" docs/notes.md README.md)
+[ "$sel" = 'tests/dd.test.sh' ] \
+  || fail "a read doc must still select its reader even alongside an unread one, got: $sel"
+pass "the prose exception applies only to docs no test reads"
+
+# --- parity: the selected, sharded path agrees with the whole set -----------
+# This is the contract that makes narrowing safe. --verify-parity runs the
+# canonical whole-set serial mode and the selected parallel mode over the same
+# files and diffs their per-file verdicts. It is asserted on a tree that
+# actually HAS a failure, because "both modes report green" is the one result
+# that proves nothing.
+out=$(FM_TEST_NO_CACHE=1 "$FXL/bin/fm-test.sh" --verify-parity 2>&1)
+rc=$?
+[ "$rc" -eq 0 ] || fail "green fixture must reach parity (rc=$rc): $out"
+assert_contains "$out" 'PARITY OK - 4 file(s)' "parity must compare every file, not a subset"
+pass "the selected, sharded path agrees with the whole set on a green tree"
+
+printf '#!/usr/bin/env bash\nprintf "broken\\n" >&2\nexit 3\n' > "$FXL/bin/other.sh"
+chmod +x "$FXL/bin/other.sh"
+out=$(FM_TEST_NO_CACHE=1 "$FXL/bin/fm-test.sh" --verify-parity 2>&1)
+rc=$?
+[ "$rc" -eq 0 ] || fail "a failing tree must still reach parity (rc=$rc): $out"
+assert_contains "$out" 'PARITY OK' "both modes must agree about the failure too"
+pass "the two paths agree file for file on a tree that fails"
+
+# And the local path must actually FAIL on it: a faster gate that reports green
+# on a broken tree is the only outcome worse than a slow gate.
+sel_rc=0
+printf '%s\n' bin/other.sh > "$CHANGEFILE"
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$CHANGEFILE" \
+  "$FXL/bin/fm-test.sh" --local 2>&1) || sel_rc=$?
+[ "$sel_rc" -eq 1 ] || fail "the local run must fail on a broken selected test (rc=$sel_rc): $out"
+assert_contains "$out" 'tests/bb.test.sh (exit 3)' "the local failure must name the file and its status"
+assert_contains "$out" '1 assigned, 1 run, 0 passed, 1 failed, 0 skipped' \
+  "the local run must print the same accounting as every other mode"
+pass "a broken selected test fails the local run with full attribution"
+git -C "$FXL" checkout -q -- bin/other.sh
+
+# Every fallback names the concrete blocker, so a run that silently went wide is
+# never mistaken for a run that selected.
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$FXL/nonexistent" "$FXL/bin/fm-test.sh" --local 2>&1)
+assert_contains "$out" 'is not a readable file' "the fallback must name the concrete blocker"
+assert_contains "$out" 'running the canonical whole set instead' "an unusable change list must not narrow"
+pass "an unusable change set falls back to the whole set and says why"
+
+# --- the parallel shards cover the selection exactly ------------------------
+# Same disjoint-coverage property the CI partition has, on the selected set.
+# The expected set is spelled out by hand here: comparing the listing with the
+# run and nothing else would be circular if both came from the packer, so the
+# closure-derived answer is stated independently of the code under test.
+#   bin/lib-core.sh -> tests/aa.test.sh, bin/other.sh -> tests/bb.test.sh,
+#   docs/notes.md   -> tests/dd.test.sh (its reader), and nothing reaches cc.
+expected=$(printf 'tests/aa.test.sh\ntests/bb.test.sh\ntests/dd.test.sh\n')
+printf '%s\n' bin/lib-core.sh bin/other.sh docs/notes.md > "$CHANGEFILE"
+listed=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$CHANGEFILE" "$FXL/bin/fm-test.sh" --list-local 2>/dev/null)
+[ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
+  || fail "--list-local must promise exactly the closure-derived selection; listed [$listed]"
+ran=$(FM_TEST_NO_CACHE=1 FM_TEST_EMIT_VERDICTS="$VERDICTFILE" FM_TEST_CHANGED="$CHANGEFILE" \
+  FM_TEST_JOBS=3 "$FXL/bin/fm-test.sh" --local >/dev/null 2>&1; cut -f1 "$VERDICTFILE")
+[ "$(printf '%s\n' "$ran" | LC_ALL=C sort)" = "$expected" ] \
+  || fail "the parallel shards must run exactly that selection; ran [$ran]"
+[ "$(printf '%s\n' "$ran" | wc -l)" -eq "$(printf '%s\n' "$ran" | sort -u | wc -l)" ] \
+  || fail "no file may be run twice across the parallel shards"
+pass "the parallel shards disjointly cover exactly the selected set"
+
+# And the run refuses when they do not. The packer is sabotaged to drop one
+# selected file: without the audit that loses a file silently, because the count
+# the accounting compares against would come from the packer's own output.
+BROKEN="$LOCALROOT/broken"
+cp -a "$FXL" "$BROKEN"
+sed 's/packed\[best\] = packed\[best\] " " sel\[i\]/if (i > 1) packed[best] = packed[best] " " sel[i]/' \
+  "$BROKEN/bin/fm-test-plan.awk" > "$SCRATCH/plan.awk"
+mv "$SCRATCH/plan.awk" "$BROKEN/bin/fm-test-plan.awk"
+grep -Fq 'if (i > 1) packed[best]' "$BROKEN/bin/fm-test-plan.awk" \
+  || fail "could not build the dropped-file packer fixture"
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$CHANGEFILE" "$BROKEN/bin/fm-test.sh" --local 2>&1)
+rc=$?
+[ "$rc" -eq 2 ] || fail "a packer that drops a selected file must refuse to run (rc=$rc): $out"
+assert_contains "$out" 'SELECTION PARTITION BROKEN' "the refusal must name the broken partition"
+assert_not_contains "$out" 'all 2 test files passed' "a dropped file must never be reported as green"
+pass "packed shards that do not cover the selection refuse to run"
+
+# --- the git-derived change set, exercised for real -------------------------
+# Every case above hands the runner an explicit change list, which bypasses the
+# path the gate itself uses: base resolution, merge-base, the diff of the
+# WORKING TREE against it, and the separate untracked-file pass. The fixture is
+# a real git repo, so that path is asserted directly rather than assumed.
+BR=$(git -C "$FXL" rev-parse --abbrev-ref HEAD)
+[ -n "$BR" ] || fail "the fixture repo must have a resolvable branch to diff against"
+
+printf 'core_extra() { printf "extra\\n"; }\n' >> "$FXL/bin/lib-core.sh"
+sel=$(FM_TEST_NO_CACHE=1 FM_TEST_BASE="$BR" "$FXL/bin/fm-test.sh" --list-local 2>/dev/null)
+[ "$sel" = 'tests/aa.test.sh' ] \
+  || fail "an uncommitted edit must select its transitive test through git, got: $sel"
+pass "the git-derived change set selects on an uncommitted working-tree edit"
+
+# A brand-new test file is untracked, so `git diff` never sees it; the separate
+# `git ls-files --others` pass is the only thing that can put it in scope.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FXL/tests/ee.test.sh"
+chmod +x "$FXL/tests/ee.test.sh"
+sel=$(FM_TEST_NO_CACHE=1 FM_TEST_BASE="$BR" "$FXL/bin/fm-test.sh" --list-local 2>/dev/null \
+  | LC_ALL=C sort)
+[ "$sel" = "$(printf 'tests/aa.test.sh\ntests/ee.test.sh\n')" ] \
+  || fail "an untracked new test file must be selected alongside the edit, got: $sel"
+pass "an untracked new test file reaches the change set"
+rm -f "$FXL/tests/ee.test.sh"
+git -C "$FXL" checkout -q -- bin/lib-core.sh
+
+# A base that does not resolve is a failure to derive the baseline, so it
+# escalates, and it names the base rather than reporting a generic problem.
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_BASE=refs/heads/no-such-base "$FXL/bin/fm-test.sh" --local 2>&1)
+rc=$?
+[ "$rc" -eq 0 ] || fail "the escalated whole-set run must still pass on a green fixture (rc=$rc): $out"
+assert_contains "$out" 'FM_TEST_BASE=refs/heads/no-such-base does not resolve to a commit' \
+  "the fallback must name the base it could not resolve"
+assert_contains "$out" 'running the canonical whole set instead' "an underivable baseline must not narrow"
+assert_contains "$out" 'whole set: 4 assigned, 4 run' "the escalation must run every file"
+pass "an unresolvable base escalates to the whole set and names the base"
+
+# --- a listing never executes the suite -------------------------------------
+# --list-local answers "what would --local run". Escalation is the case someone
+# is most likely to be asking about (a new, still-unreferenced script), so a
+# fallback there must print the whole set, not spend the whole set's runtime.
+out=$(FM_TEST_NO_CACHE=1 FM_TEST_CHANGED="$FXL/nonexistent" "$FXL/bin/fm-test.sh" \
+  --list-local 2>"$SCRATCH/err")
+rc=$?
+[ "$rc" -eq 0 ] || fail "an escalating listing must succeed (rc=$rc): $out"
+[ "$(printf '%s\n' "$out" | LC_ALL=C sort)" \
+  = "$(printf 'tests/aa.test.sh\ntests/bb.test.sh\ntests/cc.test.sh\ntests/dd.test.sh\n')" ] \
+  || fail "an escalating listing must print the canonical whole set, got: $out"
+assert_not_contains "$out" '== tests/' "a listing must never execute a test file"
+err=$(cat "$SCRATCH/err")
+assert_contains "$err" 'listing the canonical whole set instead' "the listing must say why it went wide"
+assert_not_contains "$err" 'assigned' "a listing must not report a run it never performed"
+pass "an escalating --list-local lists the whole set instead of running it"
 
 printf 'ok - fm-test parity suite complete\n'

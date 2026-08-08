@@ -41,10 +41,12 @@ fm_backend_hometag() {
     prefix="firstmate"
   fi
   root=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || root=$FM_ROOT
-  if command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print substr($1,1,8)}')
-  elif command -v sha256sum >/dev/null 2>&1; then
+  # sha256sum first because it is a C binary and shasum is a perl script; see
+  # bin/fm-pr-lib.sh's fm_pr_sha256 for the measurement and the macOS fallback rule.
+  if command -v sha256sum >/dev/null 2>&1; then
     hash=$(printf '%s' "$root" | sha256sum | awk '{print substr($1,1,8)}')
+  elif command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print substr($1,1,8)}')
   else
     hash=$(printf '%s' "$root" | cksum | awk '{printf "%08x", $1}')
   fi

@@ -57,6 +57,29 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   --local-skip, --ci-skip, and --all-testing-skip are the captain's testing
+#   skips, orthogonal to delivery mode and yolo. Each records local_skip=on and/or
+#   ci_skip=on in state/<id>.meta (--all-testing-skip records both); an absent
+#   field means off, so an unflagged task's meta is byte-identical to before.
+#   --local-skip ENFORCES the skip instead of asking for it: the launch prepends a
+#   per-task shim directory to the worker's pane environment whose `no-mistakes`
+#   executable explains the intentional skip and exits 0, so the worker cannot run
+#   the local pipeline even if it tries. The shim lives under the per-task temp
+#   root and is exported only into that pane's shell, so it reaches no other task
+#   and never the captain's own environment.
+#   --ci-skip only RECORDS the captain's authorization, as ci_skip=on plus a
+#   ci_skip_auth= HMAC minted here from this home's config/ci-waiver-secret. The
+#   flag line alone is not authority - a worker appends its status lines into the
+#   same state directory and could append that line too - so the token is what
+#   bin/fm-ci-waiver.sh actually checks before signing, and --ci-skip refuses
+#   outright when no secret exists to mint it.
+#   Accepted flag/delivery-mode combinations are checked before launch and every
+#   other combination refuses: no-mistakes takes --local-skip or
+#   --all-testing-skip; direct-PR takes --ci-skip; local-only takes none, having
+#   no pipeline, no PR, and no CI; scout and secondmate spawns take none.
+#   --ci-skip alone is refused under no-mistakes because that pipeline owns the
+#   push and the PR, so a commit-bound waiver cannot be attached before CI starts
+#   unless the worker opens the PR itself.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -77,6 +100,7 @@
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
+# followed by " local_skip=on" and/or " ci_skip=on" only when a testing skip is active.
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
@@ -84,7 +108,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,101p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -108,6 +132,10 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-ci-waiver-lib.sh
+. "$SCRIPT_DIR/fm-ci-waiver-lib.sh"
+# shellcheck source=bin/fm-testing-skip-lib.sh
+. "$SCRIPT_DIR/fm-testing-skip-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -119,6 +147,7 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+fm_testing_skip_reset
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -143,6 +172,7 @@ for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
+    --local-skip|--ci-skip|--all-testing-skip) fm_testing_skip_note "$a" ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -163,6 +193,17 @@ case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+
+# Testing-skip validation, part 1: the argument-only rules, checked before any
+# filesystem or backend work so a malformed dispatch costs nothing. Part 2 (the
+# delivery-mode rules) needs the resolved project and runs after the brief check.
+# Every unrecognised combination refuses rather than picking an interpretation:
+# these flags remove test coverage, so guessing which one the captain meant is
+# the one behaviour they must never have.
+fm_testing_skip_check_args "$KIND" task || exit 1
+LOCAL_SKIP=$FM_TESTING_SKIP_LOCAL
+CI_SKIP=$FM_TESTING_SKIP_CI
+SKIP_FLAGS=$FM_TESTING_SKIP_FLAGS
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -235,6 +276,9 @@ orca_spawn_abort_cleanup() {
           echo "tasktmp=${TASK_TMP:-}"
           echo "model=${MODEL:-default}"
           echo "effort=${EFFORT:-default}"
+          [ "$LOCAL_SKIP" = off ] || echo "local_skip=on"
+          [ "$CI_SKIP" = off ] || echo "ci_skip=on"
+          [ -z "${CI_SKIP_AUTH:-}" ] || echo "ci_skip_auth=$CI_SKIP_AUTH"
           echo "backend=orca"
           echo "orca_worktree_id=$ORCA_WORKTREE_ID"
           [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -265,6 +309,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  # The single validated skip flag applies to every pair in the batch, exactly
+  # like --harness/--model/--effort. Each re-exec re-validates it against its own
+  # project's delivery mode, so one unsuitable project fails its pair alone.
+  [ -z "$SKIP_FLAGS" ] || shared_args+=("$SKIP_FLAGS")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -646,6 +694,59 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
+# Recorded in meta so fm-teardown's safety check and the validate/merge stages can
+# branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
+# merge, so scout teardown ignores mode.
+# Resolved HERE, before any backend container or worktree exists, so the
+# testing-skip validation below can refuse an unsuitable combination without
+# leaving an orphaned window behind.
+SECONDMATE_PROJECTS=
+if [ "$KIND" = secondmate ]; then
+  MODE=secondmate
+  YOLO=off
+  SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
+else
+  PROJ_NAME=$(basename "$PROJ_ABS")
+  read -r MODE YOLO <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
+EOF
+fi
+
+# Testing-skip validation, part 2: which skip a delivery mode can honour. Each
+# rule below refuses a combination the mode CANNOT actually deliver, rather than
+# accepting it and silently doing nothing, so a captain who asks for less testing
+# always learns whether they got it.
+fm_testing_skip_check_mode "$MODE" || exit 1
+
+# The dispatch-authorization token for a CI skip, minted here and only here.
+# ci_skip=on on its own is not authority: the worker appends its status lines
+# into this same state directory, so it can append that line to its own record
+# too. The token is an HMAC the worker cannot compute, and bin/fm-ci-waiver.sh
+# refuses to sign without a valid one (bin/fm-ci-waiver-lib.sh owns the domain
+# separation and the residual same-user limit).
+#
+# This is why --ci-skip requires an initialized secret while --local-skip does
+# not: without the secret no waiver could ever be signed for this task anyway,
+# so refusing here turns a useless dispatch into an immediate, fixable message.
+CI_SKIP_AUTH=
+if [ "$CI_SKIP" = on ]; then
+  CI_WAIVER_SECRET_FILE="$CONFIG/ci-waiver-secret"
+  if ! fm_ci_waiver_secret_readable "$CI_WAIVER_SECRET_FILE"; then
+    echo "error: --ci-skip needs this home's CI waiver secret at $CI_WAIVER_SECRET_FILE; run 'bin/fm-ci-waiver.sh init' (and 'publish <owner/repo>') first" >&2
+    exit 1
+  fi
+  command -v node >/dev/null 2>&1 || {
+    echo "error: --ci-skip needs node to mint this task's dispatch authorization (docs/configuration.md \"Toolchain\")" >&2
+    exit 1
+  }
+  CI_SKIP_AUTH=$(fm_ci_waiver_dispatch_token "$ID" < "$CI_WAIVER_SECRET_FILE") || CI_SKIP_AUTH=
+  fm_ci_waiver_valid_sig "$CI_SKIP_AUTH" || {
+    echo "error: could not mint the CI-skip dispatch authorization for $ID" >&2
+    exit 1
+  }
+fi
+
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
 # Every backend's own current-path read (tmux's pane_current_path, herdr's
@@ -867,8 +968,84 @@ fi
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+#
+# Ownership, checked before anything is written into the root: /tmp/fm-<id> is a
+# predictable path under a world-writable sticky directory, so another local user
+# can pre-create it. The spawn refuses when it is already there as a symlink, or
+# already there owned by somebody else, rather than writing through a path it does
+# not control. -e and -O both FOLLOW a symlink, so the -L test is the one that
+# actually rejects a planted link, and it is asked first for that reason. The guard
+# covers EVERY spawn, not only a --local-skip one: writing this task's Go temp
+# through a link somebody else chose is wrong on its own terms, and for the shim
+# installed below - which goes at the FRONT of a worker's PATH - it would be code
+# execution as this user. It refuses outright and never falls back to another path:
+# fm-teardown.sh removes exactly $TASK_TMP and the PATH export names exactly that
+# directory, so a silent fallback would strand both.
 TASK_TMP="/tmp/fm-$ID"
+if [ -L "$TASK_TMP" ] || { [ -e "$TASK_TMP" ] && [ ! -O "$TASK_TMP" ]; }; then
+  echo "error: refusing to use $TASK_TMP as this task's temp root: it already exists as a symlink or is not owned by this user, so nothing written under it can be trusted" >&2
+  exit 1
+fi
 mkdir -p "$TASK_TMP/gotmp"
+
+# --local-skip enforcement. A brief that merely ASKS a worker not to run the
+# pipeline is probabilistic - the agent decides, and agents do not reliably
+# decide - so the skip is made mechanical instead: a shim directory goes on the
+# front of the worker's PATH holding a `no-mistakes` executable that refuses to
+# be the real one.
+#
+# Scope: the shim lives under this task's own temp root, and the only thing that
+# puts it on a PATH is the export sent into this task's pane below. It is never
+# written to a shell rc file and never exported by this process, so it cannot
+# reach another task's worker or the captain's own shell, and fm-teardown.sh
+# removes it with the rest of $TASK_TMP.
+#
+# Exit status: the shim exits 0, deliberately. A non-zero exit reads to an agent
+# as a broken toolchain, and the repair it would reach for - reinstalling
+# no-mistakes, hunting for another copy, or restarting the shared daemon that
+# serves every other lane - is far more damaging than the skip itself. Exiting 0
+# with a message that names the flag and points straight at push-and-PR keeps the
+# worker on the intended path instead of into a repair loop.
+#
+# Permissions: this directory is not the inert scratch space the sibling gotmp dir
+# is - it goes at the FRONT of an agent's PATH and shadows a real tool by name, so
+# it is created mode 700 and nobody else can swap the shim after it is written. The
+# temp root it sits under was validated for symlinks and ownership above, before
+# anything was written there.
+#
+# Streams: the shim prints the same message on stdout AND stderr. Exit 0 paired
+# with empty stdout is the worst combination for a machine reader - a worker
+# running `no-mistakes axi run --json` and parsing stdout would see nothing plus a
+# success status, and could read that as a pipeline that ran and passed.
+SKIP_BIN=
+if [ "$LOCAL_SKIP" = on ]; then
+  SKIP_BIN="$TASK_TMP/skip-bin"
+  mkdir -p "$SKIP_BIN"
+  chmod 700 "$SKIP_BIN"
+  cat > "$SKIP_BIN/no-mistakes" <<EOF
+#!/usr/bin/env bash
+# Firstmate local-testing skip shim for task $ID, installed by bin/fm-spawn.sh.
+# Not the real no-mistakes; see that script's --local-skip contract.
+emit_skip_notice() {
+cat <<'MSG'
+no-mistakes is intentionally disabled for this task.
+
+The captain dispatched it with --local-skip, so the local validation pipeline is
+switched off by design. Nothing is broken: this is not a missing install, not a
+PATH problem, and not a daemon fault, and there is nothing here to diagnose,
+repair, reinstall, or work around. Do not look for another copy of no-mistakes,
+do not install one, and do not touch the shared daemon.
+
+Go straight to delivery instead: commit your work, push your branch, open the PR
+with gh-axi, and report done exactly as your instructions say.
+MSG
+}
+emit_skip_notice
+emit_skip_notice >&2
+exit 0
+EOF
+  chmod 755 "$SKIP_BIN/no-mistakes"
+fi
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
@@ -973,22 +1150,6 @@ EOF
   esac
 fi
 
-# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
-# Recorded in meta so fm-teardown's safety check and the validate/merge stages can
-# branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
-# merge, so scout teardown ignores mode.
-SECONDMATE_PROJECTS=
-if [ "$KIND" = secondmate ]; then
-  MODE=secondmate
-  YOLO=off
-  SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
-else
-  PROJ_NAME=$(basename "$PROJ_ABS")
-  read -r MODE YOLO <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
-EOF
-fi
-
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 {
@@ -1002,6 +1163,14 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # Testing skips are written only when ON, so an unflagged task's meta stays
+  # byte-identical to before these flags existed; an absent field means off.
+  # ci_skip=on is the ONLY thing that lets bin/fm-ci-waiver.sh sign for this
+  # task, which is why it is written here, at dispatch, on the captain's machine
+  # and into a directory no worker can reach.
+  [ "$LOCAL_SKIP" = off ] || echo "local_skip=on"
+  [ "$CI_SKIP" = off ] || echo "ci_skip=on"
+  [ -z "$CI_SKIP_AUTH" ] || echo "ci_skip_auth=$CI_SKIP_AUTH"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta keeps carrying no backend= line (absent backend= means
   # tmux; data/fm-backend-design-d7's P1 compatibility contract).
@@ -1063,8 +1232,18 @@ fi
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
+# Prepend the --local-skip shim to the pane shell's own PATH, so the agent and
+# every process it starts resolve `no-mistakes` to the shim. Sent before the
+# launch command so the environment is already in place when the agent starts.
+if [ -n "$SKIP_BIN" ]; then
+  spawn_send_text_line "$T" "export PATH=$(shell_quote "$SKIP_BIN"):\$PATH"
+  sleep 0.3
+fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
 
-echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
+SKIP_SUMMARY=
+[ "$LOCAL_SKIP" = off ] || SKIP_SUMMARY="${SKIP_SUMMARY} local_skip=on"
+[ "$CI_SKIP" = off ] || SKIP_SUMMARY="${SKIP_SUMMARY} ci_skip=on"
+echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT$SKIP_SUMMARY"
