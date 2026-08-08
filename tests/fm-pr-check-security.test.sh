@@ -444,6 +444,7 @@ git@github.com:o/r.git|o|r
 git@GitHub.com:someone-else/other.git|someone-else|other
 EOF
   # A PR link is not a remote address: the parser must not mine one out of it.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the dollar sign is literal rejection fixture data
   for row in \
     /srv/mirrors/origin.git \
     ../relative/origin.git \
