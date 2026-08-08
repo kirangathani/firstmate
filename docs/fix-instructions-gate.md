@@ -143,8 +143,14 @@ Nothing else is consulted, so there is no second copy to keep in sync.
 The generated no-mistakes ship brief instructs the worker to start every run with:
 
 ```sh
-no-mistakes axi run --intent "$(<firstmate-root>/bin/fm-nm-intent.sh <task-id>)"
+no-mistakes axi run --intent "$(FM_HOME=<firstmate-home> <firstmate-root>/bin/fm-nm-intent.sh <task-id>)"
 ```
+
+The `FM_HOME=` prefix is load-bearing, not decoration, and `bin/fm-brief.sh` embeds the resolved home into every command it emits for both helpers.
+The helpers read `data/<task-id>/` under the HOME while the scripts come from the shared tracked code ROOT, and a crewmate pane is launched with no `FM_HOME` of its own: only a `--secondmate` launch carries that env prefix.
+In the main home the two paths coincide, so a root-anchored command happens to work; in a secondmate home they do not, which is the entire point of the `FM_HOME` split.
+Root-anchored, a secondmate's crewmate resolved `data/` to the code root, found no brief, and could not start a run at all.
+`tests/fm-nm-gate-context.test.sh` runs the brief's own emitted command with `FM_HOME` scrubbed from the environment, so the root-anchored form cannot return.
 
 The WHOLE Task section is emitted, acceptance criteria and constraints included, not just its first paragraph.
 That is deliberate: the pipeline's final review step scores the diff against the intent, so handing it the full stated criteria makes that review stricter, and any truncation rule would silently decide which of the captain's requirements stop being checked.
@@ -184,8 +190,14 @@ The Grok global hook is additionally proven inert for a workspace with no token 
 `tests/fm-nm-gate-context.test.sh` owns the intent owner, the decision record lifecycle, and the generated brief's contract.
 
 No harness binary was spawned by either suite.
-**Live per-harness hook-loading was not confirmed for Codex, OpenCode, Pi, or Grok**: only `claude` (2.1.220) was installed in the environment where this was built.
+**Live per-harness hook-loading was not confirmed for Codex, OpenCode, Pi, or Grok.**
 The wiring shapes follow the already-verified per-harness mechanics recorded in `docs/arm-pretool-check.md` and the `harness-adapters` skill, and the generated adapter code is exercised directly by the suites above, but the step of "the harness actually loads this file" is inherited from those prior validations rather than re-observed here.
+
+Checked 2026-08-08 in the build environment: `claude` 2.1.226 and `opencode` 1.18.15 are installed; `codex`, `pi`, and `grok` are absent.
+OpenCode being present does not upgrade its row above, and the attempt is recorded so nobody repeats it expecting a cheap win.
+`opencode serve --print-logs --log-level DEBUG` was booted inside a real `fm-spawn`-generated crewmate worktree holding the generated `.opencode/plugins/fm-turn-end.js`, and its startup log named only the three global config files, never a plugin.
+OpenCode loads project plugins lazily per session rather than at server start, so proving the load needs a real model turn that executes a tool call, which spends provider credits and returns a nondeterministic result.
+That was left undone deliberately rather than reported as verified.
 
 Run:
 

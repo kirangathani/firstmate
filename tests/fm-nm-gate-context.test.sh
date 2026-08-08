@@ -255,7 +255,7 @@ generated_no_mistakes_brief() {
 test_ship_brief_pins_the_intent_to_its_one_owner() {
   local brief
   brief=$(generated_no_mistakes_brief)
-  assert_grep 'fm-nm-intent.sh gate-demo' "$brief" "the brief must name the intent owner with this task's id"
+  assert_grep "fm-nm-intent.sh' gate-demo" "$brief" "the brief must name the intent owner with this task's id"
   assert_grep 'no-mistakes axi run --intent' "$brief" "the brief must show the pinned run command"
   assert_grep 'never a paraphrase' "$brief" "the brief must say why the intent is pinned"
   pass "brief: pins --intent to bin/fm-nm-intent.sh, the one owner of that string"
@@ -274,10 +274,10 @@ test_ship_brief_states_the_fix_instructions_rule() {
 test_ship_brief_requires_decision_survival() {
   local brief
   brief=$(generated_no_mistakes_brief)
-  assert_grep 'fm-nm-decision.sh record gate-demo' "$brief" "the brief must require recording each gate decision"
-  assert_grep 'fm-nm-decision.sh verify gate-demo' "$brief" "the brief must require verifying each decision against the final diff"
-  assert_grep 'fm-nm-decision.sh reverted gate-demo' "$brief" "the brief must give the reverted path"
-  assert_grep 'fm-nm-decision.sh check gate-demo' "$brief" "the brief must require the check before done"
+  assert_grep "fm-nm-decision.sh' record gate-demo" "$brief" "the brief must require recording each gate decision"
+  assert_grep "fm-nm-decision.sh' verify gate-demo" "$brief" "the brief must require verifying each decision against the final diff"
+  assert_grep "fm-nm-decision.sh' reverted gate-demo" "$brief" "the brief must give the reverted path"
+  assert_grep "fm-nm-decision.sh' check gate-demo" "$brief" "the brief must require the check before done"
   assert_grep 'Do NOT report done' "$brief" "the brief must hard-stop on a reverted decision"
   assert_grep '#591' "$brief" "the brief must cite the upstream evidence"
   pass "brief: requires recording, verifying, and hard-stopping on gate decisions"
@@ -309,6 +309,36 @@ test_scout_and_local_only_briefs_are_untouched() {
   pass "brief: only the no-mistakes ship brief carries the gate-context contract"
 }
 
+# A crewmate pane is launched with NO FM_HOME of its own - only a --secondmate
+# launch gets that env prefix (bin/fm-spawn.sh) - while the brief and the
+# decision record live under the home's data/. In the main home the home and the
+# tracked code root are the same directory, so a root-anchored command happens to
+# work; in a secondmate home they are not, which is the entire point of the
+# FM_HOME split. Root-anchored, the helper resolved data/ to the code root, found
+# no brief, and the worker could not start a run at all. This runs the brief's
+# OWN emitted command with FM_HOME scrubbed from the environment, which is the
+# exact shape that failed before the command carried the resolved home.
+test_ship_brief_commands_carry_the_resolved_home() {
+  local home brief cmd out
+  home="$TMP_ROOT/brief-nohome"
+  mkdir -p "$home/data" "$home/projects/demo"
+  FM_HOME="$home" "$BRIEF" nohome-demo demo >/dev/null 2>&1 || fail "brief scaffold failed"
+  brief="$home/data/nohome-demo/brief.md"
+  sed -i 's/{TASK}/Pinned intent fixture text./' "$brief"
+  assert_grep "FM_HOME='$home'" "$brief" "the brief's helper commands must carry the resolved home"
+  cmd=$(grep -o "FM_HOME='[^']*' '[^']*fm-nm-intent\.sh' nohome-demo" "$brief" | head -1)
+  [ -n "$cmd" ] || fail "could not extract the emitted intent command from the generated brief"
+  out=$(env -u FM_HOME bash -c "$cmd") \
+    || fail "the brief's own intent command failed with no inherited FM_HOME"
+  case "$out" in
+    *"Pinned intent fixture text."*) ;;
+    *) fail "the emitted intent command did not print the task text: $out" ;;
+  esac
+  grep -q "FM_HOME='$home' '[^']*fm-nm-decision\.sh' record nohome-demo" "$brief" \
+    || fail "the decision-record command must carry the resolved home too"
+  pass "brief: emitted helper commands resolve the home themselves, with no inherited FM_HOME"
+}
+
 test_scripts_are_shellcheck_clean() {
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
   shellcheck "$INTENT" >/dev/null 2>&1 || fail "bin/fm-nm-intent.sh is not shellcheck-clean"
@@ -336,4 +366,5 @@ test_ship_brief_states_the_fix_instructions_rule
 test_ship_brief_requires_decision_survival
 test_ship_brief_denies_checks_passed_as_evidence
 test_scout_and_local_only_briefs_are_untouched
+test_ship_brief_commands_carry_the_resolved_home
 test_scripts_are_shellcheck_clean
