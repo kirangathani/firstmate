@@ -79,7 +79,9 @@
 # Environment:
 #   FM_LINT_JOBS       shard count (default: nproc, capped at 8)
 #   FM_LINT_CACHE_DIR  where clean results and discovered source edges are
-#                       recorded (default: .git/fm-lint-cache)
+#                       recorded (default: fm-lint-cache under the repository's
+#                       COMMON .git, shared by every worktree; see the CACHE_DIR
+#                       block for why the common dir and what that costs)
 #   FM_LINT_NO_CACHE=1 read and write no cache entries
 #
 # Exit status is ShellCheck's own on a lint run, so a caller (CI or the gate)
@@ -154,7 +156,16 @@ if [ "$MODE" = whole-set ]; then
 fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-lint.XXXXXX")
-trap 'rm -rf "$TMP"' EXIT INT TERM
+# The two cache staging files are named below, once CACHE_DIR is known. They are
+# cleaned up here as well as at their use sites because the cache directory is
+# shared by every worktree of the repository and is long lived: a run killed
+# mid-publish would otherwise leave its staging file there for good, and enough
+# interrupted crewmate runs would silt the directory up.
+DISC_STAGED=
+MAN_STAGED=
+trap 'rm -rf "$TMP"
+      [ -z "$DISC_STAGED" ] || rm -f "$DISC_STAGED"
+      [ -z "$MAN_STAGED" ] || rm -f "$MAN_STAGED"' EXIT INT TERM
 
 # The fast path plans over exactly the canonical set above, so the two modes
 # cannot cover different files.
@@ -213,7 +224,27 @@ CACHE_DIR="${FM_LINT_CACHE_DIR:-}"
 if [ -z "$CACHE_DIR" ]; then
   # .git is never tracked and never shipped, so a stale or hostile cache cannot
   # ride into the repo or into CI, which always starts cold.
-  git_dir=$(git rev-parse --git-dir 2>/dev/null || true)
+  #
+  # The COMMON git dir, not --git-dir: --git-dir in a linked worktree is that
+  # worktree's PRIVATE directory, and every crewmate runs this gate in a fresh
+  # disposable worktree, so a per-worktree cache was cold on every single run
+  # and the gate always paid the full price the cache exists to avoid. Measured
+  # 2026-08-08 over 187 files in two linked worktrees of one clone: with
+  # --git-dir the second worktree still reported "0 cached clean" and took
+  # 2m55s wall / 18m33s CPU; with --git-common-dir the same second worktree
+  # took 0.069s with all 187 files served from the first worktree's result.
+  #
+  # Sharing it is safe because a manifest entry is keyed by CONTENT, not by
+  # location: the line is the file's repo-relative path, the pinned ShellCheck
+  # version, LINT_FLAGS, and the sorted digests of the file plus its entire
+  # transitive source closure, and a hit demands the whole line byte-identical.
+  # An entry another worktree wrote is therefore valid here only when every byte
+  # ShellCheck would read is identical, so a cross-worktree hit cannot be wrong.
+  # Both files are published by whole-file replace, so the failure direction of
+  # a lost update is a MISS (entries a divergent worktree dropped get re-linted),
+  # never a false pass. See the publication comments below for the concurrency
+  # rule sharing the directory imposes.
+  git_dir=$(git rev-parse --git-common-dir 2>/dev/null || true)
   CACHE_DIR="${git_dir:-$ROOT/.fm-lint}/fm-lint-cache"
 fi
 USE_CACHE=1
@@ -256,7 +287,11 @@ if [ "$USE_CACHE" = 1 ]; then
   mkdir -p "$CACHE_DIR"
   # shellcheck disable=SC2046
   $HASHER $(cat "$TMP/files") >"$TMP/hashes" 2>/dev/null || : >"$TMP/hashes"
-  [ -f "$DISC_CACHE" ] || : >"$DISC_CACHE"
+  # The reader below tolerates a missing cache file (awk's getline returns -1 and
+  # the load loop simply yields no entries), so it is deliberately NOT created
+  # here: a `[ -f ] || : >` pair is a test-then-truncate race, and now that the
+  # directory is shared by every worktree it could truncate a full cache another
+  # run had just published between the test and the redirect.
   awk -v VER="$REQUIRED_SHELLCHECK" -v FLAGS="$LINT_FLAGS" -v HASHES="$TMP/hashes" \
       -v CACHE="$DISC_CACHE" -v EDGES="$TMP/edges" -v KEEP="$TMP/disc.keep" '
     BEGIN {
@@ -341,8 +376,19 @@ fi
 # clean-run manifest they are recorded even when the tree has findings. The
 # rewrite below keeps only entries for the current digests, so the cache
 # cannot grow without bound.
+#
+# Staged inside CACHE_DIR under a per-process name, then renamed. Two properties
+# are load-bearing now that every worktree of the repo shares this directory:
+# only a SAME-DIRECTORY rename is atomic, so a concurrent reader sees the whole
+# old file or the whole new one; and the staging name must be unique per process,
+# because a fixed "<file>.new" lets two runs write the same staging file at once
+# and publish a spliced mixture of both through an otherwise atomic rename.
+# Recording is best effort - it cannot change a verdict, only cost the next run
+# a re-discovery - so a failure warns and continues rather than aborting.
 if [ "$USE_CACHE" = 1 ]; then
-  awk -v VER="$REQUIRED_SHELLCHECK" -v FLAGS="$LINT_FLAGS" -v HASHES="$TMP/hashes" \
+  DISC_STAGED="$DISC_CACHE.$$"
+  disc_recorded=1
+  if awk -v VER="$REQUIRED_SHELLCHECK" -v FLAGS="$LINT_FLAGS" -v HASHES="$TMP/hashes" \
       -v TODO="$TMP/disc.todo" -v KEEP="$TMP/disc.keep" '
     BEGIN {
       while ((getline hl < HASHES) > 0) { split(hl, hf, " "); digest[hf[2]] = hf[1] }
@@ -368,7 +414,15 @@ if [ "$USE_CACHE" = 1 ]; then
         printf "%s %s %s\t%s\n", VER, FLAGS, digest[f], disc[f]
       }
     }
-  ' "$TMP/edges" >"$DISC_CACHE.new" && mv "$DISC_CACHE.new" "$DISC_CACHE"
+  ' "$TMP/edges" >"$DISC_STAGED"; then
+    mv "$DISC_STAGED" "$DISC_CACHE" || disc_recorded=0
+  else
+    disc_recorded=0
+  fi
+  if [ "$disc_recorded" = 0 ]; then
+    printf 'fm-lint.sh: could not record discovered source edges; the next run will re-discover them.\n' >&2
+    rm -f "$DISC_STAGED" 2>/dev/null || true
+  fi
 fi
 
 # --- closures ---------------------------------------------------------------
@@ -436,7 +490,9 @@ fi
 if [ "$USE_CACHE" != 1 ]; then
   cut -d' ' -f1 "$TMP/closures" >"$TMP/work"
 else
-  [ -f "$MANIFEST" ] || : >"$MANIFEST"
+  # Not created if absent, for the same reason as the discovery cache above: the
+  # awk below reads a missing manifest as no entries, whereas a test-then-create
+  # pair could truncate a manifest another worktree published in between.
   # A file is a hit only when its entire line is byte-identical to the line
   # recorded by a previous clean run.
   awk -F'\t' -v MAN="$MANIFEST" '
@@ -543,10 +599,18 @@ fi
 # Every canonical file was either a cache hit or a member of some closed shard,
 # and every shard member is analysed against its full closure. So reaching here
 # with no findings means every file is clean, and the whole material file is a
-# valid manifest. Written atomically so an interrupted run cannot leave a
-# half-manifest that would be read as a set of hits.
+# valid manifest. Staged under a per-process name inside CACHE_DIR and renamed,
+# exactly as the discovery cache is and for the same two reasons: the rename is
+# atomic only within the directory, and a fixed "<file>.new" would let two
+# worktrees sharing this cache splice their manifests together. A lost update
+# here costs the other worktree cache misses, never a false pass, because a hit
+# still demands the whole content-keyed line byte-identical.
 if [ "$USE_CACHE" = 1 ]; then
-  cp "$TMP/material" "$MANIFEST.new" && mv "$MANIFEST.new" "$MANIFEST"
+  MAN_STAGED="$MANIFEST.$$"
+  if ! { cp "$TMP/material" "$MAN_STAGED" && mv "$MAN_STAGED" "$MANIFEST"; }; then
+    printf 'fm-lint.sh: could not record the clean-run manifest; the next run will re-lint.\n' >&2
+    rm -f "$MAN_STAGED" 2>/dev/null || true
+  fi
 fi
 
 printf 'fm-lint.sh: clean (%s file(s) checked, %s cached).\n' "$todo" "$cached" >&2
