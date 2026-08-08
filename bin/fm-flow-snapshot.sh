@@ -359,8 +359,9 @@ EOF
 printf ']' >> "$AGENTS_FILE"
 
 # The agents array is passed by FILE, never as an argv string. fm-fleet-snapshot.sh
-# builds its document with --argjson and stops working entirely once the fleet
-# outgrows ARG_MAX; this script must not inherit that ceiling.
+# passes its whole document through a single --argjson argument, so it stops
+# working entirely once the fleet outgrows ARG_MAX; this script must not inherit
+# that ceiling.
 jq -n \
   --arg generated "$NOW_ISO" \
   --argjson generated_epoch "$NOW_EPOCH" \
