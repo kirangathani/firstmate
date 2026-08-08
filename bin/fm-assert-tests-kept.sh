@@ -7,8 +7,11 @@
 # in BOTH the source file and the test file - deleting the other branch's
 # functionality AND the test that would have caught it, leaving a green suite.
 # The invariant this script checks: every test identifier present on the
-# authoritative base (origin/<default>) is still present on the branch under
-# review.
+# authoritative base is still present on the branch under review. The
+# authoritative base is the branch the work actually targets - the PR's own base
+# when there is a PR, the project's default branch otherwise (see Usage below) -
+# never an assumed default, because a verdict measured against a tree the branch
+# was never built on is wrong in both directions.
 #
 # Two checks run, because names alone do not catch the motivating scenario:
 # a branch that KEEPS a test's name and REWRITES its assertion body passes any
@@ -78,17 +81,33 @@
 #
 # Usage:
 #   fm-assert-tests-kept.sh <task-id>
-#       Resolve worktree=, project=, and pr=/pr_head= from state/<id>.meta the
-#       same way fm-review-diff.sh does: base is origin/<default> (fetched)
-#       for remote-backed projects or the local default branch otherwise, and
-#       the compare side is the PR head when pr= is recorded and resolvable,
-#       falling back to the local branch fm/<id> with a warning.
+#       Resolve worktree=, project=, and pr=/pr_head= from state/<id>.meta. The
+#       compare side is the PR head when pr= is recorded and resolvable, falling
+#       back to the local branch fm/<id> with a warning.
+#       The base is the branch the PR actually TARGETS, never an assumed
+#       default: when pr= is recorded, the base branch name is read from GitHub
+#       (`gh pr view <url> --json baseRefName`, the same raw-gh JSON read
+#       fm-pr-check.sh uses, because gh-axi exposes no baseRefName field), and
+#       the check REFUSES with exit 2 when that name cannot be read. Falling
+#       back to the default branch there would silently compare a stacked PR
+#       against a tree it was never built on, which is exactly the class of
+#       wrong-base verdict this gate must not produce; the only caller that
+#       records pr= (bin/fm-pr-merge.sh) already requires working GitHub access,
+#       so the refusal costs no legitimate workflow.
+#       When no pr= is recorded (local-only merges), the base is the project's
+#       default branch as before. Either way the base is origin/<branch>
+#       (fetched) for remote-backed projects and the local branch otherwise.
 #   fm-assert-tests-kept.sh --worktree <path> --base <ref> [--branch <ref>]
 #       Explicit mode: enumerate <base> vs <ref> (default HEAD) in <path>.
 #
 # Output and exit status. stdout is strictly line-oriented so a gate or a viewer
-# can parse it; the human-facing diagnostic blobs go to stderr. Five finding
-# prefixes and one summary line are the stable contract:
+# can parse it; the human-facing diagnostic blobs go to stderr. One base line,
+# five finding prefixes and one summary line are the stable contract:
+#   - `base: <ref> (<origin>)` always, as the FIRST line, naming the ref both
+#     checks compared against and where that ref came from - the PR's own base
+#     branch, the project's default branch, or the caller's explicit --base - so
+#     an operator reading the gate's output can tell a PR-derived base from an
+#     assumed one without re-deriving it.
 #   - `missing: <file>::<name>` per identifier present on the base and absent
 #     from the branch (check 1).
 #   - `failing: <file>::<name>` per base assertion that passed on the base and
@@ -140,6 +159,7 @@ fi
 
 WT=
 BASE=
+BASE_ORIGIN=
 COMPARE_REF=
 COMPARE_LABEL=
 
@@ -159,6 +179,10 @@ if [ "${1:-}" = "--worktree" ]; then
     *) usage; exit 2 ;;
   esac
   COMPARE_LABEL=$COMPARE_REF
+  # Explicit mode takes the caller's ref verbatim and never consults GitHub:
+  # its caller (bin/fm-nm-flow.sh --tests-gate, an operator) already knows the
+  # base it means, and a lookup here would only be able to disagree with it.
+  BASE_ORIGIN='explicit --base'
   [ -d "$WT" ] || { echo "error: worktree is missing: $WT" >&2; exit 2; }
 else
   ID=${1:-}
@@ -232,6 +256,22 @@ else
     printf '%s' "$resolved"
   }
 
+  # resolve_pr_base <pr-url>: print the branch name the PR targets, read from
+  # GitHub. gh-axi is this repo's GitHub interface for ACTIONS, but its `pr view`
+  # exposes no baseRefName field, so this is a raw-gh JSON read exactly as
+  # fm-pr-check.sh's headRefOid lookup is. The URL fully qualifies the repo; the
+  # cd into the worktree only supplies gh's repo context if it ever needs one.
+  resolve_pr_base() {
+    local pr_url=$1 name
+    command -v gh >/dev/null 2>&1 || return 1
+    name=$(cd "$WT" && gh pr view "$pr_url" --json baseRefName -q .baseRefName 2>/dev/null) || return 1
+    [ -n "$name" ] || return 1
+    # The name goes into a refspec, so it must be a name git itself accepts as a
+    # branch; anything else is rejected rather than interpolated.
+    git check-ref-format "refs/heads/$name" 2>/dev/null || return 1
+    printf '%s' "$name"
+  }
+
   PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
   PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
   COMPARE_REF=$BRANCH
@@ -245,18 +285,39 @@ else
     fi
   fi
 
+  # The base is the branch the PR TARGETS whenever a PR is recorded, and only
+  # the project's default branch when none is. A recorded PR whose base cannot
+  # be read refuses rather than falling back: see this script's header.
+  if [ -n "$PR_URL" ]; then
+    BASE_BRANCH=$(resolve_pr_base "$PR_URL") || {
+      echo "error: cannot read the base branch of $PR_URL from GitHub; refusing rather than assuming the default branch, which would compare the branch against a base the PR was never built on" >&2
+      exit 2
+    }
+    BASE_ORIGIN="base branch of $PR_URL"
+  else
+    BASE_BRANCH=$DEFAULT
+    BASE_ORIGIN="default branch of $PROJ"
+  fi
+
   if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
     # Update the remote-tracking ref itself; a bare single-branch fetch can
-    # leave origin/<default> stale on some Git versions.
-    git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-    BASE="origin/$DEFAULT"
+    # leave origin/<branch> stale on some Git versions.
+    git -C "$WT" fetch origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" --quiet || {
+      echo "error: cannot fetch base branch $BASE_BRANCH ($BASE_ORIGIN) from origin in $WT" >&2
+      exit 2
+    }
+    BASE="origin/$BASE_BRANCH"
   else
-    BASE="$DEFAULT"
+    BASE="$BASE_BRANCH"
   fi
 fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not resolve in $WT" >&2; exit 2; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 2; }
+
+# Name the base and its provenance before any finding, so the verdict below is
+# never read without knowing which tree it was measured against.
+printf 'base: %s (%s)\n' "$BASE" "$BASE_ORIGIN"
 
 # --- language classification and name extraction -----------------------------
 

@@ -74,6 +74,9 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  # fm-assert-tests-kept.sh reads the PR's own base branch rather than assuming
+  # the default; these fixtures all build their project on main.
+  *" baseRefName "*) printf '%s\n' "${FM_TEST_GH_BASE:-main}" ;;
   *statusCheckRollup*)
     # Green rollup so fm-pr-merge.sh's checks-green gate passes; this suite
     # exercises URL/ID safety, not check classification (tests/fm-pr-merge.test.sh
