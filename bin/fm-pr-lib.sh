@@ -15,6 +15,10 @@
 #   - fm_pr_github_slug_fold  the folded form two identities are COMPARED on,
 #                             since GitHub treats owner and repo
 #                             case-insensitively.
+#
+# It is also the ONE reader of which BRANCH a PR targets
+# (fm_pr_base_branch_read), for the same reason: a merge gate and the preview of
+# that gate must resolve one base, not two.
 
 FM_PR_URL=
 FM_PR_OWNER=
@@ -181,6 +185,58 @@ fm_pr_remote_parse() {
   FM_PR_REMOTE_URL=$raw
   FM_PR_REMOTE_OWNER=$owner
   FM_PR_REMOTE_REPO=$repo
+}
+
+# fm_pr_base_branch_read <worktree> <pr-url> <diagnostic-file>: the sole reader
+# of which BRANCH a pull request targets, printed on stdout.
+# Two callers ask that question and must never answer it differently: the merge
+# gate (bin/fm-assert-tests-kept.sh) measures its verdict against this branch,
+# and the merge-gate preview (bin/fm-nm-flow.sh) shows the captain what that
+# verdict will be. A second reading of "which base" would put the preview and
+# the gate it previews on different trees, which is the same wrong-base class
+# both were written to eliminate.
+# gh-axi is this repo's GitHub interface for ACTIONS, but its `pr view` exposes
+# no baseRefName field, so this is a raw-gh JSON read exactly as
+# bin/fm-pr-check.sh's headRefOid lookup is. The URL fully qualifies the repo;
+# the cd into the worktree only supplies gh's repo context if it ever needs one.
+# This function DECIDES NOTHING on failure, because its callers legitimately
+# differ: the gate refuses because it blocks a merge, the viewer degrades
+# because it does not. So every distinguishable cause, together with gh's own
+# verbatim stderr, is written to <diagnostic-file> and the caller chooses what
+# to do with it. gh's stderr is captured into the sibling <diagnostic-file>.gh,
+# so a caller must own a private directory for both rather than a bare temp
+# name a second user could pre-create as a symlink.
+# The link itself is judged by the parser that owns its input type BEFORE any
+# network call, so a value that is not a PR link at all costs no query.
+fm_pr_base_branch_read() {
+  local wt=${1-} pr_url=${2-} diag=${3-} err name rc=0
+  err="$diag.gh"
+  : > "$diag" || return 1
+  : > "$err" || return 1
+  if ! fm_pr_url_parse "$pr_url"; then
+    printf '%s is not a GitHub pull request link\n' "$pr_url" > "$diag"
+    return 1
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    printf 'gh is not installed\n' > "$diag"
+    return 1
+  fi
+  name=$(cd "$wt" && gh pr view "$pr_url" --json baseRefName -q .baseRefName 2>"$err") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    { printf 'the gh query failed (exit %s)\n' "$rc"; cat "$err"; } > "$diag"
+    return 1
+  fi
+  if [ -z "$name" ]; then
+    { printf 'the gh query succeeded but reported no base branch name\n'; cat "$err"; } > "$diag"
+    return 1
+  fi
+  # The name goes into a refspec, so it must be a name git itself accepts as a
+  # branch; anything else is rejected rather than interpolated.
+  if ! git check-ref-format "refs/heads/$name" 2>"$err"; then
+    { printf 'gh reported %s, which git does not accept as a branch name\n' "$name"; cat "$err"; } > "$diag"
+    return 1
+  fi
+  printf '%s' "$name"
 }
 
 fm_pr_head_valid() {

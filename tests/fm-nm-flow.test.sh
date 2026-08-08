@@ -66,6 +66,10 @@
 #       up, and qualifies the result as a point-in-time snapshot against a
 #       deliberately-unfetched LOCAL base ref; and the probe writes no guard
 #       state and creates no state dir, even against a fresh FM_HOME
+#   (aa) the merge-gate box resolves the base the GATE resolves - the branch
+#       the task's recorded PR targets - and names it as the PR's own; when
+#       that base cannot be read the box degrades to the default branch, says
+#       on the row that it did, and never shows a silent default-branch verdict
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -109,6 +113,23 @@ esac
 exit 0
 SH
   chmod +x "$fb/no-mistakes"
+  # Fake gh, shadowing any real one: the merge-gate box asks GitHub which branch
+  # a recorded PR targets, and no test may make that a network call. It logs
+  # every invocation so a case can assert the query happened (or did not), and
+  # answers only what FM_FAKE_PR_BASE says - unset means the query fails, which
+  # is the degraded path the box must fall back from.
+  cat > "$fb/gh" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -n "${FM_FAKE_GH_LOG:-}" ] && printf 'gh %s\n' "$*" >> "$FM_FAKE_GH_LOG"
+if [ -n "${FM_FAKE_PR_BASE:-}" ]; then
+  printf '%s\n' "$FM_FAKE_PR_BASE"
+  exit 0
+fi
+printf 'could not resolve to a PullRequest\n' >&2
+exit 1
+SH
+  chmod +x "$fb/gh"
   printf '%s\n' "$fb"
 }
 
@@ -117,7 +138,10 @@ reset_fakes() {
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_CI_LOGS=""
   FM_FAKE_RM_WT=""
+  FM_FAKE_PR_BASE=""
+  FM_FAKE_GH_LOG=""
   export FM_FAKE_AXI_STATUS FM_FAKE_RUNS_LIST FM_FAKE_CI_LOGS FM_FAKE_RM_WT
+  export FM_FAKE_PR_BASE FM_FAKE_GH_LOG
 }
 
 run_flow() {  # <case-dir> <args...>
@@ -477,6 +501,83 @@ SH
   assert_contains "$out" "prior-tests: pending (checked at merge)" \
     "merge-gate box pending without --tests-gate"
   pass "--tests-gate shows real counts and stays read-only"
+}
+
+# (aa) the box previews the gate, so it must resolve the base the GATE resolves:
+# the branch the task's recorded PR targets, not the project's default branch.
+# The fixture makes the two disagree in a way a wrong base cannot hide - the
+# default branch carries an identifier the PR's base does not - so the counts
+# alone say which tree was compared against.
+make_pr_base_flow_case() {  # <name> -> echoes case dir
+  local d=$1
+  d=$(new_case "$d")
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/wt/tests"
+  git -C "$d/wt" init -q
+  cat > "$d/wt/tests/demo.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+pass "alpha"
+pass "only-on-default"
+SH
+  chmod +x "$d/wt/tests/demo.test.sh"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm default
+  git -C "$d/wt" branch -M main
+  git -C "$d/wt" checkout -qb feature-base
+  cat > "$d/wt/tests/demo.test.sh" <<'SH'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+pass "alpha"
+SH
+  git -C "$d/wt" commit -qam "the PR's own base"
+  git -C "$d/wt" checkout -qb fm/pr-base-task
+  printf 'note\n' > "$d/wt/README.md"
+  git -C "$d/wt" add -A
+  git -C "$d/wt" commit -qm "the branch under review"
+  fm_write_meta "$d/state/pr-base-task.meta" \
+    "window=firstmate:fm-pr-base-task" \
+    "worktree=$d/wt" \
+    "project=$d/projects/demo" \
+    "pr=https://github.com/o/r/pull/7"
+  printf '%s\n' "$d"
+}
+
+test_tests_gate_uses_the_pr_base() {
+  reset_fakes
+  local d out
+  d=$(make_pr_base_flow_case tests-gate-pr-base)
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+  out=$(FM_FAKE_PR_BASE=feature-base FM_FAKE_GH_LOG="$d/gh.log" \
+    run_flow "$d" pr-base-task --tests-gate)
+  grep -q 'gh pr view https://github.com/o/r/pull/7 --json baseRefName' "$d/gh.log" \
+    || fail "the box must ask GitHub which branch the PR targets: $(cat "$d/gh.log" 2>/dev/null)"
+  assert_contains "$out" "prior-tests: base feature-base: the PR's own base, LOCAL" \
+    "the row names the PR's own base, distinguishably from a default-branch base"
+  assert_contains "$out" "the gate refetches it" \
+    "the unfetched-base qualifier survives a PR-derived base"
+  assert_contains "$out" "miss 0/fail 0/unex 0/excu 0/skip 0/unac 0" \
+    "comparing against the PR's base finds nothing missing"
+  [ -z "$(git -C "$d/wt" status --porcelain)" ] || fail "the PR-base probe dirtied the worktree"
+  pass "the merge-gate box compares against the branch the recorded PR targets"
+}
+
+# The same fixture with the PR base unreadable: a viewer blocks nothing, so it
+# degrades to the default branch where the gate would refuse - but it must SAY
+# it did, since a silent default-branch verdict is the defect being fixed.
+test_tests_gate_pr_base_unreadable_degrades() {
+  reset_fakes
+  local d out
+  d=$(make_pr_base_flow_case tests-gate-pr-base-degraded)
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+  out=$(FM_FAKE_GH_LOG="$d/gh.log" run_flow "$d" pr-base-task --tests-gate)
+  assert_contains "$out" "prior-tests: base main: no PR base read, LOCAL" \
+    "an unresolvable PR base falls back to the default branch AND says so"
+  assert_not_contains "$out" "the PR's own base" \
+    "a fallback never claims the PR's own base"
+  assert_contains "$out" "miss 1/fail 0/unex 0/excu 0/skip 0/unac 0 !!" \
+    "the fallback really did compare against the default branch"
+  pass "an unreadable PR base degrades to the default branch and names the fallback"
 }
 
 # (k) watch mode re-renders and honors the frame bound
@@ -1003,8 +1104,9 @@ PY
   out=$(FM_NM_FLOW_ROWS=26 FM_NM_FLOW_WATCH_MAX=2 run_flow "$d" height-task --tests-gate --watch 1)
   frame=$(last_frame "$out")
   assert_contains "$frame" "PR: https://github.com/o/r/pull/7" "the PR line is present"
-  assert_contains "$frame" "prior-tests: base main: LOCAL, never fetched" "the base legend is present"
-  assert_contains "$frame" "LOCAL, never fetched" "the unfetched-base qualifier is present"
+  assert_contains "$frame" "prior-tests: base main: no PR base read, LOCAL" \
+    "the base legend is present, naming the fallback the fake gh forces"
+  assert_contains "$frame" "the gate refetches it" "the unfetched-base qualifier is present"
   assert_contains "$frame" "prior-tests: snapshot " "the snapshot qualifier is present"
   assert_contains "$frame" "prior-tests: excu=captain-excused" "the class legend is present"
   assert_contains "$frame" "verified by name only" "the name-only legend is present"
@@ -1028,7 +1130,7 @@ PY
   assert_contains "$frame" "3 legend lines dropped to fit a 24-row pane" "the drop is stated explicitly"
   assert_contains "$frame" "miss 0/fail 0/unex 1/excu 0/skip 0/unac 0" \
     "the qualified result row survives the drop"
-  assert_contains "$frame" "prior-tests: base main: LOCAL, never fetched" \
+  assert_contains "$frame" "prior-tests: base main: no PR base read, LOCAL" \
     "the base claim is undroppable while a result shows"
   assert_contains "$frame" "the gate refetches it" \
     "the stale-base qualifier is undroppable while a result shows"
@@ -1094,7 +1196,7 @@ PY
   out=$(FM_NM_FLOW_ROWS=12 run_flow "$d" height-task --tests-gate)
   lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
   [ "$lines" = 26 ] || fail "the one-shot render was trimmed to $lines lines"
-  assert_contains "$out" "prior-tests: base main: LOCAL, never fetched" \
+  assert_contains "$out" "prior-tests: base main: no PR base read, LOCAL" \
     "the one-shot render keeps the base claim"
   assert_contains "$out" "miss 0/fail 0/unex 1/excu 0/skip 0/unac 0" \
     "the one-shot render keeps the qualified result"
@@ -1164,6 +1266,10 @@ test_frame_row_budget_all_states() {
   git -C "$d/wt" checkout -qb fm/change
   cp "$NM_FLOW" "$d/bin/fm-nm-flow.sh"
   cp "$ROOT/bin/fm-supersession-lib.sh" "$d/bin/fm-supersession-lib.sh"
+  # The base of a task with a recorded pr= is resolved through this library, so
+  # the copy needs it too: without it the fallback below would be reached for
+  # the wrong reason.
+  cp "$ROOT/bin/fm-pr-lib.sh" "$d/bin/fm-pr-lib.sh"
   chmod +x "$d/bin/fm-nm-flow.sh"
   # Every class non-zero at once, plus the name-only stderr line: the widest
   # result the row and its qualifiers can ever be asked to carry. Stubbed rather
@@ -1225,7 +1331,7 @@ MD
     done <<< "$frame"
     assert_contains "$frame" "miss 2/fail 1/unex 1/excu 1/skip 1/unac 1 !!" \
       "$scenario keeps all six counts inside the 80x24 budget"
-    assert_contains "$frame" "prior-tests: base main: LOCAL, never fetched" \
+    assert_contains "$frame" "prior-tests: base main: no PR base read, LOCAL" \
       "$scenario keeps the base qualifier with the counts"
     assert_contains "$frame" "prior-tests: snapshot " \
       "$scenario keeps the snapshot qualifier with the counts"
@@ -1903,6 +2009,8 @@ test_idle_static_diagram
 test_unreadable_status
 test_coarse_fallback
 test_tests_gate_counts
+test_tests_gate_uses_the_pr_base
+test_tests_gate_pr_base_unreadable_degrades
 test_watch_mode_frames
 test_help_exits_zero
 test_tests_gate_name_check_only

@@ -209,17 +209,24 @@ if [ "$INCLUDE_PRS" = 1 ]; then
     # same repository reached by two spellings would otherwise be queried twice
     # and consume two slots of the repository cap, while repos keeps the
     # first-seen spelling so the rendered label is the one its source used.
+    # That split has ONE owner below, add_repo_candidate, so the two loops
+    # cannot drift: a future fix to how identity and display relate lands in
+    # both sources or in neither.
     repos=""
     repo_keys=""
+    add_repo_candidate() {  # <owner> <repo>
+      local owner=$1 repo=$2 key
+      key=$(fm_pr_github_slug_fold "$owner" "$repo")
+      case " $repo_keys " in
+        *" $key "*) return 0 ;;
+      esac
+      repo_keys="$repo_keys $key"
+      repos="$repos $owner/$repo"
+    }
     while IFS= read -r u; do
       [ -n "$u" ] || continue
       fm_pr_url_parse "$u" || continue
-      s="$FM_PR_OWNER/$FM_PR_REPO"
-      k=$(fm_pr_github_slug_fold "$FM_PR_OWNER" "$FM_PR_REPO")
-      case " $repo_keys " in
-        *" $k "*) : ;;
-        *) repo_keys="$repo_keys $k"; repos="$repos $s" ;;
-      esac
+      add_repo_candidate "$FM_PR_OWNER" "$FM_PR_REPO"
     done <<EOF
 $(printf '%s' "$SNAP" | jq -r '.tasks[].pr.url // empty')
 EOF
@@ -228,12 +235,7 @@ EOF
       [ -d "$wt" ] || continue
       u=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
       fm_pr_remote_parse "$u" || continue
-      s="$FM_PR_REMOTE_OWNER/$FM_PR_REMOTE_REPO"
-      k=$(fm_pr_github_slug_fold "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO")
-      case " $repo_keys " in
-        *" $k "*) : ;;
-        *) repo_keys="$repo_keys $k"; repos="$repos $s" ;;
-      esac
+      add_repo_candidate "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO"
     done <<EOF
 $(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths.worktree.path // empty')
 EOF

@@ -88,7 +88,11 @@
 #       The base is the branch the PR actually TARGETS, never an assumed
 #       default: when pr= is recorded, the base branch name is read from GitHub
 #       (`gh pr view <url> --json baseRefName`, the same raw-gh JSON read
-#       fm-pr-check.sh uses, because gh-axi exposes no baseRefName field), and
+#       fm-pr-check.sh uses, because gh-axi exposes no baseRefName field). That
+#       read is owned by bin/fm-pr-lib.sh's fm_pr_base_branch_read rather than
+#       written here, because bin/fm-nm-flow.sh's merge-gate box previews this
+#       verdict and a preview that resolves its own base would preview a
+#       different gate. The library reads; the policy below is this script's:
 #       the check REFUSES with exit 2 when that name cannot be read. Falling
 #       back to the default branch there would silently compare a stacked PR
 #       against a tree it was never built on, which is exactly the class of
@@ -104,19 +108,27 @@
 #       than origin's REFUSES with exit 2 before either fetch, naming both sides.
 #       Fetching there would compare the branch against a same-named branch in
 #       the wrong repository, the same class of wrong-base verdict as assuming
-#       the default. Each side is read by the bin/fm-pr-lib.sh parser that owns
+#       the default. A recorded pr= that is not a PR link at all refuses the
+#       same way and for the same reason, naming the value it could not read:
+#       an unidentifiable link cannot be checked against origin, so trusting it
+#       would reopen the hole the mismatch refusal closes. That the only writer
+#       of pr= validates it with the same parser first is not leaned on - this
+#       is the last gate before a merge, so it does not trust an input it cannot
+#       identify even where nothing reaches it today.
+#       Each side is read by the bin/fm-pr-lib.sh parser that owns
 #       its input type - fm_pr_url_parse for the PR link, fm_pr_remote_parse for
 #       origin's address - and compared through fm_pr_github_slug_fold, so the
 #       host and owner/repo rule has one owner rather than a copy per caller.
 #       The refusal names both owner/repo pairs and never origin's raw address,
 #       which can carry an embedded credential that this script's unredirected
 #       stderr would then put in the merge output and any CI log.
-#       DELIBERATE BOUNDARY: when origin's URL is not a GitHub owner/repo at all
-#       (a local path, a bare mirror, a self-hosted or non-GitHub remote) the
-#       mismatch is not determinable, so the check does NOT refuse and fetching
-#       from origin holds, exactly as it already does when resolving the PR head.
-#       This closes the wrong-GitHub-repository hole; it is not a general
-#       remote-identity check.
+#       DELIBERATE BOUNDARY, and it is about ORIGIN's side alone: when origin's
+#       URL is not a GitHub owner/repo at all (a local path, a bare mirror, a
+#       self-hosted or non-GitHub remote) the mismatch is not determinable, so
+#       the check does NOT refuse and fetching from origin holds, exactly as it
+#       already does when resolving the PR head. The PR-link side carries no
+#       such boundary: an unreadable link refuses, as above. This closes the
+#       wrong-GitHub-repository hole; it is not a general remote-identity check.
 #       When no pr= is recorded (local-only merges), the base is the project's
 #       default branch as before. Either way the base is origin/<branch>
 #       (fetched) for remote-backed projects and the local branch otherwise.
@@ -153,8 +165,9 @@
 #     script can tell "assertions vanished" from "could not verify": bad usage,
 #     missing meta, missing worktree or project, unresolvable refs, and every
 #     way the base itself cannot be established honestly - an unreadable PR base
-#     branch, a recorded PR in a GitHub repository other than origin's, or a
-#     base branch that could not be fetched from origin.
+#     branch, a recorded pr= that is not a readable PR link, a recorded PR in a
+#     GitHub repository other than origin's, or a base branch that could not be
+#     fetched from origin.
 #
 # FM_ASSERT_TESTS_TIMEOUT caps each executed test file's runtime in seconds
 # (default 300) when a `timeout` binary exists; a timed-out branch run counts
@@ -284,47 +297,16 @@ else
     printf '%s' "$resolved"
   }
 
-  # resolve_pr_base <pr-url> <diagnostic-file>: print the branch name the PR
-  # targets, read from GitHub. gh-axi is this repo's GitHub interface for
-  # ACTIONS, but its `pr view` exposes no baseRefName field, so this is a raw-gh
-  # JSON read exactly as fm-pr-check.sh's headRefOid lookup is. The URL fully
-  # qualifies the repo; the cd into the worktree only supplies gh's repo context
-  # if it ever needs one.
-  # Unlike fm-pr-check.sh, whose lookup falls back softly, a failure here is a
-  # HARD refusal that blocks a merge, so the cause must reach the operator
-  # instead of being discarded: the distinguishable causes are written to
-  # <diagnostic-file> along with gh's own verbatim stderr, and the caller prints
-  # that block beneath the refusal.
-  resolve_pr_base() {
-    local pr_url=$1 diag=$2 err="$2.gh" name rc=0
-    : > "$diag"
-    : > "$err"
-    if ! command -v gh >/dev/null 2>&1; then
-      printf 'gh is not installed\n' > "$diag"
-      return 1
-    fi
-    name=$(cd "$WT" && gh pr view "$pr_url" --json baseRefName -q .baseRefName 2>"$err") || rc=$?
-    if [ "$rc" -ne 0 ]; then
-      { printf 'the gh query failed (exit %s)\n' "$rc"; cat "$err"; } > "$diag"
-      return 1
-    fi
-    if [ -z "$name" ]; then
-      { printf 'the gh query succeeded but reported no base branch name\n'; cat "$err"; } > "$diag"
-      return 1
-    fi
-    # The name goes into a refspec, so it must be a name git itself accepts as a
-    # branch; anything else is rejected rather than interpolated.
-    if ! git check-ref-format "refs/heads/$name" 2>"$err"; then
-      { printf 'gh reported %s, which git does not accept as a branch name\n' "$name"; cat "$err"; } > "$diag"
-      return 1
-    fi
-    printf '%s' "$name"
-  }
-
-  # assert_pr_repo_is_origin <pr-url>: refuse when the PR lives in a GitHub
-  # repository other than the one origin points at. Both PR-derived fetches
-  # below read from origin, so a determinable mismatch would silently measure
-  # the verdict against a same-named branch in the wrong repository.
+  # assert_pr_repo_is_origin <pr-url>: refuse when the recorded PR link cannot be
+  # identified at all, and when the PR lives in a GitHub repository other than
+  # the one origin points at. Both PR-derived fetches below read from origin, so
+  # either condition would silently measure the verdict against a same-named
+  # branch in the wrong repository.
+  # An UNPARSEABLE link refuses for the same reason a mismatched one does, and
+  # deliberately does not lean on the fact that the only writer of pr=
+  # (bin/fm-pr-merge.sh, via bin/fm-pr-check.sh) validates it with this same
+  # parser first: this script is the last gate before a merge, so it must not
+  # trust an input it cannot identify even where nothing reaches it today.
   # Each side is read by the bin/fm-pr-lib.sh parser that owns ITS input type -
   # a PR link and a git remote address are different grammars - and the two are
   # compared through that library's fold, so the host and owner/repo rule cannot
@@ -333,16 +315,22 @@ else
   # credential, and bin/fm-pr-merge.sh redirects this script's stdout but not its
   # stderr, so the token would reach the merge output and any CI log. The
   # owner/repo pair already names the side that is wrong.
+  # "targets" is reserved throughout this script for the PR's BASE BRANCH, so
+  # the repository sense is spelled "lives in": an operator reading a refusal
+  # that blocks their merge must not be sent looking at the wrong thing.
   assert_pr_repo_is_origin() {
     local pr_url=$1 origin_url pr_slug origin_slug
-    fm_pr_url_parse "$pr_url" || return 0
+    if ! fm_pr_url_parse "$pr_url"; then
+      echo "error: the recorded pr= value '$pr_url' is not a GitHub pull request link; refusing rather than fetching PR refs for a link this check cannot identify" >&2
+      exit 2
+    fi
     pr_slug=$(fm_pr_github_slug_fold "$FM_PR_OWNER" "$FM_PR_REPO")
     origin_url=$(git -C "$WT" remote get-url origin 2>/dev/null || true)
     [ -n "$origin_url" ] || return 0
     fm_pr_remote_parse "$origin_url" || return 0
     origin_slug=$(fm_pr_github_slug_fold "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO")
     [ "$pr_slug" != "$origin_slug" ] || return 0
-    echo "error: PR $pr_url targets $FM_PR_OWNER/$FM_PR_REPO but this worktree's origin is $FM_PR_REMOTE_OWNER/$FM_PR_REMOTE_REPO; refusing rather than fetching a same-named branch from the wrong repository" >&2
+    echo "error: PR $pr_url lives in $FM_PR_OWNER/$FM_PR_REPO but this worktree's origin is $FM_PR_REMOTE_OWNER/$FM_PR_REMOTE_REPO; refusing rather than fetching a same-named branch from the wrong repository" >&2
     exit 2
   }
 
@@ -364,14 +352,18 @@ else
   fi
 
   # The base is the branch the PR TARGETS whenever a PR is recorded, and only
-  # the project's default branch when none is. A recorded PR whose base cannot
-  # be read refuses rather than falling back: see this script's header.
+  # the project's default branch when none is. The branch name comes from
+  # bin/fm-pr-lib.sh's fm_pr_base_branch_read, which is the one owner of that
+  # question, so this gate and the merge-gate preview in bin/fm-nm-flow.sh
+  # cannot resolve two different bases. That reader decides nothing on failure;
+  # refusing rather than falling back is THIS script's policy, because it blocks
+  # a merge: see this script's header.
   if [ -n "$PR_URL" ]; then
     # A private 0700 directory, so the diagnostic and its sibling capture file
     # cannot be pre-created as symlinks by another user on a shared /tmp.
     PR_BASE_DIAG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-assert-tests-kept-prbase.XXXXXX")
     PR_BASE_DIAG="$PR_BASE_DIAG_DIR/cause"
-    BASE_BRANCH=$(resolve_pr_base "$PR_URL" "$PR_BASE_DIAG") || {
+    BASE_BRANCH=$(fm_pr_base_branch_read "$WT" "$PR_URL" "$PR_BASE_DIAG") || {
       echo "error: cannot read the base branch of $PR_URL from GitHub; refusing rather than assuming the default branch, which would compare the branch against a base the PR was never built on" >&2
       if [ -s "$PR_BASE_DIAG" ]; then
         echo "error: cause:" >&2

@@ -66,7 +66,12 @@
 #        in a GitHub repository OTHER than origin's REFUSES before any fetch,
 #        naming both sides, since both PR-derived refs are fetched from origin,
 #        and that refusal names owner/repo only, never origin's raw address,
-#        which can carry an embedded credential;
+#        which can carry an embedded credential; a recorded pr= that is not a
+#        readable PR link REFUSES before any gh call or fetch, naming the value
+#        it could not read, because an unidentifiable link cannot be checked
+#        against origin at all; the repository sense of that refusal is spelled
+#        "lives in", never "targets", which means the PR's BASE BRANCH
+#        everywhere else in the script;
 #        an origin that is not a GitHub URL at all is NOT a determinable
 #        mismatch and must still resolve normally, which every other case here
 #        covers implicitly because their origin is a local path; a task with
@@ -403,8 +408,13 @@ test_pr_in_another_github_repo_refuses_before_any_fetch() {
 
   expect_code 2 "$code" \
     "pr-base-wrong-repo: a PR in another GitHub repository must refuse as 'cannot verify'"
-  assert_contains "$err" 'targets o/r' \
+  assert_contains "$err" 'lives in o/r' \
     "pr-base-wrong-repo: the refusal must name the PR URL's own owner/repo"
+  # "targets" means the PR's BASE BRANCH everywhere else in the script and its
+  # header, so the repository sense must never reclaim the word: an operator
+  # hitting this merge-blocking refusal would go looking at the wrong thing.
+  assert_not_contains "$err" 'targets' \
+    "pr-base-wrong-repo: the repository sense must not be spelled 'targets'"
   assert_contains "$err" 'someone-else/other-repo' \
     "pr-base-wrong-repo: the refusal must name origin's owner/repo"
   assert_not_contains "$out" 'missing:' \
@@ -412,6 +422,56 @@ test_pr_in_another_github_repo_refuses_before_any_fetch() {
   assert_not_contains "$out" 'base:' \
     "pr-base-wrong-repo: refusing must never name a base resolved from the wrong repository"
   pass "a PR whose repository is not origin's refuses rather than fetching a same-named branch"
+}
+
+# The only writer of pr= validates it with this same parser first, so nothing
+# reaches this today - which is exactly why it is asserted. This script is the
+# last gate before a merge and must not trust an input it cannot identify, and
+# a hand-edited meta file is the one route in.
+test_unparseable_recorded_pr_refuses_before_any_github_call() {
+  local case_dir out err code
+  case_dir=$(make_pr_base_case pr-base-unparseable)
+  write_pr_base_gh "$case_dir" feature-base
+  # Every gh call and every fetch is logged, so "refused BEFORE any of them" is
+  # asserted from evidence rather than from the exit code alone.
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf 'gh %s\n' "\$*" >> "$case_dir/net.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
+  cat > "$case_dir/fakebin/git" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" fetch "*) printf 'git %s\n' "\$*" >> "$case_dir/net.log" ;;
+esac
+exec $(command -v git) "\$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+  : > "$case_dir/net.log"
+  fm_write_meta "$case_dir/state/task-pb.meta" \
+    "window=fm-task-pb" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "pr=https://github.example.com/o/r/pull/7"
+
+  set +e
+  out=$(run_pr_base_case "$case_dir" 2> "$case_dir/stderr")
+  code=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 2 "$code" \
+    "pr-base-unparseable: a recorded pr= that is not a PR link must refuse as 'cannot verify'"
+  assert_contains "$err" 'https://github.example.com/o/r/pull/7' \
+    "pr-base-unparseable: the refusal must name the value it could not read"
+  assert_not_contains "$out" 'missing:' \
+    "pr-base-unparseable: refusing must not produce findings measured against an assumed base"
+  assert_not_contains "$out" 'base:' \
+    "pr-base-unparseable: refusing must never name a base at all"
+  [ ! -s "$case_dir/net.log" ] || fail \
+    "pr-base-unparseable: refused only after touching the network: $(cat "$case_dir/net.log")"
+  pass "a recorded pr= that is not a readable PR link refuses before any gh call or fetch"
 }
 
 test_pr_repo_mismatch_refusal_never_leaks_origin_credentials() {
@@ -1809,6 +1869,7 @@ test_js_run_never_mutates_the_live_worktree() {
 test_pr_base_branch_is_compared_against_the_pr_target
 test_unreadable_pr_base_refuses_rather_than_assuming_default
 test_pr_in_another_github_repo_refuses_before_any_fetch
+test_unparseable_recorded_pr_refuses_before_any_github_call
 test_pr_repo_mismatch_refusal_never_leaks_origin_credentials
 test_task_without_a_pr_still_resolves_the_default_branch
 test_explicit_mode_never_consults_github

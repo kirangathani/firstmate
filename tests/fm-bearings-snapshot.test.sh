@@ -930,6 +930,10 @@ test_include_prs_is_the_only_fetch_path() {
 # collapse to one repository - otherwise it is queried twice, counted twice, and
 # eats two slots of the repository cap - while the label still reads as the
 # source that was seen first spelled it.
+# Both candidate sources are covered, and each is covered against ITSELF as well
+# as against the other: the two loops share one accumulate-and-dedupe helper, so
+# a fix applied to one and missed in the other is exactly what this case exists
+# to catch.
 test_case_differing_repository_identities_collapse_to_one() {
   local home fakebin wt calls
   home=$(make_home repo-identity-fold); write_fixture "$home"
@@ -948,12 +952,29 @@ test_case_differing_repository_identities_collapse_to_one() {
     "pr=https://github.com/Acme/Repo/pull/1"
   printf 'working: folding\n' > "$home/state/fold-task.status"
 
+  # A second task naming the same repository in a third spelling, on a second
+  # worktree whose origin uses a fourth: the PR-link loop and the origin loop
+  # each now see a duplicate of their OWN making, not just of the other's.
+  wt="$home/projects/zz-fold-wt"
+  mkdir -p "$wt"
+  git init -q "$wt"
+  git -C "$wt" remote add origin https://github.com/AcMe/rEpO.git
+  fm_write_meta "$home/state/zz-fold-task.meta" \
+    "window=firstmate:fm-zz-fold-task" \
+    "worktree=$wt" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=https://github.com/ACME/REPO/pull/2"
+  printf 'working: folding again\n' > "$home/state/zz-fold-task.status"
+
   run "$home" "$fakebin" --include-prs --json >/dev/null
-  calls=$(grep -c '^gh pr list --repo Acme/Repo ' "$home/net.log" || true)
+  calls=$(grep -ci '^gh pr list --repo acme/repo ' "$home/net.log" || true)
   [ "$calls" = 1 ] \
-    || fail "the first-seen spelling must be queried exactly once, got $calls: $(cat "$home/net.log")"
-  ! grep -q '^gh pr list --repo acme/repo ' "$home/net.log" \
-    || fail "the same repository in a second spelling must not be queried again: $(cat "$home/net.log")"
+    || fail "the folded repository must be queried exactly once, got $calls: $(cat "$home/net.log")"
+  grep -q '^gh pr list --repo Acme/Repo ' "$home/net.log" \
+    || fail "the one query must use the first-seen spelling: $(cat "$home/net.log")"
   pass "repository identities differing only in case collapse to one, keeping the first-seen spelling"
 }
 
