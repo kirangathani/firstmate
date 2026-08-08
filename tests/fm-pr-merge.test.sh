@@ -891,11 +891,64 @@ test_invalid_kind_entry_not_honored() {
   set -e
 
   expect_code 1 "$rc" "invalid-kind: an unrecognized kind must not excuse the merge"
-  assert_grep 'ignoring supersession entry whose kind is not missing, failing, unexecuted, or any' "$case_dir/stderr" \
+  assert_grep 'ignoring supersession entry whose kind is not missing, failing, unexecuted, unstable, or any' "$case_dir/stderr" \
     "invalid-kind: the invalid kind was not warned about"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "invalid-kind: gh-axi pr merge was invoked despite an invalid kind"
   pass "a supersession entry naming an invalid kind is warned about and never honored"
+}
+
+test_unstable_finding_refuses_and_explains_the_test_defect() {
+  local case_dir rc
+  # An unstable finding means the BASE's own test named one assertion two ways
+  # across the detector's two runs, so nothing could be compared. It refuses for
+  # every project with no exec-gate-style opt-in, and the message must send the
+  # reader at the test rather than at the branch under review.
+  case_dir=$(make_stub_case unstable-refuses 1 'unstable: tests/t.test.sh::took (1s)')
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/70 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unstable-refuses: an unstable finding must refuse the merge"
+  assert_grep 'no captain-approved supersession entry covers: tests/t.test.sh::took (1s) (unstable)' \
+    "$case_dir/stderr" "unstable-refuses: the unstable finding was not parsed and counted"
+  assert_grep "defect in the BASE's test" "$case_dir/stderr" \
+    "unstable-refuses: the message must point at the test, not at the branch"
+  assert_no_grep 'none of its output parsed' "$case_dir/stderr" \
+    "unstable-refuses: an unstable line must parse as a finding, not fall through as unrecognized output"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unstable-refuses: gh-axi pr merge was invoked despite an unstable finding"
+  pass "an unstable finding refuses the merge and names the base test as the defect"
+}
+
+test_unstable_kind_supersession_is_honored_and_scoped() {
+  local case_dir
+  # kind: unstable must be a recognized class - and, being a kind, must stay
+  # scoped: the same entry may not excuse a genuinely deleted assertion.
+  case_dir=$(make_stub_case unstable-kind 1 'unstable: tests/t.test.sh::took (1s)')
+  write_supersessions "$case_dir" \
+    '- ids: tests/t.test.sh::* | project: project | kind: unstable | date: 2026-08-01 | reason: captain accepted the moving name while the test fix lands'
+
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "unstable-kind: a kind: unstable entry must excuse an unstable finding"
+  assert_grep 'covers: tests/t.test.sh::took (1s) (unstable)' "$case_dir/stderr" \
+    "unstable-kind: the unstable finding was not excused by its own kind"
+
+  case_dir=$(make_stub_case unstable-kind-scoped 1 'missing: tests/t.test.sh::took (1s)')
+  write_supersessions "$case_dir" \
+    '- ids: tests/t.test.sh::* | project: project | kind: unstable | date: 2026-08-01 | reason: captain accepted the moving name while the test fix lands'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/72 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  set -e
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unstable-kind: a kind: unstable entry must not excuse a deleted (missing) assertion"
+  pass "kind: unstable excuses an unstable finding and nothing else"
 }
 
 test_field_after_reason_not_honored() {
@@ -1066,7 +1119,7 @@ test_findings_exit_with_no_parseable_line_refuses() {
   set -e
 
   expect_code 1 "$rc" "unparseable-findings: exit 1 with no parseable finding must refuse"
-  assert_grep 'none of its output parsed as a missing:/failing:/unexecuted: line' "$case_dir/stderr" \
+  assert_grep 'none of its output parsed as a missing:/failing:/unexecuted:/unstable: line' "$case_dir/stderr" \
     "unparseable-findings: the refusal did not explain the unparseable output"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "unparseable-findings: gh-axi pr merge was invoked on unparseable gate output"
@@ -1458,6 +1511,8 @@ test_ids_glob_does_not_excuse_non_matching_finding
 test_kind_restricted_batch_does_not_excuse_missing
 test_wildcard_ids_without_kind_excuses_every_class
 test_invalid_kind_entry_not_honored
+test_unstable_finding_refuses_and_explains_the_test_defect
+test_unstable_kind_supersession_is_honored_and_scoped
 test_field_after_reason_not_honored
 test_no_space_field_after_reason_not_honored
 test_duplicated_kind_field_not_honored

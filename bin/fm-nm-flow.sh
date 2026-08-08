@@ -30,8 +30,9 @@
 #                      watch frames) in its explicit --worktree/--base mode and
 #                      show its counts in the merge-gate box, read from its
 #                      `summary:` stdout line (per-line grep fallback).
-#                      Whenever the box shows a result it names ALL SIX classes
-#                      - miss / fail / unex / excu / skip / unac - every render,
+#                      Whenever the box shows a result it names ALL SEVEN classes
+#                      - miss / fail / unex / excu / skip / unac / unst - every
+#                      render,
 #                      INCLUDING the zeros. There is no ordering, threshold or
 #                      non-zero test that can hide one behind another: a class
 #                      folded into a sibling, or dropped because a louder sibling
@@ -44,7 +45,12 @@
 #                      fm-assert-tests-kept.sh's exit code (its exit 0 means only
 #                      that missing/failing/unexecuted are empty), so neither may
 #                      be read off that exit code, and both mean the assertion was
-#                      never verified.
+#                      never verified. `unst` is the check's `unstable:` class:
+#                      a base assertion whose own NAME changed between the
+#                      check's two runs of the identical base file, so nothing
+#                      could be compared over it. It DOES key the exit code, and
+#                      like miss and fail it raises the row's `!!` flag, because
+#                      it refuses a merge for every project.
 #                      A class this run never EVALUATED renders as a dash, never
 #                      as 0: never-checked and checked-and-clean are different
 #                      facts and a captain cannot be asked to tell them apart from
@@ -55,7 +61,7 @@
 #                      its absent finding lines would manufacture a 0 out of
 #                      nothing), and stdout with no content at all (a check that
 #                      printed nothing reads exactly like one that never ran, so
-#                      counting its six absent classes to six zeros would
+#                      counting its seven absent classes to seven zeros would
 #                      manufacture the whole row). Finding LINES are positive
 #                      evidence and are
 #                      believed whenever present; only their absence proves
@@ -621,8 +627,8 @@ trap on_int_term INT TERM
 # not to a viewer pane, so they are discarded here; a malformed entry fails
 # closed either way, which leaves the identifier in its raw class.
 #
-# Sets EX_MISSING/EX_FAILING/EX_UNEXEC (excused per class),
-# SEEN_MISSING/SEEN_FAILING/SEEN_UNEXEC (findings actually parsed per class,
+# Sets EX_MISSING/EX_FAILING/EX_UNEXEC/EX_UNSTABLE (excused per class),
+# SEEN_MISSING/SEEN_FAILING/SEEN_UNEXEC/SEEN_UNSTABLE (findings actually parsed per class,
 # used only as a floor under the summary counts so an excusal can never
 # subtract more than was counted), and EX_EVAL: whether the excused class was
 # EVALUATED at all. Knowing the project and finding no record is an evaluation
@@ -630,13 +636,13 @@ trap on_int_term INT TERM
 # Explicit --worktree mode is not: the record is keyed by project, so with no
 # project there is no record to consult and the honest answer is "not checked",
 # which the row renders as a dash rather than a zero it did not establish.
-EX_MISSING=0 EX_FAILING=0 EX_UNEXEC=0
-SEEN_MISSING=0 SEEN_FAILING=0 SEEN_UNEXEC=0
+EX_MISSING=0 EX_FAILING=0 EX_UNEXEC=0 EX_UNSTABLE=0
+SEEN_MISSING=0 SEEN_FAILING=0 SEEN_UNEXEC=0 SEEN_UNSTABLE=0
 EX_EVAL=0
 classify_excused() {  # <findings-file>
   local line ident cls exec_gated=0
-  EX_MISSING=0 EX_FAILING=0 EX_UNEXEC=0
-  SEEN_MISSING=0 SEEN_FAILING=0 SEEN_UNEXEC=0
+  EX_MISSING=0 EX_FAILING=0 EX_UNEXEC=0 EX_UNSTABLE=0
+  SEEN_MISSING=0 SEEN_FAILING=0 SEEN_UNEXEC=0 SEEN_UNSTABLE=0
   EX_EVAL=0
   [ -n "$PROJ_NAME" ] || return 0
   EX_EVAL=1
@@ -647,6 +653,7 @@ classify_excused() {  # <findings-file>
       'missing: '*)    cls=missing    ; ident=${line#missing: }    ; SEEN_MISSING=$((SEEN_MISSING + 1)) ;;
       'failing: '*)    cls=failing    ; ident=${line#failing: }    ; SEEN_FAILING=$((SEEN_FAILING + 1)) ;;
       'unexecuted: '*) cls=unexecuted ; ident=${line#unexecuted: } ; SEEN_UNEXEC=$((SEEN_UNEXEC + 1)) ;;
+      'unstable: '*)   cls=unstable   ; ident=${line#unstable: }   ; SEEN_UNSTABLE=$((SEEN_UNSTABLE + 1)) ;;
       *) continue ;;
     esac
     if [ "$cls" = unexecuted ] && [ "$exec_gated" -eq 0 ]; then
@@ -657,6 +664,7 @@ classify_excused() {  # <findings-file>
         missing)    EX_MISSING=$((EX_MISSING + 1)) ;;
         failing)    EX_FAILING=$((EX_FAILING + 1)) ;;
         unexecuted) EX_UNEXEC=$((EX_UNEXEC + 1)) ;;
+        unstable)   EX_UNSTABLE=$((EX_UNSTABLE + 1)) ;;
       esac
     fi
   done < "$1"
@@ -680,40 +688,43 @@ mgate_pos() {  # <cell>
 # separated; the row spends the `prior-tests: ` prefix, which every legend line
 # under the diagram carries anyway, before it spends a digit.
 #
-# `!!` marks unexcused missing/failing work. `ok` is derived from the CELLS
-# alone and never from the probe's exit status: fm-assert-tests-kept.sh exits 0
-# whenever missing/failing/unexecuted are empty, which says nothing at all about
-# the skipped and unaccounted identifiers it also reports, and `unaccounted`
-# means a base assertion a green baseline run produced no result for - never
-# verified. So `ok` requires every one of the six to be an established zero: an
-# unexecuted, excused, skipped, unaccounted or never-evaluated class each
-# suppress it alone.
-mgate_counts_ann() {  # <missing> <failing> <unexec> <excused> <skipped> <unaccounted>
-  local v flag='' zero=1 spaced tight body limit=$((COLS - 27))
+# `!!` marks unexcused missing/failing/unstable work - unstable joins them
+# because it refuses a merge for every project, with no per-project opt-in to
+# soften it. `ok` is derived from the CELLS alone and never from the probe's exit
+# status: fm-assert-tests-kept.sh exits 0 whenever missing/failing/unexecuted and
+# unstable are empty, which says nothing at all about the skipped and unaccounted
+# identifiers it also reports, and `unaccounted` means a base assertion a green
+# baseline run produced no result for - never verified. So `ok` requires every one
+# of the seven to be an established zero: an unexecuted, excused, skipped,
+# unaccounted, unstable or never-evaluated class each suppress it alone.
+mgate_counts_ann() {  # <missing> <failing> <unexec> <excused> <skipped> <unaccounted> <unstable>
+  local v flag='' zero=1 spaced tight shortest body limit=$((COLS - 27))
   for v in "$@"; do
     [ "$v" = 0 ] || zero=0
   done
-  if mgate_pos "$1" || mgate_pos "$2"; then
+  if mgate_pos "$1" || mgate_pos "$2" || mgate_pos "$7"; then
     flag=' !!'
   elif [ "$zero" -eq 1 ]; then
     flag=' ok'
   fi
-  # The ladder, widest first, every rung carrying all six counts whole: the
+  # The ladder, widest first, every rung carrying all seven counts whole: the
   # `prior-tests: ` prefix goes first (every legend line under the diagram
-  # carries it anyway), then the space between each label and its count. Only
-  # LABELLING is ever spent. A magnitude that outgrows even the tight form is
-  # left to wrap - the row budget charges the rows a wrapped line really takes -
-  # because a count the captain cannot read at all is worse than a line that
-  # runs on.
-  spaced="miss $1/fail $2/unex $3/excu $4/skip $5/unac $6$flag"
-  tight="miss$1/fail$2/unex$3/excu$4/skip$5/unac$6$flag"
-  for body in "prior-tests: $spaced" "$spaced" "$tight"; do
+  # carries it anyway), then the space between each label and its count, then
+  # the labels' last letter. Only LABELLING is ever spent, and every rung's
+  # labels stay recognizable prefixes of the legend's own `excu/skip/unac/unst`
+  # spellings. A magnitude that outgrows even the shortest form is left to wrap -
+  # the row budget charges the rows a wrapped line really takes - because a count
+  # the captain cannot read at all is worse than a line that runs on.
+  spaced="miss $1/fail $2/unex $3/excu $4/skip $5/unac $6/unst $7$flag"
+  tight="miss$1/fail$2/unex$3/excu$4/skip$5/unac$6/unst$7$flag"
+  shortest="mis$1/fal$2/unx$3/exc$4/skp$5/una$6/uns$7$flag"
+  for body in "prior-tests: $spaced" "$spaced" "$tight" "$shortest"; do
     if [ "${#body}" -le "$limit" ]; then
       printf '%s' "$body"
       return
     fi
   done
-  printf '%s' "$tight"
+  printf '%s' "$shortest"
 }
 
 # One class cell out of the probe's output: a count, or `-` for a class this
@@ -730,8 +741,8 @@ mgate_counts_ann() {  # <missing> <failing> <unexec> <excused> <skipped> <unacco
 # With no summary line at all, every class is being read the same way, off the
 # finding lines, so a 0 there is a real reading of the whole output - PROVIDED
 # the CHECK ITSELF said something. Output the check did not produce is not a
-# reading of anything: all six greps answer 0, and the row would go out with six
-# established zeros and an `ok` derived from zero positive evidence, which is
+# reading of anything: every grep answers 0, and the row would go out with a full
+# set of established zeros and an `ok` derived from zero positive evidence, which is
 # the same manufactured green an absent summary field already refuses to
 # produce. So the question is not "was there any output" but "is any of it
 # shaped like this check's contract" - the probe inherits other scripts' stdout
@@ -747,7 +758,7 @@ mgate_field() {  # <class> <summary-line> <stdout-file>
       n=$(grep -c "^$1: " "$3" || true)
       if [ "${n:-0}" -gt 0 ]; then v=$n; else v='-'; fi
     fi
-  elif grep -qE '^(summary|missing|failing|unexecuted|skipped|unaccounted): ' \
+  elif grep -qE '^(summary|missing|failing|unexecuted|skipped|unaccounted|unstable): ' \
     "$3" 2>/dev/null; then
     v=$(grep -c "^$1: " "$3" || true)
     v=${v:-0}
@@ -781,7 +792,7 @@ mgate_step_label() {
 }
 
 run_tests_gate() {
-  local base out_file missing failing unexec excused skipped unacct summary
+  local base out_file missing failing unexec excused skipped unacct unstable summary
   MGATE_BASE=""
   # Date AND time: a pane left open overnight would otherwise stamp a bare
   # clock reading that scans as this morning's, which is exactly the age at
@@ -833,8 +844,8 @@ run_tests_gate() {
     return
   fi
   # Counts come from the machine-readable `summary:` stdout line; the per-line
-  # greps are only the fallback for an output that carries no summary. All FIVE
-  # reported classes are read, not just the three the check's exit status keys
+  # greps are only the fallback for an output that carries no summary. All SIX
+  # reported classes are read, not just the ones the check's exit status keys
   # on: `skipped:` and `unaccounted:` leave the exit status at 0, and an
   # unaccounted identifier is one a green baseline run produced no result for at
   # all, so reading only the exit-status classes would let the row show a green
@@ -847,6 +858,7 @@ run_tests_gate() {
   unexec=$(mgate_field unexecuted "$summary" "$out_file")
   skipped=$(mgate_field skipped "$summary" "$out_file")
   unacct=$(mgate_field unaccounted "$summary" "$out_file")
+  unstable=$(mgate_field unstable "$summary" "$out_file")
   # An excused identifier leaves its raw class and is counted on its own, so
   # the captain sees what is being deliberately excused instead of it hiding
   # inside a pass, a failure or a not-run. The parsed per-class tally is used as
@@ -872,7 +884,12 @@ run_tests_gate() {
     unexec=$((unexec - EX_UNEXEC))
     [ "$unexec" -lt 0 ] && unexec=0
   fi
-  excused=$((EX_MISSING + EX_FAILING + EX_UNEXEC))
+  if [ "$unstable" != '-' ]; then
+    [ "$SEEN_UNSTABLE" -gt "$unstable" ] && unstable=$SEEN_UNSTABLE
+    unstable=$((unstable - EX_UNSTABLE))
+    [ "$unstable" -lt 0 ] && unstable=0
+  fi
+  excused=$((EX_MISSING + EX_FAILING + EX_UNEXEC + EX_UNSTABLE))
   # One stderr `UNEXECUTED: <file>` line per base test file check 2 could not
   # execute, so this stays a FILE count for the legend line while the row
   # carries the assertion count; both stay inside 80 columns that way.
@@ -889,9 +906,9 @@ run_tests_gate() {
     MGATE_NAMEONLY=0
   elif [ "$rc" -eq 1 ] && \
     [ $(( $(mgate_num "$missing") + $(mgate_num "$failing") \
-          + $(mgate_num "$unexec") + excused )) -eq 0 ]; then
-    # rc=1 with nothing read out of the three classes rc=1 is keyed on (excused
-    # included, since every excused identifier came out of one of those three):
+          + $(mgate_num "$unexec") + $(mgate_num "$unstable") + excused )) -eq 0 ]; then
+    # rc=1 with nothing read out of the four classes rc=1 is keyed on (excused
+    # included, since every excused identifier came out of one of those four):
     # the check claims findings this viewer could not read, so the honest render
     # is pending, not a guess either way. skipped and unaccounted are deliberately
     # NOT summed here - both are reported at rc=0 too, so neither can turn an
@@ -908,7 +925,7 @@ run_tests_gate() {
     [ "$EX_EVAL" -eq 0 ] && d_excused='-'
     MGATE_BASE=$base
     MGATE_ANN=$(mgate_counts_ann "$missing" "$failing" "$unexec" "$d_excused" \
-      "$skipped" "$unacct")
+      "$skipped" "$unacct" "$unstable")
   fi
   clean_tmpd
 }
@@ -1316,15 +1333,16 @@ build_frame() {  # <mgate-annotation> <mgate-base> <mgate-nameonly-files>
     # themselves rather than a constant, so rewording either half cannot quietly
     # push this line past the render width - and a line past the width wraps,
     # costs the frame an unbudgeted row, and gets the box degraded to pending,
-    # taking the six counts with it.
+    # taking the seven counts with it.
     local snap_pre="prior-tests: snapshot ${MGATE_AT:-unknown time} at "
     local snap_post="; not re-checked since"
     core_line "$snap_pre$(clip $((COLS - ${#snap_pre} - ${#snap_post})) "$MGATE_STEP")$snap_post"
     # The row's compact labels, spelled out in one line: "excu" is a category of
-    # its own rather than any of the other five, skip and unac are assertions
-    # nothing verified rather than assertions that passed, and a dash is a class
+    # its own rather than any of the other six, skip and unac are assertions
+    # nothing verified rather than assertions that passed, unst is an assertion
+    # whose own name moved so nothing could be compared, and a dash is a class
     # with no evidence either way rather than an established zero.
-    core_line "prior-tests: excu=captain-excused, not a pass; skip/unac=unverified; -=unchecked"
+    core_line "prior-tests: excu/skip/unac/unst=not a pass; excu=captain-excused; -=unchecked"
   fi
   if [ "$nameonly" -gt 0 ]; then
     local noun=files

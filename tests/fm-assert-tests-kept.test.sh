@@ -1564,6 +1564,7 @@ make_moving_name_repo() {
     printf '#!/usr/bin/env bash\n'
     printf "pass() { printf 'ok - %%s\\\\n' \"\$1\"; }\n"
     printf "fail() { printf 'not ok - %%s\\\\n' \"\$1\" >&2; exit 1; }\n"
+    # shellcheck disable=SC2016 # the expansion must stay LITERAL: this is the fixture test's own shell text.
     printf 'tag=$(cat ./tag.txt)\n'
     printf '%s' "$body"
   } > "$dir/tests/m.test.sh"
@@ -1577,6 +1578,7 @@ test_moving_assertion_name_is_unstable_not_a_vanished_assertion() {
   # The base test names its own assertion with a value it reads from the tree, so
   # check 2's two runs of that ONE file report two different names for one
   # passing assertion. Nothing vanished and nothing failed; the identity moved.
+  # shellcheck disable=SC2016 # the fixture body is the generated test's own shell text; $tag must stay literal.
   dir=$(make_moving_name_repo moving-name '
 pass "tag is readable ($tag)"
 pass "unrelated assertion holds"
@@ -1601,6 +1603,7 @@ pass "unrelated assertion holds"
   # The same root cause, seen from check 1's side: it requests the LITERAL
   # unexpanded source string, which no run can ever report, so this assertion has
   # never actually been verified by the gate either.
+  # shellcheck disable=SC2016 # check 1 extracts the UNEXPANDED source string, so the expected text is literal.
   assert_contains "$out" 'unaccounted: tests/m.test.sh::tag is readable ($tag)' \
     "moving-name: the unexpanded identifier check 1 requested is never accounted for by any run"
   assert_contains "$(cat "$dir/stderr")" 'UNSTABLE IDENTITY: tests/m.test.sh' \
@@ -1615,6 +1618,7 @@ test_unstable_name_does_not_swallow_a_real_failing_assertion() {
   # One file, two assertions: one whose name moves, one whose name is constant and
   # whose behavior the branch genuinely breaks. Refusing to compare the first must
   # not blind check 2 to the second.
+  # shellcheck disable=SC2016 # the fixture body is the generated test's own shell text; $tag must stay literal.
   dir=$(make_moving_name_repo unstable-plus-failing '
 pass "tag is readable ($tag)"
 observed=$(bash ./app.sh)
@@ -1642,6 +1646,7 @@ test_unstable_name_does_not_mask_a_deleted_assertion() {
   local dir out code
   # The other direction: the branch DELETES an assertion outright from a file that
   # also holds a moving name. Check 1 must still report the deletion.
+  # shellcheck disable=SC2016 # the fixture body is the generated test's own shell text; $tag must stay literal.
   dir=$(make_moving_name_repo unstable-plus-missing '
 pass "tag is readable ($tag)"
 pass "assertion the branch deletes"
@@ -1670,6 +1675,7 @@ test_constant_name_over_a_changed_value_is_fully_verified() {
   # the FAIL message and the name is a constant string. The gate then compares the
   # two runs cleanly AND finally accounts for the assertion, which the unexpanded
   # form above could never be.
+  # shellcheck disable=SC2016 # the fixture body is the generated test's own shell text; $tag must stay literal.
   dir=$(make_moving_name_repo constant-name '
 [ -n "$tag" ] || fail "tag is readable (got: $tag)"
 pass "tag is readable"
