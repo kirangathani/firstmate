@@ -93,7 +93,24 @@
 #       against a tree it was never built on, which is exactly the class of
 #       wrong-base verdict this gate must not produce; the only caller that
 #       records pr= (bin/fm-pr-merge.sh) already requires working GitHub access,
-#       so the refusal costs no legitimate workflow.
+#       so the refusal costs no legitimate workflow. The refusal names the cause
+#       it got from gh (gh absent, the query's own failure and stderr, or a name
+#       git will not accept as a branch), because a refusal that blocks a merge
+#       without saying why leaves the operator with no next step.
+#       Both the PR head (refs/pull/<n>/head) and that base branch are fetched
+#       from the worktree's origin, which is only correct if origin IS the PR's
+#       repository, so a recorded pr= whose owner/repo is a GitHub repo OTHER
+#       than origin's REFUSES with exit 2 before either fetch, naming both sides.
+#       Fetching there would compare the branch against a same-named branch in
+#       the wrong repository, the same class of wrong-base verdict as assuming
+#       the default. The URL is parsed by bin/fm-pr-lib.sh's fm_pr_url_parse,
+#       the one owner of that grammar.
+#       DELIBERATE BOUNDARY: when origin's URL is not a GitHub owner/repo at all
+#       (a local path, a bare mirror, a self-hosted or non-GitHub remote) the
+#       mismatch is not determinable, so the check does NOT refuse and fetching
+#       from origin holds, exactly as it already does when resolving the PR head.
+#       This closes the wrong-GitHub-repository hole; it is not a general
+#       remote-identity check.
 #       When no pr= is recorded (local-only merges), the base is the project's
 #       default branch as before. Either way the base is origin/<branch>
 #       (fetched) for remote-backed projects and the local branch otherwise.
@@ -143,6 +160,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-test-exec-lib.sh
 . "$SCRIPT_DIR/fm-test-exec-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 # Deterministic collation for sort/comm regardless of the host locale.
 export LC_ALL=C
@@ -256,20 +275,96 @@ else
     printf '%s' "$resolved"
   }
 
-  # resolve_pr_base <pr-url>: print the branch name the PR targets, read from
-  # GitHub. gh-axi is this repo's GitHub interface for ACTIONS, but its `pr view`
-  # exposes no baseRefName field, so this is a raw-gh JSON read exactly as
-  # fm-pr-check.sh's headRefOid lookup is. The URL fully qualifies the repo; the
-  # cd into the worktree only supplies gh's repo context if it ever needs one.
+  # resolve_pr_base <pr-url> <diagnostic-file>: print the branch name the PR
+  # targets, read from GitHub. gh-axi is this repo's GitHub interface for
+  # ACTIONS, but its `pr view` exposes no baseRefName field, so this is a raw-gh
+  # JSON read exactly as fm-pr-check.sh's headRefOid lookup is. The URL fully
+  # qualifies the repo; the cd into the worktree only supplies gh's repo context
+  # if it ever needs one.
+  # Unlike fm-pr-check.sh, whose lookup falls back softly, a failure here is a
+  # HARD refusal that blocks a merge, so the cause must reach the operator
+  # instead of being discarded: the distinguishable causes are written to
+  # <diagnostic-file> along with gh's own verbatim stderr, and the caller prints
+  # that block beneath the refusal.
   resolve_pr_base() {
-    local pr_url=$1 name
-    command -v gh >/dev/null 2>&1 || return 1
-    name=$(cd "$WT" && gh pr view "$pr_url" --json baseRefName -q .baseRefName 2>/dev/null) || return 1
-    [ -n "$name" ] || return 1
+    local pr_url=$1 diag=$2 err="$2.gh" name rc=0
+    : > "$diag"
+    : > "$err"
+    if ! command -v gh >/dev/null 2>&1; then
+      printf 'gh is not installed\n' > "$diag"
+      return 1
+    fi
+    name=$(cd "$WT" && gh pr view "$pr_url" --json baseRefName -q .baseRefName 2>"$err") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      { printf 'the gh query failed (exit %s)\n' "$rc"; cat "$err"; } > "$diag"
+      return 1
+    fi
+    if [ -z "$name" ]; then
+      { printf 'the gh query succeeded but reported no base branch name\n'; cat "$err"; } > "$diag"
+      return 1
+    fi
     # The name goes into a refspec, so it must be a name git itself accepts as a
     # branch; anything else is rejected rather than interpolated.
-    git check-ref-format "refs/heads/$name" 2>/dev/null || return 1
+    if ! git check-ref-format "refs/heads/$name" 2>"$err"; then
+      { printf 'gh reported %s, which git does not accept as a branch name\n' "$name"; cat "$err"; } > "$diag"
+      return 1
+    fi
     printf '%s' "$name"
+  }
+
+  # github_owner_repo <remote-url>: print <owner>/<repo>, lowercased, when the
+  # URL names a GitHub repository in one of the forms git accepts, and print
+  # NOTHING when it does not. Printing nothing is the "not determinable" answer,
+  # never a mismatch: see this script's header for why a non-GitHub origin must
+  # not refuse. GitHub treats owner and repo case-insensitively, so the caller
+  # compares the lowercased forms.
+  github_owner_repo() {
+    local url=$1 rest host owner repo
+    case "$url" in
+      *://*)
+        rest=${url#*://}
+        case "${rest%%/*}" in
+          *@*) rest=${rest#*@} ;;
+        esac
+        host=${rest%%/*}
+        host=${host%%:*}
+        [ "$host" = github.com ] || return 0
+        rest=${rest#*/}
+        ;;
+      *:*)
+        host=${url%%:*}
+        host=${host#*@}
+        [ "$host" = github.com ] || return 0
+        rest=${url#*:}
+        ;;
+      *) return 0 ;;
+    esac
+    rest=${rest#/}
+    rest=${rest%/}
+    rest=${rest%.git}
+    case "$rest" in */*) ;; *) return 0 ;; esac
+    owner=${rest%%/*}
+    repo=${rest#*/}
+    [ -n "$owner" ] || return 0
+    case "$repo" in ''|*/*) return 0 ;; esac
+    printf '%s/%s' "$owner" "$repo" | tr '[:upper:]' '[:lower:]'
+  }
+
+  # assert_pr_repo_is_origin <pr-url>: refuse when the PR lives in a GitHub
+  # repository other than the one origin points at. Both PR-derived fetches
+  # below read from origin, so a determinable mismatch would silently measure
+  # the verdict against a same-named branch in the wrong repository.
+  assert_pr_repo_is_origin() {
+    local pr_url=$1 origin_url pr_slug origin_slug
+    fm_pr_url_parse "$pr_url" || return 0
+    pr_slug=$(printf '%s/%s' "$FM_PR_OWNER" "$FM_PR_REPO" | tr '[:upper:]' '[:lower:]')
+    origin_url=$(git -C "$WT" remote get-url origin 2>/dev/null || true)
+    [ -n "$origin_url" ] || return 0
+    origin_slug=$(github_owner_repo "$origin_url")
+    [ -n "$origin_slug" ] || return 0
+    [ "$pr_slug" != "$origin_slug" ] || return 0
+    echo "error: PR $pr_url targets $FM_PR_OWNER/$FM_PR_REPO but this worktree's origin is $origin_slug ($origin_url); refusing rather than fetching a same-named branch from the wrong repository" >&2
+    exit 2
   }
 
   PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -277,6 +372,10 @@ else
   COMPARE_REF=$BRANCH
   COMPARE_LABEL=$BRANCH
   if [ -n "$PR_URL" ]; then
+    # Asserted before ANY PR-derived ref is fetched, because the head fetch just
+    # below reads refs/pull/<n>/head from origin on the same assumption the base
+    # fetch further down makes.
+    assert_pr_repo_is_origin "$PR_URL"
     if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
       COMPARE_REF=$PR_HEAD
       COMPARE_LABEL="PR head $(git -C "$WT" rev-parse --short "$PR_HEAD")"
@@ -289,10 +388,20 @@ else
   # the project's default branch when none is. A recorded PR whose base cannot
   # be read refuses rather than falling back: see this script's header.
   if [ -n "$PR_URL" ]; then
-    BASE_BRANCH=$(resolve_pr_base "$PR_URL") || {
+    # A private 0700 directory, so the diagnostic and its sibling capture file
+    # cannot be pre-created as symlinks by another user on a shared /tmp.
+    PR_BASE_DIAG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-assert-tests-kept-prbase.XXXXXX")
+    PR_BASE_DIAG="$PR_BASE_DIAG_DIR/cause"
+    BASE_BRANCH=$(resolve_pr_base "$PR_URL" "$PR_BASE_DIAG") || {
       echo "error: cannot read the base branch of $PR_URL from GitHub; refusing rather than assuming the default branch, which would compare the branch against a base the PR was never built on" >&2
+      if [ -s "$PR_BASE_DIAG" ]; then
+        echo "error: cause:" >&2
+        sed 's/^/error:   /' "$PR_BASE_DIAG" >&2
+      fi
+      rm -rf "$PR_BASE_DIAG_DIR"
       exit 2
     }
+    rm -rf "$PR_BASE_DIAG_DIR"
     BASE_ORIGIN="base branch of $PR_URL"
   else
     BASE_BRANCH=$DEFAULT

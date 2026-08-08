@@ -61,7 +61,13 @@
 #        against the branch it targets, in both directions - the assertion its
 #        own base had and the branch dropped is reported, and one only the
 #        default branch had is not; a recorded PR whose base cannot be read
-#        REFUSES (exit 2) rather than falling back to the default; a task with
+#        REFUSES (exit 2) rather than falling back to the default, naming the
+#        cause gh reported rather than swallowing it; a recorded PR that lives
+#        in a GitHub repository OTHER than origin's REFUSES before any fetch,
+#        naming both sides, since both PR-derived refs are fetched from origin;
+#        an origin that is not a GitHub URL at all is NOT a determinable
+#        mismatch and must still resolve normally, which every other case here
+#        covers implicitly because their origin is a local path; a task with
 #        no recorded PR still resolves the default branch; and explicit mode
 #        takes the caller's --base verbatim without consulting GitHub
 set -u
@@ -370,7 +376,40 @@ test_unreadable_pr_base_refuses_rather_than_assuming_default() {
     "pr-base-unreadable: refusing must not produce findings measured against an assumed base"
   assert_not_contains "$out" 'base: origin/main' \
     "pr-base-unreadable: refusing must never fall back to the default branch"
+  assert_contains "$err" 'the gh query failed' \
+    "pr-base-unreadable: the refusal must classify the cause, not fold every failure into one"
+  assert_contains "$err" 'mock: base lookup failed' \
+    "pr-base-unreadable: gh's own stderr must reach the operator, not be discarded"
   pass "a recorded PR whose base cannot be read refuses instead of assuming the default branch"
+}
+
+test_pr_in_another_github_repo_refuses_before_any_fetch() {
+  local case_dir out err code
+  case_dir=$(make_pr_base_case pr-base-wrong-repo)
+  write_pr_base_gh "$case_dir" feature-base
+  # A GitHub origin that is NOT the PR's repository. The fixture then has no
+  # fetchable remote at all, which is the point: the assertion must refuse
+  # BEFORE either PR-derived fetch, so reaching one would fail differently.
+  git -C "$case_dir/project" remote set-url origin \
+    https://github.com/someone-else/other-repo.git
+
+  set +e
+  out=$(run_pr_base_case "$case_dir" 2> "$case_dir/stderr")
+  code=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 2 "$code" \
+    "pr-base-wrong-repo: a PR in another GitHub repository must refuse as 'cannot verify'"
+  assert_contains "$err" 'targets o/r' \
+    "pr-base-wrong-repo: the refusal must name the PR URL's own owner/repo"
+  assert_contains "$err" 'someone-else/other-repo' \
+    "pr-base-wrong-repo: the refusal must name origin's owner/repo"
+  assert_not_contains "$out" 'missing:' \
+    "pr-base-wrong-repo: refusing must not produce findings measured against the wrong repository"
+  assert_not_contains "$out" 'base:' \
+    "pr-base-wrong-repo: refusing must never name a base resolved from the wrong repository"
+  pass "a PR whose repository is not origin's refuses rather than fetching a same-named branch"
 }
 
 test_task_without_a_pr_still_resolves_the_default_branch() {
@@ -1739,6 +1778,7 @@ test_js_run_never_mutates_the_live_worktree() {
 
 test_pr_base_branch_is_compared_against_the_pr_target
 test_unreadable_pr_base_refuses_rather_than_assuming_default
+test_pr_in_another_github_repo_refuses_before_any_fetch
 test_task_without_a_pr_still_resolves_the_default_branch
 test_explicit_mode_never_consults_github
 test_removed_shell_test_reported_via_meta
