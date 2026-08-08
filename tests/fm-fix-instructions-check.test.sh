@@ -425,7 +425,9 @@ spawn_codex_secondmate_launch() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/state" "$home/data" "$home/config" "$sm/bin" "$sm/data"
   printf '# Firstmate\n' > "$sm/AGENTS.md"
-  printf 'sm\n' > "$sm/.fm-secondmate-home"
+  # fm-spawn refuses a secondmate home whose marker names a different id, so the
+  # marker must carry the exact spawn id below.
+  printf 'fixgate-sm\n' > "$sm/.fm-secondmate-home"
   printf 'charter\n' > "$sm/data/charter.md"
   : > "$launchlog"
   PATH="$fakebin:$PATH" TMUX='' CLAUDECODE=1 \
