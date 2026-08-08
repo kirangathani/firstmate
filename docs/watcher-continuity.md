@@ -36,6 +36,9 @@ An attached arm follows verified identity-matched successors and reports the sam
 The fourth outcome is the session-lock refusal: when this home's session lock (`state/.lock`) is held by another live session, the arm prints one `watcher: read-only ... not arming` line and exits 0 without an actionable line.
 That is a correct refusal, not a failure, so both close classifiers - `classifyArmClose` in `.opencode/plugins/fm-primary-watch-arm.js` and `classifyClose` in `.pi/extensions/fm-primary-pi-watch.ts` - match that line explicitly and neither retries it nor reports `watcher: FAILED`.
 Without that case an adapter whose pre-check saw ownership change between the check and the arm's own gate would surface a supervision failure for correct behavior.
+The verdict is carried through the restoration wrappers as well, not just the classifiers: a stand-down is a terminal outcome distinct from an unready successor, so `restoreAfterActionableClose` stops in both adapters and the original actionable wake is delivered with a `watcher: read-only ... stood down` note rather than a failure.
+The note still names the reason, because the session does need to know supervision moved; it simply is not a `watcher: FAILED`, and nothing retries it.
+The genuine failure paths - an unresolved ownership resolver, an unready successor, a successor that will not retire - are unchanged and still retry and still report, and the trailing `after N retries` sentence is now emitted only on a path that actually retried.
 `bin/fm-watch-checkpoint.sh`, Codex's bounded foreground protocol, applies the same gate with the same three-way decision and the same wording, because it is the second entry point that takes the watcher singleton.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.

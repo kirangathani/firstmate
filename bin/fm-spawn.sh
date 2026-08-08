@@ -1221,6 +1221,24 @@ fi
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
+# The tracked .claude/settings.json points the status line at
+# bin/fm-statusline.sh, which composes beneath the operator's own status line.
+# A crewmate or scout worktree is a plain git worktree: it carries that tracked
+# wiring but has no config/ and no state/, so without forwarding the DISPATCHING
+# home's setting the worker window would show nothing at all. Secondmates are
+# excluded on purpose - they run with their own FM_HOME and inherit the setting
+# as a real config file through FM_INHERITABLE_CONFIG, which must stay
+# authoritative for them. Absent or empty exports nothing and changes nothing.
+STATUSLINE_BASE=
+if [ "$KIND" != secondmate ] && [ -f "$CONFIG/statusline-base" ]; then
+  IFS= read -r STATUSLINE_BASE 2>/dev/null < "$CONFIG/statusline-base" || true
+  STATUSLINE_BASE=${STATUSLINE_BASE#"${STATUSLINE_BASE%%[![:space:]]*}"}
+  STATUSLINE_BASE=${STATUSLINE_BASE%"${STATUSLINE_BASE##*[![:space:]]}"}
+fi
+if [ -n "$STATUSLINE_BASE" ]; then
+  spawn_send_text_line "$T" "export FM_STATUSLINE_BASE=$(shell_quote "$STATUSLINE_BASE")"
+  sleep 0.3
+fi
 # Prepend the --local-skip shim to the pane shell's own PATH, so the agent and
 # every process it starts resolve `no-mistakes` to the shim. Sent before the
 # launch command so the environment is already in place when the agent starts.

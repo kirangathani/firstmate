@@ -242,10 +242,11 @@ async function retireArm(armChild) {
   });
 }
 
+// Standing down is an OUTCOME, not a failure: it still says why supervision was
+// not restored, but it carries no `watcher: FAILED` and nothing retries it.
+const READ_ONLY_STAND_DOWN = "watcher: read-only - OpenCode stood down instead of restoring continuity because this session no longer owns the lock; another live firstmate session is supervising this home";
+
 function restorationFailure(status) {
-  if (status === "read-only") {
-    return "watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock";
-  }
   if (status === "ownership-unresolved") {
     return `watcher: FAILED - OpenCode could not resolve session-lock ownership, so it did not arm\n${lastOwnershipError || "bin/fm-lock.sh ownership produced no verdict"}`;
   }
@@ -254,23 +255,35 @@ function restorationFailure(status) {
 
 async function restoreAfterActionableClose(paths, sessionID, client, predecessorArmPid) {
   let failure = "";
+  let retried = false;
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
     const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true);
     if (status === "armed") return "";
     // An actionable line belongs to this arm's close handler.
     // Do not retire it before that handler can start the successor cycle.
     if (status === "wake") return "";
+    // Standing down for a fleet another live session owns is correct and
+    // terminal: no retry, and never reported as a supervision failure.
+    if (status === "read-only") {
+      setArmStatus("read-only");
+      await retireArm(armChild);
+      return READ_ONLY_STAND_DOWN;
+    }
     failure = restorationFailure(status);
     if (!(await retireArm(armChild))) {
       setArmStatus("failed");
       return `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms`;
     }
-    if (status === "read-only" || status === "not-primary" || status === "skipped") break;
+    if (status === "not-primary" || status === "skipped") break;
     if (attempt === REARM_RETRY_LIMIT) break;
     await waitForRetry(attempt + 1);
+    retried = true;
   }
   setArmStatus("failed");
-  return `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries`;
+  // The retry sentence is only true on a path that actually retried.
+  return retried
+    ? `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries`
+    : failure;
 }
 
 async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid) {

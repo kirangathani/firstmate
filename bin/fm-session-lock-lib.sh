@@ -151,13 +151,6 @@ fm_session_lock_read() {
   return 0
 }
 
-# The pid recorded in $1/.lock, or failure when there is no usable holder.
-fm_session_lock_holder() {
-  local state=$1
-  fm_session_lock_read "$state" || return 1
-  printf '%s\n' "$FM_SESSION_LOCK_PID"
-}
-
 # Record pid $2 as the holder of $1/.lock, with its start ticks when the kernel
 # offers them. This is the only writer of the format the readers above parse.
 fm_session_lock_write() {

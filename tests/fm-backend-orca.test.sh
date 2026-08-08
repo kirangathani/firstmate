@@ -534,10 +534,48 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
   assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
     "spawn did not export GOTMPDIR through the Orca terminal"
+  assert_not_contains "$(cat "$log")" "FM_STATUSLINE_BASE" \
+    "a dispatching home with no config/statusline-base must export nothing"
   assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
     "spawn did not send the selected harness launch command through Orca"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
+}
+
+test_spawn_forwards_the_dispatching_homes_statusline_base() {
+  local proj wt data state config id base out log
+  # A crewmate or scout worktree is a plain git worktree: it carries the tracked
+  # .claude/settings.json that points the status line at bin/fm-statusline.sh,
+  # but it has no config/ and no state/. Without the dispatching home's setting
+  # forwarded as FM_STATUSLINE_BASE, the worker window's status line is blank -
+  # which is the complaint composition exists to answer.
+  id="orcastatuslinez1"
+  proj="$TMP_ROOT/statusline-project"
+  wt="$TMP_ROOT/statusline-wt"
+  data="$TMP_ROOT/statusline-data"
+  state="$TMP_ROOT/statusline-state"
+  config="$TMP_ROOT/statusline-config"
+  base="$TMP_ROOT/statusline base.sh"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  # A path with a space, because the value is a command path the operator wrote.
+  printf '%s\n' "$base" > "$config/statusline-base"
+  orca_case statusline
+  log="$LOG"
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-statusline"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-statusline","path":"%s"},"terminal":{"handle":"term-statusline"}}}\n' "$wt" > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
+  expect_code 0 $? "fm-spawn.sh --backend orca should succeed with a statusline base configured"$'\n'"$out"
+  assert_contains "$(cat "$log")" "export FM_STATUSLINE_BASE='$base'" \
+    "spawn did not forward the dispatching home's config/statusline-base into the worker environment"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh --backend orca: forwards the dispatching home's status-line base into the worker environment"
 }
 
 test_spawn_refuses_orca_secondmate_before_home_mutation() {
@@ -1338,6 +1376,7 @@ test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
+test_spawn_forwards_the_dispatching_homes_statusline_base
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree

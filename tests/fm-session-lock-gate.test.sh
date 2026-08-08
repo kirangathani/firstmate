@@ -532,6 +532,33 @@ test_statusline_composes_with_the_operators_own_status_line() {
   pass "fm-statusline: composes beneath the operator's own status line, and degrades to the fleet line alone"
 }
 
+test_statusline_base_reaches_a_worktree_that_has_no_config_dir() {
+  local worktree base out status
+  # This is the shape a real crewmate or scout task worktree has: a plain git
+  # worktree carrying the tracked .claude/settings.json wiring, with NO config/
+  # and NO state/. There is no file for the composition to read there, so the
+  # only thing that can reach it is the FM_STATUSLINE_BASE env override that
+  # bin/fm-spawn.sh forwards from the dispatching home.
+  worktree="$TMP_ROOT/statusline-task-worktree"
+  base="$TMP_ROOT/statusline-task-base.sh"
+  mkdir -p "$worktree"
+  cat > "$base" <<'SH'
+#!/usr/bin/env bash
+payload=$(cat)
+printf 'base line payload=%s\n' "$payload"
+SH
+  chmod +x "$base"
+  [ ! -d "$worktree/config" ] || fail "the task-worktree fixture must have no config dir"
+
+  out=$(printf '{"session_id":"test"}' | FM_HOME="$worktree" FM_STATUSLINE_BASE="$base" "$STATUSLINE" 2>&1); status=$?
+  expect_code 0 "$status" "the env override must not fail the status line"
+  assert_contains "$out" 'base line payload={"session_id":"test"}' \
+    "the forwarded base command must run, and receive the harness payload, where there is no config dir"
+  assert_not_contains "$out" "control of fleet" "a task worktree has no fleet, so there must be no fleet line"
+  [ ! -d "$worktree/state" ] || fail "the status line created the state dir; it must never write to state"
+  pass "fm-statusline: FM_STATUSLINE_BASE reaches a task worktree that has no config dir of its own"
+}
+
 test_statusline_other_branch_names_a_remedy() {
   local home other out
   home="$TMP_ROOT/statusline-other-remedy"
@@ -599,6 +626,7 @@ test_checkpoint_is_gated_on_the_session_lock
 test_statusline_reports_fleet_control
 test_statusline_is_silent_and_writes_nothing_without_fleet_state
 test_statusline_composes_with_the_operators_own_status_line
+test_statusline_base_reaches_a_worktree_that_has_no_config_dir
 test_statusline_other_branch_names_a_remedy
 test_statusline_is_wired_into_claude_settings
 test_ownership_walk_has_exactly_one_implementation

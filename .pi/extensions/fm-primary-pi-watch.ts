@@ -22,6 +22,12 @@ type CloseClassification = {
   message: string;
 };
 
+// How an arm child settled. "read-only" is a STAND-DOWN, not an unready
+// successor: the arm's own session-lock gate refused because another live
+// session owns the fleet. It has to be distinguishable from "unready" all the
+// way up, or the restoration wrapper reports a correct refusal as a failure.
+type ArmReadiness = "ready" | "unready" | "read-only";
+
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
@@ -44,7 +50,7 @@ let retryFailures = 0;
 let stopping = false;
 let seq = 0;
 let restoring = false;
-const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
+const armReadiness = new WeakMap<ChildProcess, Promise<ArmReadiness>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 
 function positiveInteger(name: string, fallback: number): number {
@@ -167,11 +173,11 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  function waitForReadiness(armChild: ChildProcess): Promise<boolean> {
+  function waitForReadiness(armChild: ChildProcess): Promise<ArmReadiness> {
     const readiness = armReadiness.get(armChild);
-    if (!readiness) return Promise.resolve(false);
+    if (!readiness) return Promise.resolve("unready");
     return new Promise((resolveReady) => {
-      const timer = setTimeout(() => resolveReady(false), armReadyTimeoutMs);
+      const timer = setTimeout(() => resolveReady("unready"), armReadyTimeoutMs);
       timer.unref();
       void readiness.then((ready) => {
         clearTimeout(timer);
@@ -195,28 +201,46 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  // Standing down is an OUTCOME, not a failure: it still says why supervision
+  // was not restored, but it carries no `watcher: FAILED` and nothing retries it.
+  const readOnlyStandDown = "watcher: read-only - Pi extension stood down instead of restoring continuity because this session no longer owns the lock; another live firstmate session is supervising this home";
+
   async function restoreAfterActionableClose(predecessorArmPid: string): Promise<string> {
     let failure = "";
+    let retried = false;
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
       if (stopping) return "";
       const replacement = startArm(predecessorArmPid);
       const successorChild = child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return "";
-      if (replacement.ok) {
+      if (replacement.ok && successorChild) {
+        const readiness = await waitForReadiness(successorChild);
+        if (readiness === "ready") return "";
+        // Standing down for a fleet another live session owns is correct and
+        // terminal: no retry, and never reported as a supervision failure.
+        if (readiness === "read-only") return readOnlyStandDown;
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
         if (!(await retireArm(successorChild))) {
           return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`;
         }
+      } else if (replacement.ok) {
+        failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
+      } else if (/read-only/.test(replacement.message)) {
+        return readOnlyStandDown;
+      } else if (/no live session/.test(replacement.message)) {
+        // Nobody holds the lock, so nobody is supervising: still a failure the
+        // model has to act on, but there is nothing a retry could change.
+        return `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${replacement.message}`;
       } else {
-        failure = /(?:read-only|no live session)/.test(replacement.message)
-          ? `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${replacement.message}`
-          : `watcher: FAILED - Pi extension could not start the successor watcher cycle\n${replacement.message}`;
-        if (/(?:read-only|no live session)/.test(replacement.message)) break;
+        failure = `watcher: FAILED - Pi extension could not start the successor watcher cycle\n${replacement.message}`;
       }
       if (attempt === retryLimit) break;
       await waitForRetry(attempt + 1);
+      retried = true;
     }
-    return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries`;
+    // The retry sentence is only true on a path that actually retried.
+    return retried
+      ? `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries`
+      : failure;
   }
 
   function scheduleRetry(message: string, predecessorArmPid: string): void {
@@ -284,9 +308,9 @@ export default function (pi: ExtensionAPI) {
     let stderr = "";
     let settled = false;
     let readinessSettled = false;
-    let resolveReadiness: (ready: boolean) => void = () => {};
+    let resolveReadiness: (ready: ArmReadiness) => void = () => {};
     let resolveClosed: () => void = () => {};
-    const readiness = new Promise<boolean>((resolveReady) => {
+    const readiness = new Promise<ArmReadiness>((resolveReady) => {
       resolveReadiness = resolveReady;
     });
     armReadiness.set(armChild, readiness);
@@ -294,14 +318,14 @@ export default function (pi: ExtensionAPI) {
       resolveClosed = resolveClosedChild;
     });
     armClose.set(armChild, closed);
-    const settleReadiness = (ready: boolean): void => {
+    const settleReadiness = (ready: ArmReadiness): void => {
       if (readinessSettled) return;
       readinessSettled = true;
       resolveReadiness(ready);
     };
     const observeEstablishedArm = (): void => {
       if (/^watcher: (?:started|attached)\b/m.test(`${stdout}\n${stderr}`)) {
-        settleReadiness(true);
+        settleReadiness("ready");
       }
     };
     const releaseChild = (): void => {
@@ -319,16 +343,22 @@ export default function (pi: ExtensionAPI) {
       if (settled) return;
       settled = true;
       resolveClosed();
-      settleReadiness(false);
       releaseChild();
-      if (stopping) return;
+      if (stopping) {
+        settleReadiness("unready");
+        return;
+      }
+      // Classified BEFORE readiness settles, so a stand-down close is not first
+      // reported upward as an unready successor.
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "read-only") {
         // The arm declined for a lock this session does not hold. Retrying would
         // only decline again, and it is not a supervision failure to report.
+        settleReadiness("read-only");
         return;
       }
+      settleReadiness("unready");
       if (classification.kind === "actionable") {
         retryFailures = 0;
         restoring = true;
@@ -349,7 +379,7 @@ export default function (pi: ExtensionAPI) {
       if (settled) return;
       settled = true;
       resolveClosed();
-      settleReadiness(false);
+      settleReadiness("unready");
       releaseChild();
       if (stopping) return;
       if (restoring) return;

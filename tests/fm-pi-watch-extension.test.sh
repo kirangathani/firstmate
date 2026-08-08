@@ -315,6 +315,72 @@ EOF
   pass "Pi actionable close starts one successor before wake delivery settles"
 }
 
+test_pi_read_only_successor_close_stands_down_quietly() {
+  local repo home plugin log out status
+  # The successor arm passes this extension's ownership pre-check and is then
+  # refused by the arm's OWN session-lock gate, because the lock changed in
+  # between. That refusal is exit 0 with no actionable line, and it is correct
+  # behavior: the restoration wrapper must stand down terminally rather than
+  # treat it as an unready successor, retry it, or wake the model with a failure.
+  repo="$TMP_ROOT/pi-read-only-close-root"
+  home="$TMP_ROOT/pi-read-only-close-home"
+  log="$TMP_ROOT/pi-read-only-close.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic wake\n'
+  exit 0
+fi
+printf "watcher: read-only - another firstmate session holds this home's session lock; not arming\n"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_PI_ARM_READY_TIMEOUT_MS=250 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-read-only-close", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!prompt.includes("signal: synthetic wake")) throw new Error(`original wake was lost: ${prompt}`);
+if (prompt.includes("watcher: FAILED")) throw new Error(`a correct read-only stand-down was reported as a failure: ${prompt}`);
+if (/after \d+ retries/.test(prompt)) throw new Error(`a path that never retried claimed retries: ${prompt}`);
+await new Promise((resolve) => setTimeout(resolve, 150));
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+if (rows.length !== 2) throw new Error(`a read-only stand-down must not launch another arm, got ${rows.length}: ${rows.join(" | ")}`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must stand down quietly when its successor arm declines for a lock it does not own"
+  [ -z "$out" ] || fail "Pi read-only-close test printed output: $out"
+  pass "Pi read-only successor close stands down without a failure wake or an extra arm"
+}
+
 test_pi_hung_successor_falls_back_to_typed_wake() {
   local repo home plugin log out status
   repo="$TMP_ROOT/pi-hung-successor-root"
@@ -1417,6 +1483,73 @@ EOF
   pass "OpenCode pre-ready actionable close preserves its successor"
 }
 
+test_opencode_read_only_successor_close_stands_down_quietly() {
+  local plugin repo home log out status
+  # Same race as the Pi case: the successor arm passes this plugin's ownership
+  # pre-check and is refused by the arm's own gate. Standing down is correct, so
+  # it must be terminal and quiet - no retry, no watcher: FAILED, and no
+  # "after N retries" sentence on a path that never retried.
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-read-only-close-root"
+  home="$TMP_ROOT/opencode-read-only-close-home"
+  log="$TMP_ROOT/opencode-read-only-close.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic wake\n'
+  exit 0
+fi
+printf "watcher: read-only - another firstmate session holds this home's session lock; not arming\n"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_ARM_READY_TIMEOUT_MS=250 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompt = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompt += request.body.parts[0].text;
+    },
+  },
+};
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 500 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!prompt.includes("signal: synthetic wake")) throw new Error(`original wake was lost: ${prompt}`);
+if (prompt.includes("watcher: FAILED")) throw new Error(`a correct read-only stand-down was reported as a failure: ${prompt}`);
+if (/after \d+ retries/.test(prompt)) throw new Error(`a path that never retried claimed retries: ${prompt}`);
+await new Promise((resolve) => setTimeout(resolve, 150));
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+if (rows.length !== 2) throw new Error(`a read-only stand-down must not launch another arm, got ${rows.length}: ${rows.join(" | ")}`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must stand down quietly when its successor arm declines for a lock it does not own"
+  [ -z "$out" ] || fail "OpenCode read-only-close test printed output: $out"
+  pass "OpenCode read-only successor close stands down without a failure wake or an extra arm"
+}
+
 test_opencode_hung_successor_falls_back_to_typed_wake() {
   local plugin repo home log out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -1998,6 +2131,7 @@ test_spawn_template_mentions_pi_watch_placeholder
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_read_only_successor_close_stands_down_quietly
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
@@ -2016,6 +2150,7 @@ test_opencode_arm_does_not_reuse_a_stale_read_only_refusal
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_pre_ready_actionable_close_preserves_its_successor
+test_opencode_read_only_successor_close_stands_down_quietly
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry
 test_opencode_late_unretired_close_resumes_supervision

@@ -113,8 +113,12 @@ The path is deliberately never named in tracked material, because it is machine-
 An absent, empty, or non-executable base command simply means no base line, silently and with no error.
 The harness's status-line JSON payload is captured once and forwarded to the base command on stdin, so a base command that reads it behaves exactly as it does when run directly.
 
-Composition applies even where the fleet line is absent.
-In a crewmate or scout task worktree there is no `state/` directory, so the fleet line is deliberately silent, and the base command's output is printed alone rather than leaving the status line blank.
+Composition applies even where the fleet line is absent, so a location with no fleet shows the base line alone rather than a blank status line.
+How the setting reaches each location differs, because `config/` is gitignored and exists only in a real home:
+
+- **Primary home.** `config/statusline-base` is read directly. This is the file the operator writes.
+- **Secondmate home.** `statusline-base` is in `FM_INHERITABLE_CONFIG` (`bin/fm-config-inherit-lib.sh`), so the primary propagates it as a real `config/statusline-base` file on every convergence, and the secondmate reads its own copy. An item the primary does not set is mirrored as absence downstream, so clearing it downstream needs no extra step.
+- **Crewmate or scout task worktree.** A plain `git worktree` has no `config/` and no `state/`, so there is no file to read. `bin/fm-spawn.sh` therefore exports `FM_STATUSLINE_BASE` into the worker's launch environment, resolved from the dispatching home's `config/statusline-base`. That env override is the only way the setting reaches a task worktree; nothing is exported when the dispatching home has no setting, and no spawn ever fails over it.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -356,7 +360,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a live secondmate endpoint is skipped or respawn fails; already-live and successfully respawned endpoints are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync and reread nudges are not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `statusline-base`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
