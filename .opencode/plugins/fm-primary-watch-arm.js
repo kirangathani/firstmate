@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
@@ -105,23 +105,18 @@ function shouldArm(paths) {
   }
 }
 
+// Session-lock ownership (state/.lock: which session controls this home's
+// fleet) is resolved by bin/fm-session-lock-lib.sh through `bin/fm-lock.sh
+// ownership`, never reimplemented here. The walk runs from the spawned child, so
+// this plugin's own process is still one of the ancestors it finds. An
+// unresolvable check counts as not owned, which only declines to arm - the arm
+// script applies the same gate itself.
 async function sessionOwnsLock(paths) {
-  let lockPid = "";
-  try {
-    lockPid = readFileSync(`${paths.state}/.lock`, "utf8").trim();
-  } catch {
-    return false;
-  }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return false;
-  let pid = String(process.pid);
-  for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return true;
-    const result = await runProcess("ps", ["-o", "ppid=", "-p", pid]);
-    if (result.code !== 0) return false;
-    pid = result.stdout.trim();
-    if (!pid || pid === "1") return false;
-  }
-  return false;
+  const result = await runProcess(`${paths.root}/bin/fm-lock.sh`, ["ownership"], {
+    env: { ...process.env, FM_HOME: paths.home, FM_STATE_OVERRIDE: paths.state },
+  });
+  if (result.code !== 0) return false;
+  return result.stdout.trim() === "owned";
 }
 
 function classifyArmClose(stdout, stderr, code, signal) {

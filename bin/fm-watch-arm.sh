@@ -46,6 +46,17 @@
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
 #
+# Arming is gated on the SESSION lock (state/.lock), which is a different lock
+# from the watcher singleton (state/.watch.lock) used below: the session lock
+# says which session controls this home's fleet, the singleton only says which
+# process is the one watcher. A session that does not hold the session lock
+# declines here, quietly and with exit 0, because a read-only session not arming
+# is correct behavior rather than a supervision failure. Without that gate the
+# singleton silently ABSORBS the rival: a non-owning session's arm takes the
+# lock, the owning session's arm merely attaches to it, and supervision ends up
+# in the session that is not responsible for it while everything reports fine.
+# This is the one place the gate lives, so every harness inherits it.
+#
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
 # wins the singleton while the duplicate child stands down. It
@@ -58,6 +69,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
@@ -320,6 +333,26 @@ case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
   --restart) mode=restart ;;
   *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
+esac
+
+# Session-lock gate, before --restart can stop anything and before any attach:
+# a non-owning session must not arm, must not stop this home's watcher, and must
+# not attach to the owner's cycle.
+# A dead, absent, unreadable, or malformed session lock is NOT a refusal. No
+# other session is being displaced there, and refusing would leave a home whose
+# session start never ran (or whose lock was lost) permanently unsupervised,
+# which is a worse failure than the one this gate exists to stop. It is
+# announced rather than silently allowed, and names the command that claims the
+# lock.
+case "$(fm_session_lock_ownership "$STATE")" in
+  owned) ;;
+  other)
+    echo "watcher: read-only - another firstmate session holds this home's session lock; not arming"
+    exit 0
+    ;;
+  *)
+    echo "watcher: no live session holds this home's session lock - arming anyway; run bin/fm-session-start.sh to claim it"
+    ;;
 esac
 
 if [ "$mode" = restart ]; then

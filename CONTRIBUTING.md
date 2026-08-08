@@ -77,7 +77,7 @@ bin/fm-test.sh   # the canonical whole set, serial: the definition of the suite,
 
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
-tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
+tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (the scratch state has no session lock, so it notes that first, then prints arm status and an actionable signal)
 ```
 
 `bin/fm-test.sh` is the single owner of the suite: CI runs it as `--shard K/N` and stays exhaustive, the pre-push gate runs `--local`.

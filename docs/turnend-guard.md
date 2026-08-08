@@ -33,6 +33,10 @@ The process-identity primitive behind that match must not drift for a live proce
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
 
+It then requires this session to hold the home's SESSION lock, `state/.lock`, resolved by `bin/fm-session-lock-lib.sh` and distinct from the `state/.watch.lock` watcher singleton above.
+When another live session holds it, the guard exits 0 silently, mirroring the read-only advisory mode `bin/fm-guard.sh` already has: that session cannot arm a watcher at all, because `bin/fm-watch-arm.sh` declines from there, so a blind-turn alarm would be a hard stop-hook error on nearly every turn demanding supervision work it must not do.
+An absent lock or a dead holder still blocks, because nobody is supervising the in-flight work and this session is the one that should take the lock and arm.
+
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 because it cannot safely read loop-guard fields.

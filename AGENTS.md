@@ -106,6 +106,7 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .handoff-unread    path of a handoff document no session has read yet; armed by bin/fm-handoff.sh, announced by its SessionStart pickup hook, cleared only by consume
+  .lock              session lock: the harness pid of the one session controlling this home's fleet, and the gate on arming supervision; never the .watch.lock singleton below (bin/fm-session-lock-lib.sh)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete

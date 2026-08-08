@@ -17,36 +17,19 @@ const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
-function parentPid(pid: string): string {
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
-}
-
-function pidAlive(pid: string): boolean {
-  try {
-    process.kill(Number(pid), 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
+// Session-lock ownership (state/.lock: which session controls this home's
+// fleet) is resolved by bin/fm-session-lock-lib.sh through `bin/fm-lock.sh
+// ownership`; this extension keeps no second copy of the ancestry walk. An
+// unresolvable check reads as "missing", which only affects whether the loaded
+// marker is written.
 function lockOwnership(): LockOwnership {
-  let lockPid = "";
-  try {
-    lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
-  } catch {
-    return "missing";
-  }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
-  let pid = String(process.pid);
-  for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
-    pid = parentPid(pid);
-    if (!pid || pid === "1") break;
-  }
-  return pidAlive(lockPid) ? "other" : "missing";
+  const result = spawnSync(`${root}/bin/fm-lock.sh`, ["ownership"], {
+    encoding: "utf8",
+    env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state },
+  });
+  if (result.status !== 0) return "missing";
+  const ownership = result.stdout.trim();
+  return ownership === "owned" || ownership === "other" ? ownership : "missing";
 }
 
 function markLoaded(): void {

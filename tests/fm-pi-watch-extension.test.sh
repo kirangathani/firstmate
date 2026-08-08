@@ -12,6 +12,18 @@ EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 # unrelated to plugin output, which the assertions intentionally require empty.
 export NODE_NO_WARNINGS=1
 
+# Both adapters resolve session-lock ownership through `bin/fm-lock.sh
+# ownership` rather than carrying their own copy of the ancestry walk
+# (bin/fm-session-lock-lib.sh is the single implementation), so every fixture
+# repo has to carry those two real scripts.
+install_session_lock_cli() {
+  local repo=$1
+  mkdir -p "$repo/bin"
+  cp "$ROOT/bin/fm-lock.sh" "$repo/bin/fm-lock.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$repo/bin/fm-session-lock-lib.sh"
+  chmod +x "$repo/bin/fm-lock.sh"
+}
+
 install_pi_watch_extension_fixture() {
   local repo=$1
   mkdir -p "$repo/.pi/extensions" "$repo/node_modules/typebox"
@@ -42,8 +54,17 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
   assert_contains "$text" 'fileURLToPath(import.meta.url)' "tracked extension does not self-locate via import.meta.url"
   assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "other"' "tracked extension does not distinguish missing lock from another owner"
-  assert_contains "$text" "readFileSync(\`\${state}/.lock\`" "tracked extension does not read the effective session lock"
-  assert_contains "$text" 'return pidAlive(lockPid) ? "other" : "missing"' "tracked extension does not allow a pre-lock load marker"
+  # Ownership resolution moved to its single owner (bin/fm-session-lock-lib.sh,
+  # reached through `bin/fm-lock.sh ownership`), so the extension must delegate
+  # with the EFFECTIVE state dir rather than reading the lock itself.
+  assert_contains "$text" "spawnSync(\`\${fmRoot}/bin/fm-lock.sh\`, [\"ownership\"]" "tracked extension does not delegate session-lock ownership"
+  assert_contains "$text" 'FM_STATE_OVERRIDE: state' "tracked extension does not resolve ownership against the effective session lock"
+  assert_not_contains "$text" "readFileSync(\`\${state}/.lock\`" "tracked extension still carries its own session-lock reader"
+  # "A dead holder reads as missing" (which is what allows a pre-lock load
+  # marker) is now the resolver's rule; the extension must pass that answer
+  # through rather than collapse it into the live-other refusal.
+  # test_pi_arm_distinguishes_session_lock_ownership proves it end to end.
+  assert_contains "$text" 'ownership === "owned" || ownership === "other" ? ownership : "missing"' "tracked extension does not allow a pre-lock load marker"
   assert_contains "$text" 'if (lockOwnership() === "other") return' "tracked extension overwrites another live session marker"
   assert_contains "$text" 'const ownership = lockOwnership()' "tracked extension arm does not inspect the distinct lock ownership state"
   assert_contains "$text" 'if (ownership === "other") return { ok: false' "tracked extension arm does not preserve the live-other read-only refusal"
@@ -83,6 +104,7 @@ test_pi_extension_reports_external_healthy_watcher() {
   repo="$TMP_ROOT/pi-external-healthy-root"
   home="$TMP_ROOT/pi-external-healthy-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -157,6 +179,7 @@ test_pi_tool_returns_agent_tool_result() {
   repo="$TMP_ROOT/pi-tool-result-root"
   home="$TMP_ROOT/pi-tool-result-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -208,6 +231,7 @@ test_pi_actionable_close_starts_single_successor_before_delivery() {
   log="$TMP_ROOT/pi-continuous-rearm.log"
   stop="$TMP_ROOT/pi-continuous-rearm.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -284,6 +308,7 @@ test_pi_hung_successor_falls_back_to_typed_wake() {
   home="$TMP_ROOT/pi-hung-successor-home"
   log="$TMP_ROOT/pi-hung-successor.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -351,6 +376,7 @@ test_pi_unretired_successor_falls_back_without_retry() {
   log="$TMP_ROOT/pi-unretired-successor.log"
   release="$TMP_ROOT/pi-unretired-successor.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -426,6 +452,7 @@ test_pi_late_unretired_close_resumes_supervision() {
     release="$TMP_ROOT/pi-late-$kind.release"
     stop="$TMP_ROOT/pi-late-$kind.stop"
     mkdir -p "$repo/bin" "$home/state" "$home/config"
+    install_session_lock_cli "$repo"
     install_pi_watch_extension_fixture "$repo"
     plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
     cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -519,6 +546,7 @@ test_pi_empty_close_retries_instead_of_disappearing() {
   log="$TMP_ROOT/pi-empty-close.log"
   stop="$TMP_ROOT/pi-empty-close.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -577,6 +605,7 @@ test_pi_established_empty_close_honors_retry_limit() {
   home="$TMP_ROOT/pi-established-empty-close-home"
   log="$TMP_ROOT/pi-established-empty-close.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -629,6 +658,7 @@ test_pi_actionable_close_rechecks_session_lock() {
   log="$TMP_ROOT/pi-close-lock.log"
   release="$TMP_ROOT/pi-close-lock.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -687,6 +717,7 @@ test_pi_arm_distinguishes_session_lock_ownership() {
   home="$TMP_ROOT/pi-lock-ownership-home"
   log="$TMP_ROOT/pi-lock-ownership.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -767,6 +798,7 @@ test_pi_process_exit_cleanup_listener_lifecycle() {
   repo="$TMP_ROOT/pi-exit-listener-root"
   home="$TMP_ROOT/pi-exit-listener-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : > "$repo/bin/fm-watch-arm.sh"
@@ -808,6 +840,7 @@ test_pi_process_exit_cleanup_stops_arm_child() {
   cleanup_log="$TMP_ROOT/pi-process-exit-cleaned"
   pid_file="$TMP_ROOT/pi-process-exit-child.pid"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -903,6 +936,7 @@ test_opencode_primary_watch_plugin_uses_effective_state_home() {
   home="$TMP_ROOT/opencode-effective-state-home"
   log="$TMP_ROOT/opencode-effective-state.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -953,6 +987,7 @@ test_opencode_primary_watch_plugin_sources_effective_config() {
   home="$TMP_ROOT/opencode-effective-config-home"
   log="$TMP_ROOT/opencode-effective-config.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   printf 'export FM_POLL=7\n' > "$home/config/x-mode.env"
@@ -1002,6 +1037,7 @@ test_opencode_primary_watch_plugin_requires_session_lock() {
   home="$TMP_ROOT/opencode-lock-home"
   log="$TMP_ROOT/opencode-lock.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1153,6 +1189,7 @@ test_opencode_watch_arm_coordinator_respects_primary_scope() {
   log="$TMP_ROOT/opencode-coordinator.log"
   fm_git_worktree "$base" "$repo" fm/opencode-coordinator
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -1199,6 +1236,7 @@ test_opencode_primary_watch_plugin_rearms_after_wake() {
   log="$TMP_ROOT/opencode-rearm.log"
   stop="$TMP_ROOT/opencode-rearm.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1280,6 +1318,7 @@ test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   retired="$TMP_ROOT/opencode-pre-ready-actionable.retired"
   stop="$TMP_ROOT/opencode-pre-ready-actionable.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1360,6 +1399,7 @@ test_opencode_hung_successor_falls_back_to_typed_wake() {
   home="$TMP_ROOT/opencode-hung-successor-home"
   log="$TMP_ROOT/opencode-hung-successor.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1429,6 +1469,7 @@ test_opencode_unretired_successor_falls_back_without_retry() {
   log="$TMP_ROOT/opencode-unretired-successor.log"
   release="$TMP_ROOT/opencode-unretired-successor.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1506,6 +1547,7 @@ test_opencode_late_unretired_close_resumes_supervision() {
     release="$TMP_ROOT/opencode-late-$kind.release"
     stop="$TMP_ROOT/opencode-late-$kind.stop"
     mkdir -p "$repo/bin" "$home/state" "$home/config"
+    install_session_lock_cli "$repo"
     git init -q "$repo"
     : > "$repo/AGENTS.md"
     : > "$home/state/task.meta"
@@ -1601,6 +1643,7 @@ test_opencode_empty_close_retries_instead_of_disappearing() {
   log="$TMP_ROOT/opencode-empty-close.log"
   stop="$TMP_ROOT/opencode-empty-close.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1660,6 +1703,7 @@ test_opencode_established_empty_close_honors_retry_limit() {
   home="$TMP_ROOT/opencode-established-empty-close-home"
   log="$TMP_ROOT/opencode-established-empty-close.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1714,6 +1758,7 @@ test_opencode_actionable_close_rechecks_session_lock() {
   log="$TMP_ROOT/opencode-close-lock.log"
   release="$TMP_ROOT/opencode-close-lock.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1780,6 +1825,7 @@ test_opencode_watch_arm_coordinates_with_turnend_guard() {
   log="$TMP_ROOT/opencode-coordinate-arm.log"
   guard_log="$TMP_ROOT/opencode-coordinate-guard.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1853,6 +1899,7 @@ test_opencode_healthy_arm_output_does_not_suppress_guard() {
   log="$TMP_ROOT/opencode-external-healthy-arm.log"
   guard_log="$TMP_ROOT/opencode-external-healthy-guard.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
