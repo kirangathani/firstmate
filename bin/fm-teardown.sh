@@ -140,6 +140,9 @@ ID=$1
 shift
 FORCE=
 RELEASE_LOST_SLOT=0
+# Set here, not at the ownership check, so every function that reads it is safe
+# under `set -u` whatever order the flow reaches them in.
+SLOT_LOST=0
 # Parsed strictly rather than read off $2: a mistyped flag must not read as "no
 # flag" and silently take a different path than the operator asked for.
 for teardown_arg in "$@"; do
@@ -1200,7 +1203,6 @@ remove_secondmate_registry_entry() {
 # Slot ownership is proven before anything else is validated for removal, and
 # ahead of every --force waiver, because --force waives only this task's own
 # checks. See the script header for the ordered proof and the recorded incidents.
-SLOT_LOST=0
 if [ "$KIND" != secondmate ]; then
   if slot_is_foreign "$WT" "$ID" "$STATE"; then
     if [ "$RELEASE_LOST_SLOT" = 1 ] && [ "$SLOT_PROOF" != marker ]; then
