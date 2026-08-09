@@ -659,7 +659,20 @@ test_stale_meta_alone_refuses_without_a_marker() {
   expect_code 1 "$rc" "slot-collision-meta: two records naming one worktree must refuse"
   assert_grep "task-y2" "$case_dir/stderr" \
     "slot-collision-meta: refusal did not name the colliding task"
-  pass "a second record naming the same worktree refuses even with no marker"
+  # Which record is the stale one is exactly what this evidence cannot say, so
+  # the refusal must not hand over a command that clears one of them.
+  assert_no_grep "--release-lost-slot" "$case_dir/stderr" \
+    "slot-collision-meta: an ambiguous collision offered the record-clearing escape"
+
+  set +e
+  run_teardown "$case_dir" --release-lost-slot > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "slot-collision-meta: releasing an ambiguous collision must refuse"
+  [ -f "$case_dir/state/task-x1.meta" ] && [ -f "$case_dir/state/task-y2.meta" ] \
+    || fail "slot-collision-meta: an ambiguous collision cleared a record anyway"
+  pass "an ambiguous collision refuses both the teardown and the record-clearing path"
 }
 
 test_own_marker_allows_teardown_despite_a_stale_record() {

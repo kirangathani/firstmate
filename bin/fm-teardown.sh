@@ -60,6 +60,10 @@
 # A refused task is not left un-clearable: --release-lost-slot re-proves foreign
 # ownership and then clears only this task's own durable records - state files,
 # its own labeled runtime endpoint, its own temp root - never touching the slot.
+# It accepts only step 3's marker proof, which names the holder outright. Step 4
+# proves a collision without saying which of the two records is the stale one, so
+# clearing either could be the one that cuts a live worker off from its records;
+# that case refuses both paths and is left for the operator to establish.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -538,6 +542,12 @@ canonical_existing_dir() {
 # identity, and the ordered proof these functions implement.
 FM_TASK_MARKER=.fm-task
 SLOT_HOLDER=
+# Which evidence proved a foreign holder: `marker` names the holder directly and
+# is conclusive, `record` only says two durable records name one worktree and
+# cannot say which of them is stale. Both refuse the destructive path; only
+# `marker` licenses --release-lost-slot, because clearing the wrong side of an
+# ambiguous collision would orphan a live worker from its own records.
+SLOT_PROOF=
 
 # The task id in <worktree>'s .fm-task marker, or nothing when it carries none or
 # an unreadable one. bin/fm-spawn.sh writes it when it claims the slot and this
@@ -593,6 +603,7 @@ slot_colliding_task_ids() {  # <worktree> <task-id> <state-dir>
 slot_is_foreign() {  # <worktree> <task-id> <state-dir>
   local wt=$1 id=$2 state_dir=$3 marker sub branch collide label
   SLOT_HOLDER=
+  SLOT_PROOF=
   { [ -n "$wt" ] && [ -d "$wt" ]; } || return 1
   # Positive self-proof first, so a marker a previous occupant left behind can
   # never false-refuse a task that demonstrably still holds the slot.
@@ -606,11 +617,13 @@ slot_is_foreign() {  # <worktree> <task-id> <state-dir>
   fi
   if [ -n "$marker" ]; then
     SLOT_HOLDER="task $marker, per the $FM_TASK_MARKER marker in that worktree"
+    SLOT_PROOF=marker
     return 0
   fi
   sub=$(slot_marker_secondmate_id "$wt")
   if [ -n "$sub" ] && [ "$sub" != "$id" ]; then
     SLOT_HOLDER="secondmate home $sub, per the $SUB_HOME_MARKER marker in that directory"
+    SLOT_PROOF=marker
     return 0
   fi
   collide=$(slot_colliding_task_ids "$wt" "$id" "$state_dir")
@@ -618,6 +631,7 @@ slot_is_foreign() {  # <worktree> <task-id> <state-dir>
     label=task
     case "$collide" in *,*) label=tasks ;; esac
     SLOT_HOLDER="$label $collide, whose durable record names the same worktree"
+    SLOT_PROOF=record
     return 0
   fi
   return 1
@@ -628,7 +642,11 @@ refuse_foreign_slot() {  # <worktree> <task-id>
   echo "REFUSED: worktree $wt is no longer task $id's; it is held by $SLOT_HOLDER." >&2
   echo "Returning it would terminate that work's processes and reset its worktree, so teardown stops here." >&2
   echo "--force does not apply: it authorizes discarding THIS task's unlanded work, never another task's." >&2
-  echo "To clear only $id's own records and leave that worktree alone, run: $FM_ROOT/bin/fm-teardown.sh $id --release-lost-slot" >&2
+  if [ "$SLOT_PROOF" = marker ]; then
+    echo "To clear only $id's own records and leave that worktree alone, run: $FM_ROOT/bin/fm-teardown.sh $id --release-lost-slot" >&2
+  else
+    echo "Nothing here can say which of those records is the stale one, so establish that first; clearing the wrong one would cut a live worker off from its own records." >&2
+  fi
 }
 
 retry_wait_secs_is_valid() {
@@ -1185,7 +1203,11 @@ remove_secondmate_registry_entry() {
 SLOT_LOST=0
 if [ "$KIND" != secondmate ]; then
   if slot_is_foreign "$WT" "$ID" "$STATE"; then
-    if [ "$RELEASE_LOST_SLOT" = 1 ]; then
+    if [ "$RELEASE_LOST_SLOT" = 1 ] && [ "$SLOT_PROOF" != marker ]; then
+      echo "REFUSED: worktree $WT is claimed by $SLOT_HOLDER, but nothing proves which record is the stale one." >&2
+      echo "Establish that first: clearing the wrong side would cut a live worker off from its own records." >&2
+      exit 1
+    elif [ "$RELEASE_LOST_SLOT" = 1 ]; then
       echo "teardown: worktree $WT is held by $SLOT_HOLDER; clearing task $ID's own records only and leaving that worktree untouched" >&2
       SLOT_LOST=1
     else
