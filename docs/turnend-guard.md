@@ -84,6 +84,17 @@ Quiet on a healthy fleet, by the mechanics `bin/fm-ack-lib.sh` owns rather than 
 Unlike the stale-base sweep it is not bounded by a timeout, because every read it makes is a local file stat except the current-state confirm, which is already capped per invocation and cached, and swallowing the verdict on expiry would mean silently ending a turn on exactly the finding this reason exists to force.
 A confirm that cannot be read reports as unreadable and still blocks.
 
+Measured 2026-08-09 on this machine (Linux 6.6.87.2-microsoft-standard-WSL2), `fm_ack_unactioned` in-process over a synthetic ten-task home, mean of 50 calls:
+
+```
+10 healthy tasks, nothing owed              0.06280s
+10 tasks, 1 unactioned, first call          0.08103s
+10 tasks, 1 unactioned, confirm cached      0.08050s
+```
+
+The healthy case forks no current-state reader at all, which is what keeps it flat; the unactioned case pays one confirm and then serves it from `state/.unactioned-<id>` for the cache TTL, against a stub reader deliberately given a 0.3s delay.
+For scale, the stale-base sweep already on this same path measures ~0.2s across a ten-task fleet.
+
 The one thing that stops it is a captain-signed per-task exemption in `state/<task-id>.monitor-exempt`, written only by `bin/fm-monitor.sh --exempt`, whose header owns the record and its limits.
 An unsigned or unverifiable record is not an exemption, so the alarm cannot be silenced by writing a file.
 Every standing exemption is announced at session start by `bin/fm-bootstrap.sh`, which is what makes a self-granted one report itself rather than quietly drop a task out of supervision.
