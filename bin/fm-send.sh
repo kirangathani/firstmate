@@ -63,6 +63,8 @@ fi
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
+# shellcheck source=bin/fm-ack-lib.sh
+. "$SCRIPT_DIR/fm-ack-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -252,4 +254,15 @@ else
   # crewmate actually working instead of the stale idle pane. FM_SEND_SETTLE=0
   # disables it. Scoped to this path only, never the shared submit core.
   [ "${FM_SEND_SETTLE:-1}" = 0 ] || sleep "${FM_SEND_SETTLE:-1}"
+fi
+
+# Delivering an instruction to a task in this home IS firstmate acting on that
+# task's current state - triggering validation on a `done`, relaying a decision
+# back to a crew, steering a blocker - so record the ack here rather than
+# relying on firstmate to remember a second command. The record silences the
+# unactioned alarm only until the crew's next status append, which re-arms it
+# (bin/fm-ack-lib.sh). A captain typing into the pane directly is not this path
+# and deliberately does not ack: firstmate still owes the reconcile.
+if [ -n "$TARGET_META" ]; then
+  fm_ack_record "$STATE" "$(basename "$TARGET_META" .meta)" "fm-send" || true
 fi

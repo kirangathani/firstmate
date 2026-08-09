@@ -16,7 +16,13 @@
 # bounded). Independent alarms (queued wakes, worktree tangle) are never
 # suppressed by that dedup. Normal wake handling (watcher briefly down between a
 # wake and the next supervision resume) stays inside the grace window and stays
-# silent. Always exits 0: the guard warns, it never blocks.
+# silent.
+# Then a third, independent alarm: any direct report sitting in a terminal or
+# firstmate-owed state that firstmate has not acted on past the grace window.
+# A live watcher and an empty queue say nothing about whether the wakes already
+# delivered were handled, so this is the only place a dropped one surfaces; the
+# predicate and its silencers are owned by bin/fm-ack-lib.sh.
+# Always exits 0: the guard warns, it never blocks.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,6 +46,8 @@ STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
+# shellcheck source=bin/fm-ack-lib.sh
+. "$SCRIPT_DIR/fm-ack-lib.sh"
 
 # Deterministic episode key from beacon state: same continuous stale beacon
 # (or continuous absence) shares a key; a recovered-then-restale beacon gets a
@@ -205,6 +213,40 @@ else
   # Healthy again while work is still in flight: end the episode so a later
   # restale re-prints the full banner.
   [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
+fi
+
+# Unactioned direct reports are a THIRD, independent alarm: a live watcher and an
+# empty queue say supervision is healthy, and say nothing about whether the
+# terminal or firstmate-owed states it already delivered were acted on. The
+# predicate, its two silencers, and its cost model are owned by
+# bin/fm-ack-lib.sh; this is only its alarm surface. Read-only sessions must not
+# leave cache writes behind for the session that holds the lock.
+if [ "$READ_ONLY" -eq 1 ]; then FM_ACK_NO_CACHE=1; else FM_ACK_NO_CACHE=0; fi
+export FM_ACK_NO_CACHE
+unactioned=$(fm_ack_unactioned "$STATE" 2>/dev/null || true)
+if [ -n "$unactioned" ]; then
+  urule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$urule"
+    printf '●  UNACTIONED DIRECT REPORT - A REPORTED STATE IS SITTING UNANSWERED\n'
+    while IFS=$'\t' read -r u_id u_verb u_age u_verdict u_last; do
+      [ -n "$u_id" ] || continue
+      printf '●  %s reported "%s" %ss ago and firstmate has not acted (state: %s).\n' \
+        "$u_id" "$u_verb" "$u_age" "$u_verdict"
+      printf '●      %s\n' "$u_last"
+    done <<EOF
+$unactioned
+EOF
+    printf '●  This is not a watcher problem: the wake was delivered and then dropped.\n'
+    if [ "$READ_ONLY" -eq 1 ]; then
+      printf '●  This read-only session should report it, not act on it.\n'
+    else
+      printf '●  Do what the state owes, then record it: bin/fm-ack.sh <id> "<what you did>"\n'
+      printf '●  A state waiting on the CAPTAIN is acked once you have relayed it.\n'
+    fi
+    printf '●  %s\n' "$CONTINUE_LINE"
+    printf '●%s\n' "$urule"
+  } >&2
 fi
 
 # Queued wakes are an independent hazard; warn whenever they are pending, even if

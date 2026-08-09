@@ -20,7 +20,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, and Herdr-lab briefs                       |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` symlink, and the canonical self-governance section |
-| `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, and stale watcher liveness   |
+| `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, stale watcher liveness, and unactioned direct reports |
+| `fm-ack.sh`              | Record that firstmate acted on a direct report's terminal or firstmate-owed state    |
+| `fm-ack-lib.sh`          | Shared ack record, owed-state sets, and the unactioned-direct-report predicate       |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
 | `fm-handoff.sh`          | Own the handoff document's path, its unread marker, and the post-`/clear` SessionStart pickup (docs/handoff.md) |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
