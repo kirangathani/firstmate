@@ -109,6 +109,15 @@ cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
 
+# Register a cycle so an interrupt from here on is recorded. ALWAYS call this
+# BEFORE report_attached announces the cycle, never after. cycle_log_append is a
+# no-op while cycle_active is 0, so an arm that announced an attach it had not yet
+# registered would exit correctly on a signal and record NOTHING - the one hole in
+# the one-record-per-observed-cycle contract in docs/watcher-continuity.md. The
+# announcement is also the only observable an attach publishes, so anything acting
+# on it (an adapter, a test) necessarily acts inside that window. Verified by
+# widening the gap to two seconds in a scratch copy: announce-then-register lost
+# the record on every run, register-then-announce kept it on every run.
 cycle_begin() {
   cycle_watcher_pid=$1
   cycle_origin=$2
@@ -275,8 +284,8 @@ attach_and_wait() {
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
-        report_attached
         cycle_begin "$attached_pid" attached
+        report_attached
       fi
       sleep "$ATTACH_POLL"
       continue
@@ -284,8 +293,8 @@ attach_and_wait() {
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
-      report_attached
       cycle_begin "$attached_pid" attached
+      report_attached
       continue
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
@@ -381,8 +390,8 @@ fi
 # this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-  report_attached
   cycle_begin "$HEALTHY_PID" attached
+  report_attached
   attach_and_wait "$HEALTHY_PID"
   exit $?
 fi
@@ -449,8 +458,8 @@ owned_child_finished() {
       child=
       child_out=
       cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-      report_attached
       cycle_begin "$HEALTHY_PID" attached
+      report_attached
       attach_and_wait "$HEALTHY_PID"
       return $?
     fi

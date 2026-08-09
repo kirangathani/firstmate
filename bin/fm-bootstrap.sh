@@ -570,14 +570,17 @@ x_mode_write_if_changed() {
   parent=${dest%/*}
   [ "$parent" != "$dest" ] || return 1
   [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
-  if [ "$(uname)" = Darwin ]; then
+  # FMX_UNAME_S is resolved once at source time by fm-x-lib.sh, sourced above and
+  # already the owner of the artifact validators this function calls; reusing it
+  # keeps one OS reading rather than forking `uname` per write attempt.
+  if [ "$FMX_UNAME_S" = Darwin ]; then
     parent_device=$(stat -f %d "$parent" 2>/dev/null) || return 1
   else
     parent_device=$(stat -c %d "$parent" 2>/dev/null) || return 1
   fi
   if [ -e "$dest" ] || [ -L "$dest" ]; then
     fmx_single_link_file_valid "$dest" "$parent_device" || return 1
-    if [ "$(uname)" = Darwin ]; then
+    if [ "$FMX_UNAME_S" = Darwin ]; then
       current_mode=$(stat -f %Lp "$dest" 2>/dev/null) || return 1
     else
       current_mode=$(stat -c %a "$dest" 2>/dev/null) || return 1
