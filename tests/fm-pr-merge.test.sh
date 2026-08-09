@@ -2053,7 +2053,7 @@ test_attribution_in_a_commit_message_refuses() {
   case_dir=$(make_case attribution-commit)
   add_gh_mocks "$case_dir" a111111111111111111111111111111111111111
   : > "$case_dir/gh-axi.log"
-  write_pr_attribution "$case_dir" 'A clean description.' \
+  commit_on_branch "$case_dir" \
     "$(printf 'feat: thing\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>')"
 
   set +e
@@ -2065,7 +2065,7 @@ test_attribution_in_a_commit_message_refuses() {
   expect_code 1 "$rc" "attribution-commit: a PR whose commit carries attribution must refuse"
   assert_grep 'carries AI attribution' "$case_dir/stderr" \
     "attribution-commit: the refusal did not say what it found"
-  assert_grep 'ai-coauthor:commit abc123def456' "$case_dir/stderr" \
+  assert_grep 'ai-coauthor:commit ' "$case_dir/stderr" \
     "attribution-commit: the refusal did not name the rule and the offending commit"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "attribution-commit: gh-axi pr merge ran despite the attribution"
@@ -2077,9 +2077,8 @@ test_attribution_in_the_pr_body_refuses() {
   case_dir=$(make_case attribution-body)
   add_gh_mocks "$case_dir" a222222222222222222222222222222222222222
   : > "$case_dir/gh-axi.log"
-  write_pr_attribution "$case_dir" \
-    "$(printf 'Adds the thing.\n\n\xf0\x9f\xa4\x96 Generated with [Claude Code](https://claude.com/claude-code)')" \
-    'feat: thing'
+  write_pr_body "$case_dir" \
+    "$(printf 'Adds the thing.\n\n\xf0\x9f\xa4\x96 Generated with [Claude Code](https://claude.com/claude-code)')"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
@@ -2111,7 +2110,7 @@ test_attribution_runs_before_the_kept_tests_gate() {
 EOF
   git -C "$case_dir/wt" add -A
   git -C "$case_dir/wt" commit -qm "drop alpha"
-  write_pr_attribution "$case_dir" 'A clean description.' \
+  commit_on_branch "$case_dir" \
     "$(printf 'feat: thing\n\nClaude-Session: https://claude.ai/code/session_x')"
 
   set +e
@@ -2133,7 +2132,7 @@ test_unreadable_pr_body_refuses_unverified() {
   case_dir=$(make_case attribution-unreadable)
   add_gh_mocks "$case_dir" a444444444444444444444444444444444444444
   : > "$case_dir/gh-axi.log"
-  : > "$case_dir/pr-attribution-unreadable"
+  : > "$case_dir/pr-body-unreadable"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/84 \
@@ -2141,12 +2140,12 @@ test_unreadable_pr_body_refuses_unverified() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "attribution-unreadable: an unreadable body/commits query must refuse"
+  expect_code 1 "$rc" "attribution-unreadable: an unreadable PR-description read must refuse"
   assert_grep 'refusing to merge unverified' "$case_dir/stderr" \
     "attribution-unreadable: the refusal did not say the merge is unverified"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
-    "attribution-unreadable: gh-axi pr merge ran without the attribution read succeeding"
-  pass "fm-pr-merge refuses when the PR's body and commits cannot be read at all"
+    "attribution-unreadable: gh-axi pr merge ran without the description read succeeding"
+  pass "fm-pr-merge refuses when the PR's description cannot be read at all"
 }
 
 test_attribution_in_a_commit_message_refuses

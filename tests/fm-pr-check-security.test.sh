@@ -82,14 +82,13 @@ case " $* " in
   # fm-assert-tests-kept.sh reads the PR's own base branch rather than assuming
   # the default; these fixtures all build their project on main.
   *" baseRefName "*) printf '%s\n' "${FM_TEST_GH_BASE:-main}" ;;
-  # fm-pr-merge.sh's AI-attribution gate reads the PR's description and commit
-  # messages (docs/attribution-gate.md). A clean answer, because this suite
-  # exercises URL/ID safety rather than attribution; tests/fm-pr-merge.test.sh
-  # owns that gate's cases. An EMPTY answer here would not be a no-op: the gate
-  # refuses a PR it cannot read, which is what it should do.
-  *" body,commits "*)
-    printf '%s\n' '{"body":"A clean description.","commits":[{"oid":"0123456789ab","messageHeadline":"baseline","messageBody":""}]}'
-    ;;
+  # fm-pr-merge.sh's AI-attribution gate reads the PR description as raw text
+  # (docs/attribution-gate.md). An empty answer means an empty description,
+  # which carries no attribution; this suite exercises URL/ID safety rather than
+  # attribution, and tests/fm-pr-merge.test.sh owns that gate's cases. The read
+  # is answered explicitly rather than left to fall through so the canary in
+  # that suite can see it is covered.
+  *" body "*) ;;
   *statusCheckRollup*)
     # Green rollup so fm-pr-merge.sh's checks-green gate passes; this suite
     # exercises URL/ID safety, not check classification (tests/fm-pr-merge.test.sh
