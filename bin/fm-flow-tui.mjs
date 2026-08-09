@@ -52,10 +52,9 @@
 //
 // This program shells out to NOTHING unless the operator hands it an explicit
 // command with --refresh-cmd, --open-cmd or --detail-cmd, and never in one-shot
-// mode. That
-// is what keeps byte-exact frame tests possible: `render()` is a pure function
-// of the snapshot plus the frame options, and the default renderer cannot
-// reach past its input to change what it draws.
+// mode. That is what keeps byte-exact frame tests possible: `render()` is a
+// pure function of the snapshot plus the frame options, and the default
+// renderer cannot reach past its input to change what it draws.
 //
 // Exit codes: 0 a frame was emitted, 1 stdin was not a readable snapshot,
 // 2 usage error.
