@@ -79,6 +79,17 @@ if [ "${1:-}" = "capture-pane" ]; then
   fi
   exit 0
 fi
+if [ "${1:-}" = "list-panes" ]; then
+  # The endpoint-liveness primitive (bin/backends/tmux.sh
+  # fm_backend_tmux_target_exists): real tmux resolves the target and prints
+  # its '#{window_name}', so this fake answers with the target's own window
+  # name. FM_FAKE_TMUX_PANE_ALIVE=0 models a window that has closed.
+  [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
+  _t=""; _p=""
+  for _a in "$@"; do [ "$_p" = "-t" ] && _t="$_a"; _p="$_a"; done
+  printf '%s\n' "${_t##*:}"
+  exit 0
+fi
 if [ "${1:-}" = "display-message" ]; then
   case "$*" in
     *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
@@ -134,6 +145,15 @@ case "${1:-}" in
       [ "$_a" = "-p" ] && _print=1
     done
     [ "$_print" = 1 ] && printf 'fakepane\n'
+    exit 0 ;;
+  list-panes)
+    # Endpoint-liveness primitive; see bin/backends/tmux.sh
+    # fm_backend_tmux_target_exists. Honors the same FM_FAKE_TMUX_PANE_ALIVE
+    # switch as display-message above, and prints the target's window name.
+    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
+    _t=""; _p=""
+    for _a in "$@"; do [ "$_p" = "-t" ] && _t="$_a"; _p="$_a"; done
+    printf '%s\n' "${_t##*:}"
     exit 0 ;;
   list-windows)
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
@@ -211,6 +231,13 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
     for a in "$@"; do [ "$a" = "-p" ] && print=1; done
     [ "$print" = 1 ] && printf 'fakepane\n'
+    exit 0 ;;
+  list-panes)
+    # Endpoint-liveness primitive; see bin/backends/tmux.sh
+    # fm_backend_tmux_target_exists. This case's panes are always live.
+    _t=""; _p=""
+    for _a in "$@"; do [ "$_p" = "-t" ] && _t="$_a"; _p="$_a"; done
+    printf '%s\n' "${_t##*:}"
     exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
   list-windows) exit 0 ;;

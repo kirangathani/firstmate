@@ -191,23 +191,26 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
-# the given "session:window" target - the exact primitive
-# fm_backend_target_exists uses for a tmux endpoint liveness read.
+# make_fake_tmux <fakebin> <live-target>: `list-panes` resolves and prints the
+# window name only for the given "session:window" target - the exact primitive
+# fm_backend_target_exists uses for a tmux endpoint liveness read. It is
+# deliberately NOT display-message: real tmux answers that one from the
+# session's current window for ANY name (docs/tmux-backend.md "Endpoint
+# existence probe"), so a fake built on it cannot distinguish live from dead.
 make_fake_tmux() {
   local fakebin=$1 live=$2
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
 case "\${1:-}" in
-  display-message)
+  list-panes)
     target=""
     prev=""
     for a in "\$@"; do
       [ "\$prev" = "-t" ] && target="\$a"
       prev="\$a"
     done
-    [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
+    [ "\$target" = "$live" ] && { printf '%s\n' "\${target##*:}"; exit 0; }
     exit 1
     ;;
 esac
@@ -501,9 +504,9 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  make_fake_tmux "$fakebin" "fm-sess:live"
+  make_fake_tmux "$fakebin" "fm-sess:fm-task-a"
 
-  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-a.meta"
+  printf 'window=fm-sess:fm-task-a\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'working: step 1\nworking: step 2\nworking: step 3\nworking: step 4\nworking: step 5\nworking: step 6\nworking: step 7\n' \
     > "$home/state/task-a.status"
 
@@ -562,14 +565,14 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  make_fake_tmux "$fakebin" "fm-sess:live-window"
+  make_fake_tmux "$fakebin" "fm-sess:fm-task-live"
 
-  printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
-  printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
+  printf 'window=fm-sess:fm-task-live\nkind=ship\n' > "$home/state/task-live.meta"
+  printf 'window=fm-sess:fm-task-dead\nkind=ship\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
+  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:fm-task-live)" "live tmux endpoint not reported alive"
+  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:fm-task-dead)" "dead tmux endpoint not reported dead"
 
   pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
 }

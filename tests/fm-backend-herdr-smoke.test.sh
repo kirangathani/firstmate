@@ -60,7 +60,12 @@ case "$CONTAINER" in
   *) fail "container_ensure returned an unexpected shape: $CONTAINER" ;;
 esac
 [ -n "$SEEDED_TAB_ID" ] || fail "the first container_ensure in a brand-new isolated session must CREATE the workspace and report its seeded default tab id"
-pass "real herdr: container_ensure starts the isolated session's server, creates the firstmate workspace ($CONTAINER), and reports its seeded default tab id ($SEEDED_TAB_ID)"
+# The runtime workspace and tab ids are evidence, so they are printed - but never
+# baked into the pass NAME, which must be a constant string for
+# bin/fm-assert-tests-kept.sh to resolve it statically
+# (data/turnend-timing-block-h7/report.md §3).
+echo "note: created workspace $CONTAINER with seeded default tab id $SEEDED_TAB_ID" >&2
+pass "real herdr: container_ensure starts the isolated session's server, creates the firstmate workspace, and reports its seeded default tab id"
 
 # A second container_ensure must reuse (ADOPT) the same workspace (idempotent)
 # and report an EMPTY seeded tab id - the created-vs-adopted gate that fixes

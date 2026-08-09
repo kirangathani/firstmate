@@ -28,9 +28,13 @@ REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
 REAL_BASENAME=$(command -v basename)
+# Resolved once: file_mode runs thousands of times per suite (state_snapshot walks
+# the whole state dir per assertion), and a per-call `uname` fork costs more than
+# the stat it selects.
+UNAME_S=$(uname)
 
 file_mode() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$UNAME_S" = Darwin ]; then
     stat -f %Lp "$1"
   else
     stat -c %a "$1"
@@ -2415,6 +2419,15 @@ test_bootstrap_isolates_incomplete_poll_migration() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
+  *' list-panes '*)
+    # Endpoint-liveness primitive (bin/backends/tmux.sh
+    # fm_backend_tmux_target_exists): the pane is present, so it resolves and
+    # prints its '#{window_name}'. The deeper agent-liveness classification is
+    # what stays inconclusive here (a bare "node" foreground process).
+    _t=""; _p=""
+    for _a in "$@"; do [ "$_p" = "-t" ] && _t="$_a"; _p="$_a"; done
+    printf '%s\n' "${_t##*:}"
+    ;;
   *' display-message '*) printf 'node\n' ;;
 esac
 SH

@@ -154,6 +154,10 @@ done
 
 command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2; exit 1; }
 
+# shellcheck source=bin/fm-jq-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-jq-lib.sh"  # fm_jq_object: accumulated JSON reaches jq on stdin, never argv
+
 # The deterministic return-catch-up owner must clear before this or any other
 # ordinary captain request proceeds. Bearings does not reproduce that policy;
 # it only consults the shared read-only gate.
@@ -270,7 +274,7 @@ EOF
       cnt=$(printf '%s' "$repo_rows" | jq 'length')
       [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ] && ncapped=$((ncapped + 1))
       npr=$((npr + cnt))
-      rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
+      rows=$(fm_jq_object a "$rows" b "$repo_rows" -- -c '.a + .b')
     done
     PR_REPOS_SHOWN=$nrepos
     PR_ROWS_CAPPED=$ncapped
@@ -289,7 +293,8 @@ EOF
 fi
 
 # --- projection: canonical snapshot -> fm-bearings.v1 model (JSON) ----------
-MODEL=$(printf '%s' "$SNAP" | jq \
+# shellcheck disable=SC2016  # jq filter is literal: $doc and friends are jq bindings, not shell
+MODEL=$(fm_jq_object snapshot "$SNAP" candidate_prs "$CANDIDATE_PRS" -- \
   --arg home "$HOME_LABEL" \
   --arg now "$NOW" \
   --arg prs "$PR_STATUS" \
@@ -315,9 +320,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_total "$PR_REPOS_TOTAL" \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
-  --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --argjson candidate_prs "$CANDIDATE_PRS" '
-  def trunc($n): if . == null then null else
+  --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" '
+  . as $doc
+  | $doc.candidate_prs as $candidate_prs
+  | $doc.snapshot
+  | def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def round_robin_landed($n):
     . as $groups

@@ -116,6 +116,18 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # turn is running; absent when idle - verified grok 0.2.73, ASCII to avoid the
 # locale fragility of matching grok's braille spinner glyph directly).
 BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
+# Provider usage-limit dialog signature. A stale pane showing this dialog is a
+# harness frozen at a provider prompt, so no run-step or absorb path may treat
+# it as working; its wake carries the dialog evidence instead of the generic
+# stale reason firstmate has learned to dismiss as benign (2026-08-02: two live
+# crewmates froze at this dialog and sat undetected until a human peeked).
+# Phrases as recorded from live claude panes (dialog signatures logged
+# 2026-07-14, incident 2026-08-02); override via env if a harness's wording
+# changes. Matched against the whole bounded capture, not just the footer,
+# because the dialog renders mid-pane; a pane merely DISPLAYING these phrases
+# (e.g. an editor open on this file) can false-positive, which costs one loud
+# surfaced wake per distinct pane hash and is self-correcting on peek.
+LIMIT_DIALOG_REGEX=${FM_LIMIT_DIALOG_REGEX:-'Stop and wait for limit|Adjust monthly spend|Upgrade to Max|Upgrade your plan'}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash
@@ -902,6 +914,21 @@ EOF
       # verified harness renders its busy indicator) so busy-looking strings
       # in displayed content cannot suppress stale detection.
       if [ "$n" -ge 2 ] && ! window_is_busy "$w" "$tail40"; then
+        # A visible usage-limit dialog outranks every absorb path below: the
+        # harness is frozen at a provider prompt, so neither an active run-step
+        # nor a busy-looking state proves work is under way. One-shot per
+        # distinct hash like every other stale classification. A crew that
+        # declared its limit wait (paused:) or is captain-held stays on the
+        # bounded pause cadence instead; secondmates reach this loop only when
+        # paused, so the same guard covers them.
+        if printf '%s' "$tail40" | grep -qiE "$LIMIT_DIALOG_REGEX" \
+          && ! status_is_paused_or_captain_held "$last" \
+          && [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
+          fm_wake_append stale "$w" "stale: $w (usage-limit dialog visible - the worker is frozen at a provider-limit prompt, not working; act now, never absorb as busy)" || exit 1
+          printf '%s' "$h" > "$sf"
+          rm -f "$ssf"
+          wake "stale: $w (usage-limit dialog visible)"
+        fi
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then

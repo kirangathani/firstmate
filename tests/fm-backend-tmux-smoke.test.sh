@@ -60,6 +60,41 @@ if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
 
+# The window-name pin is a HARD requirement, not best-effort: every strict
+# liveness read downstream compares '#{window_name}' against fm-<id>, so both
+# rename options must actually be off on the created window.
+[ "$(tmux show-options -w -t "$TARGET" automatic-rename)" = "automatic-rename off" ] \
+  || fail "real tmux: create_task must pin the window name by disabling automatic-rename"
+[ "$(tmux show-options -w -t "$TARGET" allow-rename)" = "allow-rename off" ] \
+  || fail "real tmux: create_task must pin the window name by disabling allow-rename"
+pass "real tmux: fm_backend_tmux_create_task pins the created window's name"
+
+# An unpinnable window is refused rather than left behind for a strict reader
+# to misjudge: with set-window-option forced to fail, the spawn errors AND the
+# half-created window is removed again.
+PIN_FAIL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-backend-smoke-pin.XXXXXX")
+cat > "$PIN_FAIL_DIR/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = set-window-option ]; then
+  echo "can't set option: automatic-rename" >&2
+  exit 1
+fi
+exec "$REAL_TMUX" -L "$SOCKET" "\$@"
+SH
+chmod +x "$PIN_FAIL_DIR/tmux"
+if out=$(PATH="$PIN_FAIL_DIR:$PATH" fm_backend_tmux_create_task "$SESSION" fm-smoke-unpinnable "$HOME" 2>&1); then
+  fail "real tmux: create_task must refuse a window whose name it could not pin"
+fi
+case "$out" in
+  *"could not pin the window name"*) : ;;
+  *) fail "real tmux: an unpinnable window should fail loudly, got: $out" ;;
+esac
+if tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx fm-smoke-unpinnable; then
+  fail "real tmux: a refused spawn must not leave its half-created window behind"
+fi
+rm -rf "$PIN_FAIL_DIR"
+pass "real tmux: fm_backend_tmux_create_task fails loudly and cleans up when the name cannot be pinned"
+
 # --- send text + Enter -------------------------------------------------------
 
 tmux send-keys -t "$TARGET" "cd /tmp && PS1='smoke\$ '" Enter
@@ -127,9 +162,118 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- endpoint liveness (fm_backend_target_exists) ----------------------------
+# Regression: `tmux display-message -p -t <session>:<name>` does NOT fail on an
+# unmatched window name - it silently falls back to the session's CURRENT
+# window and exits 0, so the old probe reported EVERY task in an existing
+# session as alive (evidence 2026-08-03: 6 dead tasks all read alive with 1
+# real window). Both directions matter here: a false negative would fire
+# recovery against a healthy worker, which is worse than the bug being fixed.
+# The `-t` targets below are exactly what the session-start and fleet-snapshot
+# digests pass ("<session>:<window>" plus the owning "fm-<id>" label).
+
+# A second window, made the session's CURRENT one, is what a name-fallback
+# probe would silently answer from. `sleep` is chosen so its agent-liveness
+# classification (unknown) differs from the verdict for a genuinely gone
+# window (dead): without that difference the assertion below could not tell a
+# correct read from an inherited one.
+tmux new-window -d -t "$SESSION:" -n fm-smoke-neighbour "sleep 300" \
+  || fail "real tmux: could not create the neighbour window"
+tmux select-window -t "$SESSION:fm-smoke-neighbour" \
+  || fail "real tmux: could not select the neighbour window"
+
+fm_backend_target_exists tmux "$TARGET" \
+  || fail "real tmux: a LIVE window must report alive (false negative would trigger spurious recovery)"
+fm_backend_target_exists tmux "$TARGET" "$WINDOW" \
+  || fail "real tmux: a LIVE window must report alive when its own label is passed"
+pass "real tmux: fm_backend_target_exists reports a live window alive, with and without its label"
+
+if fm_backend_target_exists tmux "$SESSION:fm-smoke-gone"; then
+  fail "real tmux: a nonexistent window name in a LIVE session must report dead, not alive"
+fi
+if fm_backend_target_exists tmux "$SESSION:fm-smoke-gone" "fm-smoke-gone"; then
+  fail "real tmux: a nonexistent window name must report dead when its label is passed too"
+fi
+pass "real tmux: fm_backend_target_exists reports a nonexistent window in a live session as dead"
+
+# A caller that knows the owning label must not accept a window that merely
+# resolved: the fully-qualified live "$TARGET" is rejected when the expected
+# label names the neighbour instead. (The unique-prefix resolution this guards
+# against is exercised directly further down, once the neighbour is gone.)
+if fm_backend_target_exists tmux "$TARGET" fm-smoke-neighbour; then
+  fail "real tmux: a resolved window whose name differs from the expected label must report dead"
+fi
+pass "real tmux: fm_backend_target_exists rejects a target that resolves to a differently-named window"
+
+# fm_backend_agent_alive (the secondmate-liveness sweep's probe) must resolve
+# the target the same way: a gone window is `dead`, never the neighbour's
+# verdict (`unknown` here, since sleep is neither a harness nor a shell).
+verdict=$(fm_backend_agent_alive tmux "$SESSION:fm-smoke-neighbour")
+[ "$verdict" = unknown ] \
+  || fail "real tmux: the neighbour window's own agent verdict should be unknown, got '$verdict'"
+verdict=$(fm_backend_agent_alive tmux "$SESSION:fm-smoke-gone")
+[ "$verdict" = dead ] \
+  || fail "real tmux: a gone window must classify as dead from its own resolution, got '$verdict'"
+pass "real tmux: fm_backend_agent_alive reports a gone window dead instead of inheriting the current window's verdict"
+
+# fm_backend_tmux_send_key guards through the same primitive. Its previous
+# guard (`display-message -p -t <target> '#{pane_id}'`) could not fail while
+# the session existed, so a key aimed at a gone window was still handed to
+# send-keys, and one aimed at a target that prefix-resolves elsewhere went to
+# the WRONG pane.
+if fm_backend_tmux_send_key "$SESSION:fm-smoke-gone" Enter 2>/dev/null; then
+  fail "real tmux: send_key must refuse a target that does not resolve"
+fi
+if fm_backend_tmux_send_key "$TARGET" Enter fm-smoke-neighbour 2>/dev/null; then
+  fail "real tmux: send_key must refuse a target that resolves to a differently-labelled window"
+fi
+fm_backend_tmux_send_key "$TARGET" Enter "$WINDOW" \
+  || fail "real tmux: send_key must still send to a live window matching its own label"
+pass "real tmux: fm_backend_tmux_send_key refuses a gone or mislabelled target and sends to a matching one"
+
+tmux kill-window -t "$SESSION:fm-smoke-neighbour" 2>/dev/null || true
+
+# With the neighbour gone, "$SESSION:fm-smoke" is an UNAMBIGUOUS prefix of the
+# one remaining window, so tmux really does resolve it to "$WINDOW". That is
+# the hazard the expected-label argument exists for, exercised non-vacuously:
+# the truncated target resolves, yet a caller that names a DIFFERENT owning
+# window must still be refused, while the caller that names the resolved
+# window must still be accepted.
+TRUNCATED="$SESSION:fm-smoke"
+fm_backend_target_exists tmux "$TRUNCATED" \
+  || fail "real tmux: '$TRUNCATED' should resolve to '$WINDOW' by unique-prefix match (the case below is vacuous otherwise)"
+if fm_backend_target_exists tmux "$TRUNCATED" fm-smoke-other; then
+  fail "real tmux: a truncated target that resolves to '$WINDOW' must be rejected when the expected label names a different window"
+fi
+fm_backend_target_exists tmux "$TRUNCATED" "$WINDOW" \
+  || fail "real tmux: a truncated target must still be accepted when the expected label matches the window it resolved to"
+pass "real tmux: fm_backend_target_exists rejects a unique-prefix resolution to a differently-labelled window and accepts a matching one"
+
+# Existence is list-panes' EXIT STATUS, not the emptiness of its output: a live
+# pane whose window name is the empty string prints an empty line at rc=0, and
+# reporting it dead would fire recovery against a healthy worker.
+tmux new-window -d -t "$SESSION:" -n fm-smoke-unnamed "sleep 300" \
+  || fail "real tmux: could not create the to-be-unnamed window"
+unnamed_pane=$(tmux list-panes -t "$SESSION:fm-smoke-unnamed" -F '#{pane_id}' | head -n 1)
+[ -n "$unnamed_pane" ] || fail "real tmux: could not find the pane of the to-be-unnamed window"
+tmux rename-window -t "$unnamed_pane" '' \
+  || fail "real tmux: could not blank the window name"
+[ -z "$(tmux list-panes -t "$unnamed_pane" -F '#{window_name}')" ] \
+  || fail "real tmux: the window name did not actually blank (the case below would be vacuous)"
+fm_backend_target_exists tmux "$unnamed_pane" \
+  || fail "real tmux: a LIVE pane whose window name is empty must report alive when no label is passed"
+if fm_backend_target_exists tmux "$unnamed_pane" "$WINDOW"; then
+  fail "real tmux: a blank-named window must not satisfy a non-empty expected label"
+fi
+pass "real tmux: fm_backend_target_exists reads existence from list-panes' exit status, so a blank-named live pane is alive"
+tmux kill-window -t "$unnamed_pane" 2>/dev/null || true
+
 # --- kill ---------------------------------------------------------------------
 
 fm_backend_tmux_kill "$TARGET"
+if fm_backend_target_exists tmux "$TARGET"; then
+  fail "real tmux: a killed window must report dead through fm_backend_target_exists"
+fi
 if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
   fail "fm_backend_tmux_kill did not remove the window"
 fi

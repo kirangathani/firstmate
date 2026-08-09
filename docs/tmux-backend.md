@@ -66,6 +66,81 @@ tmux list-windows -t <session-name>
 Use the current tmux session name for the run-inside-tmux path, or `firstmate` for the detached outside-tmux path.
 You should see a `fm-<id>` window for the task, live and updating as the crewmate works.
 
+## Endpoint existence probe: `display-message` is not one (2026-08-03)
+
+`tmux display-message -p -t <session>:<window-name>` does **not** fail on an unmatched window name.
+It silently falls back to the session's current window and exits 0, so a probe that only reads its exit status reports every window name as alive as long as the session exists.
+Verified with real tmux 3.4 on Linux (WSL2), 2026-08-03, in a session holding only the window `fm-real`:
+
+```sh
+$ tmux display-message -p -t 'fmtest:fm-bogus' '#{pane_id} #{window_name}'
+%41 fm-real
+rc=0
+$ tmux display-message -p -t 'fmtest:=fm-bogus' '#{pane_id} #{window_name}'
+%41 fm-real
+rc=0
+$ tmux display-message -p -t '%9999' '#{window_name}'
+
+rc=0
+```
+
+The `=` exact-match prefix does not help, and a stale pane id is accepted the same way.
+Consequence while `fm_backend_target_exists` used that command: the session-start fleet digest and `bin/fm-fleet-snapshot.sh` reported every task in an existing session as `endpoint: alive`, so a dead ordinary crewmate was undetectable there (observed 2026-08-03: six tasks reported alive while one window existed).
+
+`tmux list-panes -t <target>` resolves the target through tmux's own parser and fails loudly, which is why it is now the primitive (`fm_backend_tmux_target_exists`, `bin/backends/tmux.sh`).
+Same session and version:
+
+```sh
+$ tmux list-panes -t 'fmtest:fm-real'     ; echo rc=$?   # rc=0
+$ tmux list-panes -t 'fmtest:fm-bogus'    ; echo rc=$?   # can't find window: fm-bogus     rc=1
+$ tmux list-panes -t 'nosuchsess:fm-real' ; echo rc=$?   # can't find session: nosuchsess  rc=1
+$ tmux list-panes -t '%9999'              ; echo rc=$?   # can't find pane: %9999          rc=1
+```
+
+Existence is that exit status, never the emptiness of `list-panes`' output.
+A live pane whose window name is the empty string prints an empty line at rc=0, so treating empty output as "gone" would report a healthy pane dead.
+Verified with real tmux 3.4 on Linux (WSL2), 2026-08-03:
+
+```sh
+$ tmux rename-window -t %0 ''
+$ tmux list-panes -t %0 -F '#{window_name}' ; echo rc=$?   # (empty line)  rc=0
+```
+
+False negatives are the worse direction here.
+A spurious "gone" verdict licenses `bin/fm-bootstrap.sh`'s secondmate sweep to kill and respawn a live agent, and aborts the away-mode daemon's startup on a live supervisor pane.
+The expected-label comparison is therefore applied only when the caller passed a non-empty label.
+
+It was preferred over enumerating `tmux list-windows -t <session> -F '#{window_name}'` and matching, because enumeration makes the caller split the target back into session and window, and tmux window names may themselves contain `:` (a target may equally be a pane id, a window id, or `session:window.pane`).
+`list-panes` needs no splitting: rc=0 was confirmed the same session for pane-id, window-id, bare-session, and `session:index.pane` targets, so there is no false-negative shape to trip over.
+
+One residual sharp edge is covered by the optional expected-label argument: tmux target matching is a unique-prefix match, so `fmtest:fm-re` resolves to `fm-real` when that prefix is unambiguous.
+Callers that know the owning task label (the digests pass `fm-<id>`) require the resolved `#{window_name}` to equal it exactly, mirroring the zellij and cmux arms; callers with no label (`bin/fm-send.sh`'s explicit-target escape hatch, the away-mode daemon's supervisor pane) keep tmux's own resolution, which for them is the very window tmux would act on.
+
+Regression coverage lives in `tests/fm-backend-tmux-smoke.test.sh`, the one suite that talks to a real tmux server.
+
+### The exact-label check needs a pinned window name to be safe
+
+An exact `#{window_name}` comparison is only sound while the name cannot drift.
+`fm_backend_tmux_create_task` (`bin/backends/tmux.sh`) pins it by turning `automatic-rename` and `allow-rename` off on the new window, and that pin is now a HARD requirement: if either option cannot be set, the freshly created window is killed again and the spawn is refused with an error, rather than leaving behind a window whose name no reader can trust.
+Both options were confirmed settable through `set-window-option` on real tmux 3.4 (Linux, WSL2, 2026-08-03).
+
+`bin/fm-spawn.sh` records that guarantee in the task meta as `tmux_window_pinned=1`, written for tmux spawns only.
+Readers ask `fm_backend_expected_label_of_meta` (`bin/fm-backend.sh`) for the label to pass, and it returns `fm-<id>` only when the record carries the guarantee.
+A tmux meta written before the pin became mandatory returns an empty label and so reads through tmux's own resolution, unchanged from before the label existed.
+That asymmetry is deliberate: demanding an exact name match on a record whose window may legitimately have been renamed would report a LIVE crewmate as dead in the session-start digest, the fleet snapshot, `bin/fm-crew-state.sh`, and the secondmate sweep all at once, which is the worse direction.
+Every other backend pins its label by construction, so the helper always returns the label for them.
+
+The one place the label matters most is the secondmate liveness sweep (`bin/fm-bootstrap.sh`), the only probe whose verdict acts destructively.
+Without it, a gone secondmate `sm` prefix-resolves to a live task's window `fm-sm-2` and inherits that task's verdict: either the dead secondmate is never respawned, or the sweep kills the unrelated task's window.
+The sweep therefore also guards its kill on the endpoint still resolving to the secondmate's own window.
+With the pin recorded, a failed label check is an ANSWER, not a gap: the target resolved to a window whose name is not `fm-<id>`, so that window belongs to someone else, nothing of this secondmate's is there to kill, and the respawn proceeds past it into a fresh `fm-<id>` window.
+
+The unpinned case is the opposite, and leniency stops there.
+With no label to check, the record's endpoint identity is not merely unmatched but UNKNOWABLE: a target that resolves may equally be this secondmate's own window or a neighbour reached by prefix matching, and the guard would pass on exactly the ambiguity it exists to refuse.
+Acting anyway could destroy that neighbour's window or duplicate a live agent, so when the sweep reaches a `dead` verdict for a record carrying no pin guarantee it skips the kill AND the respawn and reports the record instead (`SECONDMATE_LIVENESS: secondmate <id>: skipped: endpoint identity unverifiable`).
+Nothing backfills the guarantee onto an existing record; respawning that secondmate deliberately writes it, since every tmux spawn now pins the window name or refuses.
+The other readers stay lenient as described above, because reporting an unpinned record's endpoint state is not a destructive act.
+
 ## Agent liveness probe
 
 `fm_backend_target_exists` (`bin/fm-backend.sh`) only checks that a window's pane still exists.
@@ -103,6 +178,10 @@ The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`
 - `alive` - the name contains `claude`, `codex`, `opencode`, or `grok`. All four were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): `claude` and `codex` and `opencode` are each a native compiled binary (`file` reports Mach-O), so their `comm` is their own binary name with no interpreter wrapper to hide behind.
 - `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
 - `unknown` - anything else, including an unreadable pane.
+
+The classifier resolves the target strictly (through `fm_backend_tmux_target_exists`) before reading any command name, because `#{pane_current_command}` comes from `display-message` and would otherwise answer from a neighbouring window for a target that no longer exists (see the section above).
+It takes the same optional expected-label as that primitive and passes it straight through, so a caller with a pinned record gets the exact-name check on this path too.
+A structurally-gone window maps to `dead`, the same mapping herdr's arm already uses for a structurally-gone pane; if the tmux server itself did not answer, nothing was confidently read and the verdict stays `unknown`, so a momentary server glitch can never license a respawn.
 
 ### Known gap: `pi` cannot be confidently classified
 

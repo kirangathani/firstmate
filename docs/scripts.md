@@ -20,7 +20,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, and Herdr-lab briefs                       |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` symlink, and the canonical self-governance section |
-| `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, and stale watcher liveness   |
+| `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, stale watcher liveness, and unactioned direct reports |
+| `fm-ack.sh`              | Record that firstmate acted on a direct report's terminal or firstmate-owed state    |
+| `fm-ack-lib.sh`          | Shared ack record, owed-state sets, and the unactioned-direct-report predicate       |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
 | `fm-handoff.sh`          | Own the handoff document's path, its unread marker, and the post-`/clear` SessionStart pickup (docs/handoff.md) |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
@@ -78,7 +80,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, gate on `fm-assert-tests-kept.sh` and on the PR's checks being green, then merge a task's canonical full GitHub URL |
-| `fm-assert-tests-kept.sh` | Report the base's test assertions the branch under review lost, broke, or could not execute at all (its header owns the finding classes and exit codes) |
+| `fm-assert-tests-kept.sh` | Report the base's test assertions the branch under review lost, broke, could not execute at all, or named unstably across two runs (its header owns the finding classes and exit codes) |
 | `fm-test-exec-lib.sh`   | Shared per-language test runners (shell, pytest, vitest, jest) and scratch-tree environment lifecycle that `fm-assert-tests-kept.sh` check 2 drives |
 | `fm-supersession-lib.sh` | Single matcher for the captain-approved supersession record, shared by the merge gate that enforces it and the viewer that displays it (`fm-pr-merge.sh`'s header owns the entry grammar) |
 | `fm-ci-waiver.sh`        | Generate, publish, and sign the CI testing waiver, refusing to sign for a task the captain did not dispatch with a CI skip |

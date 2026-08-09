@@ -99,10 +99,10 @@ BASE_REF=$(resolve_base_ref) \
 #
 # build_old_bin echoes a directory whose bin/ subdir holds the PRE-REFACTOR
 # fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh
-# (extracted from BASE_REF), plus symlinks to every OTHER sibling script those
-# five source - all unchanged by this task, so the real files are exactly
-# what BASE_REF would have used too. FM_ROOT_OVERRIDE pointed at this dir's
-# root makes "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
+# (extracted from BASE_REF), plus a symlink to every OTHER entry under bin/ -
+# all unchanged by this task, so the real files are exactly what BASE_REF would
+# have used too. FM_ROOT_OVERRIDE pointed at this dir's root makes
+# "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
 # fm-backend.sh (and its bin/backends/ adapters) is the dispatcher every one
 # of the five REFACTORED scripts sources; it must be a real, reachable file in
 # the old bin/ too or `. "$SCRIPT_DIR/fm-backend.sh"` aborts under set -eu -
@@ -110,21 +110,46 @@ BASE_REF=$(resolve_base_ref) \
 # tmux-only conformance run the tmux adapter's behavior is what is under test,
 # and that is unchanged by any later (e.g. non-tmux backend) addition to
 # fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh"
+#
+# The sibling set is DERIVED from the real bin/ at run time, never hand-listed.
+# A hand-maintained list is a second copy of the five scripts' dependency sets,
+# and it rots silently the moment one of them gains a sibling: #35 added
+# `. "$SCRIPT_DIR/fm-ack-lib.sh"` to fm-send.sh without touching the list, the
+# extracted old fm-send.sh then aborted under set -eu on the missing source
+# before issuing a single tmux command, and every old-vs-new exit-code
+# comparison diverged (main red from 84813a34, CI run 31312882840).
+# That defect is invisible on the PR that introduces it and only fires after
+# the merge: BASE_REF is `merge-base HEAD main`, so on the branch it still
+# resolves to a parent whose fm-send.sh had no such dependency, and only once
+# the commit is ON main does BASE_REF advance to include it.
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
-  local name=$1 root bin f
+  local name=$1 root bin f dep
   root="$TMP_ROOT/$name"
   bin="$root/bin"
   mkdir -p "$bin"
-  for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
-    ln -s "$ROOT/bin/$f" "$bin/$f"
+  for f in "$ROOT"/bin/*; do
+    case " $OLD_BIN_REFACTORED " in
+      *" ${f##*/} "*) continue ;;
+    esac
+    ln -s "$f" "$bin/${f##*/}"
   done
-  ln -s "$ROOT/bin/backends" "$bin/backends"
   for f in $OLD_BIN_REFACTORED; do
     git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
     chmod +x "$bin/$f"
+  done
+  # Name the unresolvable sibling instead of leaving it to surface as a
+  # mystifying exit-code diff: an extracted script that cannot source a sibling
+  # aborts under set -eu before running any tmux command, so the only visible
+  # symptom downstream is "expected exit 1, got 0". Deriving the symlinks above
+  # rules out the rot case; what remains is a sibling BASE_REF's copy sources
+  # that today's bin/ no longer has, which is a real conformance signal.
+  for f in $OLD_BIN_REFACTORED; do
+    while read -r dep; do
+      [ -e "$bin/$dep" ] \
+        || fail "old-bin shim: $BASE_REF's bin/$f sources '$dep', which today's bin/ does not have"
+    done < <(grep -oE 'SCRIPT_DIR[}]?/fm-[A-Za-z0-9._-]+' "$bin/$f" | sed 's|.*/||' | sort -u)
   done
   printf '%s\n' "$root"
 }
@@ -513,7 +538,7 @@ test_meta_get_and_backend_of_meta() {
 test_resolve_selector_three_forms() {
   local state=$TMP_ROOT/resolve-state fakebin out
   mkdir -p "$state"
-  fm_write_meta "$state/task1.meta" "window=firstmate:fm-task1"
+  fm_write_meta "$state/task1.meta" "window=firstmate:fm-task1" "tmux_window_pinned=1"
   fm_write_meta "$state/dotfiles-d6.meta" "window=default:wA:p2" "backend=herdr"
   fm_write_meta "$state/fm-turnend-all-harnesses-v9.meta" "window=default:wB:p3" "backend=herdr"
 
@@ -538,6 +563,23 @@ test_resolve_selector_three_forms() {
     || fail "legacy fm-<id> label should resolve through <id>.meta's window="
   [ "$(fm_backend_expected_label_of_selector 'fm-task1' "$state")" = "fm-task1" ] \
     || fail "legacy fm-<id> label should preserve its backend label"
+
+  # A tmux record written before fm_backend_tmux_create_task made the
+  # window-name pin a hard requirement carries no tmux_window_pinned=1 line, so
+  # its window may legitimately have been renamed. Demanding an exact name
+  # match there would report a LIVE crewmate dead everywhere at once, so it
+  # reports NO label and keeps tmux's own target resolution.
+  fm_write_meta "$state/unpinned.meta" "window=firstmate:fm-unpinned"
+  [ -z "$(fm_backend_expected_label_of_selector 'unpinned' "$state")" ] \
+    || fail "a tmux meta with no pin guarantee must report no expected label"
+  [ -z "$(fm_backend_expected_label_of_meta "$state/unpinned.meta" unpinned)" ] \
+    || fail "fm_backend_expected_label_of_meta should withhold the label for an unpinned tmux record"
+  [ "$(fm_backend_expected_label_of_meta "$state/task1.meta" task1)" = "fm-task1" ] \
+    || fail "fm_backend_expected_label_of_meta should report the label for a pinned tmux record"
+  # Every non-tmux backend pins its label by construction, so the guarantee
+  # line is neither written nor required for them.
+  [ "$(fm_backend_expected_label_of_meta "$state/dotfiles-d6.meta" dotfiles-d6)" = "fm-dotfiles-d6" ] \
+    || fail "a non-tmux backend should always report its expected label"
 
   out=$(fm_backend_resolve_selector 'fm-missing' "$state" 2>&1) && fail "fm-<id> with no meta should fail"
   assert_contains "$out" "no metadata for fm-missing" "missing-meta error text changed"
@@ -612,6 +654,14 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
+  list-panes)
+    # Endpoint-liveness primitive (bin/backends/tmux.sh
+    # fm_backend_tmux_target_exists): fm-send verifies an explicit target
+    # through it before sending. Real tmux prints the resolved
+    # '#{window_name}'; every pane in this fake is live.
+    _t=""; _p=""
+    for _a in "$@"; do [ "$_p" = "-t" ] && _t="$_a"; _p="$_a"; done
+    printf '%s\n' "${_t##*:}"; exit 0 ;;
   capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
   list-windows) exit 0 ;;
 esac
@@ -630,10 +680,18 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
     "$bin/bin/fm-send.sh" "$@" >/dev/null 2>&1
 }
 
+# The target-verification preflight is the ONE intentional divergence from the
+# pre-adapter tmux command shape, so it is stripped from both logs before they
+# are compared. The old inline probe was `display-message -p -t <target>
+# '#{pane_id}'`, which cannot fail while the session exists: it falls back to
+# the session's current window for any name (docs/tmux-backend.md "Endpoint
+# existence probe"), so it verified nothing. The adapter resolves the target
+# through `list-panes` instead, which fails loudly on a gone window.
 strip_send_preflight() {  # <log>
-  local preflight
-  preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
-  awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
+  local old_preflight new_preflight
+  old_preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
+  new_preflight=$'tmux\x1flist-panes\x1f-t\x1fsess:win\x1f-F\x1f#{window_name}'
+  awk -v old="$old_preflight" -v new="$new_preflight" '$0 != old && $0 != new { print }' "$1"
 }
 
 test_send_conformance_old_vs_new() {
@@ -650,8 +708,10 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" --key Escape
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
-  assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
-    "fm-send --key did not verify the explicit tmux target before sending"
+  assert_contains "$(cat "$log_new")" $'\x1f''list-panes'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-F'$'\x1f''#{window_name}' \
+    "fm-send --key did not verify the explicit tmux target through the list-panes primitive before sending"
+  assert_not_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
+    "fm-send --key must not fall back to the display-message probe, which passes for any window name"
   strip_send_preflight "$log_old" > "$filtered_old"
   strip_send_preflight "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-key.txt" 2>&1 \

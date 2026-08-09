@@ -40,6 +40,11 @@ fm_herdr_lab_prepare "$SESSION" || fail "could not prepare the isolated Herdr la
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 HERDR_VERSION=$(herdr --version 2>/dev/null | head -1)
+# The version is verification evidence, so it is printed - but never baked into a
+# pass NAME. An assertion identifier must be a constant string or
+# bin/fm-assert-tests-kept.sh cannot resolve it statically and reads a moving
+# name as a vanished assertion (data/turnend-timing-block-h7/report.md §3).
+echo "note: real herdr version: $HERDR_VERSION" >&2
 
 # --- real capability gate ----------------------------------------------------
 
@@ -49,7 +54,7 @@ if ! fm_backend_herdr_events_capable "$SESSION"; then
   trap - EXIT
   exit 0
 fi
-pass "real herdr ($HERDR_VERSION): events.subscribe capability gate passes (protocol >= 16, events surface present in api schema)"
+pass "real herdr: events.subscribe capability gate passes (protocol >= 16, events surface present in api schema)"
 
 # --- container + a real task pane in the isolated session --------------------
 
@@ -108,7 +113,8 @@ REC_TO=$(fm_transition_to_status "$REC")
 # Sub-second: comfortably under the ~240s stale-pane wedge timer this replaces.
 UNDER_ONE=$(python3 -c "print('yes' if (($END)-($START)) < 1.0 else 'no')" 2>/dev/null || echo "no")
 [ "$UNDER_ONE" = yes ] || echo "note: idle->blocked wake took ${ELAPSED}s (>1s; still far under the 240s wedge timer, not fatal)" >&2
-pass "real herdr ($HERDR_VERSION): a driven idle->blocked transition returns the blocked record in ${ELAPSED}s (pane $PANE_ID)"
+echo "note: driven idle->blocked transition returned in ${ELAPSED}s (pane $PANE_ID)" >&2
+pass "real herdr: a driven idle->blocked transition returns the blocked record for the driven pane"
 
 # --- the watcher's fast-path lands a stale record in the scratch wake queue ---
 # Source the watcher (its guard returns before the lock/loop) and override wake so

@@ -91,7 +91,8 @@ state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; a captain-authorized testing skip also records local_skip=on and/or ci_skip=on with its ci_skip_auth= token (section 7); kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
+  <id>.acted           written by bin/fm-ack.sh, bin/fm-send.sh, and bin/fm-pr-check.sh: firstmate acted on this task's reported state; silences the unactioned alarm until the crew's next status append (bin/fm-ack-lib.sh); removed by teardown
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; a tmux task also records tmux_window_pinned=1, the guarantee that its window name cannot drift from fm-<id>, which is what licenses the exact-label liveness reads (docs/tmux-backend.md "The exact-label check needs a pinned window name to be safe"); a captain-authorized testing skip also records local_skip=on and/or ci_skip=on with its ci_skip_auth= token (section 7); kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
@@ -109,6 +110,7 @@ state/               volatile runtime signals; gitignored
   .handoff-unread    path of a handoff document no session has read yet; armed by bin/fm-handoff.sh, announced by its SessionStart pickup hook, cleared only by consume
   .lock              session lock: the harness pid of the one session controlling this home's fleet, and the gate on arming supervision; never the .watch.lock singleton below (bin/fm-session-lock-lib.sh)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
+  .unactioned-*      short-lived unactioned-alarm confirm cache; never touch; removed by teardown
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
@@ -282,6 +284,7 @@ Never merge a red PR.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 `bin/fm-pr-merge.sh` also gates every merge on `bin/fm-assert-tests-kept.sh`: a test assertion the base already had that is missing or failing on the PR branch is a hard refusal, even under `yolo`.
 A base assertion the gate could not execute at all against the branch is reported as unexecuted, and it refuses only for a project the captain has enabled with a `data/exec-gate/<project>` marker; otherwise it is informational.
+A base assertion the gate could not compare because the base's own test named it differently across two runs is reported as unstable and always refuses; that is a defect in the base's test, so the fix is an ordinary test-fix task naming the assertion with a constant string, never a captain decision.
 On that refusal, rebase damage is the worker's to fix, while a deliberate supersession of the base's asserted behavior is a product decision that is never the worker's or firstmate's to make - relay it to the captain, and only a captain-approved entry in `data/supersessions/<project>.md` (entry format in `bin/fm-pr-merge.sh`'s header) lets that merge proceed.
 `bin/fm-pr-merge.sh` also enforces "never merge a red PR" in code: it refuses when any PR check is failing, still pending, or unreadable, and treats a PR reporting no checks at all as unverified rather than green - only a captain-created `data/no-pr-ci/<project>` marker (contract in that script's header) lets a genuinely no-CI project's zero-check PR merge.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
@@ -351,6 +354,10 @@ Handle actionable wakes as follows:
 3. For `check:`, act on the named poll result, including merges and X-mode events.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
+A high context reading in a peeked pane is not by itself actionable: the harness compacts and continues, and the worktree's files and commits persist.
+A high context reading together with uncommitted changes in the task worktree is actionable: compaction discards the worker's memory of what its uncommitted diff means, and the worktree recycling that follows genuinely discards the diff, so immediately steer that worker to commit its work in progress before anything else.
+`bin/fm-peek.sh` reports the uncommitted half alongside every peek, and a stale wake carrying a visible usage-limit dialog means the worker is frozen at a provider prompt, never a benign quiet pane to dismiss.
+
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, always post the final completion follow-up so the link clears even if earlier follow-ups were spent.
 
@@ -361,6 +368,7 @@ A forced repair must use the home-scoped owner path emitted by supervision instr
 
 Guard warnings do not replace the contract.
 Queued wakes must be drained before other action, stale liveness must be repaired through the emitted protocol, and the worktree-tangle warning must be resolved without touching unlanded work.
+An unactioned-direct-report warning is answered by doing what the reported state owes, then recording it with `bin/fm-ack.sh <id> "<what you did>"` when the action leaves no other trace, above all a relay to the captain; `bin/fm-ack-lib.sh` owns the predicate, owed states, grace, and silencers.
 The spawn assertion and generated ship brief must both enforce that project work starts in an isolated disposable worktree, never the primary checkout.
 Harness-aware turn-end guards are structural backstops, not permission to omit the live cycle.
 

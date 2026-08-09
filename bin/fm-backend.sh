@@ -30,11 +30,18 @@
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
-# treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
-# `backend=tmux` for a default-backend task, so existing and newly spawned
-# default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently experimental herdr, zellij, orca, or cmux,
-# carries an explicit `backend=` line.
+# treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh still does not
+# write `backend=tmux` for a default-backend task. Only a task spawned on a
+# non-tmux spawn-capable backend, currently experimental herdr, zellij, orca,
+# or cmux, carries an explicit `backend=` line.
+# A newly spawned default-path meta is NO LONGER byte-identical to a
+# pre-existing one, though: a tmux spawn now also writes
+# `tmux_window_pinned=1`, the guarantee that fm_backend_tmux_create_task could
+# pin the window name (it refuses the spawn otherwise). That one line is
+# exactly what fm_backend_expected_label_of_meta keys off to decide whether an
+# exact-label liveness read is safe, so an OLDER tmux meta - lacking it - is
+# read leniently and is never acted on destructively by the secondmate
+# liveness sweep (bin/fm-bootstrap.sh).
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -410,10 +417,36 @@ fm_backend_of_selector() {  # <raw-target> <resolved-target> <state-dir>
   printf 'tmux'
 }
 
+# fm_backend_expected_label_of_meta: the owning "fm-<id>" label to hand a
+# label-checking backend read for <meta-file>, or EMPTY when this record
+# carries no guarantee that its endpoint still answers to that label.
+#
+# Every backend that pins a task's label at creation gets the strict check:
+# zellij, cmux, and herdr address labelled tabs/panes by construction, and a
+# tmux window created by fm_backend_tmux_create_task has automatic-rename and
+# allow-rename hard-disabled, so its '#{window_name}' cannot drift from
+# fm-<id>. fm-spawn.sh records that guarantee as tmux_window_pinned=1.
+#
+# A tmux meta WITHOUT that line was written before the pin became a hard
+# requirement, so its window may legitimately have been renamed by the
+# captain's own tmux config. Demanding an exact name match there would turn a
+# LIVE crewmate into a `dead` reading everywhere at once (the digests,
+# fm-crew-state.sh, and the secondmate sweep's respawn decision), which is the
+# worse direction. Such a record falls back to a resolution-only read instead:
+# tmux's own target resolution, unchanged from before the label existed.
+fm_backend_expected_label_of_meta() {  # <meta-file> <id>
+  local meta=$1 id=$2
+  if [ "$(fm_backend_of_meta "$meta")" = tmux ] \
+     && [ "$(fm_meta_get "$meta" tmux_window_pinned)" != 1 ]; then
+    return 0
+  fi
+  printf 'fm-%s' "$id"
+}
+
 fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
   local raw=$1 state=$2 id
   id=$(fm_backend_task_id_for_selector "$raw" "$state" 2>/dev/null || true)
-  [ -n "$id" ] && printf 'fm-%s' "$id"
+  [ -n "$id" ] && fm_backend_expected_label_of_meta "$state/$id.meta" "$id"
   return 0
 }
 
@@ -652,14 +685,21 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
 # probe). A gone tmux window or an unqueryable herdr pane (server down, pane
 # closed), missing zellij pane, or unreadable Orca terminal simply fails, which
 # IS "does not exist" for this purpose.
-# Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
-# primitive so callers that only need a fast alive/dead read (recovery
-# digests, the session-start fleet digest) do not re-derive it inline.
+# This is the one shared primitive; fm-crew-state.sh's pane_readable delegates
+# here rather than re-deriving the check inline, as do the callers that only
+# need a fast alive/dead read (recovery digests, the session-start fleet
+# digest).
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      fm_backend_source tmux || return 1
+      # NOT a raw `tmux display-message -p -t "$target"` probe: that command
+      # falls back to the session's current window and exits 0 for ANY window
+      # name, so it reported every dead task as alive. See
+      # fm_backend_tmux_target_exists (bin/backends/tmux.sh) for the reproduced
+      # evidence and why list-panes is the correct primitive.
+      fm_backend_tmux_target_exists "$target" "$expected_label"
       ;;
     herdr)
       fm_backend_source herdr || return 1
@@ -715,11 +755,16 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
 # live supervisor.
-fm_backend_agent_alive() {  # <backend> <target>
-  local backend=$1 target=$2
+# [expected-label] is the owning "fm-<id>", passed by callers that can prove
+# the endpoint's label is pinned (fm_backend_expected_label_of_meta). It is
+# what stops this probe reading a NEIGHBOURING window that a gone target
+# merely prefix-resolved to; herdr addresses a pane by id, so it has no
+# equivalent ambiguity and takes no label.
+fm_backend_agent_alive() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 expected_label=${3:-}
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_alive "$target" ;;
+    tmux) fm_backend_tmux_agent_alive "$target" "$expected_label" ;;
     herdr) fm_backend_herdr_agent_alive "$target" ;;
     *) printf 'unknown' ;;
   esac
