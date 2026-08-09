@@ -357,7 +357,7 @@ Guarantees the renderer is entitled to rely on:
 - `skips` reports the captain's testing skips as the task's own `state/<id>.meta` records them, read through `bin/fm-testing-skip-lib.sh`.
   It is a report of what the record says, never an authorization: the flag line alone is reachable by a worker, and the signature beside it is what grants anything.
 
-### Five check classes, because three of them were lies
+### Five check classes, because three folded two facts away
 
 The three original buckets folded two different facts into passing and failing, and both folds reached the captain's screen.
 
@@ -373,8 +373,9 @@ Both now have a class of their own.
 The excusal is resolved through `bin/fm-attestation-lib.sh`, the same owner `bin/fm-pr-merge.sh` reaches its verdict through, and only when that exact named check is actually failing - so an ordinary green PR pays none of its cost, a pending check of that name is never excusable, and a renamed job simply stops being recognised, which costs a merge rather than granting one.
 The authority is what decides, never the name: the same red check on a `no-mistakes` project with no signed skip stays a failure.
 
-Splitting them does not move the counts away from `gh pr checks`; it moves them towards it, because gh's own per-check vocabulary already separates `skipping` from `pass`.
-What it does change is what the merge gate COUNTS versus what it DECIDES: `bin/fm-pr-merge.sh` still treats a `SKIPPED` check as passing when deciding, and this splits only how it is reported.
+The split does change what `passed` means: a job GitHub reports `SKIPPED` is no longer inside it.
+The total is unchanged, every check still lands in exactly one class, and every class is on screen, so the comparison against `gh pr checks` below still holds at the total and is now made against a row that distinguishes one more thing than a single pass-or-fail split can.
+It changes nothing the merge gate DECIDES: `bin/fm-pr-merge.sh` still treats a `SKIPPED` check as passing, and this splits only how it is reported.
 
 The captain's standing rule governs the display, and he has ruled it three times:
 every class is named on every render, zeros included; a green or ready flag only when every class is clear; and a class that was never evaluated renders as a dash, never as a `0`.

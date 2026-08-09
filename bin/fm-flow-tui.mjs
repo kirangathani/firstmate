@@ -543,8 +543,9 @@ function ciBox(agent, anim) {
 // screen needs a key to read. `excused` and `skipped` are separate on purpose:
 // one is a red check firstmate's merge gate authorises, the other is a job
 // GitHub never ran. Neither is a pass, and folding either into passing is the
-// exact false-green this line exists to prevent. gh's own per-check vocabulary
-// makes the same split, so these counts still line up with `gh pr checks`.
+// exact false-green this line exists to prevent. The total is unchanged by the
+// split and every check lands in exactly one class, so the comparison against
+// `gh pr checks` still holds where it always did.
 export function ciTally(agent) {
   const ci = agent.ci;
   const ok = ci && ci.collection?.ok !== false;
