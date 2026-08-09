@@ -15,8 +15,22 @@
 # fleet state, and adds two things that view does not carry: the named pipeline
 # step each agent is on, and its GitHub check rollup.
 #
+# An agent in this document is a task with a LIVE worker behind it. A
+# `state/<id>.meta` outlives the window it names - firstmate stands finished
+# workers down by killing the window, and the record is what recovery reads
+# afterwards - so enumerating the records alone put finished workers on screen
+# beside running ones with nothing to tell them apart. Every task is therefore
+# checked against its recorded endpoint, through the same
+# `fm_backend_target_exists` the rest of the fleet resolves liveness with, and
+# one that no longer resolves moves to `omitted` instead of `agents`: named,
+# counted, and not drawn. --include-dead puts them back for diagnosis.
+#
+# Cleaning up the leftover records is a SEPARATE question, and not this
+# command's: the record is durable state other tools depend on, and this one is
+# read-only by contract.
+#
 # Usage:
-#   fm-flow-snapshot.sh [--json] [--no-ci] [--task <id>]
+#   fm-flow-snapshot.sh [--json] [--no-ci] [--task <id>] [--include-dead]
 #
 #   --json        emit the snapshot (default; accepted explicitly for symmetry
 #                 with bin/fm-fleet-snapshot.sh)
@@ -25,6 +39,10 @@
 #                 for the network.
 #   --task <id>   restrict the snapshot to one task, for a targeted refresh
 #                 rather than a whole-fleet sweep.
+#   --include-dead  keep tasks whose recorded endpoint no longer resolves. They
+#                 arrive as ordinary agents carrying endpoint_alive:false, which
+#                 the renderer marks "worker gone". For looking at a record
+#                 after its worker is gone, never for the live view.
 #
 # Environment knobs:
 #   FM_FLOW_SNAPSHOT_NM_TIMEOUT   seconds bounding one `no-mistakes axi status`
@@ -53,15 +71,17 @@ NM_DB=${FM_FLOW_SNAPSHOT_DB:-$HOME/.no-mistakes/state.sqlite}
 
 WANT_CI=1
 ONLY_TASK=
+INCLUDE_DEAD=0
 
 usage() {
-  sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) ;;
     --no-ci) WANT_CI=0 ;;
+    --include-dead) INCLUDE_DEAD=1 ;;
     --task)
       shift
       [ $# -gt 0 ] || { echo "fm-flow-snapshot: --task needs an id" >&2; exit 2; }
@@ -189,24 +209,59 @@ ci_json() {  # <pr-url>
     jq -n '{collection:{ok:false,reason:"gh read failed or timed out"},checks:[],total:0,passed:0,failed:0,pending:0}'
     return
   fi
-  # Checks are keyed on workflow PLUS name: the names alone are not unique.
-  # "CI testing waiver" appears under both the CI and Require no-mistakes
-  # workflows on this repo, so a name-keyed rollup silently loses one of them.
+  # The counts here have ONE job: agree with what `gh pr checks <n>` prints for
+  # the same PR, because that is what the captain compares them against. Two
+  # things are needed for that, and the shipped version did neither.
+  #
+  # 1. Supersession. Checks are keyed on workflow PLUS name - names alone are
+  #    not unique, "CI testing waiver" appears under both the CI and Require
+  #    no-mistakes workflows on this repo - but the rollup also keeps EVERY
+  #    attempt of that key, so a re-run leaves the old one in it. PR #40 held 13
+  #    entries for 11 checks and was counted 11/13 with 2 failures where gh
+  #    reports 10/11 and one. The latest attempt of a key wins; the rest are
+  #    superseded and counted nowhere.
+  # 2. Exclusive buckets. Passed, failed and pending must partition the checks.
+  #    Reading `conclusion` without first checking `status` counted PR #33's
+  #    re-running "Repo invariants" as both passed and pending, on the strength
+  #    of a conclusion left over from its previous attempt - 8+3+1 buckets over
+  #    11 checks. A check that has not COMPLETED has no verdict yet, whatever
+  #    field is still lying around on it.
+  #
+  # A StatusContext (a commit status, not a check run) carries `state` and
+  # `context` instead; gh counts those too, so they are normalised rather than
+  # dropped into the pending bucket by virtue of having no `status` field.
   printf '%s' "$raw" | jq '
+    def normalize:
+      if (.__typename // "") == "StatusContext" then
+        { workflow: "", name: (.context // ""), started: (.createdAt // ""),
+          status: (if (.state // "") == "PENDING" or (.state // "") == "EXPECTED"
+                   then "IN_PROGRESS" else "COMPLETED" end),
+          conclusion: (if (.state // "") == "SUCCESS" then "SUCCESS" else (.state // "") end) }
+      else
+        { workflow: (.workflowName // ""), name: (.name // ""),
+          started: (.startedAt // ""),
+          status: (.status // ""), conclusion: (.conclusion // "") }
+      end;
     (.statusCheckRollup // [])
-    | map({
-        workflow: (.workflowName // ""),
-        name: (.name // ""),
-        status: (.status // ""),
-        conclusion: (.conclusion // "")
-      })
+    | map(normalize)
+    | to_entries
+    | map(.value + {seq: .key})
+    | group_by([.workflow, .name])
+    | map(max_by([.started, .seq]))
+    | sort_by(.seq)
+    | map(del(.seq))
+    | map(. + {verdict:
+        (if .status != "COMPLETED" then "pending"
+         elif .conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED"
+         then "passed"
+         else "failed" end)})
     | {
         collection: {ok: true, reason: ""},
         checks: .,
         total: length,
-        passed: (map(select(.conclusion == "SUCCESS")) | length),
-        failed: (map(select(.conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")) | length),
-        pending: (map(select(.status != "COMPLETED")) | length)
+        passed: (map(select(.verdict == "passed")) | length),
+        failed: (map(select(.verdict == "failed")) | length),
+        pending: (map(select(.verdict == "pending")) | length)
       }'
 }
 
@@ -338,11 +393,43 @@ if [ -z "$FLEET" ] || ! printf '%s' "$FLEET" | jq -e '.tasks' >/dev/null 2>&1; t
   exit 1
 fi
 
-TASKS=$(printf '%s' "$FLEET" | jq -c --arg only "$ONLY_TASK" '
-  .tasks
-  | map(select(.kind == "ship"))
-  | map(select($only == "" or .id == $only))
-  | .[]')
+SCOPED=$(printf '%s' "$FLEET" | jq -c --arg only "$ONLY_TASK" '
+  [ .tasks[] | select($only == "" or .id == $only) ]')
+SHIP=$(printf '%s' "$SCOPED" | jq -c '[ .[] | select(.kind == "ship") ]')
+
+# A live worker this view does not draw. The view is the no-mistakes PIPELINE
+# view and only a ship task has a pipeline, so a scout or a secondmate would be
+# nine permanently empty boxes. Naming them is still owed: the captain reconciles
+# this list against the windows in front of them, and a live worker that is
+# simply absent from it with no explanation is the same failure as a dead one
+# that is present.
+OUT_OF_SCOPE=$(printf '%s' "$SCOPED" | jq -c '[
+  .[]
+  | select(.kind != "ship")
+  | select(.endpoint.exists == true)
+  | {id, kind, window:(.endpoint.target // null)}
+]')
+
+# `endpoint.exists` is bin/fm-fleet-snapshot.sh's own reading of
+# fm_backend_target_exists, the fleet's single owner of "does this recorded
+# endpoint still resolve". It is consumed here rather than re-derived, so the
+# view can never disagree with the rest of firstmate about which workers are
+# running. null means no endpoint was ever recorded, which is not a live worker
+# either, and is a different reason worth naming.
+if [ "$INCLUDE_DEAD" = 1 ]; then
+  TASKS=$(printf '%s' "$SHIP" | jq -c '.[]')
+  OMITTED='[]'
+else
+  TASKS=$(printf '%s' "$SHIP" | jq -c '.[] | select(.endpoint.exists == true)')
+  OMITTED=$(printf '%s' "$SHIP" | jq -c '[
+    .[]
+    | select(.endpoint.exists != true)
+    | {id, window:(.endpoint.target // null),
+       reason:(if .endpoint.exists == false
+               then "recorded window no longer exists"
+               else "no endpoint recorded" end)}
+  ]')
+fi
 
 AGENTS_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-flow-agents.XXXXXX")
 trap 'rm -f "$AGENTS_FILE"' EXIT INT TERM
@@ -366,11 +453,15 @@ jq -n \
   --arg generated "$NOW_ISO" \
   --argjson generated_epoch "$NOW_EPOCH" \
   --arg fm_home "$FM_HOME" \
+  --argjson omitted "$OMITTED" \
+  --argjson out_of_scope "$OUT_OF_SCOPE" \
   --slurpfile agents "$AGENTS_FILE" \
   '{
     schema:"fm-flow-snapshot.v1",
     generated:$generated,
     generated_epoch:$generated_epoch,
     fm_home:$fm_home,
-    agents:($agents[0] // [])
+    agents:($agents[0] // []),
+    omitted:$omitted,
+    out_of_scope:$out_of_scope
   }'

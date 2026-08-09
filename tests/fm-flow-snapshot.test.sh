@@ -78,13 +78,25 @@ TOON
 
 # Two workflows carry a check of the SAME name ("CI testing waiver"), which is
 # why the rollup is keyed on workflow plus name rather than name alone.
+#
+# The last three entries are the two shapes that made these counts disagree with
+# `gh pr checks`, both captured from real PRs on 2026-08-09:
+#   - PR 40 held TWO attempts of "PR must be raised via no-mistakes" after a
+#     re-run. Counting both reported 11/13 with two failures where gh reports
+#     10/11 with one, so the older attempt must be superseded, not counted.
+#   - PR 33's "Repo invariants" was IN_PROGRESS while still carrying the SUCCESS
+#     conclusion of its previous attempt. Reading the conclusion without the
+#     status put it in the passed AND the pending bucket, 8+3+1 over 11 checks.
 cat > "$TMP_ROOT/ci-rollup.json" <<'JSON'
 {"statusCheckRollup":[
 {"__typename":"CheckRun","name":"CI testing waiver","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"CI"},
 {"__typename":"CheckRun","name":"CI testing waiver","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"Require no-mistakes"},
 {"__typename":"CheckRun","name":"Lint shell scripts","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"CI"},
 {"__typename":"CheckRun","name":"Behavior tests (shard 1)","status":"COMPLETED","conclusion":"FAILURE","workflowName":"CI"},
-{"__typename":"CheckRun","name":"Behavior tests (shard 2)","status":"IN_PROGRESS","conclusion":"","workflowName":"CI"}
+{"__typename":"CheckRun","name":"Behavior tests (shard 2)","status":"IN_PROGRESS","conclusion":"","workflowName":"CI"},
+{"__typename":"CheckRun","name":"PR must be raised via no-mistakes","status":"COMPLETED","conclusion":"FAILURE","workflowName":"Require no-mistakes","startedAt":"2026-08-09T11:49:46Z"},
+{"__typename":"CheckRun","name":"PR must be raised via no-mistakes","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"Require no-mistakes","startedAt":"2026-08-09T11:59:26Z"},
+{"__typename":"CheckRun","name":"Repo invariants","status":"IN_PROGRESS","conclusion":"SUCCESS","workflowName":"CI","startedAt":"2026-08-09T12:15:59Z"}
 ]}
 JSON
 
@@ -181,11 +193,39 @@ got=$(jq -r '.schema' "$OUT")
 [ "$got" = "fm-flow-snapshot.v1" ] || fail "wrong schema id: $got"
 pass "emits the fm-flow-snapshot.v1 schema id"
 
-# Scout tasks have no pipeline of their own, so they are not agents in this view.
+# --- an agent is a task with a LIVE worker behind it -------------------------
+#
+# `state/<id>.meta` outlives the window it names: firstmate stands a finished
+# worker down by killing the window, and the record stays for recovery to read.
+# Enumerating records alone put finished workers on screen as though they were
+# running - the captain's second run showed 14 agents against two live windows.
+# A task whose recorded endpoint no longer resolves is named in `omitted` and
+# drawn nowhere.
 got=$(jq -r '[.agents[].id] | sort | join(",")' "$OUT")
-[ "$got" = "arm-lock-gate-q4,eager-dispatch-e2,no-run-yet-n1,stale-runner-s9" ] \
+[ "$got" = "arm-lock-gate-q4,eager-dispatch-e2,no-run-yet-n1" ] \
   || fail "unexpected agent set: $got"
-pass "ships become agents and scouts are excluded"
+pass "ships with a live endpoint become agents; scouts and dead endpoints do not"
+
+got=$(jq -r '[.omitted[].id] | sort | join(",")' "$OUT")
+[ "$got" = "stale-runner-s9" ] || fail "unexpected omitted set: $got"
+got=$(jq -r '.omitted[] | select(.id=="stale-runner-s9") | .reason' "$OUT")
+assert_contains "$got" "no longer exists" "the omission gave no reason"
+pass "a task whose recorded endpoint is gone is named in omitted, not drawn as an agent"
+
+# Live workers this view has no row for are stated too, so the captain can
+# reconcile the list against the windows in front of them.
+got=$(jq -r '[.out_of_scope[].id] | sort | join(",")' "$OUT")
+[ "$got" = "some-scout-x1" ] || fail "unexpected out_of_scope set: $got"
+pass "a live worker with no pipeline is named rather than silently absent"
+
+# The record is still readable on request - the point is that it is not drawn
+# beside running workers by default.
+got=$(run_snapshot --no-ci --include-dead | jq -r '[.agents[].id] | sort | join(",")')
+[ "$got" = "arm-lock-gate-q4,eager-dispatch-e2,no-run-yet-n1,stale-runner-s9" ] \
+  || fail "--include-dead did not restore the dead record: $got"
+got=$(run_snapshot --no-ci --include-dead | jq -r '.omitted | length')
+[ "$got" = 0 ] || fail "--include-dead still omitted $got task(s)"
+pass "--include-dead puts the gone-worker records back for diagnosis"
 
 # --- the defect this script exists to fix -----------------------------------
 #
@@ -241,9 +281,14 @@ pass "parses quoted active_steps fields containing commas"
 # timed-out collection emitted pending steps, the view would state as fact that
 # the pipeline has not begun.
 
-ok=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .collection.ok' "$OUT")
+# Read through --include-dead: the only fixture task with a failing axi read is
+# also the one whose endpoint is gone, and the default view no longer draws it.
+DEADOUT="$TMP_ROOT/out-include-dead.json"
+run_snapshot --no-ci --include-dead > "$DEADOUT" 2>/dev/null
+
+ok=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .collection.ok' "$DEADOUT")
 [ "$ok" = "false" ] || fail "failed axi read reported collection.ok=$ok"
-n=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .steps | length' "$OUT")
+n=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .steps | length' "$DEADOUT")
 [ "$n" = 0 ] || fail "failed collection still emitted $n steps"
 pass "a failed read reports collection.ok false and emits no steps"
 
@@ -261,9 +306,9 @@ pass "no run yet is distinct from a failed read"
 # the live host four rows read `running` with no update for five to nine days.
 # The age must reach the renderer so a dead pipeline cannot be animated.
 
-age=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .run.db_age_seconds' "$OUT")
+age=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .run.db_age_seconds' "$DEADOUT")
 [ "$age" = 9400 ] || fail "expected db_age_seconds 9400, got $age"
-alive=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .endpoint_alive' "$OUT")
+alive=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .endpoint_alive' "$DEADOUT")
 [ "$alive" = "false" ] || fail "endpoint liveness not carried through: $alive"
 pass "carries run age and endpoint liveness so staleness cannot be hidden"
 
@@ -274,7 +319,7 @@ run_snapshot > "$CIOUT" 2>/dev/null
 expect_code 0 $? "snapshot with CI exits clean"
 
 got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .ci.total' "$CIOUT")
-[ "$got" = 5 ] || fail "expected 5 checks, got $got"
+[ "$got" = 7 ] || fail "expected 7 checks from 8 rollup entries, got $got"
 # Both same-named checks must survive: keying on name alone drops one.
 got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | [.ci.checks[] | select(.name=="CI testing waiver")] | length' "$CIOUT")
 [ "$got" = 2 ] || fail "duplicate check name collapsed: kept $got of 2"
@@ -283,8 +328,36 @@ got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | [.ci.checks[] | sele
 pass "keys checks on workflow plus name so duplicates both survive"
 
 got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | "\(.ci.passed)/\(.ci.failed)/\(.ci.pending)"' "$CIOUT")
-[ "$got" = "3/1/1" ] || fail "rollup counts wrong (passed/failed/pending): $got"
+[ "$got" = "4/1/2" ] || fail "rollup counts wrong (passed/failed/pending): $got"
 pass "rolls up passed, failed, and pending counts"
+
+# --- the counts must agree with `gh pr checks` ------------------------------
+#
+# That is the comparison the captain makes, so these are the two ways the
+# rollup disagreed with it.
+
+# A re-run leaves the earlier attempt in the rollup. The LATEST attempt of a
+# workflow-plus-name is the verdict; counting the superseded one as well turned
+# one failing check into two.
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2")
+  | [.ci.checks[] | select(.name=="PR must be raised via no-mistakes")] | length' "$CIOUT")
+[ "$got" = 1 ] || fail "a superseded re-run was counted: kept $got attempts, want 1"
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2")
+  | .ci.checks[] | select(.name=="PR must be raised via no-mistakes") | .conclusion' "$CIOUT")
+[ "$got" = "SUCCESS" ] || fail "kept the superseded attempt, not the latest: $got"
+pass "a re-run supersedes its earlier attempt instead of being counted twice"
+
+# Passed, failed and pending must PARTITION the checks. A check still running
+# carries whatever conclusion its previous attempt left behind, and reading that
+# without the status put it in two buckets at once.
+sum=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2")
+  | .ci | (.passed + .failed + .pending)' "$CIOUT")
+tot=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .ci.total' "$CIOUT")
+[ "$sum" = "$tot" ] || fail "buckets overlap: passed+failed+pending=$sum over $tot checks"
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2")
+  | .ci.checks[] | select(.name=="Repo invariants") | .verdict' "$CIOUT")
+[ "$got" = "pending" ] || fail "a running check with a stale conclusion counted as $got"
+pass "a check that has not completed is pending and nothing else"
 
 # An agent with no PR must not be reported as having a clean CI result.
 got=$(jq -r '.agents[] | select(.id=="arm-lock-gate-q4") | .ci.collection.ok' "$CIOUT")
