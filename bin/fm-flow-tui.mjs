@@ -425,13 +425,18 @@ function skipOverride(agent, spec) {
 }
 
 function stepBox(agent, spec, anim) {
-  if (agent.collection?.ok === false) {
-    return box(spec.label, "unknown", W, { timer: "?" });
-  }
+  // The skip is checked BEFORE the unreadable case, because it does not depend
+  // on the pipeline read at all: it comes from the task's own record, and under
+  // local_skip there is no pipeline run for that read to have failed on. A
+  // failed read leaves the stage unknown; a recorded skip leaves it skipped,
+  // whatever the read did.
   const forced = skipOverride(agent, spec);
   if (forced) {
     const b = box(spec.label, forced.state, W, { timer: forced.timer });
     return { ...b, timer: (PAINT[forced.state] ?? dim)(b.timer) };
+  }
+  if (agent.collection?.ok === false) {
+    return box(spec.label, "unknown", W, { timer: "?" });
   }
   const st = stepFor(agent, spec);
   let state = stepState(st?.status ?? "pending");

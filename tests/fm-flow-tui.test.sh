@@ -613,6 +613,20 @@ STEPS.forEach((s, i) => {
   }
 });
 
+// A failed pipeline read does not un-skip a skipped stage. The skip comes from
+// the task's own record, and under local_skip there is no pipeline run for that
+// read to have failed on, so `unknown` there would be a worse answer than the
+// one the record already gives.
+const unreadable = withSkips({ local: true, ci: false });
+unreadable.collection = { ok: false, reason: "axi status failed (exit 124)", at: "t", epoch: 1 };
+const unreadableCells = timerCells(unreadable);
+STEPS.filter((s) => LOCAL_SKIP_STAGES.has(s.key)).forEach((s) => {
+  const i = STEPS.indexOf(s);
+  if (unreadableCells[i] !== "skipped") {
+    say(`unreadable + local skip: stage ${s.key} reads "${unreadableCells[i]}", want "skipped"`);
+  }
+});
+
 process.exit(bad ? 1 : 0);
 JS
 node "$TMP_ROOT/skips.mjs" "$TUI" "$(snap "[$(agent_with sk0 '[]' '{}')]")" ||
@@ -662,10 +676,8 @@ pass "a task carrying no testing skip renders exactly as it does without the fie
 
 # --- the drill-in, and the way back, are stated on screen --------------------
 
-assert_contains "$plainoff" "d " "the key line does not offer the pipeline drill-in"
+assert_contains "$plainoff" "pipeline detail" "the key line does not offer the pipeline drill-in"
 assert_contains "$plainoff" "ctrl-c back" "the key line does not say how to come back from the drill-in"
-custom=$(printf '%s' "$WITHOFF" | node "$TUI" --cols 200 --rows 60 --tick 0 2>/dev/null)
-[ -n "$custom" ] || fail "the frame vanished"
 out=$(setsid node "$TUI" --watch --cols 200 --rows 60 --tick 0 \
   --detail-hint 'd: the pipeline, esc to return' <<<"$WITHOFF" 2>/dev/null |
   sed 's/\x1b\[[0-9;]*m//g')
