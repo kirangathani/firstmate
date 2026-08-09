@@ -172,6 +172,9 @@ Both `ci-waiver` jobs check out the base ref rather than the default pull-reques
 That does not close the broader path where a PR edits the workflow file itself, which is inherent to `pull_request` events and is mitigated by branch protection rather than here.
 When the checked-out base predates the waiver and carries no verifier at all, both jobs report "not waived" and run everything rather than failing on the missing script, because a base with no verifier has no waiver capability to honour.
 
+A repository that never publishes the secret leaves that `check` job permanently red for every PR the pipeline did not raise, which firstmate itself authorizes in two ordinary cases, so the remedy for the merge is firstmate-side rather than CI-side.
+`bin/fm-pr-merge.sh` excuses that one check by exact name when the task carries a signed testing skip or the project is registered as `direct-PR`, refuses every other failing or unfinished check unchanged, and discloses each such merge loudly; that script's header owns the full contract, including why a rename of the job fails towards refusing.
+
 ## Testing skips (bin/fm-spawn.sh --local-skip / --ci-skip / --all-testing-skip)
 
 A ship task can be dispatched with testing switched off, but only by the captain and only mechanically: the skip is enforced by code and by a keyed signature, never by an instruction a worker can decline and never by a string a worker can type.
@@ -179,7 +182,7 @@ They are a third axis, orthogonal to delivery mode and to `yolo`, and `yolo` nev
 Pass the same flag to `bin/fm-brief.sh`, which writes the worker-facing half; `bin/fm-testing-skip-lib.sh` is the single owner of the flags, the accepted matrix, and every refusal, so the two scripts cannot drift.
 
 `--local-skip` switches off the local pipeline, `--ci-skip` waives CI's expensive jobs for the PR, and `--all-testing-skip` does both.
-Each is recorded in `state/<id>.meta` only when on, as `local_skip=on` and/or `ci_skip=on` with its `ci_skip_auth=` token, so an unflagged task's record is byte-identical to one from before the feature existed.
+Each is recorded in `state/<id>.meta` only when on, as `local_skip=on` and/or `ci_skip=on`, each paired with its own `local_skip_auth=`/`ci_skip_auth=` dispatch token, so an unflagged task's record is byte-identical to one from before the feature existed.
 
 A local skip is enforced rather than requested.
 `bin/fm-spawn.sh` writes a `no-mistakes` shim into the task's own temp root and puts that directory first on the worker's PATH, so a flagged worker cannot run the pipeline even if it tries.
@@ -187,9 +190,15 @@ The shim exits 0 deliberately: a non-zero exit reads to an agent as a broken too
 The directory is mode 700 and the spawn refuses when the temp root already exists owned by another user, because it shadows a real tool at the front of an agent's PATH and its path is predictable.
 The shim is scoped to that one pane's environment, so it reaches no other task and not the captain's own shell, and teardown removes it.
 
-A CI skip additionally mints the `ci_skip_auth=` dispatch token described in the waiver-secret section above.
-It is required because a worker appends its status lines into the same `state/` directory and could otherwise append the flag to its own record; the token is an HMAC it cannot compute.
-Because the token is minted at dispatch, `--ci-skip` refuses when the home has no waiver secret yet, while `--local-skip` needs none.
+Each skip mints a dispatch token of its own, `ci_skip_auth=` and `local_skip_auth=`, from the master key described in the waiver-secret section above.
+They are required because a worker appends its status lines into the same `state/` directory and could otherwise append the flag to its own record; the token is an HMAC it cannot compute.
+The two use separate payload domains, so a token minted for one flag never verifies for the other and one authorized skip cannot widen into the other.
+`ci_skip_auth=` is what `bin/fm-ci-waiver.sh sign` checks; `local_skip_auth=` is what `bin/fm-pr-merge.sh` checks before a local skip may excuse the attestation check, and that script's header owns the exemption.
+
+A missing secret is treated differently by the two flags, because they lose different amounts without one.
+`--ci-skip` refuses outright: without a key no waiver could ever be signed for that task, so the dispatch would be inert and would send a worker to ask for a signature nobody can produce.
+`--local-skip` still spawns, because the shim above enforces its skip with or without a key, and refusing would break a working flag for every home that has never run `init`.
+What it loses is the merge-time exemption, so the spawn says so on stderr and names the one command that restores it, rather than recording a flag that will fail a merge much later with no explanation.
 
 Which flag a delivery mode can honour, refused loudly rather than silently ignored:
 
