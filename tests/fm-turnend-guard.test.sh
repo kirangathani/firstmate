@@ -83,20 +83,20 @@ test_predicate_queue_pending_flag() {
 # under bin/, so the hook (invoked by absolute path) resolves its own FM_ROOT to
 # that scenario dir regardless of the test's cwd.
 
+# The scenario's bin/ is DERIVED from the real bin/ at run time, never a
+# hand-maintained list of the guard's dependencies. Such a list is a second copy
+# of that dependency set and rots the moment the guard gains a sibling: the same
+# shape took main red once already (tests/fm-backend.test.sh's old-bin shim, #44)
+# because the defect is invisible on the PR that introduces it.
+# Copies, not symlinks: several scenarios below overwrite an entry in the
+# scenario's own bin/ with a stub, and a symlink would write that stub straight
+# back into the real repo file.
 install_guard_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
-  cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
-  cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
-  cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
-  cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
-  cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
-  cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
-  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp -R "$ROOT"/bin/. "$dir/bin/"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
-  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
 }
 
 mark_codex_hook_root() {
@@ -598,6 +598,156 @@ test_hook_runs_fast() {
   pass "fm-turnend-guard: runs well under the generous timing margin"
 }
 
+# --- HOOK: the stale-base backstop ------------------------------------------
+#
+# The guard's second, independent block reason (bin/fm-stale-base.sh): a turn
+# must not end with an in-flight branch whose CI was measured against a base
+# that has since moved. Fixtures live outside the scenario dir because a
+# scenario is itself a plain git repo and a task's project must be a separate
+# clone with its own origin.
+
+# make_stale_base_project <name>: echo a clone with a bare origin and one commit
+# on main, alongside the side work repo used to advance that origin later.
+make_stale_base_project() {
+  local name=$1 root remote_abs
+  root="$TMP_ROOT/sb-$name"
+  mkdir -p "$root"
+  git init -q "$root/work"
+  git -C "$root/work" symbolic-ref HEAD refs/heads/main
+  printf 'v0\n' > "$root/work/file.txt"
+  git -C "$root/work" add file.txt
+  git -C "$root/work" commit -qm C0
+  git clone --quiet --bare "$root/work" "$root/origin.git"
+  remote_abs=$(cd "$root/origin.git" && pwd)
+  git -C "$root/work" remote add origin "file://$remote_abs"
+  git -C "$root/work" push -q -u origin main
+  git clone --quiet "file://$remote_abs" "$root/clone"
+  printf '%s\n' "$root/clone"
+}
+
+# add_stale_base_task <scenario-dir> <clone> <id> behind|level: publish a task
+# branch and record the task meta fm-spawn would write. `behind` then lands one
+# more commit on that origin's main and refreshes the clone, which is exactly
+# what a merged sibling PR does to every other open branch.
+add_stale_base_task() {
+  local dir=$1 clone=$2 id=$3 want=$4 root wt
+  root=$(dirname "$clone")
+  wt="$root/wt-$id"
+  git -C "$clone" worktree add -q -b "fm/$id" "$wt" origin/main
+  printf 'work\n' > "$wt/$id.txt"
+  git -C "$wt" add "$id.txt"
+  git -C "$wt" commit -qm "work on $id"
+  git -C "$wt" push -q -u origin "fm/$id"
+  if [ "$want" = behind ]; then
+    printf 'v1\n' > "$root/work/file.txt"
+    git -C "$root/work" add file.txt
+    git -C "$root/work" commit -qm C1
+    git -C "$root/work" push -q origin main
+    git -C "$clone" fetch -q origin
+  fi
+  fm_write_meta "$dir/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$wt" \
+    "project=$clone" \
+    "harness=echo" \
+    "kind=ship" \
+    "mode=direct-PR" \
+    "yolo=off"
+}
+
+# start_live_watcher <dir>: give the scenario a live identity-matched watcher
+# lock and a fresh beacon, so the blind-turn reason is satisfied and only the
+# stale-base reason can block. The holder pid lands in LIVE_WATCHER_PID rather
+# than on stdout: `pid=$(start_live_watcher ...)` would wait on the background
+# holder's inherited stdout for its full lifetime, and the test would then run
+# against a dead watcher and see the blind-turn block instead.
+LIVE_WATCHER_PID=
+start_live_watcher() {
+  local dir=$1 identity
+  sleep 60 >/dev/null 2>&1 &
+  LIVE_WATCHER_PID=$!
+  identity=$(watcher_identity "$dir" "$LIVE_WATCHER_PID") || {
+    stop_live_watcher
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$LIVE_WATCHER_PID" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+}
+
+stop_live_watcher() {
+  [ -n "$LIVE_WATCHER_PID" ] || return 0
+  kill "$LIVE_WATCHER_PID" 2>/dev/null || true
+  wait "$LIVE_WATCHER_PID" 2>/dev/null || true
+  LIVE_WATCHER_PID=
+}
+
+test_hook_blocks_when_a_sibling_branch_is_behind() {
+  local dir clone out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-stale-behind")
+  clone=$(make_stale_base_project behind)
+  add_stale_base_task "$dir" "$clone" sib1 behind
+  start_live_watcher "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  stop_live_watcher
+
+  expect_code 2 "$status" "hook must block a turn that would end with a branch behind a moved base"
+  assert_contains "$out" "TURN WOULD END WITH CI MEASURED AGAINST A BASE THAT MOVED" \
+    "the stale-base block must read as its own alarm"
+  assert_contains "$out" "sib1" "the block must name the task that is behind"
+  assert_contains "$out" "merge origin/main into fm/sib1 and re-verify" \
+    "the block must name the remedy, not just the problem"
+  pass "fm-turnend-guard: blocks when an in-flight branch is behind a moved base"
+}
+
+test_hook_silent_when_every_sibling_contains_the_base() {
+  local dir clone out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-stale-level")
+  clone=$(make_stale_base_project level)
+  add_stale_base_task "$dir" "$clone" sib2 level
+  start_live_watcher "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  stop_live_watcher
+
+  expect_code 0 "$status" "hook must not block when every in-flight branch contains the base"
+  [ -z "$out" ] || fail "hook produced output with no stale base: $out"
+  pass "fm-turnend-guard: silent when every in-flight branch already contains the base"
+}
+
+test_hook_reports_both_reasons_together() {
+  local dir clone out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-stale-and-blind")
+  clone=$(make_stale_base_project both)
+  add_stale_base_task "$dir" "$clone" sib3 behind
+  # No watcher at all, so the blind-turn reason fires too. Neither reason may
+  # mask the other: a permanently broken watcher would otherwise hide every
+  # stale base behind it.
+  out=$(run_hook "$dir" false); status=$?
+
+  expect_code 2 "$status" "hook must block when both reasons hold"
+  assert_contains "$out" "TURN WOULD END BLIND" "the supervision reason must still be reported"
+  assert_contains "$out" "$REQUIRED_REASON" "the supervision repair instruction must survive"
+  assert_contains "$out" "TURN WOULD END WITH CI MEASURED AGAINST A BASE THAT MOVED" \
+    "the stale-base reason must not be masked by the supervision reason"
+  assert_contains "$out" "sib3" "the stale-base reason must still name its task"
+  pass "fm-turnend-guard: reports the blind-turn and stale-base reasons together"
+}
+
+test_hook_stale_base_honours_the_acknowledgement() {
+  local dir clone out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-stale-acked")
+  clone=$(make_stale_base_project acked)
+  add_stale_base_task "$dir" "$clone" sib4 behind
+  FM_HOME="$dir" bash "$dir/bin/fm-stale-base.sh" --ack sib4 >/dev/null \
+    || fail "could not acknowledge the stale-base finding"
+  start_live_watcher "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  stop_live_watcher
+
+  expect_code 0 "$status" "an acknowledged stale base must not block the next turn end"
+  [ -z "$out" ] || fail "hook produced output for an acknowledged finding: $out"
+  pass "fm-turnend-guard: an acknowledged stale base stops blocking turn ends"
+}
+
 test_grok_adapter_forces_one_resume_when_unhealthy() {
   local dir fakebin log out status
   dir=$(make_primary_dir "$TMP_ROOT/grok-adapter-block")
@@ -986,6 +1136,10 @@ test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast
+test_hook_blocks_when_a_sibling_branch_is_behind
+test_hook_silent_when_every_sibling_contains_the_base
+test_hook_reports_both_reasons_together
+test_hook_stale_base_honours_the_acknowledgement
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
