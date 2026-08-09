@@ -141,14 +141,27 @@ real_path() {
 }
 
 project_label() {
-  basename "$1" 2>/dev/null || printf '%s\n' "$1"
+  printf '%s\n' "${1##*/}"
 }
 
-# Last occurrence wins, matching how every other reader treats a meta key.
-meta_field() {  # <meta-file> <key>
+# Read the three fields this sweep needs in ONE pass, with no subprocess per
+# field: this runs on every turn end, once per in-flight task. Last occurrence
+# wins, matching how every other reader treats a meta key.
+META_KIND=
+META_PROJECT=
+META_WORKTREE=
+read_meta() {  # <meta-file>
   local line
-  line=$(grep "^$2=" "$1" 2>/dev/null | tail -1)
-  printf '%s\n' "${line#"$2"=}"
+  META_KIND=
+  META_PROJECT=
+  META_WORKTREE=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      kind=*) META_KIND=${line#kind=} ;;
+      project=*) META_PROJECT=${line#project=} ;;
+      worktree=*) META_WORKTREE=${line#worktree=} ;;
+    esac
+  done < "$1"
 }
 
 emit() {  # <status> <id> <situation-key> <sentence>
@@ -220,9 +233,9 @@ lookup_worktree() {  # <porcelain-file> <path> [<resolved-path>]
 # situation key is what an acknowledgement is recorded against, so it embeds the
 # base commit and a base that moves again re-alarms.
 scan() {
-  local meta id kind project worktree tasks only_real
+  local meta id tasks only_real
   local cur_project=$NO_PROJECT_YET proj_state=ok label='' default='' base='' wt_list=''
-  local proj_dir rc pushed behind_by want_real
+  local proj_dir project worktree rc pushed behind_by want_real
 
   tasks="$TMP_DIR/tasks"
   : > "$tasks"
@@ -233,15 +246,16 @@ scan() {
 
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    kind=$(meta_field "$meta" kind)
+    id=${meta##*/}
+    id=${id%.meta}
+    read_meta "$meta"
     # A scout has no ship branch by design, and a secondmate is a persistent
     # home rather than a branch-bearing work item. Neither can be behind a base.
-    case "$kind" in
+    case "$META_KIND" in
       scout|secondmate) continue ;;
     esac
-    project=$(meta_field "$meta" project)
-    worktree=$(meta_field "$meta" worktree)
+    project=$META_PROJECT
+    worktree=$META_WORKTREE
     # A record naming neither a project nor a local copy cannot have a branch at
     # all, so it is outside this check's domain rather than an unchecked item;
     # corrupt task metadata is bin/fm-crew-state.sh's to report.
@@ -423,16 +437,21 @@ done <<< "$RECORDS"
 
 [ -n "$REPORT" ] || exit 0
 
+# EVERY line this script prints starts with "STALE BASE", including the remedy
+# footer. bin/fm-bootstrap.sh's session-start relay is an allowlist that drops
+# any fleet-sync line it does not recognise, so a report whose lines did not
+# share one stable marker would have its remedy silently stripped, or the whole
+# finding dropped, at exactly the moment firstmate is building its picture.
 printf '%s' "$REPORT"
 if [ "$HAS_BEHIND" = 1 ]; then
-  printf 'Remedy: steer each worker above to do exactly the merge named on its line, then re-verify that branch.\n'
+  printf 'STALE BASE REMEDY: steer each worker above to do exactly the merge named on its line, then re-verify that branch.\n'
   # shellcheck disable=SC2016 # The backticked flag is literal text, not an expansion.
-  printf 'Never rebase: a global settings rule denies `git push --force*`, so a rebased branch cannot be pushed at all.\n'
+  printf 'STALE BASE REMEDY: Never rebase - a global settings rule denies `git push --force*`, so a rebased branch cannot be pushed at all.\n'
 fi
 if [ "$HAS_UNKNOWN" = 1 ]; then
-  printf 'Undeterminable is not clean: resolve each one above before treating any CI result on that branch as a verdict on the branch.\n'
+  printf 'STALE BASE REMEDY: undeterminable is not clean - resolve each one above before treating any CI result on that branch as a verdict on the branch.\n'
 fi
-printf 'Once acted on, silence a finding with: bin/fm-stale-base.sh --ack <task-id>\n'
+printf 'STALE BASE REMEDY: once acted on, silence a finding with bin/fm-stale-base.sh --ack <task-id>\n'
 
 [ "$UNACKED" = 1 ] && exit 1
 exit 0

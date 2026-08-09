@@ -150,7 +150,7 @@ test_behind_pushed_branch_fires_and_names_the_remedy() {
   assert_contains "$out" "a base that no longer exists" "the finding must say why the CI result is not a verdict"
   assert_contains "$out" "merge origin/main into fm/t-behind and re-verify" \
     "the finding must name the remedy, not just the problem"
-  assert_contains "$out" "Never rebase" "the remedy must rule out rebasing"
+  assert_contains "$out" "STALE BASE REMEDY: Never rebase" "the remedy must rule out rebasing"
   assert_contains "$out" 'git push --force' "the remedy must say why rebasing is not an option"
   pass "fm-stale-base: a behind pushed branch fires and names task, branch and remedy"
 }
@@ -258,7 +258,7 @@ test_project_without_origin_remote_is_silent() {
 # --- cannot tell: report, never silence -------------------------------------
 
 test_missing_project_clone_is_undeterminable() {
-  local w out status
+  local w out status reported_line
   w=$(new_world missing-project-clone-is-undeterminable)
   add_task "$w" t-gone fm/t-gone >/dev/null
   rm -rf "$w/projects/proj"
@@ -267,7 +267,13 @@ test_missing_project_clone_is_undeterminable() {
   expect_code 1 "$status" "an unreadable project must not read as clean"
   assert_contains "$out" "STALE BASE UNDETERMINABLE: cannot tell whether t-gone is behind" \
     "a missing project copy must be reported, not silently passed"
-  assert_contains "$out" "Undeterminable is not clean" "the report must say cannot-tell is not an all-clear"
+  while IFS= read -r reported_line; do
+    case "$reported_line" in
+      "STALE BASE"*) ;;
+      *) fail "every reported line must carry the STALE BASE marker so a relay cannot split a finding from its remedy: $reported_line" ;;
+    esac
+  done <<< "$out"
+  assert_contains "$out" "STALE BASE REMEDY: undeterminable is not clean" "the report must say cannot-tell is not an all-clear"
   pass "fm-stale-base: a missing project copy reports as undeterminable"
 }
 

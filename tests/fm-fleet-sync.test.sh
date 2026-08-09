@@ -531,6 +531,26 @@ test_bootstrap_relays_recovered_and_stuck() {
   pass "bootstrap relays recovered: and STUCK: fleet-sync outcomes"
 }
 
+test_bootstrap_relays_the_stale_base_report() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" relay-clone)
+  add_open_branch "$home" relay-clone sibRelay
+  advance_origin "$home" relay-clone C1
+
+  out=$(PATH="$(fm_no_mistakes_stub_bin):$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  # The relay is an allowlist: an unrecognised fleet-sync line is dropped. A
+  # dropped stale-base finding at session start is a green flag over an
+  # unchecked item, so both the finding and its remedy must survive.
+  assert_contains "$out" "FLEET_SYNC: STALE BASE: sibRelay" \
+    "bootstrap must relay the stale-base finding, not drop it"
+  assert_contains "$out" "FLEET_SYNC: STALE BASE REMEDY:" \
+    "bootstrap must relay the remedy alongside the finding"
+  pass "bootstrap relays the stale-base report raised by a moved base"
+}
+
 # --- packed-refs.lock guard tests -------------------------------------------
 
 test_orphaned_stale_packed_refs_lock_recovers() {
@@ -683,6 +703,7 @@ test_single_project_by_projects_relative_name_ignores_cwd_shadow
 test_single_project_unresolvable_name_still_skips
 test_whole_fleet_form
 test_bootstrap_relays_recovered_and_stuck
+test_bootstrap_relays_the_stale_base_report
 test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal
