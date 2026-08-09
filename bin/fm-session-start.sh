@@ -38,6 +38,7 @@
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
+#                       a DRIFT CHECK reconciling the two against live reality,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
@@ -66,6 +67,16 @@
 # Only the five mutating sweeps and the wake-queue drain are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
+#
+# DRIFT CHECK: the digest above prints the durable queue and the live records
+# side by side but never COMPARES them, which is how this home once opened a
+# session with a backlog claiming 17 tasks in flight against 2 running agents.
+# bin/fm-drift-check.sh owns that comparison, its four classes, its render
+# contract, and its bounds; this script only places it, after both inputs have
+# been printed. It is detection-only and read-only, so it runs in a read-only
+# session too, and it is the ONLY step here that can make a network call - see
+# that script's header for the bound and for how it degrades when GitHub cannot
+# be reached.
 #
 # BACKLOG DIGEST: FM_SESSION_START_BACKLOG_LIMIT bounds the startup backlog
 # listing, default 80 items.
@@ -381,6 +392,18 @@ for status in "$STATE"/*.status; do
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
+# Placed AFTER the backlog listing and the runtime records, because it is the
+# verdict on the two of them together. bin/fm-drift-check.sh owns every class,
+# bound and degradation rule; this call adds only its position in the digest.
+subsection "Drift (durable queue vs live reality)"
+DRIFT_OUT=$("$SCRIPT_DIR/fm-drift-check.sh" 2>&1)
+DRIFT_RC=$?
+if [ -n "$DRIFT_OUT" ]; then
+  printf '%s\n' "$DRIFT_OUT"
+else
+  printf 'DRIFT CHECK: no report produced.\n'
+fi
+
 subsection "AFK"
 if [ -e "$STATE/.afk" ]; then
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
@@ -415,6 +438,14 @@ else
 cat <<EOF
 Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
 This script never starts supervision itself.
+
+EOF
+fi
+if [ "$DRIFT_RC" -ne 0 ]; then
+  cat <<'EOF'
+The drift check above is NOT clean: the durable queue and live reality disagree,
+or a class could not be determined. Reconcile it before dispatching against this
+queue - the check reports only and changes nothing itself.
 
 EOF
 fi
