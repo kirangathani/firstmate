@@ -93,6 +93,15 @@ Tests that need a real optional backend or an explicit opt-in (real herdr/zellij
 Those environments are cached under the shared git common dir in directories named for the version they hold, so a local run pays the install only on a cold or broken cache and on the first run after a pin is bumped; the test file itself owns the pins, the cache rules, and the coverage trade that caching accepts.
 CI does not add its own guard step for those prerequisites: it relies on the `ubuntu-latest` runner already providing `python3`, `venv`, `pip`, `node`, and `npm`, and on this test failing loudly rather than skipping if that ever stops being true, and it always starts cold, so every CI run still exercises the full provisioning path.
 
+### Re-verifying a PR after `main` moves
+
+GitHub re-runs a PR's checks only when the PR's own head changes, so a green result stays green after `main` has moved underneath it, measured against a base that no longer exists.
+The `Base re-verification` workflow is the cheap way back: re-run it (`gh run rerun <run-id>`) and it re-fetches the base at job time and re-runs only the base test files that differ from the branch's copies, with no new push and nothing else re-run.
+It is its own workflow rather than a job inside `ci.yml` precisely so that re-running it is one command against the run, and so it never drags the four behaviour shards along with it.
+`bin/fm-assert-tests-kept.sh` is the single owner of which files those are, and `bin/fm-reverify-base.sh` is the thin caller that renders its verdict; neither the workflow nor anything else re-spells that selection.
+It is a required check and it refuses rather than passing whenever it cannot evaluate, so a green reading always means assertions were actually compared.
+It re-runs the base's assertions against the branch, so it never merges the base's source in and cannot see the two sets of source changes conflicting; merging the moved base forward is still what settles that.
+
 ## Questions
 
 Open an issue, or talk to me on [Discord](https://discord.gg/Wsy2NpnZDu).
