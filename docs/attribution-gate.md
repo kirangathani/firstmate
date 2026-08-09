@@ -121,6 +121,8 @@ These are stated so the gap is visible rather than assumed closed.
 - **Nothing scans a push.** A branch pushed to a remote can carry attribution in its commit messages until the merge gate refuses it. The refusal is at landing, not at push.
 - **`bin/fm-pr-merge.sh` forwards extra arguments to `gh-axi pr merge`.** A caller that passes its own `--body` there writes text the gate never read.
 - **Release notes, tags, and issue comments are not covered.** Only commit messages and the PR description are.
+- **A worktree handed out before this landed has no hook.** The installer runs at spawn, so work already in flight gets the hook only at its next spawn into that project. The landing gate covers those tasks meanwhile, which is the whole reason it is the boundary and the hook is not.
+- **A refusal inside another tool's commit surfaces as that tool's failure.** If anything that commits on the branch on the worker's behalf - the no-mistakes pipeline, a formatter's auto-commit - ever emits attribution, the hook refuses that commit rather than rewriting it quietly. That is the intended outcome, but it appears as a stalled pipeline step, so the message to look for is the checker's own `refused: this commit message carries AI attribution`.
 
 ## Fail-open points, and why each one is deliberate
 

@@ -1135,8 +1135,17 @@ exclude_path() {
 attr_hook_out=$("$FM_ROOT/bin/fm-install-commit-hook.sh" "$WT" 2>&1) || true
 case "$attr_hook_out" in
   *'attribution-hook: installed'*) ;;
-  '') echo "note: could not install the attribution commit-msg hook for $WT; the merge gate still enforces it" >&2 ;;
-  *) printf '%s\n' "$attr_hook_out" >&2 ;;
+  *)
+    # Reported as a note, never as an error: a skipped hook does not fail a
+    # spawn, and the word "error" here would read as one. Each line is prefixed
+    # so the installer's own wording cannot be mistaken for fm-spawn's.
+    while IFS= read -r attr_hook_line; do
+      [ -n "$attr_hook_line" ] && echo "note: $attr_hook_line" >&2
+    done <<EOF_ATTR
+$attr_hook_out
+EOF_ATTR
+    echo "note: the attribution commit-msg hook was not installed for $WT; the merge gate still refuses AI attribution before anything lands" >&2
+    ;;
 esac
 
 if [ "$KIND" != secondmate ]; then
