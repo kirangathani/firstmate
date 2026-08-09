@@ -114,6 +114,9 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# Every non-secondmate spawn also claims its worktree with a gitignored .fm-task
+# marker naming the task, so bin/fm-teardown.sh can prove the recorded pool slot
+# is still that task's before it terminates anything in it.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # followed by " local_skip=on" and/or " ci_skip=on" only when a testing skip is active.
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
@@ -1019,6 +1022,33 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
+exclude_path() {
+  local rel=$1 EXCL
+  EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
+  [ -n "$EXCL" ] || return 0
+  mkdir -p "$(dirname "$EXCL")"
+  grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
+}
+
+# Slot-occupancy marker: which task the worktree currently belongs to.
+# A pooled worktree PATH is a lease, not an identity - treehouse returns a slot
+# to the pool when a task ends and leases the same path to a later task - so a
+# stale `worktree=` in an old meta can name a slot a DIFFERENT task now holds.
+# bin/fm-teardown.sh reads this marker to refuse acting on a slot that is no
+# longer this task's; it is written here, at the earliest point $WT is final for
+# every non-secondmate backend, so the slot is claimed before the agent starts.
+# A secondmate home carries .fm-secondmate-home instead, written by
+# bin/fm-home-seed.sh and enforced by the same script's home-removal check.
+# It is excluded rather than left untracked because an untracked file makes
+# treehouse report the slot dirty, which permanently withholds a crashed task's
+# slot from the pool (verified 2026-08-09, treehouse v2.0.0: a slot holding only
+# an excluded file reports `available`, one holding an untracked file reports
+# `dirty` and is never handed out again).
+if [ "$KIND" != secondmate ]; then
+  printf 'id=%s\n' "$ID" > "$WT/.fm-task"
+  exclude_path '.fm-task'
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -1118,13 +1148,6 @@ mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 FIXCHECK="$FM_ROOT/bin/fm-fix-instructions-check.sh"
-exclude_path() {
-  local rel=$1 EXCL
-  EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
-  [ -n "$EXCL" ] || return 0
-  mkdir -p "$(dirname "$EXCL")"
-  grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
-}
 if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)

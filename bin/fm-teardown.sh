@@ -34,6 +34,36 @@
 # device. It refuses and preserves task state when that proof fails; otherwise
 # it removes the task's check, trust record, PR sidecar, publication record, and
 # quarantine entries with the rest of the volatile state.
+# SLOT OWNERSHIP, checked before every destructive step and NOT waivable by
+# --force: a recorded `worktree=` path is a pool LEASE, not a task identity.
+# treehouse returns a slot to the pool when a task ends and leases the same path
+# to a later task, so an old meta can name a slot a DIFFERENT task now holds, and
+# acting on it terminates that task's live agent and resets its worktree.
+# Verified twice on the captain's fleet: 2026-07-31 a teardown of
+# fm-watcher-identity-p6 read its stale meta and killed the LIVE kept-exec-p2
+# agent that had been leased the same slot ("Terminated lingering processes:
+# bash (595616), claude (596596)"), reporting success; 2026-08-09
+# ci-contention-consult-w4 and fm-stale-base-guard-b8 named the same slot at once
+# with b8 live, and the collision had to be caught by hand.
+# slot_is_foreign owns the proof and is deliberately ordered so that positive
+# self-proof wins over any marker a previous occupant may have left behind:
+#   1. the worktree's .fm-task marker names THIS task            -> owned
+#   2. the worktree's checked-out branch is fm/<task-id>         -> owned
+#   3. .fm-task names another task, or .fm-secondmate-home names
+#      another home                                              -> FOREIGN
+#   4. another state/<other>.meta names the same worktree path   -> FOREIGN
+#   5. no evidence either way                                    -> owned
+# Steps 3 and 4 both refuse, because the other task's uncommitted work is at risk
+# whether or not its agent is still running. --force authorizes discarding THIS
+# task's unlanded work; it is never authority to discard another task's, so the
+# check runs regardless of it.
+# A refused task is not left un-clearable: --release-lost-slot re-proves foreign
+# ownership and then clears only this task's own durable records - state files,
+# its own labeled runtime endpoint, its own temp root - never touching the slot.
+# It accepts only step 3's marker proof, which names the holder outright. Step 4
+# proves a collision without saying which of the two records is the stale one, so
+# clearing either could be the one that cuts a live worker off from its records;
+# that case refuses both paths and is left for the operator to establish.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -44,10 +74,14 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--force | --release-lost-slot]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
-#   when the captain has explicitly said to discard the work.
+#   when the captain has explicitly said to discard the work. It never waives the
+#   slot-ownership check.
+#   --release-lost-slot clears this task's own records after proving its recorded
+#   worktree now belongs to someone else. It touches no worktree and refuses when
+#   the task still owns its slot. The two flags are mutually exclusive.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -103,7 +137,25 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   exit 2
 fi
 ID=$1
-FORCE=${2:-}
+shift
+FORCE=
+RELEASE_LOST_SLOT=0
+# Set here, not at the ownership check, so every function that reads it is safe
+# under `set -u` whatever order the flow reaches them in.
+SLOT_LOST=0
+# Parsed strictly rather than read off $2: a mistyped flag must not read as "no
+# flag" and silently take a different path than the operator asked for.
+for teardown_arg in "$@"; do
+  case "$teardown_arg" in
+    --force) FORCE=--force ;;
+    --release-lost-slot) RELEASE_LOST_SLOT=1 ;;
+    *) echo "error: unknown teardown option $teardown_arg" >&2; exit 2 ;;
+  esac
+done
+if [ "$FORCE" = "--force" ] && [ "$RELEASE_LOST_SLOT" = 1 ]; then
+  echo "error: --force and --release-lost-slot are mutually exclusive; --release-lost-slot discards no work" >&2
+  exit 2
+fi
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -395,6 +447,13 @@ work_is_landed() {
 backlog_refresh_reminder() {
   local pr done_cmd report_path
   [ "$KIND" = secondmate ] && return 0
+  # A released lost slot is not a finished task: its worker is gone and whatever
+  # it had not landed went with the slot. Prompting for `done` here would record
+  # a completion that never happened.
+  if [ "$SLOT_LOST" = 1 ]; then
+    printf '%s\n' "Backlog: $ID's worker and worktree are gone, so it did not finish. Judge from its own PR or report whether the work landed, record it accordingly, and re-queue anything that has to be redone."
+    return 0
+  fi
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
       scout)
@@ -479,6 +538,118 @@ canonical_existing_dir() {
   [ -n "$target" ] || return 1
   [ -d "$target" ] || return 1
   ( cd "$target" && pwd -P )
+}
+
+# --- Slot ownership ---------------------------------------------------------
+# The script header owns why a recorded worktree path cannot stand in for a task
+# identity, and the ordered proof these functions implement.
+FM_TASK_MARKER=.fm-task
+SLOT_HOLDER=
+# Which evidence proved a foreign holder: `marker` names the holder directly and
+# is conclusive, `record` only says two durable records name one worktree and
+# cannot say which of them is stale. Both refuse the destructive path; only
+# `marker` licenses --release-lost-slot, because clearing the wrong side of an
+# ambiguous collision would orphan a live worker from its own records.
+SLOT_PROOF=
+
+# The task id in <worktree>'s .fm-task marker, or nothing when it carries none or
+# an unreadable one. bin/fm-spawn.sh writes it when it claims the slot and this
+# script removes it before returning the slot, so a marker found in a pooled
+# worktree names that worktree's current occupant.
+slot_marker_task_id() {  # <worktree>
+  local wt=$1 marker first id
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  marker="$wt/$FM_TASK_MARKER"
+  { [ -f "$marker" ] && [ ! -L "$marker" ]; } || return 0
+  first=
+  IFS= read -r first < "$marker" 2>/dev/null || true
+  case "$first" in id=*) id=${first#id=} ;; *) return 0 ;; esac
+  fm_task_id_path_safe "$id" || return 0
+  printf '%s' "$id"
+}
+
+# The secondmate id in <dir>'s .fm-secondmate-home marker, or nothing. A leased
+# secondmate home occupies a slot in the same pool as this repo's own task
+# worktrees, so it is the other identity a recycled slot can be carrying.
+slot_marker_secondmate_id() {  # <dir>
+  local dir=$1 marker id
+  [ -n "$dir" ] || return 0
+  marker="$dir/$SUB_HOME_MARKER"
+  { [ -f "$marker" ] && [ ! -L "$marker" ]; } || return 0
+  id=$(cat "$marker" 2>/dev/null || true)
+  fm_task_id_path_safe "$id" || return 0
+  printf '%s' "$id"
+}
+
+# Ids of OTHER tasks recorded in <state-dir> whose meta names <worktree>, as a
+# comma-separated list, or nothing.
+slot_colliding_task_ids() {  # <worktree> <task-id> <state-dir>
+  local wt=$1 id=$2 state_dir=$3 wt_abs meta other other_wt other_abs out=
+  [ -d "$state_dir" ] || return 0
+  wt_abs=$(canonical_existing_dir "$wt") || wt_abs=$wt
+  for meta in "$state_dir"/*.meta; do
+    [ -f "$meta" ] || continue
+    other=$(basename "$meta" .meta)
+    [ "$other" != "$id" ] || continue
+    other_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$other_wt" ] || continue
+    other_abs=$(canonical_existing_dir "$other_wt") || other_abs=$other_wt
+    [ "$other_abs" = "$wt_abs" ] || continue
+    out="${out:+$out, }$other"
+  done
+  printf '%s' "$out"
+}
+
+# 0 when a DIFFERENT holder of <worktree> is proven, with SLOT_HOLDER set to a
+# description of who holds it; 1 when <task-id> still owns the worktree, or when
+# there is no worktree left to hold.
+slot_is_foreign() {  # <worktree> <task-id> <state-dir>
+  local wt=$1 id=$2 state_dir=$3 marker sub branch collide label
+  SLOT_HOLDER=
+  SLOT_PROOF=
+  { [ -n "$wt" ] && [ -d "$wt" ]; } || return 1
+  # Positive self-proof first, so a marker a previous occupant left behind can
+  # never false-refuse a task that demonstrably still holds the slot.
+  marker=$(slot_marker_task_id "$wt")
+  if [ -n "$marker" ] && [ "$marker" = "$id" ]; then
+    return 1
+  fi
+  branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  if [ "$branch" = "fm/$id" ]; then
+    return 1
+  fi
+  if [ -n "$marker" ]; then
+    SLOT_HOLDER="task $marker, per the $FM_TASK_MARKER marker in that worktree"
+    SLOT_PROOF=marker
+    return 0
+  fi
+  sub=$(slot_marker_secondmate_id "$wt")
+  if [ -n "$sub" ] && [ "$sub" != "$id" ]; then
+    SLOT_HOLDER="secondmate home $sub, per the $SUB_HOME_MARKER marker in that directory"
+    SLOT_PROOF=marker
+    return 0
+  fi
+  collide=$(slot_colliding_task_ids "$wt" "$id" "$state_dir")
+  if [ -n "$collide" ]; then
+    label=task
+    case "$collide" in *,*) label=tasks ;; esac
+    SLOT_HOLDER="$label $collide, whose durable record names the same worktree"
+    SLOT_PROOF=record
+    return 0
+  fi
+  return 1
+}
+
+refuse_foreign_slot() {  # <worktree> <task-id>
+  local wt=$1 id=$2
+  echo "REFUSED: worktree $wt is no longer task $id's; it is held by $SLOT_HOLDER." >&2
+  echo "Returning it would terminate that work's processes and reset its worktree, so teardown stops here." >&2
+  echo "--force does not apply: it authorizes discarding THIS task's unlanded work, never another task's." >&2
+  if [ "$SLOT_PROOF" = marker ]; then
+    echo "To clear only $id's own records and leave that worktree alone, run: $FM_ROOT/bin/fm-teardown.sh $id --release-lost-slot" >&2
+  else
+    echo "Nothing here can say which of those records is the stale one, so establish that first; clearing the wrong one would cut a live worker off from its own records." >&2
+  fi
 }
 
 retry_wait_secs_is_valid() {
@@ -653,7 +824,11 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$)' | head -1 || true)
+  # fm-spawn.sh excludes its own worktree files from git, so they normally never
+  # appear here at all; this filter is the backstop for a worktree whose exclude
+  # write did not take, so firstmate's own bookkeeping can never read as the
+  # crewmate's uncommitted work.
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$|\.fm-task$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -938,6 +1113,14 @@ validate_firstmate_home_children_removal() {
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
     fi
+    # A discarded home's child records can name a recycled slot for exactly the
+    # reason the script header describes, and forced discard of THIS home is not
+    # authority over whoever holds that slot now.
+    if [ "$child_kind" != secondmate ] && slot_is_foreign "$child_wt" "$child_id" "$sub_state"; then
+      echo "REFUSED: child task $child_id's worktree $child_wt is held by $SLOT_HOLDER." >&2
+      echo "Discarding this home must not touch it; resolve that task first." >&2
+      return 1
+    fi
   done
 }
 
@@ -983,12 +1166,12 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend" "$child_wt/$FM_TASK_MARKER"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend" "$child_wt/$FM_TASK_MARKER"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
@@ -1016,6 +1199,32 @@ remove_secondmate_registry_entry() {
   grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv "$tmp" "$SECONDMATE_REG"
 }
+
+# Slot ownership is proven before anything else is validated for removal, and
+# ahead of every --force waiver, because --force waives only this task's own
+# checks. See the script header for the ordered proof and the recorded incidents.
+if [ "$KIND" != secondmate ]; then
+  if slot_is_foreign "$WT" "$ID" "$STATE"; then
+    if [ "$RELEASE_LOST_SLOT" = 1 ] && [ "$SLOT_PROOF" != marker ]; then
+      echo "REFUSED: worktree $WT is claimed by $SLOT_HOLDER, but nothing proves which record is the stale one." >&2
+      echo "Establish that first: clearing the wrong side would cut a live worker off from its own records." >&2
+      exit 1
+    elif [ "$RELEASE_LOST_SLOT" = 1 ]; then
+      echo "teardown: worktree $WT is held by $SLOT_HOLDER; clearing task $ID's own records only and leaving that worktree untouched" >&2
+      SLOT_LOST=1
+    else
+      refuse_foreign_slot "$WT" "$ID"
+      exit 1
+    fi
+  elif [ "$RELEASE_LOST_SLOT" = 1 ]; then
+    echo "REFUSED: task $ID still holds worktree $WT, so there is no lost slot to release." >&2
+    echo "Use the ordinary teardown, which keeps the uncommitted-work and unlanded-work checks." >&2
+    exit 1
+  fi
+elif [ "$RELEASE_LOST_SLOT" = 1 ]; then
+  echo "error: --release-lost-slot does not apply to a secondmate home; its identity is already checked against $SUB_HOME_MARKER before removal" >&2
+  exit 2
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -1068,7 +1277,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ "$SLOT_LOST" != 1 ] && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -1083,7 +1292,11 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
+if [ "$SLOT_LOST" = 1 ]; then
+  # The recorded worktree belongs to another task: no branch delete, no hook
+  # removal, no treehouse or Orca return. Only this task's own records go.
+  :
+elif [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
@@ -1095,7 +1308,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
     fi
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend" "$WT/$FM_TASK_MARKER"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
@@ -1107,7 +1320,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend" "$WT/$FM_TASK_MARKER"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -1140,5 +1353,9 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
-echo "teardown $ID complete (window $T, worktree $WT)"
+if [ "$SLOT_LOST" = 1 ]; then
+  echo "teardown $ID records released (window $T; worktree $WT left untouched, held by $SLOT_HOLDER)"
+else
+  echo "teardown $ID complete (window $T, worktree $WT)"
+fi
 backlog_refresh_reminder
