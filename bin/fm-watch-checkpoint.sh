@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
 # Run one bounded foreground watcher checkpoint for harnesses that should not
 # rely on background-task completion to wake the model.
+#
+# This is Codex's documented watcher protocol, so it is the SECOND entry point
+# into supervision and carries the same session-lock gate bin/fm-watch-arm.sh
+# does: it runs bin/fm-watch.sh, which takes the watcher singleton
+# (state/.watch.lock), and without the gate a non-owning Codex session would
+# still supervise a fleet a different session controls. The gate lives on the
+# entry points, never on bin/fm-watch.sh itself: that script is also forked as a
+# child by the arm and by the away-mode daemon, and gating it would refuse those
+# legitimate children.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
+
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -42,6 +57,21 @@ done
 case "$SECONDS_ARG" in
   ''|*[!0-9]*) echo "error: --seconds must be a positive integer" >&2; exit 2 ;;
   0) echo "error: --seconds must be greater than zero" >&2; exit 2 ;;
+esac
+
+# Same three-way decision, and the same wording, as bin/fm-watch-arm.sh: a
+# non-owner declines quietly with exit 0 because declining is correct rather than
+# a failure, while an absent or dead-holder lock still runs the checkpoint,
+# announced, so a home whose session start never ran is not left unsupervised.
+case "$(fm_session_lock_ownership "$STATE")" in
+  owned) ;;
+  other)
+    echo "watcher: read-only - another firstmate session holds this home's session lock; not arming"
+    exit 0
+    ;;
+  *)
+    echo "watcher: no live session holds this home's session lock - arming anyway; run bin/fm-session-start.sh to claim it"
+    ;;
 esac
 
 OUT=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.out.XXXXXX") || exit 1

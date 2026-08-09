@@ -93,6 +93,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -280,6 +281,53 @@ test_hook_blocks_when_unhealthy_in_primary() {
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
   pass "fm-turnend-guard: blocks with the exact required reason in the primary when unhealthy"
+}
+
+# Fleet supervision belongs to the session holding this home's SESSION lock
+# (state/.lock, not the state/.watch.lock watcher singleton). A session that does
+# not hold it cannot arm a watcher at all, so the blind-turn alarm would be a
+# hard stop-hook error on nearly every turn telling a read-only session to repair
+# supervision it must not touch.
+test_hook_silent_when_another_session_owns_the_fleet() {
+  local dir other out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-not-lock-owner")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  other=$!
+  printf '%s\n' "$other" > "$dir/state/.lock"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 0 "$status" "hook must not block a session that does not hold the session lock"
+  [ -z "$out" ] || fail "hook nagged a session that does not own the fleet: $out"
+  pass "fm-turnend-guard: silent when another live session holds the session lock"
+}
+
+# The same fixture with the session lock held by THIS session must still alarm:
+# silencing the non-owner may not silence the owner.
+test_hook_blocks_when_this_session_owns_the_fleet() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-lock-owner")
+  : > "$dir/state/task1.meta"
+  printf '%s\n' "$$" > "$dir/state/.lock"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must still block the session that holds the session lock"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
+  pass "fm-turnend-guard: still blocks the session that owns the fleet and has no watcher"
+}
+
+# A dead holder means nobody is supervising the in-flight work and this session
+# is the one that should take the lock, so the alarm must survive there too.
+test_hook_blocks_when_no_session_holds_the_lock() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-dead-lock-owner")
+  : > "$dir/state/task1.meta"
+  printf '%s\n' "$(nonexistent_pid)" > "$dir/state/.lock"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block when the session lock names a dead holder"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: blocks when no live session holds the session lock"
 }
 
 test_hook_blocks_from_fm_home_state() {
@@ -918,6 +966,9 @@ test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
+test_hook_silent_when_another_session_owns_the_fleet
+test_hook_blocks_when_this_session_owns_the_fleet
+test_hook_blocks_when_no_session_holds_the_lock
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
 test_hook_ignores_repo_state_when_fm_home_set

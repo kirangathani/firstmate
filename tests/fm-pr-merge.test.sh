@@ -71,6 +71,17 @@
 #   (w4) the waiver does not excuse a PR reporting zero checks
 #   (w5) the kept-tests gate still runs, and still refuses, under every
 #        skip-flag combination
+#
+# The branch-suite premise behind check 2's identical-file skip (contract in
+# bin/fm-pr-merge.sh's header), asserted from the stub detector's own argv:
+#   (p1) an ordinary merge passes --assume-branch-suite-green, since its own
+#        checks-green gate is what holds that premise up
+#   (p2) a ci_skip=on task does NOT, and says the gate re-ran in full: a waiver
+#        removes the very suite the premise names
+#   (p3) a project with the no-pr-ci marker does NOT either, since that marker
+#        lets an EMPTY rollup pass the checks-green gate
+#   (p4) `assumed-covered:` lines are disclosed with a count in the merge log
+#        and are never treated as a finding
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -618,8 +629,13 @@ make_stub_case() {
   else
     : > "$case_dir/kept-findings"
   fi
+  # The stub records its own argv, so the premise cases below can assert which
+  # arguments fm-pr-merge.sh actually handed the detector rather than inferring
+  # it from an outcome that would look the same either way.
+  : > "$case_dir/kept-argv"
   cat > "$shimbin/fm-assert-tests-kept.sh" <<SH
 #!/usr/bin/env bash
+printf '%s\n' "\$@" > "$case_dir/kept-argv"
 cat "$case_dir/kept-findings"
 exit $exit_code
 SH
@@ -1488,8 +1504,103 @@ test_kept_tests_gate_still_runs_under_every_skip() {
   pass "the kept-tests gate runs, and still refuses, under every skip-flag combination"
 }
 
+### the premise behind check 2's identical-file skip ##########################
+#
+# bin/fm-assert-tests-kept.sh only skips a base test file the branch's copy
+# matches byte for byte when a caller asserts the branch's own suite is verified
+# green. This script is the caller that holds that premise, through its own
+# checks-green gate - so these cases pin WHO asserts it and, more importantly,
+# the two cases where it must not be asserted at all.
+
+test_merge_asserts_the_branch_suite_premise_to_the_kept_gate() {
+  local case_dir rc
+  case_dir=$(make_stub_case premise-asserted 0)
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/90 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "premise-asserted: an ordinary green PR must merge"
+  assert_grep '--assume-branch-suite-green' "$case_dir/kept-argv" \
+    "premise-asserted: the ordinary path must let the gate skip files the branch's green suite already ran"
+  pass "an ordinary merge asserts the branch-suite premise to the kept-tests gate"
+}
+
+test_ci_waived_task_re_runs_every_base_test_file() {
+  local case_dir rc
+  case_dir=$(make_stub_case premise-ci-waived 0)
+  # With the PR's CI test jobs waived there is no green branch suite at all, so
+  # the kept-tests gate is this merge's only test evidence and must not behave
+  # as though it had one.
+  add_skip_flags "$case_dir" 'ci_skip=on'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/91 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "premise-ci-waived: a waived PR must still be mergeable"
+  assert_no_grep '--assume-branch-suite-green' "$case_dir/kept-argv" \
+    "premise-ci-waived: a CI-waived task must never assert a premise its own waiver removed"
+  assert_grep 'were re-run in full' "$case_dir/stderr" \
+    "premise-ci-waived: the full re-run must be stated in the merge log"
+  assert_grep 'EVERY base test file is re-run here' "$case_dir/stderr" \
+    "premise-ci-waived: the waiver banner must say the gate is running at full cost"
+  pass "a CI-waived task re-runs every base test file instead of assuming coverage"
+}
+
+test_no_pr_ci_project_re_runs_every_base_test_file() {
+  local case_dir rc
+  case_dir=$(make_stub_case premise-no-pr-ci 0)
+  # A project the captain has marked as running no PR CI passes the checks-green
+  # gate on an EMPTY rollup, so that gate cannot supply the premise either.
+  enable_no_pr_ci "$case_dir"
+  write_pr_checks "$case_dir"
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/92 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "premise-no-pr-ci: a marked zero-check project must still merge"
+  assert_no_grep '--assume-branch-suite-green' "$case_dir/kept-argv" \
+    "premise-no-pr-ci: a project with no PR CI has no branch suite to assume coverage from"
+  assert_grep 'were re-run in full' "$case_dir/stderr" \
+    "premise-no-pr-ci: the full re-run must be stated in the merge log"
+  pass "a project with no PR CI re-runs every base test file instead of assuming coverage"
+}
+
+test_assumed_covered_findings_are_disclosed_and_do_not_block() {
+  local case_dir rc
+  case_dir=$(make_stub_case premise-disclosed 0 \
+    'assumed-covered: tests/a.test.sh::alpha holds' \
+    'assumed-covered: tests/a.test.sh::beta holds' \
+    'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0 assumed-covered=2 unstable=0')
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/93 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "premise-disclosed: an assumed-covered identifier is accounted for, not a finding"
+  assert_grep '2 base assertion(s) were not re-run here' "$case_dir/stderr" \
+    "premise-disclosed: the merge log must say how many assertions were not re-run"
+  assert_no_grep 'no captain-approved supersession entry covers' "$case_dir/stderr" \
+    "premise-disclosed: an assumed-covered identifier must not be treated as a finding"
+  pass "assumed-covered identifiers are disclosed in the merge log and never block"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
+test_merge_asserts_the_branch_suite_premise_to_the_kept_gate
+test_ci_waived_task_re_runs_every_base_test_file
+test_no_pr_ci_project_re_runs_every_base_test_file
+test_assumed_covered_findings_are_disclosed_and_do_not_block
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge

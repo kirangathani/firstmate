@@ -25,6 +25,32 @@
 # This gate is firstmate-side, so it protects every repo including ones with no
 # PR CI.
 #
+# Check 2's cost control, and why this script is what makes it honest: running
+# every base test file twice is the dominant cost of landing a PR (~20-35
+# minutes on firstmate itself). bin/fm-assert-tests-kept.sh can skip a base test
+# file the branch's copy matches BYTE FOR BYTE, because the branch's own suite
+# runs that identical file against that same branch code - but only when a
+# caller passes --assume-branch-suite-green to assert that suite is verified
+# green. That assertion is THIS script's to make, and it rests on the
+# checks-green gate below refusing to merge a PR whose checks are failing,
+# pending or unreadable: within one run of this command, a skip taken under the
+# flag can never carry a merge whose suite was not verified green. The gate's
+# order in the file does not weaken that - both must pass before the merge, and
+# a conjunction does not care which is evaluated first.
+# The flag is therefore WITHHELD in exactly the two cases where the checks-green
+# gate cannot supply the premise, and check 2 then runs in full as it always has:
+#   - the task carries ci_skip=on: the captain waived the PR's CI test jobs, so
+#     the branch's suite never ran on the PR at all. This is precisely when the
+#     kept-tests gate is the only test evidence the merge has, which is what the
+#     waiver banner below already claims, so it must not be the run that
+#     shortcuts it.
+#   - $FM_HOME/data/no-pr-ci/<project> is present: the project intentionally
+#     runs no PR CI, so a zero-check rollup passes the checks-green gate without
+#     any suite having run.
+# Every identifier the check does skip is reported by it as `assumed-covered:`
+# and echoed here as a note, so a merge log never shows a green over assertions
+# nothing re-ran. The class does not block: it is accounted for, not a finding.
+#
 # A refusal has two causes the coder cannot reliably tell apart. Rebase damage:
 # the conflict resolution ate the base's behavior; redoing the resolution makes
 # the base's assertion pass again and the gate clears itself. Deliberate
@@ -189,10 +215,12 @@
 #     CI is fully waived must still leave at least one check reporting or the
 #     merge refuses as unverified exactly as it does today.
 #   - The kept-tests gate above runs under EVERY flag combination and no skip
-#     flag can disable it. It costs seconds, it is firstmate-side rather than
-#     CI-side, and it is what catches a rebase quietly eating a base assertion -
-#     which is precisely the failure a PR with no test evidence cannot catch any
-#     other way.
+#     flag can disable it. It is firstmate-side rather than CI-side, and it is
+#     what catches a rebase quietly eating a base assertion - which is precisely
+#     the failure a PR with no test evidence cannot catch any other way. Under
+#     ci_skip=on it runs at FULL cost, with no identical-file skip, for exactly
+#     that reason: it is then the merge's only test evidence, so it has no green
+#     branch suite to lean on and must not behave as though it had one.
 #
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
@@ -285,6 +313,11 @@ waiver_banner() {  # <where>
     fi
     echo "  still enforced:  the base's own test assertions (fm-assert-tests-kept.sh) and"
     echo "                   every PR check gate below; no skip flag can disable either."
+    if [ "$CI_SKIP" = on ]; then
+      echo "                   With CI waived there is no green branch suite to lean on, so"
+      echo "                   EVERY base test file is re-run here rather than assumed"
+      echo "                   covered - slower, and the only test evidence this merge has."
+    fi
     echo "================================================================================"
   } >&2
 }
@@ -310,11 +343,34 @@ grep -qxF "pr=$URL" "$META" || {
 KEPT_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-kept.XXXXXX")
 CHECKS_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-checks.XXXXXX")
 trap 'rm -f "$KEPT_OUT" "$CHECKS_ERR"' EXIT
+
+# --- the premise behind check 2's identical-file skip (contract in this
+# --- script's header) ---------------------------------------------------------
+# Decided from facts this script already holds, BEFORE the check runs, so no
+# reordering of the gates is needed to establish it honestly.
+KEPT_ARGS=()
+FULL_RERUN_REASON=
+if [ "$CI_SKIP" = on ]; then
+  FULL_RERUN_REASON="this task's CI test jobs were waived, so the branch's own suite never ran on the PR"
+elif [ -n "$PROJ_NAME" ] && [ -e "$NO_PR_CI_FILE" ]; then
+  FULL_RERUN_REASON="$PROJ_NAME is marked as running no PR CI, so no branch suite runs on the PR"
+else
+  KEPT_ARGS+=(--assume-branch-suite-green)
+fi
+
 set +e
-"$SCRIPT_DIR/fm-assert-tests-kept.sh" "$ID" > "$KEPT_OUT"
+"$SCRIPT_DIR/fm-assert-tests-kept.sh" ${KEPT_ARGS[@]+"${KEPT_ARGS[@]}"} "$ID" > "$KEPT_OUT"
 kept_rc=$?
 set -e
 cat "$KEPT_OUT"
+if [ -n "$FULL_RERUN_REASON" ]; then
+  echo "note: the base's test assertions were re-run in full: $FULL_RERUN_REASON" >&2
+else
+  assumed_covered=$(grep -c '^assumed-covered: ' "$KEPT_OUT" || true)
+  if [ "${assumed_covered:-0}" -gt 0 ]; then
+    echo "note: $assumed_covered base assertion(s) were not re-run here because the branch's copy of their test file is byte-identical, so the branch's own suite already ran them against this code; the checks-green gate below is what holds that premise up" >&2
+  fi
+fi
 if [ "$kept_rc" -ne 0 ] && [ "$kept_rc" -ne 1 ]; then
   echo "error: could not verify the base's tests are kept (fm-assert-tests-kept.sh exit $kept_rc, see above); refusing to merge unverified" >&2
   echo "error: repair the task's worktree/project so the check can run, then re-run fm-pr-merge.sh" >&2

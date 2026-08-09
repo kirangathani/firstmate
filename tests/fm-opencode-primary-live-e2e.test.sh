@@ -101,6 +101,8 @@ mkdir -p "$LAB"
 git clone -q "$ROOT" "$PROJECT"
 cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$PROJECT/.opencode/plugins/fm-primary-watch-arm.js"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
+cp "$ROOT/bin/fm-lock.sh" "$PROJECT/bin/fm-lock.sh"
+cp "$ROOT/bin/fm-session-lock-lib.sh" "$PROJECT/bin/fm-session-lock-lib.sh"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
 printf 'project=fixture\n' > "$HOME_DIR/state/opencode-e2e.meta"
 

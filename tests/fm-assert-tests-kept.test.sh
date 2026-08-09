@@ -78,11 +78,18 @@
 #        no recorded PR still resolves the default branch; and explicit mode
 #        takes the caller's --base verbatim without consulting GitHub
 #   (ee) an assertion whose NAME is built from a runtime value: check 2 refuses to
-#       compare a name it cannot resolve in check 1's static extraction and
-#       reports `unstable:` rather than a false `failing:`; that refusal never
-#       swallows a genuinely failing assertion or masks a deleted one in the same
-#       file; and the constant-named fix is both compared cleanly AND finally
-#       accounted for, which the unexpanded form never could be
+#        compare a name it cannot resolve in check 1's static extraction and
+#        reports `unstable:` rather than a false `failing:`; that refusal never
+#        swallows a genuinely failing assertion or masks a deleted one in the same
+#        file; and the constant-named fix is both compared cleanly AND finally
+#        accounted for, which the unexpanded form never could be
+#   (ff) --assume-branch-suite-green: a base test file the branch's copy matches
+#        byte for byte is NOT executed and every identifier in it is reported
+#        `assumed-covered:` at exit zero; the same tree without the flag executes
+#        it and reports `failing:`, so the skip is opt-in and the flagged run
+#        really did decline to run it; a rewritten assertion body and a deleted
+#        base test file are both still caught under the flag; and identical
+#        content at a DIFFERENT path is never treated as identical
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -249,13 +256,18 @@ commit_all() {
   git -C "$1" commit -qm "$2"
 }
 
+# run_explicit <dir> [<extra arg>...]: explicit --worktree/--base mode. Extra
+# args are passed through BEFORE the positional ones, which is where the
+# premise-flag cases below want them; one case deliberately passes the flag
+# after them instead, to hold up the "any argument position" claim.
 run_explicit() {
   local dir=$1
+  shift
   mkdir -p "$dir/.state"
   touch "$dir/.state/.last-watcher-beat"
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$dir/.state" \
-    "$ASSERT_KEPT" --worktree "$dir" --base main --branch work
+    "$ASSERT_KEPT" "$@" --worktree "$dir" --base main --branch work
 }
 
 # --- the PR-base fixtures ----------------------------------------------------
@@ -828,6 +840,141 @@ test_unexecutable_files_are_reported_not_passed() {
   assert_grep 'captured baseline output' "$dir/stderr" \
     "unexecuted-report: the verbatim baseline output must be captured as evidence"
   pass "base test files check 2 cannot execute are reported as unexecuted, never as a pass"
+}
+
+# --- (ff) the --assume-branch-suite-green identical-file skip ----------------
+# The flag lets check 2 skip a base test file the branch's copy matches byte for
+# byte, on the premise that the branch's own verified-green suite already ran
+# that identical file against that same branch code. These cases hold up all
+# four halves of that: the skip happens and is REPORTED, it is off by default,
+# it never reaches the cases the gate exists for (a rewritten body, a deleted
+# file), and a MOVED file is not mistaken for an identical one.
+
+test_assume_green_reports_an_identical_file_instead_of_running_it() {
+  local dir out code
+  dir=$(make_zk_repo assume-identical)
+  # The test file is left BYTE-IDENTICAL while app.sh changes Z -> K, so main's
+  # assertion would FAIL if it were executed. That is what makes non-execution
+  # observable at all, and it deliberately falsifies the flag's premise: a real
+  # branch in this state has a RED suite, so bin/fm-pr-merge.sh's checks-green
+  # gate refuses the merge and the flag is never honestly passed for it. This
+  # fixture is the proof of mechanism, and it is exactly why the flag is opt-in
+  # rather than the default.
+  printf '#!/usr/bin/env bash\necho K\n' > "$dir/app.sh"
+  commit_all "$dir" "branch changes app.sh only; the test file is untouched"
+
+  set +e
+  out=$(run_explicit "$dir" --assume-branch-suite-green 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "assume-identical: an assumed-covered identifier must not affect the exit code"
+  assert_contains "$out" 'assumed-covered: tests/x.test.sh::X behaves' \
+    "assume-identical: every identifier in a skipped file must be reported in its own class"
+  assert_contains "$out" 'assumed-covered=1' \
+    "assume-identical: the summary must count the assumed-covered identifier"
+  assert_not_contains "$out" 'failing:' \
+    "assume-identical: the identical file must not have been executed at all"
+  assert_not_contains "$out" 'unexecuted:' \
+    "assume-identical: a deliberately skipped file is accounted for, never unexecuted"
+  pass "an identical base test file is reported assumed-covered instead of being run"
+}
+
+test_identical_file_is_executed_without_the_premise_flag() {
+  local dir out code
+  # The SAME tree as the case above. Without the flag nothing is skipped, so
+  # main's assertion is executed against the branch's K and reported failing -
+  # proving both that the skip is opt-in and that the case above really did
+  # decline to run the file rather than running it and finding nothing.
+  dir=$(make_zk_repo assume-default-off)
+  printf '#!/usr/bin/env bash\necho K\n' > "$dir/app.sh"
+  commit_all "$dir" "branch changes app.sh only; the test file is untouched"
+
+  set +e
+  out=$(run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "assume-default-off: without the flag the base's assertion must still be run and fail"
+  assert_contains "$out" 'failing: tests/x.test.sh::X behaves' \
+    "assume-default-off: the default path must execute the identical file exactly as before"
+  assert_contains "$out" 'assumed-covered=0' \
+    "assume-default-off: nothing may be assumed covered when the caller asserted no premise"
+  assert_not_contains "$out" 'assumed-covered: ' \
+    "assume-default-off: no identifier may be reported assumed-covered without the flag"
+  pass "the identical-file skip is off by default and the run is unchanged"
+}
+
+test_assume_green_still_catches_a_rewritten_assertion_body() {
+  local dir out code
+  dir=$(make_zk_repo assume-rewrite)
+  # The motivating scenario: the resolver takes K's side in BOTH files, so the
+  # name survives check 1 and the test file DIFFERS from main's. A differing
+  # file is never identical, so the flag must not reach it.
+  write_zk_tree "$dir" K K
+  commit_all "$dir" "resolver takes K in both app.sh and test"
+
+  set +e
+  out=$(run_explicit "$dir" --assume-branch-suite-green 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "assume-rewrite: a rewritten assertion body must still exit non-zero under the flag"
+  assert_contains "$out" 'failing: tests/x.test.sh::X behaves' \
+    "assume-rewrite: the flag must not stop check 2 catching a rewritten assertion body"
+  assert_contains "$out" 'assumed-covered=0' \
+    "assume-rewrite: a file whose content differs is never assumed covered"
+  pass "a rewritten assertion body is still caught under --assume-branch-suite-green"
+}
+
+test_assume_green_still_catches_a_deleted_base_test_file() {
+  local dir out code
+  dir=$(make_zk_repo assume-delete)
+  git -C "$dir" rm -q tests/x.test.sh
+  git -C "$dir" commit -qm "branch deletes main's test file"
+
+  mkdir -p "$dir/.state"
+  touch "$dir/.state/.last-watcher-beat"
+  set +e
+  # The flag TRAILS the positional arguments here rather than going through
+  # run_explicit, holding up the contract that it is accepted in any argument
+  # position rather than in one blessed slot.
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/.state" \
+    "$ASSERT_KEPT" --worktree "$dir" --base main --branch work \
+    --assume-branch-suite-green 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "assume-delete: a deleted base test file must still exit non-zero under the flag"
+  assert_contains "$out" 'missing: tests/x.test.sh::X behaves' \
+    "assume-delete: check 1 must still report the deleted assertion"
+  assert_contains "$out" 'assumed-covered=0' \
+    "assume-delete: a file the branch does not hold at all is never assumed covered"
+  pass "a deleted base test file is still caught under --assume-branch-suite-green"
+}
+
+test_assume_green_does_not_treat_a_moved_file_as_identical() {
+  local dir out code
+  dir=$(make_zk_repo assume-move)
+  # Identical CONTENT at a different path. Identity is the blob at the SAME
+  # path, so this is a delete plus an add and main's path has no branch copy
+  # whose run could stand in for it.
+  git -C "$dir" mv tests/x.test.sh tests/y.test.sh
+  git -C "$dir" commit -qm "branch moves the test file, content unchanged"
+
+  set +e
+  out=$(run_explicit "$dir" --assume-branch-suite-green 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "assume-move: a moved test file is still the documented check 1 report"
+  assert_contains "$out" 'missing: tests/x.test.sh::X behaves' \
+    "assume-move: check 1 must still report the identifier at its old path"
+  assert_not_contains "$out" 'assumed-covered: ' \
+    "assume-move: identical content at a DIFFERENT path must never be assumed covered"
+  assert_contains "$out" 'assumed-covered=0' \
+    "assume-move: the summary must show nothing was assumed covered"
+  pass "a moved base test file is not mistaken for an identical one"
 }
 
 # --- pytest fixtures --------------------------------------------------------
@@ -2004,7 +2151,7 @@ pass "tag is readable"
   set -e
 
   expect_code 0 "$code" "constant-name: a constant identity over a changed value must exit zero"
-  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0 unstable=0' \
+  assert_contains "$out" 'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0 assumed-covered=0 unstable=0' \
     "constant-name: every class must be zero, including the unaccounted one the dynamic name always landed in"
   pass "a constant assertion name over a changed runtime value is compared cleanly and actually accounted for"
 }
@@ -2024,6 +2171,11 @@ test_identical_branch_loses_nothing
 test_removed_js_test_reported
 test_rewritten_assertion_caught_by_check2
 test_behavior_preserving_rewrite_is_silent_zero
+test_assume_green_reports_an_identical_file_instead_of_running_it
+test_identical_file_is_executed_without_the_premise_flag
+test_assume_green_still_catches_a_rewritten_assertion_body
+test_assume_green_still_catches_a_deleted_base_test_file
+test_assume_green_does_not_treat_a_moved_file_as_identical
 test_unexecutable_files_are_reported_not_passed
 test_pytest_clean_run_exits_zero
 test_pytest_rewritten_assertion_caught
