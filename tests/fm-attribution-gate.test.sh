@@ -277,7 +277,7 @@ pass "(o) a project's own commit-msg hook is never clobbered"
 
 "$INSTALL" "$E2E/wt" >/dev/null || fail "(p) a second install should succeed"
 "$INSTALL" "$E2E/wt" >/dev/null || fail "(p) a third install should succeed"
-[ "$(grep -c 'fm-attribution-hook-v1' "$COMMON/hooks/commit-msg")" -ge 1 ] \
+[ "$(grep -c 'fm-commit-hook-v2' "$COMMON/hooks/commit-msg")" -ge 1 ] \
   || fail "(p) the reinstalled shim should still carry its marker"
 pass "(p) reinstalling over our own shim is idempotent"
 
