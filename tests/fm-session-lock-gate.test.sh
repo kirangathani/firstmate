@@ -421,8 +421,23 @@ test_checkpoint_is_gated_on_the_session_lock() {
 
 # --- bin/fm-statusline.sh ----------------------------------------------------
 
+# With nothing configured locally, base-command resolution falls back to the
+# harness's own user-level status line (docs/configuration.md "Status-line
+# composition"). These cases are about the fleet line and about the configured
+# sources, so they pin that fallback at an empty config dir - otherwise they
+# would read whatever status line the developer running the suite happens to have
+# installed, and assert on it. tests/fm-statusline-render.test.sh owns the
+# fallback itself, and renders it end to end.
+STATUSLINE_EMPTY_CONFIG="$TMP_ROOT/statusline-empty-claude-config"
+mkdir -p "$STATUSLINE_EMPTY_CONFIG"
+
+# FM_STATUSLINE_BASE is stripped for the same reason: bin/fm-spawn.sh exports it
+# into every crewmate worktree, so a suite that inherited it would compose the
+# dispatching home's real status line into cases that assert on silence.
 run_statusline() {  # <home>
-  printf '{"session_id":"test"}' | FM_HOME="$1" "$STATUSLINE" 2>&1
+  printf '{"session_id":"test"}' |
+    env -u FM_STATUSLINE_BASE FM_HOME="$1" CLAUDE_CONFIG_DIR="$STATUSLINE_EMPTY_CONFIG" \
+      "$STATUSLINE" 2>&1
 }
 
 test_statusline_reports_fleet_control() {
@@ -509,7 +524,9 @@ test_statusline_composes_with_the_operators_own_status_line() {
   assert_not_contains "$out" "control of fleet" "there is no fleet here, so there must be no fleet line"
   [ ! -d "$home/state" ] || fail "composing created the state dir; it must never write to state"
 
-  # An absent, empty, or non-executable base command means no base line, quietly.
+  # An absent, empty, or non-executable base command in the configured source
+  # means no base line from it, quietly. The user-level fallback is pinned empty
+  # here (see run_statusline), so what is left is the fleet line alone.
   home="$TMP_ROOT/statusline-base-unusable"
   mkdir -p "$home/state" "$home/config"
   printf '%s\n' "$$" > "$home/state/.lock"
@@ -536,9 +553,12 @@ test_statusline_base_reaches_a_worktree_that_has_no_config_dir() {
   local worktree base out status
   # This is the shape a real crewmate or scout task worktree has: a plain git
   # worktree carrying the tracked .claude/settings.json wiring, with NO config/
-  # and NO state/. There is no file for the composition to read there, so the
-  # only thing that can reach it is the FM_STATUSLINE_BASE env override that
-  # bin/fm-spawn.sh forwards from the dispatching home.
+  # and NO state/. There is no file for the composition to read there, so a
+  # deliberate per-home setting reaches it only through the FM_STATUSLINE_BASE
+  # env override that bin/fm-spawn.sh forwards from the dispatching home. A
+  # worktree that inherits no override falls back to the operator's own
+  # user-level status line instead of going blank; that case is rendered end to
+  # end in tests/fm-statusline-render.test.sh.
   worktree="$TMP_ROOT/statusline-task-worktree"
   base="$TMP_ROOT/statusline-task-base.sh"
   mkdir -p "$worktree"

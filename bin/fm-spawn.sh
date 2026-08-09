@@ -1347,11 +1347,14 @@ sleep 0.3
 # The tracked .claude/settings.json points the status line at
 # bin/fm-statusline.sh, which composes beneath the operator's own status line.
 # A crewmate or scout worktree is a plain git worktree: it carries that tracked
-# wiring but has no config/ and no state/, so without forwarding the DISPATCHING
-# home's setting the worker window would show nothing at all. Secondmates are
-# excluded on purpose - they run with their own FM_HOME and inherit the setting
-# as a real config file through FM_INHERITABLE_CONFIG, which must stay
-# authoritative for them. Absent or empty exports nothing and changes nothing.
+# wiring but has no config/ and no state/, so there is no file there to read.
+# Forwarding the DISPATCHING home's setting is what carries a DELIBERATE per-home
+# choice into the worker window; a worker that inherits no export still falls back
+# to the operator's own user-level status line on its own, so absent or empty
+# exports nothing and costs nothing (docs/configuration.md "Status-line
+# composition"). Secondmates are excluded on purpose - they run with their own
+# FM_HOME and inherit the setting as a real config file through
+# FM_INHERITABLE_CONFIG, which must stay authoritative for them.
 STATUSLINE_BASE=
 if [ "$KIND" != secondmate ] && [ -f "$CONFIG/statusline-base" ]; then
   IFS= read -r STATUSLINE_BASE 2>/dev/null < "$CONFIG/statusline-base" || true

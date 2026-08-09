@@ -11,16 +11,42 @@
 # so wiring this script there would otherwise override whatever status line the
 # operator already runs globally, in every worktree of this repo - and go fully
 # blank in crewmate and scout worktrees, which carry the tracked script but no
-# fleet. So an optional base status-line command runs first and its output is
-# printed above the fleet line. The base command is deliberately NOT named in
-# tracked material, because it is machine-specific: it comes from the local,
-# gitignored config/statusline-base (one path, in the style of config/crew-harness)
-# or from FM_STATUSLINE_BASE. Absent, empty, or non-executable simply means no
-# base command, silently. Composition applies even where the fleet line is
-# absent, so a task worktree shows the operator's own line rather than nothing.
+# fleet. So a base status-line command runs first and its output is printed above
+# the fleet line. The base command is deliberately NOT named in tracked material,
+# because it is machine-specific.
+#
+# Resolution order for that base command, highest first:
+#   1. FM_STATUSLINE_BASE - explicit env override, and the only thing that
+#      reaches a task worktree from the dispatching home (bin/fm-spawn.sh).
+#   2. config/statusline-base - local, gitignored, first line only, in the style
+#      of config/crew-harness.
+#   3. The harness's own user-level status-line command, read live from
+#      ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json as .statusLine.command.
+#      That is exactly the status line the operator would be seeing if this
+#      repo's tracked project settings did not exist, so restoring it is the
+#      correct default rather than a guess - and it still names nothing
+#      machine-specific in tracked material.
+#   4. Nothing: the fleet line alone, silently.
+# The literal value "none" in 1 or 2 means "no base line at all" and stops the
+# fallback, for an operator who wants the fleet line by itself.
+#
+# 3 exists because the previous default was 4. A home with no config/ dir - a
+# fresh home, a fresh clone, a task worktree - silently blanked the operator's
+# own status line, and nothing warned: the only way to discover it was noticing
+# the line was gone. A default that requires a hand-written local file to avoid
+# breaking something is the defect, so the default now resolves the answer from
+# the authoritative copy already on disk.
+#
+# A resolved base is run the way Claude Code itself runs a statusLine command:
+# an existing file is executed directly (the long-standing "one path" contract,
+# and the only form that survives a path containing spaces), anything else is a
+# command line handed to sh -c. FM_STATUSLINE_COMPOSING is exported across that
+# call and short-circuits base resolution in the child, so a user-level setting
+# that names this very script terminates instead of recursing.
 #
 # Contract, because this runs on every status-line render:
-#   - Bounded work only: two small file reads plus at most eight ps parent hops
+#   - Bounded work only: at most three small file reads, one JSON read of the
+#     user settings file, at most eight ps parent hops
 #     (bin/fm-session-lock-lib.sh), and whatever the operator's own base command
 #     costs. No process scans, no globbing over the fleet, no network, no git.
 #   - It never writes anything under state/, and never creates it.
@@ -47,16 +73,69 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-BASE="${FM_STATUSLINE_BASE:-}"
-if [ -z "$BASE" ] && [ -f "$CONFIG/statusline-base" ]; then
-  IFS= read -r BASE 2>/dev/null < "$CONFIG/statusline-base" || true
+fm_statusline_trim() {  # <value> -> value without surrounding whitespace
+  local v=$1
+  v=${v#"${v%%[![:space:]]*}"}
+  v=${v%"${v##*[![:space:]]}"}
+  printf '%s' "$v"
+}
+
+# The harness's own user-level status-line command. Quiet by construction: an
+# unreadable, absent, or unparseable settings file, a settings file with no
+# status line, and a machine with neither jq nor node all yield the empty string
+# rather than an error. node is a bootstrap-required tool and jq is not, so jq is
+# only ever an optimisation here.
+fm_statusline_user_base() {
+  local dir file
+  dir=${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}
+  file="$dir/settings.json"
+  [ -r "$file" ] || return 0
+  if command -v jq >/dev/null 2>&1; then
+    jq -r 'if (.statusLine | type) == "object" and (.statusLine.type == "command")
+           then (.statusLine.command // "") else "" end' "$file" 2>/dev/null || true
+    return 0
+  fi
+  if command -v node >/dev/null 2>&1; then
+    node -e '
+      const fs = require("fs");
+      try {
+        const s = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).statusLine;
+        if (s && typeof s === "object" && s.type === "command" && typeof s.command === "string") {
+          process.stdout.write(s.command);
+        }
+      } catch {}
+    ' "$file" 2>/dev/null || true
+  fi
+}
+
+BASE=
+# A base command this script itself invoked is already composing; resolving a
+# base again there would double the operator's line, or recurse forever when the
+# user-level setting names this script.
+if [ -z "${FM_STATUSLINE_COMPOSING:-}" ]; then
+  BASE=$(fm_statusline_trim "${FM_STATUSLINE_BASE:-}")
+  if [ -z "$BASE" ] && [ -f "$CONFIG/statusline-base" ]; then
+    IFS= read -r BASE 2>/dev/null < "$CONFIG/statusline-base" || true
+    BASE=$(fm_statusline_trim "$BASE")
+  fi
+  # Nothing configured locally: fall back to what the operator's own harness
+  # would be running here. This is the case that used to render nothing at all.
+  [ -n "$BASE" ] || BASE=$(fm_statusline_trim "$(fm_statusline_user_base)")
+  [ "$BASE" != none ] || BASE=
+  # A home whose harness-level status line already IS this script: composing it
+  # under itself would print the fleet line twice. FM_STATUSLINE_COMPOSING alone
+  # stops that recursing, this stops it duplicating.
+  case "$BASE" in *fm-statusline.sh*) BASE= ;; esac
 fi
-BASE=${BASE#"${BASE%%[![:space:]]*}"}
-BASE=${BASE%"${BASE##*[![:space:]]}"}
-if [ -n "$BASE" ] && [ -x "$BASE" ]; then
+
+if [ -n "$BASE" ]; then
   # Captured rather than streamed so the fleet line below always starts on its
   # own line, whatever the base command does about a trailing newline.
-  base_out=$(printf '%s' "$PAYLOAD" | "$BASE" 2>/dev/null || true)
+  if [ -f "$BASE" ]; then
+    base_out=$(printf '%s' "$PAYLOAD" | FM_STATUSLINE_COMPOSING=1 "$BASE" 2>/dev/null || true)
+  else
+    base_out=$(printf '%s' "$PAYLOAD" | FM_STATUSLINE_COMPOSING=1 sh -c "$BASE" 2>/dev/null || true)
+  fi
   [ -z "$base_out" ] || printf '%s\n' "$base_out"
 fi
 

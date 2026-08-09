@@ -91,7 +91,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock; `ownership` also answers owned/other/missing read-only for the adapters |
 | `fm-session-lock-lib.sh` | Single implementation of session-lock ownership: the ancestry walk, holder liveness, and the owned/other/missing verdict every gate consumes |
-| `fm-statusline.sh`       | Harness-neutral status line saying whether this session is in control of the current home's fleet, composed beneath an optional `config/statusline-base` command |
+| `fm-statusline.sh`       | Harness-neutral status line saying whether this session is in control of the current home's fleet, composed beneath the operator's own status line |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
 | `fm-x-poll.sh`           | One bounded X relay poll: stash newly offered mentions and emit their once-only wake |
 | `fm-x-reply.sh`          | Post or dry-run preview a composed X-mode reply or follow-up                         |
