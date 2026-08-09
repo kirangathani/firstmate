@@ -3,7 +3,7 @@
 A captain-facing instrument that renders every agent's no-mistakes pipeline as one horizontal row per agent.
 It is not part of the supervision loop: the captain runs it as a plain command, and firstmate never opens it.
 
-`bin/fm-nm-flow.sh` remains the single-task detail view and is unchanged by this work.
+`bin/fm-nm-flow.sh` remains the single-task detail view, unchanged; the fleet view now has a key that drills into it rather than leaving the captain to know its name.
 
 The view is split across two programs so that neither can drift into the other's job.
 
@@ -199,6 +199,25 @@ A task whose endpoint no longer resolves moves to `omitted`, with its window and
 A live worker this view has no row for - a scout or a secondmate, neither of which runs a pipeline - is listed in `out_of_scope` and counted in the header too, because the captain reconciles this list against the windows in front of them and a live worker that is simply absent is the same failure as a dead one that is present.
 `--include-dead` puts the held-back records back, as ordinary agents carrying `endpoint_alive: false`, which the renderer marks `worker gone`.
 
+## A skip-flagged task is drawn as the journey it actually takes
+
+The captain's own words: a task dispatched with a testing skip "wouldn't actually run through all of those steps", so drawing the full chain leaves him watching boxes that were never going to light.
+
+The authority is `state/<id>.meta`, which `bin/fm-spawn.sh` writes at dispatch and nothing else does - never a status log, never the brief.
+It is read through `bin/fm-testing-skip-lib.sh`, the same owner `bin/fm-pr-merge.sh`'s waiver banner reads, and a test in `tests/fm-spawn-testing-skip.test.sh` reads back the meta a real spawn just wrote so the writer and the readers cannot drift.
+
+The two flags are independent and remove different stages.
+Reading either as "skip everything before merge" would put the same lie back in a new place:
+
+| Flag | What it removes | How the row draws it |
+|---|---|---|
+| `local_skip=on` | the whole local pipeline, mechanically: the `no-mistakes` on the worker's PATH is a shim that explains the skip and exits, so no run exists at all | `intent`, `rebase`, `review`, `test`, `docs`, `lint` are `skipped`; `push+PR` is `by hand`, because the brief sends the worker straight to `git push` and `gh-axi`, and the CI cell beside it carries real checks |
+| `ci_skip=on` | the PR's expensive lint and test JOBS, by a signature CI itself verifies | no local stage at all; its whole effect lands in the CI cell, where the waived jobs report as skipped checks |
+| either, or both | never the pre-merge gate | `bin/fm-pr-merge.sh` runs the base's own test assertions under every flag combination and no skip can disable them, so that cell is never drawn as skipped |
+
+`skipped` has a colour slot of its own rather than sharing dim with `pending`: deliberately-not-run and not-yet-run are different facts and must not be told apart by squinting at the four-letter word underneath.
+The row also states in plain words that the skip is captain-authorised, naming which halves, so a short chain never reads as a broken one.
+
 ## Enter opens the worker's window, or it says it did not
 
 Enter is agent-scoped.
@@ -227,6 +246,24 @@ Finally, the footer reports what the command SAID it did, not what its exit code
 `--open` prints its own outcome line - `switched to <window>`, `back from <window>`, or the error - and the viewer flashes that.
 A message reporting an action that did not occur is worse than an error, so an exit code alone is never enough to claim one.
 
+## `d` drills into one agent's pipeline
+
+The row states a CI verdict per agent, so the obvious next move from it is that agent's own pipeline.
+Enter is not that move - it hands over the worker's terminal, which is a different and equally useful thing - so the drill-in has its own key, and enter's behaviour and its per-terminal sentence are untouched.
+
+`bin/fm-flow.sh --detail <id>` runs `bin/fm-nm-flow.sh <id> --watch`, the read-only detailed view of one task's delivery flow that already existed and that the captain previously had to know by name and type.
+It is deliberately that command rather than a second renderer, because a copy would drift from it.
+The viewer suspends for it exactly as it does for enter, through the same shared hand-over.
+
+Ctrl-C is the way back, and it is stated on the key line beside the key that goes in.
+Two mechanics make it work:
+
+- The viewer does not quit on `SIGINT`, and that follows from raw mode rather than from preference.
+  With `ISIG` off, ctrl-c reaches the viewer as the byte `0x03` on its keyboard stream, never as a signal.
+  So the only way the process can receive `SIGINT` is while a child owns the terminal, which is the captain closing that child - quitting on it would tear the fleet view down every time they came back.
+- `--detail` traps `INT` and reports the return itself, so the footer flashes the outcome rather than an interrupt.
+  That trap is a function call, not an inline string: a trap body is re-parsed when the signal arrives, so an apostrophe in it has to survive two rounds of quoting, and the first cut of this flashed `unexpected EOF while looking for matching '` at the captain instead of the outcome (observed 2026-08-09, in a live terminal).
+
 ## Wire format
 
 Schema id `fm-flow-snapshot.v1`, emitted by `bin/fm-flow-snapshot.sh --json`.
@@ -248,6 +285,7 @@ Exact fields, flags, and environment knobs are owned by that script's header and
       "kind": "ship",
       "mode": "no-mistakes",
       "endpoint_alive": true,
+      "skips": { "local": false, "ci": false },
       "pr": { "url": "https://github.com/kirangathani/firstmate/pull/25", "number": 25 },
       "collection": { "ok": true, "reason": "", "at": "2026-08-08T16:30:00Z", "epoch": 1786000000 },
       "run": {
@@ -280,7 +318,11 @@ Exact fields, flags, and environment knobs are owned by that script's header and
             "status": "COMPLETED", "conclusion": "SUCCESS", "verdict": "passed"
           }
         ],
-        "total": 11, "passed": 10, "failed": 1, "pending": 0
+        "total": 11, "passed": 10, "failed": 0, "pending": 0,
+        "skipped": 0, "excused": 1,
+        "excused_authority": [
+          "firstmate is registered as a direct-PR project, whose PRs are raised without the pipeline by design"
+        ]
       }
     }
   ],
@@ -311,7 +353,37 @@ Guarantees the renderer is entitled to rely on:
 - Every entry of `agents` has a recorded endpoint that resolved at collection time, unless `--include-dead` was passed.
   `omitted` names every task held back for that reason, and `out_of_scope` names every live worker this view has no row for.
   Both are always present, empty when there is nothing to report.
-- `ci.passed`, `ci.failed` and `ci.pending` partition `ci.checks`, and their sum is always `ci.total`.
+- `ci.passed`, `ci.failed`, `ci.pending`, `ci.skipped` and `ci.excused` partition `ci.checks`, and their sum is always `ci.total`.
+- `skips` reports the captain's testing skips as the task's own `state/<id>.meta` records them, read through `bin/fm-testing-skip-lib.sh`.
+  It is a report of what the record says, never an authorization: the flag line alone is reachable by a worker, and the signature beside it is what grants anything.
+
+### Five check classes, because three folded two facts away
+
+The three original buckets folded two different facts into passing and failing, and both folds reached the captain's screen.
+
+`PR must be raised via no-mistakes` greps a PR body for a string only the no-mistakes pipeline writes.
+Firstmate is registered `direct-PR`, so its PRs are opened with `gh pr create` and that string is never there: the check cannot pass on a firstmate PR by construction.
+`bin/fm-pr-merge.sh` has always excused exactly that check on exactly that authority, and the view knew nothing about it, so it boxed `GITHUB CI` in red with `10/11 FAIL` over PRs the merge gate would have taken - observed on both live agents at once, 2026-08-09, against GitHub reporting 10 passed and 1 failed of 11 on both.
+An indicator that is red whatever happens is an indicator nobody reads, which destroys the one thing this view exists to provide.
+
+A job GitHub reports `SKIPPED` verified nothing, and was counted as passing.
+Under a captain-authorised CI waiver the expensive lint and test jobs are exactly those jobs, so a waived PR read as more verified than it was.
+
+Both now have a class of their own.
+The excusal is resolved through `bin/fm-attestation-lib.sh`, the same owner `bin/fm-pr-merge.sh` reaches its verdict through, and only when that exact named check is actually failing - so an ordinary green PR pays none of its cost, a pending check of that name is never excusable, and a renamed job simply stops being recognised, which costs a merge rather than granting one.
+The authority is what decides, never the name: the same red check on a `no-mistakes` project with no signed skip stays a failure.
+
+The split does change what `passed` means: a job GitHub reports `SKIPPED` is no longer inside it.
+The total is unchanged, every check still lands in exactly one class, and every class is on screen, so the comparison against `gh pr checks` below still holds at the total and is now made against a row that distinguishes one more thing than a single pass-or-fail split can.
+It changes nothing the merge gate DECIDES: `bin/fm-pr-merge.sh` still treats a `SKIPPED` check as passing, and this splits only how it is reported.
+
+The captain's standing rule governs the display, and he has ruled it three times:
+every class is named on every render, zeros included; a green or ready flag only when every class is clear; and a class that was never evaluated renders as a dash, never as a `0`.
+Five counts do not fit the 15-column timer under a 13-wide cell, so they live on a line of their own with the words spelled out rather than being thinned to fit - the rule allows compact labels or a legend, never a dropped count.
+
+That line is shared with the skip disclosure when a task carries one, and their order was measured rather than chosen.
+With the sentence in front the pair ran 124 columns, so a 120-column terminal cut the tally mid-class.
+The counts therefore come first: the sentence is the half that can shorten, because the stages above already say `skipped` in their own colour, so it explains what is on screen rather than being the only trace of it.
 
 ### The CI counts must agree with `gh pr checks`
 
@@ -355,6 +427,30 @@ Facts in this document were established by running the commands shown, on 2026-0
 CI check names on this repository are not unique: `CI testing waiver` appears under both the `CI` and `Require no-mistakes` workflows on PR 25, so checks are keyed on workflow plus name.
 The no-mistakes version-update banner is written to stderr, so stdout parsing does not need to strip it.
 
-The five defects above were each reproduced in a real terminal on 2026-08-09 before being changed, and the fixed behaviour reproduced the same way afterwards, driving the actual viewer rather than asserting a helper.
+The five rendering and input defects fixed on 2026-08-09 were each reproduced in a real terminal before being changed, and the fixed behaviour reproduced the same way afterwards, driving the actual viewer rather than asserting a helper.
 The harness was a sandbox tmux session of live worker windows plus deliberately stale `state/<id>.meta` records, with the viewer run in a second session so its pane could be captured with `tmux capture-pane` and driven with `tmux send-keys`.
 Two facts came out of that run rather than out of reading the code, and both are recorded where they bite: tmux refuses a client whose terminal descriptor was opened through `/dev/tty`, and `switch-client` without an explicit client moves whichever client is attached to the invoking pane's session.
+
+### The three honesty defects, 2026-08-09
+
+**The permanent red.**
+Measured on PR 51 of this repository, feeding one fleet document to the shipped collector and to the changed one in turn, and rendering each through its own viewer at 150 columns.
+`gh pr checks 51` reported 10 pass and 1 fail:
+
+| | cell | class counts |
+|---|---|---|
+| shipped | `10/11 FAIL` | total 11, passed 10, failed 1 |
+| changed | `10/11 your word` | total 11, passed 10, failed 0, excused 1, skipped 0, pending 0 |
+
+The single red check was `PR must be raised via no-mistakes`, and the authority the excusal recorded was `firstmate is registered as a direct-PR project, whose PRs are raised without the pipeline by design`.
+The other direction was measured too: the same rollup with that job renamed leaves `failed 1, excused 0`, and the same red check on a `no-mistakes` project with no signed skip stays `failed 1, excused 0`.
+
+**The drill-in.**
+Driven end to end in a detached 150x45 tmux session running the real `bin/fm-flow.sh` against the captain's live home, with `tmux send-keys` and `tmux capture-pane`.
+`d` on the selected agent handed the terminal to `bin/fm-nm-flow.sh --watch`, which drew that task's full pipeline; ctrl-c returned to the fleet view with the footer flashing `back from the pipeline detail for fm-no-attribution-reach-a2`, and the fleet view survived the interrupt.
+Enter still reported honestly in the same session: from a session with no attached client it flashed `open failed: error: this tmux session has no attached terminal to switch` rather than claiming an open.
+
+**The skip rendering.**
+Verified in the same kind of session against a home whose `state/<id>.meta` was written by a real `bin/fm-spawn.sh --all-testing-skip` dispatch rather than by hand; only the recorded endpoint was rewritten afterwards, so the flag lines the view reads are the bytes that spawn wrote.
+The flagged task drew `skipped` under `intent`, `rebase`, `review`, `test`, `docs` and `lint`, `by hand` under `push+PR`, nothing under `pre-merge`, and the row read `captain-authorised skip: local pipeline, CI test jobs`.
+An unflagged task in the same frame was unchanged.

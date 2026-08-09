@@ -44,6 +44,21 @@ steps_all() {  # <status>
   ] | map({step:., status:$s, findings:0, duration_ms:1000})'
 }
 
+# A CI rollup result in the shape bin/fm-flow-snapshot.sh emits, with a PR to
+# hang it on. Every class is named so a case can never accidentally leave one
+# undefined and assert against a default.
+ci_result() {  # <total> <passed> <failed> <pending> <skipped> <excused>
+  jq -n --argjson t "$1" --argjson p "$2" --argjson f "$3" \
+        --argjson w "$4" --argjson s "$5" --argjson x "$6" '{
+    pr:{url:"https://github.com/kirangathani/firstmate/pull/51",number:51},
+    ci:{collection:{ok:true,reason:""},checks:[],
+        total:$t,passed:$p,failed:$f,pending:$w,skipped:$s,excused:$x,
+        excused_authority:(if $x > 0
+          then ["firstmate is registered as a direct-PR project, whose PRs are raised without the pipeline by design"]
+          else [] end)}
+  }'
+}
+
 agent_with() {  # <id> <steps-json> [extra-json]
   local extra=${3:-}
   [ -n "$extra" ] || extra='{}'
@@ -450,6 +465,256 @@ eq(keysOf("\r"), ["\r"], "enter");
 JS
 node "$TMP_ROOT/keys.mjs" "$TUI" || fail "key decoding dropped a key"
 pass "a chunk holding several keys, in either arrow encoding, decodes to all of them"
+
+# --- the excused attestation check is not a failure, and not a pass ----------
+#
+# The captain's own screen, 2026-08-09: both live agents boxed GITHUB CI in red
+# with `10/11 FAIL`, on PRs GitHub reported as 10 passed and 1 failed of 11. The
+# single red one was `PR must be raised via no-mistakes`, which cannot pass on a
+# firstmate PR by construction - the project ships direct-PR, so its PRs are
+# opened with `gh pr create` and carry no pipeline attestation - and which
+# bin/fm-pr-merge.sh already excuses on exactly that authority. A cell that is
+# red however healthy the PR is is a cell nobody reads.
+#
+# Both directions are asserted, because the fix is worthless if it also swallows
+# a real failure.
+
+excused=$(render "$(snap "[$(agent_with ex1 "$(steps_all completed)" "$(ci_result 11 10 0 0 0 1)")]")" |
+  sed 's/\x1b\[[0-9;]*m//g')
+assert_not_contains "$excused" "FAIL" "an excused-only red PR still rendered as a CI failure"
+assert_contains "$excused" "10/11 your word" "an excused-only red PR did not park for the captain"
+assert_contains "$excused" "1 excused" "the excused check was not counted in its own category"
+pass "a PR whose only red check is the excused one is not drawn as a failure"
+
+genuine=$(render "$(snap "[$(agent_with ex2 "$(steps_all completed)" "$(ci_result 11 9 1 0 0 1)")]")" |
+  sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$genuine" "9/11 FAIL" "a genuinely failing check stopped being reported as a failure"
+assert_contains "$genuine" "1 fail" "the real failure lost its own count"
+assert_contains "$genuine" "1 excused" "the excused check was folded away beside a real failure"
+pass "a genuinely failing check is still loud, even beside an excused one"
+
+# An excused check is an authorized RED, not evidence anything ran.
+# bin/fm-pr-merge.sh refuses a PR whose only entries were excused exactly like
+# one reporting no checks at all, so this cell must not read readier than that.
+nothing=$(render "$(snap "[$(agent_with ex3 "$(steps_all completed)" "$(ci_result 1 0 0 0 0 1)")]")" |
+  sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$nothing" "nothing ran" "a PR whose only check was excused claimed a result"
+assert_not_contains "$nothing" "your word" "a PR with no evidence was offered for merge"
+assert_contains "$nothing" "0 ready to merge" "a PR with no evidence was counted ready to merge"
+pass "a PR whose only check was excused is not offered as ready"
+
+# --- every check class is named on every render ------------------------------
+#
+# The captain's standing rule, ruled three times in one session: every class
+# appears on every render, zeros included; a green or ready flag only when every
+# class is clear; and a class that was never evaluated renders as a dash, never
+# as a 0, because "checked, nothing found" and "never checked" are different
+# facts. The 15-column timer under the CI box cannot hold five counts, so they
+# live on their own line rather than being thinned to fit.
+
+for label in pass fail excused skipped pending; do
+  assert_contains "$excused" "$label" "class $label is missing from a rendered row"
+done
+pass "all five check classes are named on a row that has counts for them"
+
+zeros=$(printf '%s\n' "$excused" | grep -o 'CI 11 checks:.*')
+[ "$zeros" = "CI 11 checks:  10 pass  0 fail  1 excused  0 skipped  0 pending" ] ||
+  fail "the tally dropped or reordered a class: $zeros"
+pass "a class whose count is zero is still printed, as a 0"
+
+# The same row for an agent that has no PR: the labels stay, the counts become
+# dashes, and the reason is stated.
+noci=$(render "$(snap "[$(agent_with ex4 "$(steps_all pending)")]")" | sed 's/\x1b\[[0-9;]*m//g')
+dashes=$(printf '%s\n' "$noci" | grep -o 'CI checks:.*')
+[ "$dashes" = "CI checks:  - pass  - fail  - excused  - skipped  - pending  (no PR)" ] ||
+  fail "an unevaluated row did not render dashes with its reason: $dashes"
+pass "a class that was never evaluated renders as a dash and says why"
+
+# --- a captain-authorised skip is drawn as skipped, and said out loud --------
+#
+# The captain's words: a task dispatched with a skip flag "wouldn't actually run
+# through all of those steps", so drawing the full chain leaves him watching
+# boxes that were never going to light. The two flags are independent and remove
+# DIFFERENT stages, so each is asserted against what it actually removes rather
+# than against "everything before merge".
+#
+# The stage list comes from the renderer's own exported set, so a stage added to
+# the pipeline cannot quietly fall out of this assertion.
+
+LOCALSKIP=$(jq -n --argjson ci "$(ci_result 11 10 0 0 0 1)" '$ci * {
+  skips:{local:true,ci:false},
+  collection:{ok:true,reason:"no pipeline run for this branch",at:"t",epoch:1},
+  run:{present:false,id:"",status:"",db_updated_epoch:0,db_age_seconds:null}}')
+BOTHSKIP=$(jq -n --argjson ci "$(ci_result 11 5 0 0 5 1)" '$ci * {
+  skips:{local:true,ci:true},
+  collection:{ok:true,reason:"no pipeline run for this branch",at:"t",epoch:1},
+  run:{present:false,id:"",status:"",db_updated_epoch:0,db_age_seconds:null}}')
+CISKIP=$(jq -n --argjson ci "$(ci_result 11 5 0 0 5 1)" '$ci * {skips:{local:false,ci:true}}')
+
+cat >"$TMP_ROOT/skips.mjs" <<'JS'
+const { render, layout, CELL_WIDTHS, LOCAL_SKIP_STAGES, STEPS } =
+  await import(process.argv[2]);
+const base = JSON.parse(process.argv[3]);
+const COLS = 200, ROWS = 80;
+let bad = 0;
+const say = (m) => { console.error(m); bad++; };
+
+// Address the timer row cell by cell using the renderer's OWN layout, so a
+// change to a cell width or the arrow gutter moves this assertion with it
+// rather than leaving it reading the wrong column.
+const lay = layout(COLS, 0);
+if (lay.first !== 0 || lay.count !== CELL_WIDTHS.length) {
+  say(`the probe width shows only stages ${lay.first + 1}-${lay.first + lay.count}`);
+}
+const offsets = [];
+{
+  let x = 2;  // agentBlock indents every box row by two columns
+  for (const w of CELL_WIDTHS) { offsets.push(x); x += w + lay.gap; }
+}
+
+// One agent per frame: the row indices stay trivial and a failure names the
+// stage rather than a line number. head, top, mid, bot, timer, facts.
+const timerCells = (agent) => {
+  const frame = render({ ...base, agents: [agent] }, { rows: ROWS, cols: COLS, sel: 0, cell: -1 })
+    .map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  const head = frame.findIndex((l) => l.includes(agent.id));
+  const row = frame[head + 4] ?? "";
+  return CELL_WIDTHS.map((w, i) => row.slice(offsets[i], offsets[i] + w).trim());
+};
+
+const withSkips = (skips) => ({
+  ...base.agents[0],
+  skips,
+  steps: [],
+  pr: { url: "https://github.com/kirangathani/firstmate/pull/51", number: 51 },
+  collection: { ok: true, reason: "no pipeline run for this branch", at: "t", epoch: 1 },
+});
+
+// local_skip switches the whole local pipeline off, so every validation stage
+// is skipped - but push and PR still happen, by hand, which is why that box is
+// NOT skipped and why the CI cell beside it carries real checks.
+const localCells = timerCells(withSkips({ local: true, ci: false }));
+STEPS.forEach((s, i) => {
+  const want = LOCAL_SKIP_STAGES.has(s.key) ? "skipped" : "by hand";
+  if (localCells[i] !== want) {
+    say(`local skip: stage ${s.key} reads "${localCells[i]}", want "${want}"`);
+  }
+});
+if (localCells[CELL_WIDTHS.length - 1] === "skipped") {
+  say("local skip: the pre-merge gate was drawn as skipped, and no flag can skip it");
+}
+
+// ci_skip removes no local stage at all. Reading it as "skip everything before
+// merge" would put the same lie back in a new place.
+const ciCells = timerCells(withSkips({ local: false, ci: true }));
+STEPS.forEach((s, i) => {
+  if (ciCells[i] === "skipped" || ciCells[i] === "by hand") {
+    say(`ci-only skip: stage ${s.key} was marked "${ciCells[i]}", which that flag does not remove`);
+  }
+});
+
+// A failed pipeline read does not un-skip a skipped stage. The skip comes from
+// the task's own record, and under local_skip there is no pipeline run for that
+// read to have failed on, so `unknown` there would be a worse answer than the
+// one the record already gives.
+const unreadable = withSkips({ local: true, ci: false });
+unreadable.collection = { ok: false, reason: "axi status failed (exit 124)", at: "t", epoch: 1 };
+const unreadableCells = timerCells(unreadable);
+STEPS.filter((s) => LOCAL_SKIP_STAGES.has(s.key)).forEach((s) => {
+  const i = STEPS.indexOf(s);
+  if (unreadableCells[i] !== "skipped") {
+    say(`unreadable + local skip: stage ${s.key} reads "${unreadableCells[i]}", want "skipped"`);
+  }
+});
+
+process.exit(bad ? 1 : 0);
+JS
+node "$TMP_ROOT/skips.mjs" "$TUI" "$(snap "[$(agent_with sk0 '[]' '{}')]")" ||
+  fail "a recorded testing skip did not reach the stages it actually removes"
+pass "each testing skip marks exactly the stages it removes, and never pre-merge"
+
+localout=$(render "$(snap "[$(agent_with sk1 '[]' "$LOCALSKIP")]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$localout" "captain-authorised skip: local pipeline" \
+  "a skip-flagged task did not say its short chain is authorised"
+assert_contains "$localout" "skipped" "a local-skip task drew no skipped stage"
+assert_contains "$localout" "by hand" "a local-skip task did not show its hand-run push and PR"
+bothout=$(render "$(snap "[$(agent_with sk2 '[]' "$BOTHSKIP")]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$bothout" "captain-authorised skip: local pipeline, CI test jobs" \
+  "a task carrying both skips named only one of them"
+ciout=$(render "$(snap "[$(agent_with sk3 "$(steps_all completed)" "$CISKIP")]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$ciout" "captain-authorised skip: CI test jobs" \
+  "a CI-only skip was not disclosed"
+assert_not_contains "$ciout" "local pipeline" "a CI-only skip claimed the local pipeline was skipped"
+# Which STAGES each flag touches is asserted cell by cell above; this half is
+# only about the sentence naming them.
+pass "the skip is disclosed in plain words, naming exactly which halves were skipped"
+
+# The disclosure shares its line with the tally, and the captain's rule is that
+# a count is never dropped to make room. With the sentence in front the pair ran
+# 124 columns and a 120-column terminal cut the tally mid-class, so the counts
+# come first and the sentence is the half that shortens.
+#
+# The width swept is derived from the line itself, not from the number that
+# happened to expose it: every width from the tally's own length upwards must
+# carry the whole tally.
+tallyline=$(printf '%s\n' "$bothout" | grep -o 'CI 11 checks:.*pending' | head -1)
+[ -n "$tallyline" ] || fail "no tally line to size this from"
+# The floor is the tally's own length plus the two-column indent plus the one
+# column clip() spends on the ellipsis that marks a cut. Narrower than that and
+# the line is visibly shortened like any other over-wide line, on a terminal
+# whose stage window is already truncated and says so in the header.
+for cols in $(( ${#tallyline} + 3 )) 100 110 120 130 150 200; do
+  got=$(render "$(snap "[$(agent_with sk6 '[]' "$BOTHSKIP")]")" --cols "$cols" |
+    sed 's/\x1b\[[0-9;]*m//g' | grep -o 'CI 11 checks:[^·]*' | head -1)
+  case $got in
+    *"0 pending"*) ;;
+    *) fail "at $cols columns the tally lost a count: '$got'" ;;
+  esac
+done
+pass "every check count survives at any width the tally itself fits in"
+
+# A skipped stage must not look like one that has simply not been reached.
+# `skipped` and `pending` shared the dim slot, so the only difference on screen
+# was the four-letter timer word underneath.
+skipcolour=$(render "$(snap "[$(agent_with sk4 '[]' "$LOCALSKIP")]")" |
+  grep -o $'\x1b\\[94m' | head -1)
+[ -n "$skipcolour" ] || fail "a skipped stage is not drawn in its own colour"
+pending_only=$(render "$(snap "[$(agent_with sk5 "$(steps_all pending)")]")")
+printf '%s' "$pending_only" | grep -q $'\x1b\[94m' &&
+  fail "a stage that has merely not started was drawn in the skipped colour"
+pass "a skipped stage is visually distinct from one that has not been reached"
+
+# --- a task with no skip renders exactly as it did before --------------------
+#
+# The field is inert when off: an agent that records no skip must be
+# byte-identical to one whose record predates the field entirely.
+WITHOUT=$(snap "[$(agent_with same "$(steps_all completed)")]")
+WITHOFF=$(printf '%s' "$WITHOUT" | jq '.agents[0].skips = {local:false,ci:false}')
+[ "$(render "$WITHOUT")" = "$(render "$WITHOFF")" ] ||
+  fail "recording an off skip changed the frame"
+plainoff=$(render "$WITHOFF" | sed 's/\x1b\[[0-9;]*m//g')
+assert_not_contains "$plainoff" "captain-authorised" "an unflagged task claimed an authorised skip"
+assert_not_contains "$plainoff" "by hand" "an unflagged task's push and PR was relabelled"
+assert_not_contains "$plainoff" "skipped stage" "an unflagged task grew a skipped stage"
+pass "a task carrying no testing skip renders exactly as it does without the field"
+
+# --- the drill-in, and the way back, are stated on screen --------------------
+
+assert_contains "$plainoff" "pipeline detail" "the key line does not offer the pipeline drill-in"
+assert_contains "$plainoff" "ctrl-c back" "the key line does not say how to come back from the drill-in"
+out=$(setsid node "$TUI" --watch --cols 200 --rows 60 --tick 0 \
+  --detail-hint 'd: the pipeline, esc to return' <<<"$WITHOFF" 2>/dev/null |
+  sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$out" "esc to return" "--detail-hint did not survive the flag path"
+assert_not_contains "$out" "ctrl-c back" "--detail-hint did not replace the default"
+pass "the drill-in key and its way back are on screen, and the caller owns the wording"
+
+out=$(node "$TUI" --detail-cmd 'true' <<<"$WITHOFF" 2>&1); rc=$?
+expect_code 2 $rc "--detail-cmd outside --watch must be a usage error"
+assert_contains "$out" "--watch" "the usage error did not name the flag it needs"
+out=$(node "$TUI" --detail-hint 'x' <<<"$WITHOFF" 2>&1); rc=$?
+expect_code 2 $rc "--detail-hint outside --watch must be a usage error"
+pass "the drill-in flags are refused outside watch mode, like the others"
 
 # --- every tracked .mjs stays syntactically valid ---------------------------
 #

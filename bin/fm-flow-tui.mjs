@@ -34,6 +34,14 @@
 //                     --open-cmd, and only it knows what that command does to
 //                     the captain's terminal or how to get back. Default:
 //                     "enter: open this worker's window".
+//   --detail-cmd C    watch only. Shell command run when the captain presses d
+//                     on an agent, suspending the view exactly as --open-cmd
+//                     does and with the same FM_FLOW_* environment. Meant for a
+//                     read-only per-task pipeline view; a non-zero exit is the
+//                     ordinary way back, not a failure. OPT-IN, no default.
+//   --detail-hint T   watch only. What the key line says d does and how to come
+//                     back. Caller-owned for the same reason --open-hint is.
+//                     Default: "d pipeline detail, ctrl-c back".
 //
 // THE TWO CHANNELS ARE SEPARATE, AND THAT IS THE WHOLE POINT.
 // The snapshot arrives on stdin, so stdin is a PIPE and can never be a
@@ -43,10 +51,10 @@
 // false for every invocation that has data, so no key ever reached it.
 //
 // This program shells out to NOTHING unless the operator hands it an explicit
-// command with --refresh-cmd or --open-cmd, and never in one-shot mode. That
-// is what keeps byte-exact frame tests possible: `render()` is a pure function
-// of the snapshot plus the frame options, and the default renderer cannot
-// reach past its input to change what it draws.
+// command with --refresh-cmd, --open-cmd or --detail-cmd, and never in one-shot
+// mode. That is what keeps byte-exact frame tests possible: `render()` is a
+// pure function of the snapshot plus the frame options, and the default
+// renderer cannot reach past its input to change what it draws.
 //
 // Exit codes: 0 a frame was emitted, 1 stdin was not a readable snapshot,
 // 2 usage error.
@@ -71,6 +79,12 @@ const red = sgr("91");
 const cyan = sgr("96");
 const white = sgr("97");
 const magenta = sgr("95");
+// `skipped` needs a slot of its own. It used to share dim with `pending`, so a
+// stage the captain deliberately switched off looked exactly like one that had
+// not been reached - the difference surviving only in the timer word beneath
+// it. Deliberately-not-run and not-yet-run are different facts and must not be
+// told apart by squinting at four characters.
+const blue = sgr("94");
 
 // The marching trail. Hard rule, learned by looking at it against the
 // captain's skin: NO cell of the trail may be darker than the border it runs
@@ -80,7 +94,7 @@ const magenta = sgr("95");
 // across several cells rather than from more hues.
 const TAIL = ["1;92", "1;92", "92", "92", "92", "1;97", "97"].map(sgr);
 
-const STEPS = [
+export const STEPS = [
   { key: "intent", label: "intent" },
   { key: "rebase", label: "rebase" },
   { key: "review", label: "review" },
@@ -93,7 +107,11 @@ const W = 9;
 const CIW = 13;
 const MW = 9;
 const NCELLS = STEPS.length + 2;
-const BLOCK = 6;
+// One agent block: the head, the three box rows, the timer row, the facts row,
+// and one blank. visibleRows() below derives everything from this number, so a
+// row added to agentBlock has to be added here in the same edit or the frame
+// runs past the bottom of the terminal.
+const BLOCK = 7;
 
 // --- display-state model ----------------------------------------------------
 //
@@ -132,9 +150,58 @@ const PAINT = {
   waiting: yellow,
   failed: red,
   pending: dim,
-  skipped: dim,
+  skipped: blue,
   unknown: magenta,
 };
+
+// --- the captain's testing skips --------------------------------------------
+//
+// A task dispatched with a testing skip does not run the same journey, and the
+// view drew the full chain for it anyway - nine boxes, six of which were never
+// going to light, leaving the captain to wonder what was stuck.
+//
+// WHAT EACH FLAG ACTUALLY REMOVES, from bin/fm-spawn.sh's flag contract and
+// bin/fm-brief.sh's definitions of done. The two are independent and they do
+// NOT both mean "skip everything before merge":
+//
+//   local_skip=on  The local validation pipeline is switched off, mechanically:
+//                  the `no-mistakes` on the worker's PATH is a shim that
+//                  explains the skip and exits. So no pipeline run exists at
+//                  all, and intent, rebase, review, test, docs and lint never
+//                  happen in any form. Push and PR still DO happen - the brief
+//                  sends the worker straight to `git push` and `gh-axi` - so
+//                  that box is not skipped, it is done by hand, and the CI
+//                  behind it is real.
+//   ci_skip=on     Waives the PR's expensive lint and test JOBS, by a signature
+//                  CI itself verifies. It removes no local stage whatsoever;
+//                  its whole effect lands in the GitHub CI cell, where the
+//                  waived jobs report as skipped checks.
+//
+// The pre-merge cell is never skipped under either flag: bin/fm-pr-merge.sh
+// runs the base's own test assertions under EVERY flag combination and no skip
+// can disable that. Under ci_skip it runs at full cost, because it is then the
+// merge's only test evidence.
+export const LOCAL_SKIP_STAGES = new Set(["intent", "rebase", "review", "test", "document", "lint"]);
+
+export function skipsOf(agent) {
+  return { local: agent?.skips?.local === true, ci: agent?.skips?.ci === true };
+}
+
+// The one sentence naming what this task's record says was authorised. Empty
+// when it records no skip, which is every ordinary task.
+//
+// The halves are comma-joined rather than joined with " and " for four columns:
+// with both skips and an unevaluated CI tally sharing the line, those four are
+// the difference between the sentence finishing and being cut at 130 columns,
+// which is an ordinary terminal width.
+export function skipDisclosure(agent) {
+  const s = skipsOf(agent);
+  const parts = [];
+  if (s.local) parts.push("local pipeline");
+  if (s.ci) parts.push("CI test jobs");
+  if (!parts.length) return "";
+  return `captain-authorised skip: ${parts.join(", ")}`;
+}
 
 export function dur(ms) {
   if (ms == null) return "";
@@ -273,7 +340,10 @@ function box(label, state, width, opts = {}) {
 // Either way every cell that is drawn is drawn whole. There is no third option
 // where a box is cut in half.
 const GAPS = [5, 3, 1];
-const CELL_WIDTHS = [...STEPS.map(() => W + 2), CIW + 2, MW + 2];
+// Exported so a test can address one cell of the timer row by the same
+// arithmetic the renderer lays it out with, rather than by a column number
+// copied out of a frame that a width change would silently move.
+export const CELL_WIDTHS = [...STEPS.map(() => W + 2), CIW + 2, MW + 2];
 const INDENT = 2;
 
 const span = (first, count, gap) =>
@@ -341,7 +411,34 @@ function stepFor(agent, spec) {
   };
 }
 
+// What a recorded testing skip does to ONE stage box, or null when it does
+// nothing to it. Read from the task's own state/<id>.meta by the collector, so
+// this never guesses from a status log, a brief, or the absence of a run.
+function skipOverride(agent, spec) {
+  if (!skipsOf(agent).local) return null;
+  if (LOCAL_SKIP_STAGES.has(spec.key)) return { state: "skipped", timer: "skipped" };
+  if (spec.key === "pr") {
+    // The pipeline did not push or open this PR, but somebody did: the brief
+    // sends a local-skip worker straight to `git push` and `gh-axi`. Drawing
+    // this box as skipped would contradict the live CI cell one step to its
+    // right, so it reports the hand-run delivery it actually is, and the
+    // recorded PR link is what says it has happened.
+    return { state: agent.pr?.url ? "done" : "pending", timer: "by hand" };
+  }
+  return null;
+}
+
 function stepBox(agent, spec, anim) {
+  // The skip is checked BEFORE the unreadable case, because it does not depend
+  // on the pipeline read at all: it comes from the task's own record, and under
+  // local_skip there is no pipeline run for that read to have failed on. A
+  // failed read leaves the stage unknown; a recorded skip leaves it skipped,
+  // whatever the read did.
+  const forced = skipOverride(agent, spec);
+  if (forced) {
+    const b = box(spec.label, forced.state, W, { timer: forced.timer });
+    return { ...b, timer: (PAINT[forced.state] ?? dim)(b.timer) };
+  }
   if (agent.collection?.ok === false) {
     return box(spec.label, "unknown", W, { timer: "?" });
   }
@@ -364,38 +461,107 @@ function stepBox(agent, spec, anim) {
 // CI green does NOT mean ready to merge: the pre-merge gate only runs when a
 // merge is attempted. So a fully green run parks HERE, amber, asking for the
 // captain's word, rather than advancing into a stage nothing has started.
+//
+// `failed` here excludes the ONE check bin/fm-pr-merge.sh excuses, because the
+// collector already moved it into its own class through that gate's own owner.
+// That is the whole of the defect this cell used to carry: firstmate ships
+// direct-PR, so `PR must be raised via no-mistakes` fails on every one of its
+// PRs by construction, and this box painted a permanent red `10/11 FAIL` over
+// PRs the merge gate would have taken. An indicator that is red whatever
+// happens is an indicator nobody reads.
+//
+// One function decides what this cell means, and the header's "ready to merge"
+// count reads the SAME one, so a PR the cell parks on cannot be counted ready
+// in the line above it.
+export function ciVerdict(agent) {
+  const ci = agent.ci;
+  if (!ci || ci.collection?.ok === false) return agent.pr?.url ? "unread" : "none";
+  const { total = 0, failed = 0, pending = 0, excused = 0 } = ci;
+  if (failed > 0) return "failed";
+  if (pending > 0) return "running";
+  if (total === 0) return "none";
+  // An excused check is an authorized RED, not evidence that anything ran, so
+  // bin/fm-pr-merge.sh subtracts it before asking whether this PR reported any
+  // checks at all - and refuses a PR whose only entries were excused exactly
+  // like one that reported none. Nothing here may be readier than that gate.
+  if (total - excused === 0) return "nothing-ran";
+  return "ready";
+}
+
 function ciBox(agent, anim) {
   const ci = agent.ci;
-  if (!ci || ci.collection?.ok === false) {
+  const { passed = 0, total = 0 } = ci ?? {};
+  switch (ciVerdict(agent)) {
     // No PR yet is a real "not reached". Having a PR whose checks were not
     // collected is NOT: drawing it dim would claim CI has not started when the
     // truth is that nobody looked.
-    if (!agent.pr?.url) return box("GITHUB CI", "pending", CIW, { dashed: true });
-    const b = box("GITHUB CI", "unknown", CIW, { dashed: true, timer: "not read" });
-    return { ...b, timer: magenta(b.timer) };
+    case "none":
+      return box("GITHUB CI", "pending", CIW, { dashed: true });
+    case "unread": {
+      const b = box("GITHUB CI", "unknown", CIW, { dashed: true, timer: "not read" });
+      return { ...b, timer: magenta(b.timer) };
+    }
+    case "failed": {
+      const b = box("GITHUB CI", "failed", CIW, { dashed: true, timer: `${passed}/${total} FAIL` });
+      return { ...b, timer: red(b.timer) };
+    }
+    case "running": {
+      const state = liveIsCredible(agent) ? "live" : "unknown";
+      const b = box("GITHUB CI", state, CIW, {
+        dashed: true,
+        timer: `${passed}/${total} running`,
+        anim,
+      });
+      return { ...b, timer: (PAINT[state] ?? dim)(b.timer) };
+    }
+    case "nothing-ran": {
+      const b = box("GITHUB CI", "unknown", CIW, { dashed: true, timer: "nothing ran" });
+      return { ...b, timer: magenta(b.timer) };
+    }
+    default: {
+      // "N/N your word" is 15 columns at two-digit counts, which is exactly the
+      // timer field under a 13-wide box. The dash this phrase used to carry cost
+      // two more and pushed it over, which is how it reached the captain as
+      // `11/11 - your wo`. fit() still guards the three-digit case; the phrase is
+      // chosen so the guard does not have to fire on a real fleet.
+      const b = box("GITHUB CI", "waiting", CIW, {
+        dashed: true,
+        timer: `${passed}/${total} your word`,
+      });
+      return { ...b, timer: yellow(b.timer) };
+    }
   }
-  const { passed = 0, total = 0, failed = 0, pending = 0 } = ci;
-  if (failed > 0) {
-    const b = box("GITHUB CI", "failed", CIW, { dashed: true, timer: `${passed}/${total} FAIL` });
-    return { ...b, timer: red(b.timer) };
-  }
-  if (pending > 0) {
-    const state = liveIsCredible(agent) ? "live" : "unknown";
-    const b = box("GITHUB CI", state, CIW, {
-      dashed: true,
-      timer: `${passed}/${total} running`,
-      anim,
-    });
-    return { ...b, timer: (PAINT[state] ?? dim)(b.timer) };
-  }
-  if (total === 0) return box("GITHUB CI", "pending", CIW, { dashed: true });
-  // "N/N your word" is 15 columns at two-digit counts, which is exactly the
-  // timer field under a 13-wide box. The dash this phrase used to carry cost
-  // two more and pushed it over, which is how it reached the captain as
-  // `11/11 - your wo`. fit() still guards the three-digit case; the phrase is
-  // chosen so the guard does not have to fire on a real fleet.
-  const b = box("GITHUB CI", "waiting", CIW, { dashed: true, timer: `${passed}/${total} your word` });
-  return { ...b, timer: yellow(b.timer) };
+}
+
+// The complete check tally, on its own line, because a 15-column timer cannot
+// hold five counts and the captain's standing rule forbids solving that by
+// dropping one: every class is named on every render, zeros included, and a
+// class that was never evaluated renders as a dash rather than as a 0 so
+// "checked, nothing found" is never confused with "never checked".
+//
+// The words are spelled out rather than abbreviated to a legend, so nothing on
+// screen needs a key to read. `excused` and `skipped` are separate on purpose:
+// one is a red check firstmate's merge gate authorises, the other is a job
+// GitHub never ran. Neither is a pass, and folding either into passing is the
+// exact false-green this line exists to prevent. The total is unchanged by the
+// split and every check lands in exactly one class, so the comparison against
+// `gh pr checks` still holds where it always did.
+export function ciTally(agent) {
+  const ci = agent.ci;
+  const ok = ci && ci.collection?.ok !== false;
+  const cell = (n) => (ok ? String(n ?? 0) : "-");
+  const counts =
+    `${cell(ci?.passed)} pass  ${cell(ci?.failed)} fail  ` +
+    `${cell(ci?.excused)} excused  ${cell(ci?.skipped)} skipped  ${cell(ci?.pending)} pending`;
+  if (ok) return `CI ${ci.total ?? 0} checks:  ${counts}`;
+  // "no PR" rather than "no PR yet": those three columns are the difference
+  // between the skip sentence sharing this line finishing and being cut at 130
+  // columns, and the distinction that matters here is against "not read" -
+  // nobody looked - which the other branch states in full.
+  const why = !agent.pr?.url
+    ? "no PR"
+    : `not read: ${ci?.collection?.reason || "no reason recorded"}`;
+  return `CI checks:  ${counts}  (${why})`;
 }
 
 // The final box is the pre-merge check: the base branch's own assertions run
@@ -406,6 +572,7 @@ function premergeBox() {
 }
 
 const DEFAULT_OPEN_HINT = "enter: open this worker's window";
+const DEFAULT_DETAIL_HINT = "d pipeline detail, ctrl-c back";
 
 function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   const cells = STEPS.map((s) => stepBox(agent, s, anim));
@@ -448,7 +615,30 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
     (notes.length ? `  ${notes.join("  ")}` : "") +
     (selected ? `  ${dim(openHint || DEFAULT_OPEN_HINT)}` : "");
 
-  return [head, "  " + top.join(""), "  " + mid.join(""), "  " + bot.join(""), "  " + tim.join("")];
+  // The facts line. It carries the two things no cell has room for and no
+  // reader should have to infer: the complete check tally, and - when the task
+  // carries one - the plain sentence saying its short chain is authorised
+  // rather than broken.
+  //
+  // The tally goes FIRST, and that ordering was measured rather than chosen.
+  // The captain's standing rule is that a count is never dropped, and with the
+  // sentence in front the two together ran 124 columns, so a 120-column
+  // terminal cut the tally mid-class. The sentence is the half that can be
+  // shortened without breaking a rule: the stages above already say `skipped`
+  // in their own colour, so it explains what is on screen rather than being the
+  // only trace of it, and a clip leaves its opening words - which are the ones
+  // that matter - intact.
+  const skip = skipDisclosure(agent);
+  const facts = dim(ciTally(agent)) + (skip ? `  ${dim("·")}  ${blue(skip)}` : "");
+
+  return [
+    head,
+    "  " + top.join(""),
+    "  " + mid.join(""),
+    "  " + bot.join(""),
+    "  " + tim.join(""),
+    "  " + facts,
+  ];
 }
 
 function shortProject(p) {
@@ -464,7 +654,7 @@ function shortProject(p) {
 // scrolls the terminal, every absolute cursor address in the repaint below
 // then points one row too high, and last frame's durations survive under the
 // header with no boxes above them. That was the orphaned timing row.
-// A block is BLOCK lines: 5 of content plus one blank. `chrome` is the header,
+// A block is BLOCK lines: 6 of content plus one blank. `chrome` is the header,
 // the two rules, the key hint, and the flash line when one is showing, so the
 // whole frame is exactly chrome + visible * BLOCK lines.
 export function visibleRows(rows, chrome) {
@@ -527,7 +717,7 @@ export function headerLine(segs, cols) {
 export function render(snap, opts) {
   const {
     rows, cols, anim = 0, sel = 0, cell = -1, top: topIn = 0,
-    flash = "", note = "", openHint = "",
+    flash = "", note = "", openHint = "", detailHint = "",
   } = opts;
   const agents = snap.agents ?? [];
   const lay = layout(cols, cell < 0 ? 0 : cell);
@@ -536,7 +726,7 @@ export function render(snap, opts) {
   // The data age must be honest and prominent. A green box that is thirty
   // seconds stale is a lie the captain has no way to detect.
   const ageSec = opts.ageSeconds ?? 0;
-  const needs = agents.filter((a) => a.ci && a.ci.pending === 0 && a.ci.failed === 0 && a.ci.total > 0).length;
+  const needs = agents.filter((a) => ciVerdict(a) === "ready").length;
   const broken = agents.filter((a) => a.collection?.ok === false).length;
   // Records the collector held back because nothing is running behind them.
   // Stated, never drawn: they are not agents, so counting them in "N agents"
@@ -582,9 +772,18 @@ export function render(snap, opts) {
   out.push(rule);
   const more = agents.length - (top + shown.length);
   const scroll = (top > 0 ? `^${top} above  ` : "") + (more > 0 ? `v${more} below  ` : "");
+  // The drill-in's way BACK is stated here, beside the key that goes in. It
+  // rides the key line rather than the selected row because - unlike enter,
+  // whose effect depends on whether this terminal is already a tmux client -
+  // the detail view is the same journey from any terminal, so there is one
+  // sentence rather than one per caller's situation. It is still the caller's
+  // to word, because the caller owns the command the key runs.
   out.push(
     (scroll ? green(scroll) : "") +
-      dim("up/down agent   left/right stage   enter open worker   r refresh   q quit"),
+      dim(
+        "up/down agent   left/right stage   enter open worker   " +
+          `${detailHint || DEFAULT_DETAIL_HINT}   r refresh   q quit`,
+      ),
   );
   if (flash) out.push(yellow(flash));
 
@@ -599,6 +798,7 @@ function parseArgs(argv) {
   const o = {
     watch: false, cols: null, rows: null, tick: 0, tickGiven: false,
     refreshCmd: "", refreshMs: 10000, openCmd: "", openHint: "",
+    detailCmd: "", detailHint: "",
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -610,6 +810,8 @@ function parseArgs(argv) {
     else if (a === "--refresh-ms") o.refreshMs = Number(argv[++i]);
     else if (a === "--open-cmd") o.openCmd = String(argv[++i] ?? "");
     else if (a === "--open-hint") o.openHint = String(argv[++i] ?? "");
+    else if (a === "--detail-cmd") o.detailCmd = String(argv[++i] ?? "");
+    else if (a === "--detail-hint") o.detailHint = String(argv[++i] ?? "");
     else if (a === "-h" || a === "--help") o.help = true;
     else { o.bad = a; }
   }
@@ -651,7 +853,8 @@ async function main() {
   if (opts.help) {
     process.stdout.write(
       "usage: fm-flow-snapshot.sh --json | fm-flow-tui.mjs [--cols N] [--rows N] [--tick N]\n" +
-        "       [--watch [--refresh-cmd CMD] [--refresh-ms N] [--open-cmd CMD] [--open-hint TEXT]]\n" +
+        "       [--watch [--refresh-cmd CMD] [--refresh-ms N] [--open-cmd CMD] [--open-hint TEXT]\n" +
+        "               [--detail-cmd CMD] [--detail-hint TEXT]]\n" +
         "       bin/fm-flow.sh is the captain-facing entry point and wires all three up.\n",
     );
     return 0;
@@ -660,8 +863,11 @@ async function main() {
     process.stderr.write(`fm-flow-tui: unknown argument ${opts.bad}\n`);
     return 2;
   }
-  if (!opts.watch && (opts.refreshCmd || opts.openCmd || opts.openHint)) {
-    process.stderr.write("fm-flow-tui: --refresh-cmd, --open-cmd and --open-hint need --watch\n");
+  if (!opts.watch && (opts.refreshCmd || opts.openCmd || opts.openHint
+    || opts.detailCmd || opts.detailHint)) {
+    process.stderr.write(
+      "fm-flow-tui: --refresh-cmd, --open-cmd, --open-hint, --detail-cmd and --detail-hint need --watch\n",
+    );
     return 2;
   }
   // Without this the process waits forever on a keyboard that is never going
@@ -760,6 +966,7 @@ const KEY = {
   left: new Set(["h", "\x1b[D", "\x1bOD"]),
   quit: new Set(["q", "\x03", "\x04"]),
   open: new Set(["\r", "\n"]),
+  detail: new Set(["d"]),
   refresh: new Set(["r"]),
   first: new Set(["g", "\x1b[H"]),
   last: new Set(["G", "\x1b[F"]),
@@ -796,6 +1003,7 @@ function watch(snap0, cols0, rows0, opts) {
       ageSeconds: opts.tickGiven ? 0 : ageOf(snap),
       note,
       openHint: opts.openHint,
+      detailHint: opts.detailHint,
     });
     process.stdout.write(frame.join("\n") + "\n");
     return 0;
@@ -815,7 +1023,17 @@ function watch(snap0, cols0, rows0, opts) {
   };
   const quit = () => { restore(); process.exit(0); };
   process.on("exit", restore);
-  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, quit);
+  for (const sig of ["SIGTERM", "SIGHUP"]) process.on(sig, quit);
+  // SIGINT is NOT a quit here, and that is a consequence of raw mode rather
+  // than a preference. With ISIG off, ctrl-c reaches this program as the byte
+  // 0x03 on the keyboard stream - KEY.quit above is where it is handled - and
+  // never as a signal. So the only way this process can receive SIGINT is while
+  // a child owns the terminal, which is the captain closing that child, not the
+  // view. Quitting on it would tear the fleet view down every time the captain
+  // pressed ctrl-c to come back from the pipeline detail, which is the stated
+  // way back. A listener is still registered because the default action would
+  // kill the process outright and leave the terminal in the alternate screen.
+  process.on("SIGINT", () => { if (!suspended) paint(); });
 
   const setFlash = (msg) => { flash = msg; flashUntil = Date.now() + 5000; };
 
@@ -857,6 +1075,7 @@ function watch(snap0, cols0, rows0, opts) {
       flash,
       note,
       openHint: opts.openHint,
+      detailHint: opts.detailHint,
       ageSeconds: ageOf(snap),
     });
     let buf = "\x1b[?2026h";
@@ -901,10 +1120,10 @@ function watch(snap0, cols0, rows0, opts) {
     );
   };
 
-  // Enter is AGENT-scoped, not cell-scoped: it opens the selected worker's
-  // window whichever cell is highlighted. No cell carries an action of its own,
-  // including GITHUB CI, and the selected agent's row says so on every frame
-  // rather than leaving the captain to find out by pressing it.
+  // Hand the terminal to one command and take it back afterwards. Shared by
+  // enter and by the pipeline drill-in, so the two cannot drift apart in how
+  // they suspend the view, what they tell the child about the agent, or how
+  // they report what happened.
   //
   // Two things this must never do, both of which it used to. It must not run
   // the command with the terminal still under the alternate screen and raw
@@ -915,13 +1134,7 @@ function watch(snap0, cols0, rows0, opts) {
   // window, which is the exact defect class this fleet cares about most. What
   // the command SAYS it did is what reaches the footer; the exit code only
   // decides whether that is an outcome or a failure.
-  const open = () => {
-    const a = (snap.agents ?? [])[sel];
-    if (!a) return;
-    if (!opts.openCmd) {
-      setFlash(`no open command wired up; that worker is at ${a.window || "an unrecorded window"}`);
-      return;
-    }
+  const handOver = (cmd, a) => {
     // Our OWN stdout, not a fresh open of /dev/tty, and it is handed to the
     // child as both its stdin and its stdout. A terminal is opened read-write,
     // so one descriptor serves for both, and this is the only handle that names
@@ -943,7 +1156,7 @@ function watch(snap0, cols0, rows0, opts) {
       // No timeout. The command is allowed to be an interactive session the
       // captain sits in for as long as they like; a timeout here would kill it
       // out from under them.
-      res = spawnSync("/bin/sh", ["-c", opts.openCmd], {
+      res = spawnSync("/bin/sh", ["-c", cmd], {
         encoding: "utf8",
         stdio: ttyFd == null ? ["ignore", "ignore", "pipe"] : [ttyFd, ttyFd, "pipe"],
         env: {
@@ -956,8 +1169,8 @@ function watch(snap0, cols0, rows0, opts) {
         },
       });
     } catch (e) {
-      // spawnSync itself refusing to start is still a failed open, and the
-      // screen has to come back either way.
+      // spawnSync itself refusing to start is still a failure, and the screen
+      // has to come back either way.
       threw = e;
     } finally {
       enterScreen();
@@ -967,7 +1180,21 @@ function watch(snap0, cols0, rows0, opts) {
       // The command owned the screen; nothing on it matches the diff cache.
       prev = [];
     }
+    return { res, threw, ttyFd };
+  };
 
+  // Enter is AGENT-scoped, not cell-scoped: it opens the selected worker's
+  // window whichever cell is highlighted. No cell carries an action of its own,
+  // including GITHUB CI, and the selected agent's row says so on every frame
+  // rather than leaving the captain to find out by pressing it.
+  const open = () => {
+    const a = (snap.agents ?? [])[sel];
+    if (!a) return;
+    if (!opts.openCmd) {
+      setFlash(`no open command wired up; that worker is at ${a.window || "an unrecorded window"}`);
+      return;
+    }
+    const { res, threw, ttyFd } = handOver(opts.openCmd, a);
     if (threw) { setFlash(`open failed: ${threw.message}`); return; }
     const said = firstLine(res.stderr);
     if (res.error) setFlash(`open failed: ${res.error.message}`);
@@ -978,6 +1205,29 @@ function watch(snap0, cols0, rows0, opts) {
       // not put anywhere. Saying it succeeded would be the original lie again.
       setFlash(said || `${a.id}: open command ran, but there is no terminal to show it in`);
     } else setFlash(said || `${a.id}: open command exited 0 without saying what it did`);
+  };
+
+  // The drill-in the CI cell invites. The row states a CI verdict per agent, so
+  // the obvious next move is to see THAT agent's pipeline in detail - and until
+  // now the only way there was to know bin/fm-nm-flow.sh existed and type it.
+  // Enter is not that move: it hands the terminal to the worker, which is a
+  // different and equally useful thing, and it keeps its key.
+  //
+  // The child is interrupted to come back, so a non-zero exit is the ordinary
+  // path here rather than a failure, and only a command that could not run at
+  // all is reported as one.
+  const detail = () => {
+    const a = (snap.agents ?? [])[sel];
+    if (!a) return;
+    if (!opts.detailCmd) {
+      setFlash(`no pipeline detail command wired up for ${a.id}`);
+      return;
+    }
+    const { res, threw } = handOver(opts.detailCmd, a);
+    if (threw) { setFlash(`pipeline detail failed: ${threw.message}`); return; }
+    const said = firstLine(res.stderr);
+    if (res.error) setFlash(`pipeline detail failed: ${res.error.message}`);
+    else setFlash(said || `back from ${a.id}'s pipeline detail`);
   };
 
   keyboard.setRawMode(true);
@@ -994,6 +1244,7 @@ function watch(snap0, cols0, rows0, opts) {
       else if (KEY.last.has(k)) sel = Math.max(0, count() - 1);
       else if (KEY.refresh.has(k)) refresh();
       else if (KEY.open.has(k)) open();
+      else if (KEY.detail.has(k)) detail();
     }
     paint();
   });

@@ -237,9 +237,14 @@
 # job therefore stops the exemption applying, in the safe direction: the renamed
 # check is no longer recognized, so it is no longer excused, so a failing one
 # refuses the merge. A rename can only ever cost a merge, never grant one.
-# tests/fm-pr-merge.test.sh asserts the constant below still equals that
-# workflow's job name, so the drift is caught by firstmate's own CI rather than
-# discovered at a captain's next merge.
+# tests/fm-pr-merge.test.sh asserts the constant still equals that workflow's job
+# name, so the drift is caught by firstmate's own CI rather than discovered at a
+# captain's next merge.
+#
+# The name, and the resolution of the two authorities below, are IMPLEMENTED in
+# bin/fm-attestation-lib.sh rather than here, so the read-only fleet pipeline
+# view can show the captain the same verdict this gate will reach without a
+# second copy of either. This header remains the policy's owner.
 #
 # TWO AUTHORITIES, either of which excuses that one check. Both are read on the
 # captain's machine, from records the PR cannot influence:
@@ -325,6 +330,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-supersession-lib.sh"
 # shellcheck source=bin/fm-ci-waiver-lib.sh
 . "$SCRIPT_DIR/fm-ci-waiver-lib.sh"
+# shellcheck source=bin/fm-attestation-lib.sh
+. "$SCRIPT_DIR/fm-attestation-lib.sh"
 # shellcheck source=bin/fm-attribution-lib.sh
 . "$SCRIPT_DIR/fm-attribution-lib.sh"
 # shellcheck source=bin/fm-merge-additive-lib.sh
@@ -386,10 +393,13 @@ EXEC_GATE_FILE="$FM_HOME/data/exec-gate/$PROJ_NAME"
 NO_PR_CI_FILE="$FM_HOME/data/no-pr-ci/$PROJ_NAME"
 
 # --- testing-waiver disclosure (contract in this script's header) -------------
-LOCAL_SKIP=off
-CI_SKIP=off
-if grep -qx 'local_skip=on' "$META"; then LOCAL_SKIP=on; fi
-if grep -qx 'ci_skip=on' "$META"; then CI_SKIP=on; fi
+# Read through bin/fm-testing-skip-lib.sh, the owner of the flags in both the
+# form they are typed and the form they are recorded, so this banner and the
+# fleet view's skipped-stage rendering cannot disagree about what a task's
+# record says.
+fm_testing_skip_read "$META"
+LOCAL_SKIP=$FM_TESTING_SKIP_LOCAL
+CI_SKIP=$FM_TESTING_SKIP_CI
 
 waiver_banner() {  # <where>
   [ "$LOCAL_SKIP" = on ] || [ "$CI_SKIP" = on ] || return 0
@@ -419,72 +429,24 @@ waiver_banner() {  # <where>
 waiver_banner "before gates"
 
 # --- the attestation exemption (contract in this script's header) -------------
-# The ONE check name whose failure may be excused, and only ever by exact string
-# equality against a rollup entry's name. It is duplicated from
-# .github/workflows/no-mistakes-required.yml's `check` job by necessity - this
-# script cannot read a workflow that lives in another repository - so
-# tests/fm-pr-merge.test.sh asserts the two still agree.
-ATTESTATION_CHECK_NAME='PR must be raised via no-mistakes'
-CI_WAIVER_SECRET_FILE="$CONFIG/ci-waiver-secret"
+# The name and the two authorities are implemented once, in
+# bin/fm-attestation-lib.sh, so the read-only fleet pipeline view that shows the
+# captain which red check this gate will excuse reads them through the same
+# owner rather than a second copy that could drift from it. The POLICY stays
+# documented in this script's header; that file is only its implementation.
+ATTESTATION_CHECK_NAME=$FM_ATTESTATION_CHECK_NAME
 # Newline-delimited rather than an array so an EMPTY value stays safe to expand
 # under `set -u` on every Bash this repo supports, stock macOS 3.2 included.
 # Empty means no authority, which is what makes it the exemption's own test.
 ATTESTATION_AUTHORITY=
-add_attestation_authority() {
-  ATTESTATION_AUTHORITY="${ATTESTATION_AUTHORITY}${ATTESTATION_AUTHORITY:+
-}$1"
-}
-
-# signed_skip_authority: 0 iff this task's meta pairs a testing-skip flag with a
-# token this home's own secret reproduces for THIS task id. The pairing is the
-# whole point: the flag line alone is reachable by the worker, the token is not.
-# Every failure path here - no flag, no token, a malformed token, no secret, no
-# node - returns non-zero, so an unverifiable claim is never an authorization.
-signed_skip_authority() {  # <meta-field> <checker-fn> <label>
-  local field=$1 checker=$2 label=$3 auth
-  auth=$(grep -m1 "^$field=" "$META" | cut -d= -f2- || true)
-  if [ -z "$auth" ] || ! fm_ci_waiver_valid_sig "$auth"; then
-    echo "note: this task records a $label but no usable $field= signature, so the skip authorizes nothing here" >&2
-    return 1
-  fi
-  if ! fm_ci_waiver_secret_readable "$CI_WAIVER_SECRET_FILE"; then
-    echo "note: this task records a $label with a $field= signature, but this home has no signing key at $CI_WAIVER_SECRET_FILE to check it against, so the skip authorizes nothing here" >&2
-    return 1
-  fi
-  if ! command -v node >/dev/null 2>&1; then
-    echo "note: node is unavailable, so this task's $field= signature cannot be checked and the skip authorizes nothing here" >&2
-    return 1
-  fi
-  if ! "$checker" "$ID" "$auth" < "$CI_WAIVER_SECRET_FILE"; then
-    echo "error: this task records a $label whose $field= signature this home's key does NOT reproduce for $ID; treating it as unauthorized" >&2
-    echo "error: that pairing means the flag line was not written by this home's own dispatch - re-dispatch the task with the flag rather than editing its record" >&2
-    return 1
-  fi
-  return 0
-}
 
 # Resolves ATTESTATION_AUTHORITY, and is called ONLY when that named check is
 # actually failing on this PR, so an ordinary green merge pays none of its cost
 # and prints none of its notes.
 resolve_attestation_exemption() {
-  local mode yolo
-  if [ "$LOCAL_SKIP" = on ] \
-    && signed_skip_authority local_skip_auth fm_ci_waiver_dispatch_local_check "captain-authorized local-pipeline skip"; then
-    add_attestation_authority "a captain-authorized local-pipeline skip on this task, signed at dispatch by this home's own key"
-  fi
-  if [ "$CI_SKIP" = on ] \
-    && signed_skip_authority ci_skip_auth fm_ci_waiver_dispatch_check "captain-authorized CI skip"; then
-    add_attestation_authority "a captain-authorized CI skip on this task, signed at dispatch by this home's own key"
-  fi
-  if [ -n "$PROJ_NAME" ]; then
-    read -r mode yolo <<EOF_MODE
-$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-project-mode.sh" "$PROJ_NAME")
-EOF_MODE
-    : "$yolo"
-    if [ "$mode" = direct-PR ]; then
-      add_attestation_authority "$PROJ_NAME is registered as a direct-PR project, whose PRs are raised without the pipeline by design"
-    fi
-  fi
+  ATTESTATION_AUTHORITY=$(
+    fm_attestation_authority "$ID" "$META" "$CONFIG" "$FM_HOME" "$SCRIPT_DIR"
+  ) || ATTESTATION_AUTHORITY=
 }
 
 attestation_banner() {  # <where>
