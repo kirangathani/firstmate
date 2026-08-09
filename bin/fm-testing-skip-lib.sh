@@ -34,6 +34,13 @@
 # "skip the testing for this task". It resolves to the MOST any given delivery
 # mode can honour, which is the whole matrix below collapsed into one token, so
 # the accepted combinations stop being something to look up before dispatching.
+#
+# A fifth entry point, fm_testing_skip_read, reads the flags back out of a
+# DISPATCHED task's state/<id>.meta rather than out of argv. It is the same
+# input shape - which testing skip does this task carry - written down instead of
+# typed, so it belongs to the same owner: bin/fm-pr-merge.sh's waiver banner and
+# bin/fm-flow-snapshot.sh's skipped-stage rendering must agree about what the
+# record says, and two greps in two scripts is how they would stop agreeing.
 
 # Accumulated state, valid after fm_testing_skip_reset plus a pass of
 # fm_testing_skip_note over argv.
@@ -49,6 +56,28 @@ fm_testing_skip_reset() {
   FM_TESTING_SKIP_FLAGS=
   FM_TESTING_SKIP_COUNT=0
   FM_TESTING_SKIP_AUTO=off
+}
+
+# fm_testing_skip_read <meta-file>: set FM_TESTING_SKIP_LOCAL and
+# FM_TESTING_SKIP_CI from a dispatched task's own record, resetting first so a
+# caller can never read a stale accumulation.
+#
+# The match is on the WHOLE line, not on a `local_skip=` prefix, because the
+# only value bin/fm-spawn.sh ever writes is `on` and an absent field means off.
+# A line that says anything else is not a flag this owner recognises, and a
+# testing skip is the last place to guess at an unrecognised value.
+#
+# It reports what the record SAYS and nothing more. The flag line alone is
+# reachable by the worker, so it is disclosure-grade evidence only; the
+# signature beside it is what grants anything, and bin/fm-attestation-lib.sh
+# owns that check.
+fm_testing_skip_read() {  # <meta-file>
+  local meta=${1-}
+  fm_testing_skip_reset
+  [ -f "$meta" ] || return 0
+  if grep -qx 'local_skip=on' "$meta" 2>/dev/null; then FM_TESTING_SKIP_LOCAL=on; fi
+  if grep -qx 'ci_skip=on' "$meta" 2>/dev/null; then FM_TESTING_SKIP_CI=on; fi
+  return 0
 }
 
 # fm_testing_skip_note <argv-token>: record a testing-skip flag.

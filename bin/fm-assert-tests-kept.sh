@@ -282,6 +282,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
 # Deterministic collation for sort/comm regardless of the host locale.
+#
+# THIS SCRIPT'S OWN, and it must not reach the base test files run below. The
+# sourcing above happens FIRST on purpose: bin/fm-test-exec-lib.sh captures the
+# caller's locale at source time and restores it for every test file it spawns,
+# because a project's tests are written for the environment its own CI runs
+# them in. That file's header owns the reasoning and the incident behind it,
+# and tests/fm-assert-tests-kept.test.sh asserts this ordering so it cannot be
+# reversed silently.
 export LC_ALL=C
 
 usage() {

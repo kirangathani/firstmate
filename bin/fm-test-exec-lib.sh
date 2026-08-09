@@ -746,6 +746,30 @@ fm_py_pythonpath() {
   printf '%s' "$out"
 }
 
+# THE LOCALE THE TEST FILES BELOW RUN IN IS THE CALLER'S, NEVER THE GATE'S.
+#
+# bin/fm-assert-tests-kept.sh exports LC_ALL=C so its own sort and comm collate
+# deterministically. That export is correct for the gate and wrong for the test
+# files the gate SPAWNS: a project's tests are written for the environment its
+# own CI runs them in, and forcing a byte-oriented locale on them measures
+# something else.
+#
+# The damage is not hypothetical. Under LC_ALL=C, awk's length() counts BYTES,
+# and a box-drawing glyph is three of them in UTF-8, so firstmate's own
+# tests/fm-flow-tui.test.sh reported its 40-column frame as five over-wide
+# lines. Its baseline therefore "failed on the base itself", all 29 of its
+# assertions came back `unexecuted:`, and the required re-verification check
+# refused a branch that was in fact clean (PR 56, 2026-08-09). Only a PR that
+# MODIFIES a base test file runs that baseline at all, which is why it lay
+# dormant until one did.
+#
+# Captured HERE, at source time, which is before bin/fm-assert-tests-kept.sh
+# does its own export - and asserted by tests/fm-assert-tests-kept.test.sh so
+# the ordering cannot be broken silently. An empty value is restored as an
+# empty LC_ALL, which glibc treats exactly as unset, so LANG and the LC_* the
+# caller really has keep resolving the child's locale.
+FM_TEST_EXEC_CHILD_LOCALE=${LC_ALL:-}
+
 # run_base_test_file <spec> <scratch-dir> <file> <results-out> <err-out> [<ident>...]:
 # run one base test file from the scratch tree root, returning its exit code.
 run_base_test_file() {
@@ -760,6 +784,7 @@ run_base_test_file() {
       (
         cd "$scratch" || exit 125
         FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_HOME='' \
+        LC_ALL="$FM_TEST_EXEC_CHILD_LOCALE" \
           ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} bash "$f"
       ) > "$results" 2>"$errout"
       ;;
@@ -773,6 +798,7 @@ run_base_test_file() {
         cd "$scratch" || exit 125
         PYTHONPATH="$pythonpath" PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='' \
         FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_HOME='' \
+        LC_ALL="$FM_TEST_EXEC_CHILD_LOCALE" \
           ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} "$python" -m pytest \
             -p no:cacheprovider -o addopts= --import-mode=importlib \
             --junit-xml="$results" "$@"
@@ -787,6 +813,7 @@ run_base_test_file() {
         cd "$scratch" || exit 125
         NODE_PATH='' NODE_OPTIONS='' \
         FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_HOME='' \
+        LC_ALL="$FM_TEST_EXEC_CHILD_LOCALE" \
           ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} \
           "$scratch/node_modules/.bin/vitest" run --root "$scratch" \
             --cache=false --reporter=json --outputFile="$results" "$f"
@@ -798,6 +825,7 @@ run_base_test_file() {
         cd "$scratch" || exit 125
         NODE_PATH='' NODE_OPTIONS='' \
         FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_HOME='' \
+        LC_ALL="$FM_TEST_EXEC_CHILD_LOCALE" \
           ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} \
           "$scratch/node_modules/.bin/jest" --rootDir "$scratch" \
             --reporters=default --json --outputFile="$results" \

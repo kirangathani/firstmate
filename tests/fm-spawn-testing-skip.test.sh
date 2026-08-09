@@ -573,8 +573,50 @@ test_a_planted_temp_root_symlink_is_refused() {
   pass "a symlink planted at the per-task temp root is refused before anything is written"
 }
 
+# The drift guard between the flags' WRITER and their READERS. bin/fm-spawn.sh
+# is the only thing that records them; bin/fm-pr-merge.sh's waiver banner and
+# the fleet pipeline view's skipped-stage rendering both read them back, through
+# bin/fm-testing-skip-lib.sh. A change to what spawn writes that this owner does
+# not follow would leave the merge log and the captain's view quietly claiming a
+# task runs stages it does not - which is exactly what the view used to do.
+#
+# It reads the meta the real spawn above just wrote, so there is no hand-written
+# copy of the recorded format anywhere in this assertion.
+test_recorded_skips_read_back_through_their_owner() {
+  local out probe
+  make_case readback no-mistakes
+  give_case_a_waiver_secret
+  arm_orca_success
+  out=$(run_spawn readback --all-testing-skip)
+  expect_code 0 $? "spawn with --all-testing-skip should succeed"$'\n'"$out"
+
+  # shellcheck disable=SC2016  # a script body for bash -c: $0/$1 are its args
+  probe='. "$0/bin/fm-testing-skip-lib.sh"; fm_testing_skip_read "$1";
+         printf "%s/%s\n" "$FM_TESTING_SKIP_LOCAL" "$FM_TESTING_SKIP_CI"'
+  got=$(bash -c "$probe" "$ROOT" "$CASE_HOME/state/readback.meta")
+  [ "$got" = "on/on" ] ||
+    fail "the flags spawn recorded do not read back through their own owner: $got"
+
+  make_case readback2 direct-PR
+  give_case_a_waiver_secret
+  arm_orca_success
+  out=$(run_spawn readback2 --ci-skip)
+  expect_code 0 $? "spawn with --ci-skip should succeed"$'\n'"$out"
+  got=$(bash -c "$probe" "$ROOT" "$CASE_HOME/state/readback2.meta")
+  [ "$got" = "off/on" ] || fail "a CI-only skip read back as $got"
+
+  make_case readback3 no-mistakes
+  arm_orca_success
+  out=$(run_spawn readback3)
+  expect_code 0 $? "an unflagged spawn should succeed"$'\n'"$out"
+  got=$(bash -c "$probe" "$ROOT" "$CASE_HOME/state/readback3.meta")
+  [ "$got" = "off/off" ] || fail "an unflagged task read back as $got"
+  pass "what the spawn records is what the flags' own owner reads back, in all three shapes"
+}
+
 test_refused_combinations
 test_secondmate_refuses_a_skip_flag
+test_recorded_skips_read_back_through_their_owner
 test_a_planted_temp_root_symlink_is_refused
 test_meta_records_only_the_flags_that_were_passed
 test_one_flag_writes_both_halves
