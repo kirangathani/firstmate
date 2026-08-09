@@ -88,6 +88,9 @@ A test suite is structurally blind to all of it.
 `bin/fm-spawn.sh` calls `bin/fm-install-commit-hook.sh` for every task worktree it hands out.
 That installer writes one shim into the project's own hooks directory which runs two checks in turn: `bin/fm-commit-msg-check.sh` for AI attribution, then `bin/fm-merge-resolution-check.sh` for this rule.
 They share one hook file because git allows a repository exactly one `commit-msg` hook, so a second installer would have silently disarmed the first.
+The shim's identity marker is deliberately **not** bumped for that shape change.
+Nothing keys behavior off its version, the installer rewrites its own shim on every run so a stale one is refreshed at the next spawn anyway, and recognition is a plain substring test whose failure takes the foreign-hook branch and leaves the hook alone - so a bump any reader forgot to account for would silently disarm both checks in every project already spawned into.
+`bin/fm-install-commit-hook.sh`'s header owns that reasoning.
 
 The commit is rejected at the moment of resolution, with the lost lines named and both candidate resolutions spelled out.
 

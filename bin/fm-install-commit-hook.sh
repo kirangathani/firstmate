@@ -48,18 +48,28 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-# Bump HOOK_MARKER when the shim's own shape changes; the installer writes this
-# exact string into every shim, and recognizes its own work by it.
+# The marker is an opaque FLEET-IDENTITY token - "did we write this hook?" - and
+# is deliberately NOT versioned with the shim's shape. Its name is historical: it
+# was minted when the shim ran only the attribution check, and it is left alone
+# now that the shim runs two. The comments the shim itself carries describe what
+# it actually does; this string only has to stay recognizable.
 #
-# HOOK_MARKERS_OWNED lists every marker this fleet has EVER written, newest
-# first. Recognition reads that whole list while writing only HOOK_MARKER. A bump
-# that forgot the old marker would make every already-installed shim look like a
-# foreign hook, and the foreign-hook branch below deliberately leaves those
-# alone - so the bump would silently disarm both checks in every project already
-# spawned into, which is the opposite of what a bump is for.
-HOOK_MARKER='fm-commit-hook-v2'
-HOOK_MARKERS_OWNED='fm-commit-hook-v2
-fm-attribution-hook-v1'
+# WHY IT IS NOT BUMPED WHEN THE SHIM CHANGES
+# Nothing keys any behavior off the version. The installer rewrites its own shim
+# unconditionally on every run, so a stale shim is refreshed at the next spawn
+# whatever it says. What a bump WOULD do is create a hazard: recognition is a
+# plain substring test, and an unrecognized hook takes the foreign-hook branch
+# below, which deliberately leaves it alone. So a bump that any reader forgot to
+# account for silently disarms every check in every project already spawned into
+# - the exact opposite of what bumping is for. A stable token removes that
+# hazard class instead of managing it.
+#
+# HOOK_MARKERS_OWNED is every marker this fleet has ever written, newest first.
+# Recognition reads the whole list while only HOOK_MARKER is written, so if a
+# future change ever does need a new token, adding it here is what keeps the
+# already-installed shims ours.
+HOOK_MARKER='fm-attribution-hook-v1'
+HOOK_MARKERS_OWNED='fm-attribution-hook-v1'
 
 TARGET=${1:?usage: fm-install-commit-hook.sh <path inside the target repo>}
 [ -d "$TARGET" ] || { echo "error: $TARGET is not a directory" >&2; exit 1; }
