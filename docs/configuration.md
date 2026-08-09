@@ -102,6 +102,24 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Status-line composition (config/statusline-base / FM_STATUSLINE_BASE)
+
+`bin/fm-statusline.sh` prints one line saying whether this session is in control of the current home's fleet, and Claude Code runs it through the `statusLine` setting in the tracked `.claude/settings.json`.
+Because that file is tracked and shared, it would otherwise replace whatever status line the operator already runs globally, in every worktree of this repo.
+So the script composes instead of replacing: it runs an optional base status-line command first and prints the fleet line beneath that command's output.
+
+`config/statusline-base` is a local, gitignored file whose first line is the path to that base command; `FM_STATUSLINE_BASE` overrides it.
+The path is deliberately never named in tracked material, because it is machine-specific.
+An absent, empty, or non-executable base command simply means no base line, silently and with no error.
+The harness's status-line JSON payload is captured once and forwarded to the base command on stdin, so a base command that reads it behaves exactly as it does when run directly.
+
+Composition applies even where the fleet line is absent, so a location with no fleet shows the base line alone rather than a blank status line.
+How the setting reaches each location differs, because `config/` is gitignored and exists only in a real home:
+
+- **Primary home.** `config/statusline-base` is read directly. This is the file the operator writes.
+- **Secondmate home.** `statusline-base` is in `FM_INHERITABLE_CONFIG` (`bin/fm-config-inherit-lib.sh`), so the primary propagates it as a real `config/statusline-base` file on every convergence, and the secondmate reads its own copy. An item the primary does not set is mirrored as absence downstream, so clearing it downstream needs no extra step.
+- **Crewmate or scout task worktree.** A plain `git worktree` has no `config/` and no `state/`, so there is no file to read. `bin/fm-spawn.sh` therefore exports `FM_STATUSLINE_BASE` into the worker's launch environment, resolved from the dispatching home's `config/statusline-base`. That env override is the only way the setting reaches a task worktree; nothing is exported when the dispatching home has no setting, and no spawn ever fails over it.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` as `bin/fm-test.sh --local` so no-mistakes runs firstmate's bash behavior suite directly.
@@ -342,7 +360,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a live secondmate endpoint is skipped or respawn fails; already-live and successfully respawned endpoints are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync and reread nudges are not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `statusline-base`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
@@ -445,6 +463,7 @@ FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops
 FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the composer row for submit verification
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
+FM_STATUSLINE_BASE=     # path to the base status-line command bin/fm-statusline.sh composes above its fleet line; overrides config/statusline-base, and is how fm-spawn.sh carries the setting into a task worktree (see "Status-line composition" above)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands

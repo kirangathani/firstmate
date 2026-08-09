@@ -80,10 +80,22 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
 fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
+
+# Supervision belongs to the session holding this home's SESSION lock
+# (state/.lock - not the watcher singleton state/.watch.lock checked above).
+# A session that does not hold it cannot arm a watcher (bin/fm-watch-arm.sh
+# declines from there), so telling it to repair supervision would block nearly
+# every turn on work it must not touch. This mirrors the read-only advisory mode
+# bin/fm-guard.sh already uses. A dead or absent holder still alarms: nobody is
+# supervising the in-flight work, and this session is the one that should take
+# the lock and arm.
+[ "$(fm_session_lock_ownership "$STATE")" = other ] && exit 0
 
 afk=0
 [ -e "$STATE/.afk" ] && afk=1

@@ -70,6 +70,7 @@ config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; not inherited into secondmate homes
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/statusline-base  optional path to the operator's own status-line command, composed above bin/fm-statusline.sh's fleet-control line; LOCAL, gitignored; absent means no base line; inherited by secondmate homes and forwarded to task worktrees as FM_STATUSLINE_BASE (docs/configuration.md "Status-line composition")
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 config/ci-waiver-secret  optional CI testing waiver MASTER key; LOCAL, gitignored, mode 600; created by bin/fm-ci-waiver.sh init, never printed, published, given to a worker, or inherited by secondmate homes (docs/configuration.md "The CI testing waiver secret")
 data/                personal fleet records; LOCAL, gitignored as a whole
@@ -107,6 +108,7 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .handoff-unread    path of a handoff document no session has read yet; armed by bin/fm-handoff.sh, announced by its SessionStart pickup hook, cleared only by consume
+  .lock              session lock: the harness pid of the one session controlling this home's fleet, and the gate on arming supervision; never the .watch.lock singleton below (bin/fm-session-lock-lib.sh)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .unactioned-*      short-lived unactioned-alarm confirm cache; never touch; removed by teardown
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
