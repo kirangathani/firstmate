@@ -440,6 +440,13 @@ work_is_landed() {
 backlog_refresh_reminder() {
   local pr done_cmd report_path
   [ "$KIND" = secondmate ] && return 0
+  # A released lost slot is not a finished task: its worker is gone and whatever
+  # it had not landed went with the slot. Prompting for `done` here would record
+  # a completion that never happened.
+  if [ "$SLOT_LOST" = 1 ]; then
+    printf '%s\n' "Backlog: $ID's worker and worktree are gone, so it did not finish. Judge from its own PR or report whether the work landed, record it accordingly, and re-queue anything that has to be redone."
+    return 0
+  fi
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
       scout)

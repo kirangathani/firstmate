@@ -733,6 +733,10 @@ test_release_lost_slot_clears_records_without_touching_the_slot() {
     || fail "slot-release: the holder's worktree marker was removed"
   assert_grep "task-y2" "$case_dir/wt/.fm-task" \
     "slot-release: the holder's worktree marker was rewritten"
+  assert_no_grep "just finished" "$case_dir/stdout" \
+    "slot-release: the backlog reminder called a lost task finished"
+  assert_grep "did not finish" "$case_dir/stdout" \
+    "slot-release: the backlog reminder did not say the task was lost"
   kill -9 "$victim" 2>/dev/null || true
   pass "--release-lost-slot clears only the lost task's records"
 }
