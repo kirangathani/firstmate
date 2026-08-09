@@ -188,7 +188,7 @@ test_applied_testing_skip_briefs() {
   assert_grep "Do NOT run /no-mistakes" "$brief" "--local-skip brief still points at the pipeline"
   assert_no_grep "no-mistakes doctor" "$brief" "--local-skip brief kept the pipeline setup step"
   assert_no_grep "CI waiver handshake" "$brief" "--local-skip alone must not add the CI handshake"
-  assert_no_grep "^EOF$" "$brief" "--local-skip brief leaked a heredoc marker"
+  assert_no_grep "EOF" "$brief" "--local-skip brief leaked a heredoc marker"
   assert_grep '<!-- fm:definition-of-done skip=local -->' "$brief" \
     "the applied brief did not record which skip it now carries"
 
@@ -203,7 +203,7 @@ test_applied_testing_skip_briefs() {
   assert_grep "you cannot produce and must not try to produce" "$brief" \
     "handshake did not tell the worker the signature is not its to make"
   assert_no_grep "local testing skipped" "$brief" "--ci-skip must not claim the local pipeline was skipped"
-  assert_no_grep "^EOF$" "$brief" "--ci-skip brief leaked a heredoc marker"
+  assert_no_grep "EOF" "$brief" "--ci-skip brief leaked a heredoc marker"
 
   scaffold_ship "$home" brief-allskip-c3 no-registry-proj
   brief="$home/data/brief-allskip-c3/brief.md"
@@ -271,11 +271,34 @@ test_apply_refuses_what_it_cannot_write() {
     "the malformed-marker refusal did not name the problem"
 
   # The same delivery-mode matrix bin/fm-spawn.sh checks, re-checked here so a
-  # disagreement between the two stops rather than writing half an answer.
+  # disagreement between the two stops rather than writing half an answer. Every
+  # row of that matrix is exercised through THIS entry point, not just the one
+  # that happened to be convenient: a defence-in-depth check tested on one row is
+  # a check nobody has established holds on the others.
   scaffold_ship "$home" brief-modemismatch-e5 direct-proj
   out=$(apply_skip "$home" brief-modemismatch-e5 direct-PR --local-skip); status=$?
   [ "$status" -eq 0 ] && fail "applying --local-skip on a direct-PR brief must refuse"
   assert_contains "$out" "already runs no local pipeline" "direct-PR local-skip refusal wording"
+
+  out=$(apply_skip "$home" brief-modemismatch-e5 direct-PR --all-testing-skip); status=$?
+  [ "$status" -eq 0 ] && fail "applying --all-testing-skip on a direct-PR brief must refuse"
+  assert_contains "$out" "already runs no local pipeline" "direct-PR all-testing-skip refusal wording"
+
+  scaffold_ship "$home" brief-modemismatch-e8 no-registry-proj
+  out=$(apply_skip "$home" brief-modemismatch-e8 no-mistakes --ci-skip); status=$?
+  [ "$status" -eq 0 ] && fail "applying --ci-skip alone on a no-mistakes brief must refuse"
+  assert_contains "$out" "cannot be honoured for a no-mistakes project" \
+    "no-mistakes ci-skip-alone refusal wording"
+
+  scaffold_ship "$home" brief-modemismatch-e9 local-proj
+  out=$(apply_skip "$home" brief-modemismatch-e9 local-only --ci-skip); status=$?
+  [ "$status" -eq 0 ] && fail "applying any skip on a local-only brief must refuse"
+  assert_contains "$out" "does not apply to a local-only project" "local-only refusal wording"
+
+  out=$(apply_skip "$home" brief-modemismatch-e9 local-only --skip-testing); status=$?
+  [ "$status" -eq 0 ] && fail "--skip-testing on a local-only brief must refuse"
+  assert_contains "$out" "nothing to skip on a local-only project" \
+    "local-only --skip-testing refusal wording"
 
   out=$(apply_skip "$home" brief-modemismatch-e5 direct-PR --local-skip --ci-skip); status=$?
   [ "$status" -eq 0 ] && fail "two skip flags at once must refuse"
