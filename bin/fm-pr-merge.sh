@@ -201,6 +201,63 @@
 #     exists to stop - while the marker records one considered decision per
 #     project, made once, away from the pressure of a blocked merge.
 #
+# The attestation exemption: the ONE check whose failure this gate may excuse,
+# and the only grant anywhere in this script. That check is
+# `PR must be raised via no-mistakes`, the `check` job of that name in
+# .github/workflows/no-mistakes-required.yml. It fails on every PR the pipeline
+# did not raise, and firstmate itself authorizes exactly two ways for a PR to be
+# raised without the pipeline, so without this the checks-green gate above
+# refuses every such PR permanently - which is precisely the state this exemption
+# was added to end.
+#
+# MATCHED BY EXACT NAME, never a prefix, a substring, or a pattern. Renaming that
+# job therefore stops the exemption applying, in the safe direction: the renamed
+# check is no longer recognized, so it is no longer excused, so a failing one
+# refuses the merge. A rename can only ever cost a merge, never grant one.
+# tests/fm-pr-merge.test.sh asserts the constant below still equals that
+# workflow's job name, so the drift is caught by firstmate's own CI rather than
+# discovered at a captain's next merge.
+#
+# TWO AUTHORITIES, either of which excuses that one check. Both are read on the
+# captain's machine, from records the PR cannot influence:
+#   - A captain-authorized testing skip on THIS task, carrying a signature this
+#     home's config/ci-waiver-secret reproduces for this task id: local_skip=on
+#     with a valid local_skip_auth=, or ci_skip=on with a valid ci_skip_auth=.
+#     The bare flag line is NOT authority. A worker appends its status lines into
+#     this same state directory, so it can append the flag line to its own record
+#     just as easily; the token is an HMAC minted only by bin/fm-spawn.sh at
+#     dispatch. bin/fm-ci-waiver-lib.sh owns both payload domains and states the
+#     residual same-user limit no design in this space can remove. With no
+#     secret, no token, a wrong token, or no node to verify with, nothing
+#     verifies, so nothing is excused.
+#   - The project's delivery mode, resolved through bin/fm-project-mode.sh, is
+#     direct-PR. That mode is DEFINED as "push and open a PR without the
+#     pipeline", so its PRs cannot carry the attestation by construction. The
+#     registry it reads, $FM_HOME/data/projects.md, is firstmate's own private
+#     navigation record: firstmate and bin/fm-home-seed.sh are the only writers,
+#     and no brief, scaffold, or status protocol ever points a worker at it, so
+#     unlike the flag line above it is not a file a worker is invited to touch.
+#     An unregistered project, an unknown mode, or an absent registry all resolve
+#     to no-mistakes, which grants nothing.
+#
+# WHAT IT DOES NOT GRANT, all enforced below:
+#   - Any OTHER failing check still refuses, including a second failing check on
+#     an otherwise-exempted PR.
+#   - A pending check still refuses. Only a COMPLETED failure of that one name is
+#     excusable, because "not finished yet" and "authorized to be red" are
+#     different states with different remedies.
+#   - A check the classification table cannot read still refuses as unverified.
+#   - The kept-tests gate above still runs, and still refuses, unchanged.
+#   - An exempted check is not evidence that anything ran, so it does not count
+#     toward "this PR has checks": a rollup whose only entries were exempted is
+#     treated exactly like the zero-check case above and refuses without the
+#     captain's no-pr-ci marker. Counting it would rebuild the false-green shape
+#     that whole rule exists to prevent.
+#   - Nothing about the merge method, the recording step, or any other gate.
+# Every merge that uses the exemption prints a loud banner naming the check and
+# the authority, before the gates and again on the line before the merge, on the
+# same model as the waiver banner below.
+#
 # Testing-waiver disclosure: when the task was dispatched with a testing skip
 # (bin/fm-spawn.sh's --local-skip / --ci-skip / --all-testing-skip), this script
 # prints a loud banner naming exactly what was skipped, both before the gates run
@@ -208,12 +265,20 @@
 # indistinguishable in the log from one that actually passed. Three properties
 # of that disclosure are deliberate:
 #   - It is read from the task's own state/<id>.meta, on the captain's machine,
-#     and never from the PR, the branch, or the CI result. Nothing a worker can
-#     write can add, remove, or alter this banner.
-#   - It grants nothing. A waiver is disclosure only: every gate below still
-#     applies unchanged, including the zero-checks refusal, so a project whose
-#     CI is fully waived must still leave at least one check reporting or the
-#     merge refuses as unverified exactly as it does today.
+#     and never from the PR, the branch, or the CI result. Nothing the PR carries
+#     can add, remove, or alter this banner. A worker reaches that meta file to
+#     the same extent it reaches its own status file, so it could ADD a spurious
+#     banner to its own merge log; it cannot remove one, and per the next bullet
+#     an unsigned flag grants nothing, so the most that buys is noise.
+#   - It grants exactly one thing, and only when signed: a signed skip is one of
+#     the two authorities that excuse the single named attestation check above.
+#     Nothing else. Every other gate still applies unchanged, including the
+#     zero-checks refusal, so a project whose CI is fully waived must still leave
+#     at least one non-exempted check reporting or the merge refuses as
+#     unverified exactly as it did before. Note which half needs the signature:
+#     the GRANT does, the BANNER deliberately does not, so disclosure appears on
+#     the bare flag and a merge log can never be made quieter by withholding a
+#     token.
 #   - The kept-tests gate above runs under EVERY flag combination and no skip
 #     flag can disable it. It is firstmate-side rather than CI-side, and it is
 #     what catches a rebase quietly eating a base assertion - which is precisely
@@ -229,11 +294,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-supersession-lib.sh
 . "$SCRIPT_DIR/fm-supersession-lib.sh"
+# shellcheck source=bin/fm-ci-waiver-lib.sh
+. "$SCRIPT_DIR/fm-ci-waiver-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -322,6 +390,102 @@ waiver_banner() {  # <where>
   } >&2
 }
 waiver_banner "before gates"
+
+# --- the attestation exemption (contract in this script's header) -------------
+# The ONE check name whose failure may be excused, and only ever by exact string
+# equality against a rollup entry's name. It is duplicated from
+# .github/workflows/no-mistakes-required.yml's `check` job by necessity - this
+# script cannot read a workflow that lives in another repository - so
+# tests/fm-pr-merge.test.sh asserts the two still agree.
+ATTESTATION_CHECK_NAME='PR must be raised via no-mistakes'
+CI_WAIVER_SECRET_FILE="$CONFIG/ci-waiver-secret"
+# Newline-delimited rather than an array so an EMPTY value stays safe to expand
+# under `set -u` on every Bash this repo supports, stock macOS 3.2 included.
+# Empty means no authority, which is what makes it the exemption's own test.
+ATTESTATION_AUTHORITY=
+add_attestation_authority() {
+  ATTESTATION_AUTHORITY="${ATTESTATION_AUTHORITY}${ATTESTATION_AUTHORITY:+
+}$1"
+}
+
+# signed_skip_authority: 0 iff this task's meta pairs a testing-skip flag with a
+# token this home's own secret reproduces for THIS task id. The pairing is the
+# whole point: the flag line alone is reachable by the worker, the token is not.
+# Every failure path here - no flag, no token, a malformed token, no secret, no
+# node - returns non-zero, so an unverifiable claim is never an authorization.
+signed_skip_authority() {  # <meta-field> <checker-fn> <label>
+  local field=$1 checker=$2 label=$3 auth
+  auth=$(grep -m1 "^$field=" "$META" | cut -d= -f2- || true)
+  if [ -z "$auth" ] || ! fm_ci_waiver_valid_sig "$auth"; then
+    echo "note: this task records a $label but no usable $field= signature, so the skip authorizes nothing here" >&2
+    return 1
+  fi
+  if ! fm_ci_waiver_secret_readable "$CI_WAIVER_SECRET_FILE"; then
+    echo "note: this task records a $label with a $field= signature, but this home has no signing key at $CI_WAIVER_SECRET_FILE to check it against, so the skip authorizes nothing here" >&2
+    return 1
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    echo "note: node is unavailable, so this task's $field= signature cannot be checked and the skip authorizes nothing here" >&2
+    return 1
+  fi
+  if ! "$checker" "$ID" "$auth" < "$CI_WAIVER_SECRET_FILE"; then
+    echo "error: this task records a $label whose $field= signature this home's key does NOT reproduce for $ID; treating it as unauthorized" >&2
+    echo "error: that pairing means the flag line was not written by this home's own dispatch - re-dispatch the task with the flag rather than editing its record" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Resolves ATTESTATION_AUTHORITY, and is called ONLY when that named check is
+# actually failing on this PR, so an ordinary green merge pays none of its cost
+# and prints none of its notes.
+resolve_attestation_exemption() {
+  local mode yolo
+  if [ "$LOCAL_SKIP" = on ] \
+    && signed_skip_authority local_skip_auth fm_ci_waiver_dispatch_local_check "captain-authorized local-pipeline skip"; then
+    add_attestation_authority "a captain-authorized local-pipeline skip on this task, signed at dispatch by this home's own key"
+  fi
+  if [ "$CI_SKIP" = on ] \
+    && signed_skip_authority ci_skip_auth fm_ci_waiver_dispatch_check "captain-authorized CI skip"; then
+    add_attestation_authority "a captain-authorized CI skip on this task, signed at dispatch by this home's own key"
+  fi
+  if [ -n "$PROJ_NAME" ]; then
+    read -r mode yolo <<EOF_MODE
+$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-project-mode.sh" "$PROJ_NAME")
+EOF_MODE
+    : "$yolo"
+    if [ "$mode" = direct-PR ]; then
+      add_attestation_authority "$PROJ_NAME is registered as a direct-PR project, whose PRs are raised without the pipeline by design"
+    fi
+  fi
+}
+
+attestation_banner() {  # <where>
+  [ -n "$ATTESTATION_AUTHORITY" ] || return 0
+  local line
+  {
+    echo "================================================================================"
+    # Deliberately states what was EXCUSED rather than what the merge will do:
+    # this prints before the remaining refusals too, so a run that still refuses
+    # on a pending or unrelated red check must not read as an announced merge.
+    echo "ATTESTATION CHECK EXEMPTED ($1): one FAILING PR check was excused."
+    echo "  task:            $ID"
+    echo "  check:           $ATTESTATION_CHECK_NAME"
+    echo "  why it is red:   this PR was not raised through the no-mistakes pipeline, so"
+    echo "                   its body carries no pipeline attestation for that check to find."
+    echo "  authority:"
+    while IFS= read -r line; do
+      echo "                   - $line"
+    done <<EOF_AUTH
+$ATTESTATION_AUTHORITY
+EOF_AUTH
+    echo "  still enforced:  every OTHER check must be green, no check may be pending, an"
+    echo "                   unreadable check still refuses, and the base's own test"
+    echo "                   assertions still gate this merge. Only the check named"
+    echo "                   above was excused, matched by its exact name."
+    echo "================================================================================"
+  } >&2
+}
 
 # supersession_approved <file>::<name> <finding-class>: 0 iff this project's
 # supersession record holds a fully-formed captain-approved entry that covers
@@ -461,6 +625,12 @@ checks_total=0
 checks_failing=0
 checks_pending=0
 checks_unknown=0
+checks_exempted=0
+# Deferred rather than decided inside the loop: the exemption's authority is
+# resolved once, after the pass, and only if that named check turned out to be
+# failing at all. Its count is kept because a re-run can leave the same name in
+# the rollup more than once.
+attestation_failing=0
 while IFS=$'\t' read -r ck_type ck_status ck_conclusion ck_state ck_name; do
   [ -n "$ck_type$ck_status$ck_conclusion$ck_state$ck_name" ] || continue
   checks_total=$((checks_total + 1))
@@ -487,6 +657,12 @@ while IFS=$'\t' read -r ck_type ck_status ck_conclusion ck_state ck_name; do
   esac
   case "$verdict" in
     failing)
+      # Exact equality, so a renamed job falls straight through to the ordinary
+      # refusal below (header: a rename costs a merge, it never grants one).
+      if [ "$ck_name" = "$ATTESTATION_CHECK_NAME" ]; then
+        attestation_failing=$((attestation_failing + 1))
+        continue
+      fi
       checks_failing=$((checks_failing + 1))
       echo "error: PR check is failing: $ck_name" >&2
       ;;
@@ -503,6 +679,24 @@ done <<EOF_CHECKS
 $checks_raw
 EOF_CHECKS
 
+if [ "$attestation_failing" -gt 0 ]; then
+  resolve_attestation_exemption
+  if [ -n "$ATTESTATION_AUTHORITY" ]; then
+    checks_exempted=$attestation_failing
+    attestation_banner "before the remaining gates"
+  else
+    # One line per occurrence, so the count in the refusal below still matches
+    # the checks named above it when a re-run left the name in twice.
+    attestation_seen=0
+    while [ "$attestation_seen" -lt "$attestation_failing" ]; do
+      attestation_seen=$((attestation_seen + 1))
+      checks_failing=$((checks_failing + 1))
+      echo "error: PR check is failing: $ATTESTATION_CHECK_NAME" >&2
+    done
+    echo "error: that check can only be excused by a captain-authorized testing skip carrying this home's own signature, or by the project being registered as direct-PR; neither applies here (contract in this script's header)" >&2
+  fi
+fi
+
 if [ "$checks_failing" -gt 0 ]; then
   echo "error: $checks_failing failing PR check(s) (named above); refusing to merge a red PR" >&2
   echo "error: fix the failure(s) on the PR branch until every check is green, then re-run fm-pr-merge.sh" >&2
@@ -516,11 +710,21 @@ if [ "$checks_pending" -gt 0 ]; then
   echo "error: $checks_pending PR check(s) have not finished (named above); this PR is not red, it is unfinished - wait for the checks to complete, then re-run fm-pr-merge.sh" >&2
   exit 1
 fi
-if [ "$checks_total" -eq 0 ]; then
-  if [ -n "$PROJ_NAME" ] && [ -e "$NO_PR_CI_FILE" ]; then
-    echo "note: the PR reports no checks; captain-approved marker $NO_PR_CI_FILE confirms $PROJ_NAME intentionally runs no PR CI; proceeding" >&2
+# An exempted check is an authorized RED, not evidence that anything ran, so it
+# is subtracted before asking whether this PR reported any checks at all. A PR
+# whose only entry was excused is the same false-green shape as an empty rollup
+# and takes the same refusal (header contract).
+checks_evidence=$((checks_total - checks_exempted))
+if [ "$checks_evidence" -eq 0 ]; then
+  if [ "$checks_total" -eq 0 ]; then
+    zero_reason="the PR reports no checks at all"
   else
-    echo "error: the PR reports no checks at all; refusing to treat absent CI as green" >&2
+    zero_reason="the PR's only check(s) were the exempted attestation check, so nothing on this PR actually verified the branch"
+  fi
+  if [ -n "$PROJ_NAME" ] && [ -e "$NO_PR_CI_FILE" ]; then
+    echo "note: $zero_reason; captain-approved marker $NO_PR_CI_FILE confirms $PROJ_NAME intentionally runs no PR CI; proceeding" >&2
+  else
+    echo "error: $zero_reason; refusing to treat absent CI as green" >&2
     echo "error: either CI has not reported yet (wait, then re-run fm-pr-merge.sh) or this project runs no PR CI - only a captain-created marker at $NO_PR_CI_FILE (contract in this script's header) lets a zero-check PR merge" >&2
     exit 1
   fi
@@ -534,5 +738,6 @@ fi
 # Repeated on the line immediately before the merge so the disclosure cannot be
 # lost above a long gate log.
 waiver_banner "MERGING NOW"
+attestation_banner "MERGING NOW"
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
