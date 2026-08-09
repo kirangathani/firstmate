@@ -202,7 +202,7 @@ toon_field() {  # <axi-status-output> <key>
     }'
 }
 
-CI_EMPTY='{"collection":{"ok":false,"reason":"REASON"},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"excused":0,"excused_authority":[]}'
+CI_EMPTY='{"collection":{"ok":false,"reason":""},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"excused":0,"excused_authority":[]}'
 ci_unread() {  # <reason>
   printf '%s' "$CI_EMPTY" | jq --arg r "$1" '.collection.reason = $r'
 }
@@ -323,7 +323,7 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
 
 agent_json() {  # <task-json>
   local task=$1 id kind mode project worktree window branch endpoint_alive agent_alive pr_url
-  local idx run_id run_status run_updated axi rc steps actives ci meta
+  local idx run_id run_status run_updated axi rc steps actives ci meta skip_local skip_ci
 
   id=$(printf '%s' "$task" | jq -r '.id')
   kind=$(printf '%s' "$task" | jq -r '.kind // ""')
@@ -360,9 +360,18 @@ agent_json() {  # <task-json>
   # bin/fm-fleet-snapshot.sh is this view's owner of fleet state and already
   # resolved it; the standard construction is the fallback for a fleet document
   # that predates the field.
+  #
+  # Copied out of the library's globals immediately, because the attestation
+  # resolution below reads the same flags for its own purposes and leaves those
+  # globals holding ITS answer. Reading them again after that call would work
+  # today only because it happens to be handed the same record.
   meta=$(printf '%s' "$task" | jq -r '.paths.meta.path // ""')
   [ -n "$meta" ] || meta="$STATE_DIR/$id.meta"
   fm_testing_skip_read "$meta"
+  skip_local=false
+  skip_ci=false
+  [ "$FM_TESTING_SKIP_LOCAL" = off ] || skip_local=true
+  [ "$FM_TESTING_SKIP_CI" = off ] || skip_ci=true
 
   steps='[]'
   actives='[]'
@@ -421,8 +430,8 @@ agent_json() {  # <task-json>
     --argjson endpoint_alive "$endpoint_alive" \
     --argjson collect_ok "$collect_ok" \
     --argjson pr_num "${pr_num:-null}" \
-    --argjson skip_local "$([ "$FM_TESTING_SKIP_LOCAL" = on ] && echo true || echo false)" \
-    --argjson skip_ci "$([ "$FM_TESTING_SKIP_CI" = on ] && echo true || echo false)" \
+    --argjson skip_local "$skip_local" \
+    --argjson skip_ci "$skip_ci" \
     --argjson steps "$steps" \
     --argjson actives "$actives" \
     --argjson ci "$ci" \
