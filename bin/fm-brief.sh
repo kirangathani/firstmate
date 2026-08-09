@@ -130,6 +130,19 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+# The gate-context helpers read the task's brief and decision record under
+# FM_HOME/data, while the scripts themselves come from the shared tracked code
+# root. Those are the same directory in the main home but NOT in a secondmate
+# home, which is the whole point of the FM_HOME split, and a crewmate pane is
+# launched with no FM_HOME of its own (only a --secondmate launch gets that
+# prefix, see bin/fm-spawn.sh). Left root-anchored, a secondmate's crewmate
+# would resolve data/ to the code root, find no brief there, and be unable to
+# start a run at all. So the resolved home is embedded, exactly as the status
+# file path above already is.
+FM_HOME_ENV="FM_HOME=$(shell_quote "$FM_HOME")"
+NM_INTENT_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-nm-intent.sh")"
+NM_DECISION_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-nm-decision.sh")"
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -399,12 +412,31 @@ You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
-Two firstmate-specific rules layer on top of that guidance:
+Four firstmate-specific rules layer on top of that guidance:
+
 - ask-user findings are not yours to answer: escalate to firstmate (rule 6) and stop.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
+- **Start every run with the pinned intent, never a paraphrase.** \`--intent\` is required to start a run and the pipeline's final review scores the diff against it, so it must be the goal as actually stated, not your restatement of it. Take it from its one owner:
+  \`no-mistakes axi run --intent "\$($NM_INTENT_CMD $ID)"\`
+  That prints the \`# Task\` section of this brief verbatim. Use the identical command on every re-run in this task.
+- **Every \`--action fix\` needs substantive \`--instructions\`.** The gate agent that applies a fix is not you: it sees the finding text and the diff and nothing else, and it cannot read this brief or the project's AGENTS.md. So \`--instructions\` must carry the design reasoning behind the code the finding touches, the principle the fix must preserve, and what the fix must not break or reintroduce. A bare or one-phrase \`--instructions\` is refused before it runs; that refusal is the rule working, not a tool fault, so answer it rather than routing around it.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+# Gate decisions must survive to the end of the run
+A decision recorded at a no-mistakes gate constrains the step that raised it, but NOT the steps after it. A later step's auto-fix in the same run can revert a decision you already submitted, and the final review can then pass with zero findings because it scores against \`--intent\`, which was written before any decision existed. That is upstream no-mistakes issue #591 (open, third-party, v1.40.0), and it shipped a PR contradicting three explicit decisions. **\`checks-passed\` is NOT evidence that a decision survived** - in #591 it was emitted over the reverted state. Only the final diff is evidence.
+
+So, for every decision you submit at a gate:
+
+1. Record it the moment you submit it, not later from memory:
+   \`$NM_DECISION_CMD record $ID --finding <finding-id> --key <decision-key> --requires "<what the decision requires, in concrete checkable terms>" --step <step>\`
+2. Before reporting the PR ready, check each recorded decision against the FINAL diff yourself - read the diff, do not infer from the pipeline's verdict - and mark it:
+   \`$NM_DECISION_CMD verify $ID --finding <finding-id> --evidence "<the file:line or commit that proves it still holds>"\`
+3. If any recorded decision was reverted or contradicted, mark it and STOP:
+   \`$NM_DECISION_CMD reverted $ID --finding <finding-id> --evidence "<the reverting commit>"\`
+   Then append \`blocked: gate decision <key> reverted by <commit>\` and stop. Do NOT report done, and do not re-fix it yourself.
+4. \`$NM_DECISION_CMD check $ID\` must exit 0 before you report done. It refuses while any recorded decision is unverified or contradicted.
+
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run that final \`check\`, then append \`done: PR {url} checks green\` and stop. Your completion line must state explicitly that every recorded gate decision was verified against the final diff (or that there were none). You are finished.
 EOF
 )
     fi

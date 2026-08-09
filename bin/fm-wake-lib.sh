@@ -27,37 +27,14 @@ fm_pid_alive() {
 # told apart from the older lstart format without re-deriving anything.
 FM_PID_IDENTITY_PROC_PREFIX='proc-starttime:'
 
-# Parse field 22 (starttime, clock ticks since boot) out of one /proc/<pid>/stat
-# line. Field 2 (comm) is parenthesized and may itself contain spaces or
-# parentheses, which shifts every positional field, so counting from the left is
-# unsafe. Split on the LAST ')' instead: the remainder is field 3 onward, which
-# makes field 22 that remainder's 20th whitespace-separated token.
-fm_pid_parse_start_ticks() {
-  local line=$1 rest fields
-  [ -n "$line" ] || return 1
-  rest=${line##*)}
-  [ "$rest" != "$line" ] || return 1
-  IFS=' ' read -r -a fields <<< "$rest"
-  [ "${#fields[@]}" -ge 20 ] || return 1
-  case "${fields[19]}" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  printf '%s\n' "${fields[19]}"
-}
-
-fm_pid_start_ticks() {
-  local pid=$1 line=
-  case "$pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  # stderr is redirected BEFORE the input redirect so that a dead pid's missing
-  # stat file fails silently: redirections apply left to right, so the usual
-  # trailing 2>/dev/null would arrive too late to swallow the open failure.
-  # The trailing `|| true` keeps a missing stat file from tripping a caller's
-  # errexit; the parser's own validation is what actually gates the result.
-  IFS= read -r line 2>/dev/null < "/proc/$pid/stat" || true
-  fm_pid_parse_start_ticks "$line"
-}
+# fm_pid_start_ticks and fm_pid_parse_start_ticks live in the session-lock
+# library, because the SESSION lock (state/.lock) now records the same kernel
+# start ticks the watcher singleton (state/.watch.lock) identifies its holder by,
+# and one primitive with two copies is what this branch exists to stop.
+# The dependency is one-way: that library is side-effect free on source and never
+# reads anything back from here.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FM_WAKE_LIB_DIR/fm-session-lock-lib.sh"
 
 # The command half of a /proc-derived identity, read from /proc/<pid>/cmdline so
 # the common path forks nothing at all. argv is NUL-separated there, so it is

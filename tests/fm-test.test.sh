@@ -63,7 +63,7 @@ done
 want="$want]"
 [ "$MATRIX" = "$want" ] \
   || fail "CI shard matrix ($MATRIX) must be exactly 1..$DENOM to match the invocation denominator"
-pass "CI runs every shard 1..$DENOM of the denominator it invokes"
+pass "CI runs every shard of the denominator it invokes"
 
 # --- fan-in gate: a skipped/cancelled shard fails, never passes -------------
 # The gate now fans in the CI testing waiver too, because a verified waiver
@@ -113,8 +113,13 @@ for n in "$DENOM" 3; do
   if ! diff <(printf '%s' "$union" | LC_ALL=C sort) <(printf '%s\n' "$WHOLE") >/dev/null; then
     fail "union of shards 1..$n is not the whole set"
   fi
-  pass "shards 1..$n disjointly cover all $TOTAL test files"
 done
+# One CONSTANT identifier for the whole matrix, asserted per-N by the fails
+# above. $n and $TOTAL are both tree-derived, so naming the assertion with them
+# made bin/fm-assert-tests-kept.sh see a vanished assertion on any PR that adds
+# or removes a test file or changes CI's denominator - deterministically, not
+# probabilistically (data/turnend-timing-block-h7/report.md §3).
+pass "shards disjointly cover the whole test-file set for CI's denominator and one other N"
 
 first=$("$RUNNER" --list-shard "2/$DENOM")
 second=$("$RUNNER" --list-shard "2/$DENOM")
@@ -547,4 +552,7 @@ assert_contains "$err" 'listing the canonical whole set instead' "the listing mu
 assert_not_contains "$err" 'assigned' "a listing must not report a run it never performed"
 pass "an escalating --list-local lists the whole set instead of running it"
 
-printf 'ok - fm-test parity suite complete\n'
+# Through pass(), not a raw printf of the same bytes: check 1 extracts pass calls
+# lexically, so a hand-written `ok -` line is a name the run reports that no static
+# identifier accounts for - exactly what check 2 now refuses to compare.
+pass "fm-test parity suite complete"

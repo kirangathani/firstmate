@@ -70,6 +70,7 @@ config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; not inherited into secondmate homes
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/statusline-base  optional path to the operator's own status-line command, composed above bin/fm-statusline.sh's fleet-control line; LOCAL, gitignored; absent means no base line; inherited by secondmate homes and forwarded to task worktrees as FM_STATUSLINE_BASE (docs/configuration.md "Status-line composition")
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 config/ci-waiver-secret  optional CI testing waiver MASTER key; LOCAL, gitignored, mode 600; created by bin/fm-ci-waiver.sh init, never printed, published, given to a worker, or inherited by secondmate homes (docs/configuration.md "The CI testing waiver secret")
 data/                personal fleet records; LOCAL, gitignored as a whole
@@ -90,6 +91,7 @@ state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
+  <id>.acted           written by bin/fm-ack.sh, bin/fm-send.sh, and bin/fm-pr-check.sh: firstmate acted on this task's reported state; silences the unactioned alarm until the crew's next status append (bin/fm-ack-lib.sh); removed by teardown
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; a tmux task also records tmux_window_pinned=1, the guarantee that its window name cannot drift from fm-<id>, which is what licenses the exact-label liveness reads (docs/tmux-backend.md "The exact-label check needs a pinned window name to be safe"); a captain-authorized testing skip also records local_skip=on and/or ci_skip=on with its ci_skip_auth= token (section 7); kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
@@ -106,7 +108,9 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .handoff-unread    path of a handoff document no session has read yet; armed by bin/fm-handoff.sh, announced by its SessionStart pickup hook, cleared only by consume
+  .lock              session lock: the harness pid of the one session controlling this home's fleet, and the gate on arming supervision; never the .watch.lock singleton below (bin/fm-session-lock-lib.sh)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
+  .unactioned-*      short-lived unactioned-alarm confirm cache; never touch; removed by teardown
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
@@ -280,6 +284,7 @@ Never merge a red PR.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 `bin/fm-pr-merge.sh` also gates every merge on `bin/fm-assert-tests-kept.sh`: a test assertion the base already had that is missing or failing on the PR branch is a hard refusal, even under `yolo`.
 A base assertion the gate could not execute at all against the branch is reported as unexecuted, and it refuses only for a project the captain has enabled with a `data/exec-gate/<project>` marker; otherwise it is informational.
+A base assertion the gate could not compare because the base's own test named it differently across two runs is reported as unstable and always refuses; that is a defect in the base's test, so the fix is an ordinary test-fix task naming the assertion with a constant string, never a captain decision.
 On that refusal, rebase damage is the worker's to fix, while a deliberate supersession of the base's asserted behavior is a product decision that is never the worker's or firstmate's to make - relay it to the captain, and only a captain-approved entry in `data/supersessions/<project>.md` (entry format in `bin/fm-pr-merge.sh`'s header) lets that merge proceed.
 `bin/fm-pr-merge.sh` also enforces "never merge a red PR" in code: it refuses when any PR check is failing, still pending, or unreadable, and treats a PR reporting no checks at all as unverified rather than green - only a captain-created `data/no-pr-ci/<project>` marker (contract in that script's header) lets a genuinely no-CI project's zero-check PR merge.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
@@ -359,6 +364,7 @@ A forced repair must use the home-scoped owner path emitted by supervision instr
 
 Guard warnings do not replace the contract.
 Queued wakes must be drained before other action, stale liveness must be repaired through the emitted protocol, and the worktree-tangle warning must be resolved without touching unlanded work.
+An unactioned-direct-report warning is answered by doing what the reported state owes, then recording it with `bin/fm-ack.sh <id> "<what you did>"` when the action leaves no other trace, above all a relay to the captain; `bin/fm-ack-lib.sh` owns the predicate, owed states, grace, and silencers.
 The spawn assertion and generated ship brief must both enforce that project work starts in an isolated disposable worktree, never the primary checkout.
 Harness-aware turn-end guards are structural backstops, not permission to omit the live cycle.
 

@@ -20,7 +20,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, and Herdr-lab briefs                       |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` symlink, and the canonical self-governance section |
-| `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, and stale watcher liveness   |
+| `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, stale watcher liveness, and unactioned direct reports |
+| `fm-ack.sh`              | Record that firstmate acted on a direct report's terminal or firstmate-owed state    |
+| `fm-ack-lib.sh`          | Shared ack record, owed-state sets, and the unactioned-direct-report predicate       |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
 | `fm-handoff.sh`          | Own the handoff document's path, its unread marker, and the post-`/clear` SessionStart pickup (docs/handoff.md) |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
@@ -48,8 +50,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker, detector, and idempotent transformation         |
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
-| `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with loud cycle endings and bounded lifecycle ledger |
-| `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
+| `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper, gated on session-lock ownership, with loud cycle endings and bounded lifecycle ledger |
+| `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision, gated on session-lock ownership |
 | `fm-watch.sh`            | Singleton-safe always-on watcher: absorb benign wakes, queue and exit on actionable ones |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
 | `fm-afk-launch.sh`       | Own away-mode entry, exit, rollback, and any backend terminal lifecycle                 |
@@ -78,7 +80,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, gate on `fm-assert-tests-kept.sh` and on the PR's checks being green, then merge a task's canonical full GitHub URL |
-| `fm-assert-tests-kept.sh` | Report the base's test assertions the branch under review lost, broke, or could not execute at all (its header owns the finding classes and exit codes) |
+| `fm-assert-tests-kept.sh` | Report the base's test assertions the branch under review lost, broke, could not execute at all, or named unstably across two runs (its header owns the finding classes and exit codes) |
 | `fm-test-exec-lib.sh`   | Shared per-language test runners (shell, pytest, vitest, jest) and scratch-tree environment lifecycle that `fm-assert-tests-kept.sh` check 2 drives |
 | `fm-supersession-lib.sh` | Single matcher for the captain-approved supersession record, shared by the merge gate that enforces it and the viewer that displays it (`fm-pr-merge.sh`'s header owns the entry grammar) |
 | `fm-ci-waiver.sh`        | Generate, publish, and sign the CI testing waiver, refusing to sign for a task the captain did not dispatch with a CI skip |
@@ -87,7 +89,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
-| `fm-lock.sh`             | Per-home firstmate session lock                                                      |
+| `fm-lock.sh`             | Per-home firstmate session lock; `ownership` also answers owned/other/missing read-only for the adapters |
+| `fm-session-lock-lib.sh` | Single implementation of session-lock ownership: the ancestry walk, holder liveness, and the owned/other/missing verdict every gate consumes |
+| `fm-statusline.sh`       | Harness-neutral status line saying whether this session is in control of the current home's fleet, composed beneath an optional `config/statusline-base` command |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
 | `fm-x-poll.sh`           | One bounded X relay poll: stash newly offered mentions and emit their once-only wake |
 | `fm-x-reply.sh`          | Post or dry-run preview a composed X-mode reply or follow-up                         |

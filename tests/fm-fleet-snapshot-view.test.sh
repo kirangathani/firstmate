@@ -594,6 +594,68 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# The snapshot used to build its output document by handing every accumulated
+# payload to jq as a command-line ARGUMENT. execve() caps the argument vector,
+# so past a certain payload size the exec failed with E2BIG and jq never ran at
+# all: empty stdout, exit 126, and permanently broken from that fleet size
+# upward rather than intermittently.
+#
+# A fixture at an ordinary fleet size proves nothing here, because an ordinary
+# fleet size is exactly what broke it. The fixture has to cross the host's own
+# limit, so the payload is sized from `getconf ARG_MAX` at runtime rather than
+# from a hardcoded number. ARG_MAX is the whole-vector cap and a deliberate
+# over-estimate of Linux's stricter per-argument MAX_ARG_STRLEN (a fixed
+# 128 KiB), so a payload past ARG_MAX is past every execve limit on any host.
+#
+# The exit code and the output byte count are both asserted. The old failure
+# left an EMPTY stdout behind a non-zero exit, and a test that only piped the
+# captured stdout into jq would hand jq an empty file and mis-report it.
+test_snapshot_survives_payload_past_arg_max() {
+  local home arg_max pad rows i rc bytes out err count summary
+  home=$(make_home arg-max)
+  arg_max=$(getconf ARG_MAX 2>/dev/null || printf '')
+  case $arg_max in
+    ''|*[!0-9]*|0) arg_max=2097152 ;;  # getconf unavailable: fall back to the limit measured on Linux
+  esac
+  # Every backlog record keeps its source line verbatim in .raw, so a markdown
+  # file of ARG_MAX bytes always parses into MORE than ARG_MAX bytes of JSON.
+  pad=$(printf '%*s' 4000 '' | tr ' ' 'x')
+  rows=$(( arg_max / 4096 + 2 ))
+  {
+    printf '## In flight\n'
+    i=0
+    while [ "$i" -lt "$rows" ]; do
+      printf -- '- [ ] bulk-%s - Bulk %s %s (repo: alpha) (kind: ship) (since 2026-07-07)\n' "$i" "$pad" "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+
+  out=$home/snapshot.json
+  err=$home/snapshot.err
+  FM_HOME="$home" "$SNAPSHOT" --json > "$out" 2> "$err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "snapshot must exit 0 past the argv limit, got $rc: $(head -c 400 "$err")"
+  bytes=$(wc -c < "$out" | tr -d ' ')
+  [ "$bytes" -gt "$arg_max" ] \
+    || fail "fixture must push the payload past ARG_MAX ($arg_max) to prove anything, produced only $bytes bytes"
+  jq -e '.schema == "fm-fleet-snapshot.v1"' "$out" >/dev/null \
+    || fail "oversized snapshot must still be a valid fm-fleet-snapshot.v1 document"
+  count=$(jq '.backlog.records | length' "$out")
+  [ "$count" -eq "$rows" ] \
+    || fail "oversized snapshot must carry every backlog record, expected $rows got $count"
+
+  # --secondmate-home-summary shares the same payload helpers, so it has to
+  # survive the same oversized input. Its own output is bounded by design, so
+  # the signal there is the exit status and the schema, not the byte count.
+  summary=$home/summary.json
+  FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary > "$summary" 2> "$err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "secondmate home summary must exit 0 past the argv limit, got $rc: $(head -c 400 "$err")"
+  jq -e '.schema == "fm-secondmate-home-summary.v1"' "$summary" >/dev/null \
+    || fail "oversized secondmate home summary must still be a valid fm-secondmate-home-summary.v1 document"
+  pass "snapshot and secondmate home summary survive a payload past the host's ARG_MAX"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_event_hints_follow_reconciled_current_state
@@ -607,3 +669,4 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_snapshot_survives_payload_past_arg_max

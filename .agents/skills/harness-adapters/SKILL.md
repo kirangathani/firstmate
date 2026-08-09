@@ -18,7 +18,7 @@ The captain may override that file at session start or later; a per-task instruc
 Secondmates have their own harness knob, so a secondmate can run on a different adapter than crewmates.
 `config/secondmate-harness` is the harness the primary uses to launch SECONDMATE agents, resolved through the fallback chain `config/secondmate-harness` -> `config/crew-harness` -> firstmate's own.
 An absent or `default` `config/secondmate-harness` therefore behaves exactly as the crew harness did before this knob existed (secondmates launched on the crew harness); setting it splits the two.
-`config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` are inherited by secondmate homes.
+`config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, and `config/statusline-base` are inherited by secondmate homes.
 This skill owns only the harness-relevant consequence: a secondmate's own crewmates use the primary's dispatch profiles and static harness value, while `config/secondmate-harness` is the primary's own setting and is never inherited - secondmates do not spawn secondmates.
 Inheritance copies the literal `config/crew-harness` file, so for a secondmate's own crewmates to run on the primary's crewmate harness the captain must set `config/crew-harness` to a concrete adapter name, such as `codex`.
 If `config/crew-harness` is unset or `default`, there is no concrete value to inherit, so the secondmate's own crewmates fall back to the secondmate's own/detected harness rather than the primary's effective crewmate harness.
@@ -174,6 +174,13 @@ The decision persists for the repo, so later worktrees of the same project skip 
 
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.
+
+**Crewmate launches pass `--dangerously-bypass-hook-trust`, by captain ruling.**
+Codex gates project hooks on folder hook-trust, which `fm-spawn` will not establish by writing Codex's managed trust store, so without the flag the fix-instructions seatbelt `fm-spawn` writes to `<worktree>/.codex/hooks.json` would be present but inert.
+The flag is deliberate, not an accident, and its cost was accepted: a Codex crewmate runs a repository's own hook code at launch with no trust check, in any repo this fleet clones.
+It is scoped to the crewmate launch template only; a Codex SECONDMATE launch does not carry it, and the ruling does not extend to any other harness or any other Codex safety flag.
+`docs/fix-instructions-gate.md` owns the full contract and the accepted cost.
+UNVERIFIED: that the flag makes the hook fire is an inference from Codex's documented trust gate, not a measurement, because Codex was not installed where this was built; the first session with Codex available should confirm it.
 
 **Primary-session guard fact (verified 2026-07-08, codex-cli 0.142.1).**
 The firstmate PRIMARY's own `.codex/hooks.json` registers a Stop hook that pipes Codex's Stop payload to `bin/fm-turnend-guard.sh`.

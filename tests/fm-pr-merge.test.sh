@@ -71,6 +71,17 @@
 #   (w4) the waiver does not excuse a PR reporting zero checks
 #   (w5) the kept-tests gate still runs, and still refuses, under every
 #        skip-flag combination
+#
+# The branch-suite premise behind check 2's identical-file skip (contract in
+# bin/fm-pr-merge.sh's header), asserted from the stub detector's own argv:
+#   (p1) an ordinary merge passes --assume-branch-suite-green, since its own
+#        checks-green gate is what holds that premise up
+#   (p2) a ci_skip=on task does NOT, and says the gate re-ran in full: a waiver
+#        removes the very suite the premise names
+#   (p3) a project with the no-pr-ci marker does NOT either, since that marker
+#        lets an EMPTY rollup pass the checks-green gate
+#   (p4) `assumed-covered:` lines are disclosed with a count in the merge log
+#        and are never treated as a finding
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -618,8 +629,13 @@ make_stub_case() {
   else
     : > "$case_dir/kept-findings"
   fi
+  # The stub records its own argv, so the premise cases below can assert which
+  # arguments fm-pr-merge.sh actually handed the detector rather than inferring
+  # it from an outcome that would look the same either way.
+  : > "$case_dir/kept-argv"
   cat > "$shimbin/fm-assert-tests-kept.sh" <<SH
 #!/usr/bin/env bash
+printf '%s\n' "\$@" > "$case_dir/kept-argv"
 cat "$case_dir/kept-findings"
 exit $exit_code
 SH
@@ -893,11 +909,64 @@ test_invalid_kind_entry_not_honored() {
   set -e
 
   expect_code 1 "$rc" "invalid-kind: an unrecognized kind must not excuse the merge"
-  assert_grep 'ignoring supersession entry whose kind is not missing, failing, unexecuted, or any' "$case_dir/stderr" \
+  assert_grep 'ignoring supersession entry whose kind is not missing, failing, unexecuted, unstable, or any' "$case_dir/stderr" \
     "invalid-kind: the invalid kind was not warned about"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "invalid-kind: gh-axi pr merge was invoked despite an invalid kind"
   pass "a supersession entry naming an invalid kind is warned about and never honored"
+}
+
+test_unstable_finding_refuses_and_explains_the_test_defect() {
+  local case_dir rc
+  # An unstable finding means the BASE's own test named one assertion two ways
+  # across the detector's two runs, so nothing could be compared. It refuses for
+  # every project with no exec-gate-style opt-in, and the message must send the
+  # reader at the test rather than at the branch under review.
+  case_dir=$(make_stub_case unstable-refuses 1 'unstable: tests/t.test.sh::took (1s)')
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/70 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unstable-refuses: an unstable finding must refuse the merge"
+  assert_grep 'no captain-approved supersession entry covers: tests/t.test.sh::took (1s) (unstable)' \
+    "$case_dir/stderr" "unstable-refuses: the unstable finding was not parsed and counted"
+  assert_grep "defect in the BASE's test" "$case_dir/stderr" \
+    "unstable-refuses: the message must point at the test, not at the branch"
+  assert_no_grep 'none of its output parsed' "$case_dir/stderr" \
+    "unstable-refuses: an unstable line must parse as a finding, not fall through as unrecognized output"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unstable-refuses: gh-axi pr merge was invoked despite an unstable finding"
+  pass "an unstable finding refuses the merge and names the base test as the defect"
+}
+
+test_unstable_kind_supersession_is_honored_and_scoped() {
+  local case_dir
+  # kind: unstable must be a recognized class - and, being a kind, must stay
+  # scoped: the same entry may not excuse a genuinely deleted assertion.
+  case_dir=$(make_stub_case unstable-kind 1 'unstable: tests/t.test.sh::took (1s)')
+  write_supersessions "$case_dir" \
+    '- ids: tests/t.test.sh::* | project: project | kind: unstable | date: 2026-08-01 | reason: captain accepted the moving name while the test fix lands'
+
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "unstable-kind: a kind: unstable entry must excuse an unstable finding"
+  assert_grep 'covers: tests/t.test.sh::took (1s) (unstable)' "$case_dir/stderr" \
+    "unstable-kind: the unstable finding was not excused by its own kind"
+
+  case_dir=$(make_stub_case unstable-kind-scoped 1 'missing: tests/t.test.sh::took (1s)')
+  write_supersessions "$case_dir" \
+    '- ids: tests/t.test.sh::* | project: project | kind: unstable | date: 2026-08-01 | reason: captain accepted the moving name while the test fix lands'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/72 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  set -e
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unstable-kind: a kind: unstable entry must not excuse a deleted (missing) assertion"
+  pass "kind: unstable excuses an unstable finding and nothing else"
 }
 
 test_field_after_reason_not_honored() {
@@ -1068,7 +1137,7 @@ test_findings_exit_with_no_parseable_line_refuses() {
   set -e
 
   expect_code 1 "$rc" "unparseable-findings: exit 1 with no parseable finding must refuse"
-  assert_grep 'none of its output parsed as a missing:/failing:/unexecuted: line' "$case_dir/stderr" \
+  assert_grep 'none of its output parsed as a missing:/failing:/unexecuted:/unstable: line' "$case_dir/stderr" \
     "unparseable-findings: the refusal did not explain the unparseable output"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "unparseable-findings: gh-axi pr merge was invoked on unparseable gate output"
@@ -1435,8 +1504,103 @@ test_kept_tests_gate_still_runs_under_every_skip() {
   pass "the kept-tests gate runs, and still refuses, under every skip-flag combination"
 }
 
+### the premise behind check 2's identical-file skip ##########################
+#
+# bin/fm-assert-tests-kept.sh only skips a base test file the branch's copy
+# matches byte for byte when a caller asserts the branch's own suite is verified
+# green. This script is the caller that holds that premise, through its own
+# checks-green gate - so these cases pin WHO asserts it and, more importantly,
+# the two cases where it must not be asserted at all.
+
+test_merge_asserts_the_branch_suite_premise_to_the_kept_gate() {
+  local case_dir rc
+  case_dir=$(make_stub_case premise-asserted 0)
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/90 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "premise-asserted: an ordinary green PR must merge"
+  assert_grep '--assume-branch-suite-green' "$case_dir/kept-argv" \
+    "premise-asserted: the ordinary path must let the gate skip files the branch's green suite already ran"
+  pass "an ordinary merge asserts the branch-suite premise to the kept-tests gate"
+}
+
+test_ci_waived_task_re_runs_every_base_test_file() {
+  local case_dir rc
+  case_dir=$(make_stub_case premise-ci-waived 0)
+  # With the PR's CI test jobs waived there is no green branch suite at all, so
+  # the kept-tests gate is this merge's only test evidence and must not behave
+  # as though it had one.
+  add_skip_flags "$case_dir" 'ci_skip=on'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/91 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "premise-ci-waived: a waived PR must still be mergeable"
+  assert_no_grep '--assume-branch-suite-green' "$case_dir/kept-argv" \
+    "premise-ci-waived: a CI-waived task must never assert a premise its own waiver removed"
+  assert_grep 'were re-run in full' "$case_dir/stderr" \
+    "premise-ci-waived: the full re-run must be stated in the merge log"
+  assert_grep 'EVERY base test file is re-run here' "$case_dir/stderr" \
+    "premise-ci-waived: the waiver banner must say the gate is running at full cost"
+  pass "a CI-waived task re-runs every base test file instead of assuming coverage"
+}
+
+test_no_pr_ci_project_re_runs_every_base_test_file() {
+  local case_dir rc
+  case_dir=$(make_stub_case premise-no-pr-ci 0)
+  # A project the captain has marked as running no PR CI passes the checks-green
+  # gate on an EMPTY rollup, so that gate cannot supply the premise either.
+  enable_no_pr_ci "$case_dir"
+  write_pr_checks "$case_dir"
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/92 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "premise-no-pr-ci: a marked zero-check project must still merge"
+  assert_no_grep '--assume-branch-suite-green' "$case_dir/kept-argv" \
+    "premise-no-pr-ci: a project with no PR CI has no branch suite to assume coverage from"
+  assert_grep 'were re-run in full' "$case_dir/stderr" \
+    "premise-no-pr-ci: the full re-run must be stated in the merge log"
+  pass "a project with no PR CI re-runs every base test file instead of assuming coverage"
+}
+
+test_assumed_covered_findings_are_disclosed_and_do_not_block() {
+  local case_dir rc
+  case_dir=$(make_stub_case premise-disclosed 0 \
+    'assumed-covered: tests/a.test.sh::alpha holds' \
+    'assumed-covered: tests/a.test.sh::beta holds' \
+    'summary: missing=0 failing=0 unexecuted=0 skipped=0 unaccounted=0 assumed-covered=2 unstable=0')
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/93 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "premise-disclosed: an assumed-covered identifier is accounted for, not a finding"
+  assert_grep '2 base assertion(s) were not re-run here' "$case_dir/stderr" \
+    "premise-disclosed: the merge log must say how many assertions were not re-run"
+  assert_no_grep 'no captain-approved supersession entry covers' "$case_dir/stderr" \
+    "premise-disclosed: an assumed-covered identifier must not be treated as a finding"
+  pass "assumed-covered identifiers are disclosed in the merge log and never block"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
+test_merge_asserts_the_branch_suite_premise_to_the_kept_gate
+test_ci_waived_task_re_runs_every_base_test_file
+test_no_pr_ci_project_re_runs_every_base_test_file
+test_assumed_covered_findings_are_disclosed_and_do_not_block
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge
@@ -1460,6 +1624,8 @@ test_ids_glob_does_not_excuse_non_matching_finding
 test_kind_restricted_batch_does_not_excuse_missing
 test_wildcard_ids_without_kind_excuses_every_class
 test_invalid_kind_entry_not_honored
+test_unstable_finding_refuses_and_explains_the_test_defect
+test_unstable_kind_supersession_is_honored_and_scoped
 test_field_after_reason_not_honored
 test_no_space_field_after_reason_not_honored
 test_duplicated_kind_field_not_honored

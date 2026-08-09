@@ -41,6 +41,10 @@ INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 # The authoritative file set the one owner must run.
 CANON='shellcheck --norc bin/*.sh bin/backends/*.sh tests/*.sh'
 # The pinned version, read from the single source (the one owner itself).
+# It is deliberately kept OUT of every pass NAME below and reported only in fail
+# messages: it is read from the tree under test, so naming an assertion with it
+# made bin/fm-assert-tests-kept.sh see every one of them vanish on any PR that
+# bumps the pin (data/turnend-timing-block-h7/report.md §3).
 REQUIRED=$("$LINT" --required-version)
 
 # True only when the resolved shellcheck is exactly the pinned version, so the
@@ -129,7 +133,7 @@ SH
 
 test_fast_path_matches_the_canonical_command() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): fast-path parity check"
+    pass "SKIP (pinned ShellCheck not resolved): fast-path parity check"
     return
   fi
   # The whole justification for sharding is that a file's findings depend only
@@ -152,7 +156,7 @@ test_fast_path_matches_the_canonical_command() {
 
 test_cold_cache_never_reports_a_false_clean() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): cold-cache false-clean check"
+    pass "SKIP (pinned ShellCheck not resolved): cold-cache false-clean check"
     return
   fi
   # Regression: with no manifest yet, the cache lookup absorbed every file as a
@@ -174,7 +178,7 @@ test_cold_cache_never_reports_a_false_clean() {
 
 test_cache_hit_does_not_hide_a_later_defect() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): cache invalidation check"
+    pass "SKIP (pinned ShellCheck not resolved): cache invalidation check"
     return
   fi
   local tmp fx out rc
@@ -201,7 +205,7 @@ test_cache_hit_does_not_hide_a_later_defect() {
 
 test_cache_key_covers_the_source_closure() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): closure invalidation check"
+    pass "SKIP (pinned ShellCheck not resolved): closure invalidation check"
     return
   fi
   # A file is analysed with its sourced libraries inlined, so its cached result
@@ -226,7 +230,7 @@ test_cache_key_covers_the_source_closure() {
 
 test_literal_source_path_is_a_closure_edge() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): literal-source closure check"
+    pass "SKIP (pinned ShellCheck not resolved): literal-source closure check"
     return
   fi
   # ShellCheck (without -x) also follows a plain `source <path>` whose target
@@ -268,7 +272,7 @@ SH
 
 test_guarded_literal_source_is_a_closure_edge() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): guarded-source closure check"
+    pass "SKIP (pinned ShellCheck not resolved): guarded-source closure check"
     return
   fi
   # A literal source guarded behind a top-level separator ('[ -f x ] && . x')
@@ -304,7 +308,7 @@ SH
 
 test_source_in_any_command_position_is_a_closure_edge() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): command-position source closure check"
+    pass "SKIP (pinned ShellCheck not resolved): command-position source closure check"
     return
   fi
   # ShellCheck follows a literal source wherever it sits in command position,
@@ -363,7 +367,7 @@ SH
 
 test_disabled_sc1091_source_is_still_a_closure_edge() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): suppressed-SC1091 closure check"
+    pass "SKIP (pinned ShellCheck not resolved): suppressed-SC1091 closure check"
     return
   fi
   # An in-file disable of SC1091 suppresses the very note the discovery pass
@@ -399,7 +403,7 @@ test_disabled_sc1091_source_is_still_a_closure_edge() {
 
 test_unclassifiable_disable_falls_back_to_whole_set() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): unclassifiable-disable fallback check"
+    pass "SKIP (pinned ShellCheck not resolved): unclassifiable-disable fallback check"
     return
   fi
   # 'disable=all' (or an SCnnnn-SCnnnn range) can suppress SC1091 in a form
@@ -425,7 +429,7 @@ test_unclassifiable_disable_falls_back_to_whole_set() {
 
 test_verify_parity_fails_when_fast_path_falls_back() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): vacuous-parity regression check"
+    pass "SKIP (pinned ShellCheck not resolved): vacuous-parity regression check"
     return
   fi
   # Regression: the inner fast-path run's output was discarded, so a planner
@@ -472,7 +476,7 @@ test_exec_lines_carry_exactly_lint_flags() {
 
 test_unmodelled_directive_falls_back_to_whole_set() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): unmodelled-directive fallback check"
+    pass "SKIP (pinned ShellCheck not resolved): unmodelled-directive fallback check"
     return
   fi
   # The planner does not model ShellCheck's search-path resolution, so a
@@ -499,7 +503,7 @@ test_unmodelled_directive_falls_back_to_whole_set() {
 
 test_cache_lives_in_the_shared_common_git_dir() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): shared-cache location check"
+    pass "SKIP (pinned ShellCheck not resolved): shared-cache location check"
     return
   fi
   # `git rev-parse --git-dir` in a linked worktree is that worktree's PRIVATE
@@ -523,7 +527,7 @@ test_cache_lives_in_the_shared_common_git_dir() {
 
 test_one_worktree_warms_the_next() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): cross-worktree cache-hit check"
+    pass "SKIP (pinned ShellCheck not resolved): cross-worktree cache-hit check"
     return
   fi
   # The consequence the shared directory exists for: a clean result recorded by
@@ -548,7 +552,7 @@ test_one_worktree_warms_the_next() {
 
 test_cache_dir_override_and_disable_survive_the_shared_default() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): cache override/disable check"
+    pass "SKIP (pinned ShellCheck not resolved): cache override/disable check"
     return
   fi
   # Sharing the default location must not quietly change the two documented
@@ -586,7 +590,7 @@ test_cache_dir_override_and_disable_survive_the_shared_default() {
 
 test_publication_never_uses_a_fixed_staging_name() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): staging-name check"
+    pass "SKIP (pinned ShellCheck not resolved): staging-name check"
     return
   fi
   # Sharing one cache directory between worktrees means two runs can publish at
@@ -622,7 +626,7 @@ test_publication_never_uses_a_fixed_staging_name() {
 
 test_concurrent_runs_publish_a_whole_cache_not_a_spliced_one() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): concurrent-publication check"
+    pass "SKIP (pinned ShellCheck not resolved): concurrent-publication check"
     return
   fi
   # End-to-end companion to the staging-name check: several trees publishing to
@@ -724,7 +728,7 @@ test_pins_an_explicit_version() {
   # The captain-agreed pin: adopt ShellCheck 0.11.0's rule set consistently,
   # which is also what drops the upstream-retired, false-positive-prone SC2015.
   assert_contains "$REQUIRED" "0.11.0" "fm-lint.sh must pin ShellCheck 0.11.0"
-  pass "fm-lint.sh pins an explicit ShellCheck version ($REQUIRED)"
+  pass "fm-lint.sh pins an explicit ShellCheck version"
 }
 
 test_ci_installs_and_logs_the_pinned_version() {
@@ -763,7 +767,7 @@ SH
 
 test_catches_a_real_lint_defect() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): lint-defect regression check"
+    pass "SKIP (pinned ShellCheck not resolved): lint-defect regression check"
     return
   fi
   # A script with a genuine ShellCheck finding must make the one owner exit
@@ -794,7 +798,7 @@ SH
 
 test_ignores_ambient_shellcheck_opts() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): ambient options regression check"
+    pass "SKIP (pinned ShellCheck not resolved): ambient options regression check"
     return
   fi
   local tmp bad out rc
@@ -818,7 +822,7 @@ SH
 
 test_clean_fixture_passes() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): clean fixture check"
+    pass "SKIP (pinned ShellCheck not resolved): clean fixture check"
     return
   fi
   local tmp good rc
