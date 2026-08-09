@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout] [--skip-testing|--local-skip|--ci-skip|--all-testing-skip]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -57,10 +57,21 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   --local-skip, --ci-skip, and --all-testing-skip are the captain's testing
-#   skips, orthogonal to delivery mode and yolo. Each records local_skip=on and/or
-#   ci_skip=on in state/<id>.meta (--all-testing-skip records both); an absent
-#   field means off, so an unflagged task's meta is byte-identical to before.
+#   --skip-testing, --local-skip, --ci-skip, and --all-testing-skip are the
+#   captain's testing skips, orthogonal to delivery mode and yolo. THIS IS THE
+#   ONE PLACE A TESTING SKIP IS AUTHORIZED: the flag is passed here and nowhere
+#   else, and this script both mints the authorization and rewrites the worker's
+#   own brief to match (see "the brief's half" below), so there is no second
+#   invocation to keep in agreement and no way to half-specify a skip.
+#   --skip-testing is the flag to reach for when the intent is just "skip the
+#   testing": it resolves, once the project's delivery mode is known, to the most
+#   that mode can honour (no-mistakes -> both; direct-PR -> CI; local-only has
+#   nothing to skip and refuses), states on stderr what it resolved to, and needs
+#   no knowledge of the matrix below. The three explicit flags remain for a
+#   deliberately narrower skip.
+#   Each records local_skip=on and/or ci_skip=on in state/<id>.meta
+#   (--all-testing-skip records both); an absent field means off, so an unflagged
+#   task's meta is byte-identical to before.
 #   --local-skip ENFORCES the skip instead of asking for it: the launch prepends a
 #   per-task shim directory to the worker's pane environment whose `no-mistakes`
 #   executable explains the intentional skip and exits 0, so the worker cannot run
@@ -88,10 +99,23 @@
 #   wrong answer, because the loss would surface much later as an unexplained
 #   merge refusal, so the spawn proceeds and says on stderr exactly what was lost
 #   and the one command that fixes it.
+#   THE BRIEF'S HALF. A ship spawn calls bin/fm-brief.sh --apply-testing-skip
+#   with the flag it just resolved, which rewrites the three regions of
+#   data/<id>/brief.md whose text depends on the mode and the skip (that script
+#   owns the regions and the markers). It runs on EVERY ship spawn, flagged or
+#   not, so an unflagged dispatch of a brief that carries skip text puts the
+#   ordinary instructions back rather than launching a worker whose instructions
+#   and whose record disagree. A brief that has no such regions refuses the
+#   dispatch when a skip was asked for, and is left untouched when none was.
+#   Nothing about the AUTHORIZATION passes through the brief: it is prose, and
+#   the token below is the authority.
 #   Accepted flag/delivery-mode combinations are checked before launch and every
 #   other combination refuses: no-mistakes takes --local-skip or
 #   --all-testing-skip; direct-PR takes --ci-skip; local-only takes none, having
 #   no pipeline, no PR, and no CI; scout and secondmate spawns take none.
+#   --skip-testing is accepted wherever any of those are, since it resolves to
+#   one of them. Every refusal prints that matrix, so it is never something to go
+#   and look up.
 #   --ci-skip alone is refused under no-mistakes because that pipeline owns the
 #   push and the PR, so a commit-bound waiver cannot be attached before CI starts
 #   unless the worker opens the PR itself.
@@ -125,8 +149,15 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Derived from the header block itself rather than a line range: the header is
+# the contract, it grows, and a hard-coded range silently truncates --help the
+# first time it does.
 usage() {
-  sed -n '2,120p' "$0" | sed 's/^# \{0,1\}//'
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0"
 }
 
 case "${1:-}" in
@@ -190,7 +221,7 @@ for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
-    --local-skip|--ci-skip|--all-testing-skip) fm_testing_skip_note "$a" ;;
+    --local-skip|--ci-skip|--all-testing-skip|--skip-testing) fm_testing_skip_note "$a" ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -744,8 +775,13 @@ fi
 # Testing-skip validation, part 2: which skip a delivery mode can honour. Each
 # rule below refuses a combination the mode CANNOT actually deliver, rather than
 # accepting it and silently doing nothing, so a captain who asks for less testing
-# always learns whether they got it.
+# always learns whether they got it. This is also where --skip-testing resolves,
+# because "all the testing this project has" has no answer until the mode is
+# known, so LOCAL_SKIP/CI_SKIP are re-read from the library afterwards.
 fm_testing_skip_check_mode "$MODE" || exit 1
+LOCAL_SKIP=$FM_TESTING_SKIP_LOCAL
+CI_SKIP=$FM_TESTING_SKIP_CI
+RESOLVED_SKIP_FLAG=$(fm_testing_skip_resolved_flag)
 
 # The dispatch-authorization token for a CI skip, minted here and only here.
 # ci_skip=on on its own is not authority: the worker appends its status lines
@@ -803,6 +839,31 @@ if [ "$LOCAL_SKIP" = on ]; then
       echo "error: could not mint the local-skip dispatch authorization for $ID" >&2
       exit 1
     }
+  fi
+fi
+
+# The worker-facing half of the skip, written from the SAME flag that minted the
+# authorization above, so a testing skip is one action at dispatch and there is
+# no second invocation anywhere that has to agree with this one. It runs for
+# every ship spawn, flagged or not: an unflagged dispatch of a brief that carries
+# skip text puts the ordinary instructions back, so a brief can never quietly
+# outlive the dispatch that justified it.
+#
+# This grants nothing. bin/fm-brief.sh writes prose; the authority is the keyed
+# token written into this task's meta below, which is what bin/fm-ci-waiver.sh
+# and bin/fm-pr-merge.sh actually read.
+#
+# Placed here, before any backend container, worktree, or temp root exists, so a
+# brief this dispatch cannot bring into agreement refuses without leaving an
+# orphan behind.
+if [ "$KIND" = ship ]; then
+  brief_apply_args=("$ID" --mode "$MODE")
+  [ -z "$RESOLVED_SKIP_FLAG" ] || brief_apply_args+=("$RESOLVED_SKIP_FLAG")
+  if ! FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_DATA_OVERRIDE="$DATA" \
+    FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$FM_ROOT/bin/fm-brief.sh" --apply-testing-skip "${brief_apply_args[@]}"; then
+    echo "error: could not bring $ID's brief into agreement with this dispatch; nothing was launched" >&2
+    exit 1
   fi
 fi
 

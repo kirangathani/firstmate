@@ -15,12 +15,21 @@
 # in bin/fm-spawn.sh (the PATH shim and the dispatch token) and in CI (the
 # signed waiver).
 #
-# Callers use it in three steps:
+# Callers use it in four steps:
 #   fm_testing_skip_reset                      before the argv loop
 #   fm_testing_skip_note "$arg"                per token; 0 if it consumed one
 #   fm_testing_skip_check_args <kind> <noun>   argument-only rules
-#   fm_testing_skip_check_mode <mode>          delivery-mode rules
+#   fm_testing_skip_check_mode <mode>          delivery-mode rules, and the point
+#                                              at which --skip-testing resolves
 # Both check functions print their own diagnosis and return 1; the caller exits.
+# FM_TESTING_SKIP_LOCAL / FM_TESTING_SKIP_CI are final only after
+# fm_testing_skip_check_mode has run, because --skip-testing has no answer until
+# the delivery mode is known.
+#
+# --skip-testing is the flag a caller reaches for when the intent is simply
+# "skip the testing for this task". It resolves to the MOST any given delivery
+# mode can honour, which is the whole matrix below collapsed into one token, so
+# the accepted combinations stop being something to look up before dispatching.
 
 # Accumulated state, valid after fm_testing_skip_reset plus a pass of
 # fm_testing_skip_note over argv.
@@ -28,12 +37,14 @@ FM_TESTING_SKIP_LOCAL=off
 FM_TESTING_SKIP_CI=off
 FM_TESTING_SKIP_FLAGS=
 FM_TESTING_SKIP_COUNT=0
+FM_TESTING_SKIP_AUTO=off
 
 fm_testing_skip_reset() {
   FM_TESTING_SKIP_LOCAL=off
   FM_TESTING_SKIP_CI=off
   FM_TESTING_SKIP_FLAGS=
   FM_TESTING_SKIP_COUNT=0
+  FM_TESTING_SKIP_AUTO=off
 }
 
 # fm_testing_skip_note <argv-token>: record a testing-skip flag.
@@ -48,11 +59,38 @@ fm_testing_skip_note() {
     --local-skip) FM_TESTING_SKIP_LOCAL=on ;;
     --ci-skip) FM_TESTING_SKIP_CI=on ;;
     --all-testing-skip) FM_TESTING_SKIP_LOCAL=on; FM_TESTING_SKIP_CI=on ;;
+    # Deliberately switches nothing on here: what "all the testing this project
+    # actually has" means depends on the delivery mode, which argv does not know.
+    # fm_testing_skip_check_mode resolves it.
+    --skip-testing) FM_TESTING_SKIP_AUTO=on ;;
     *) return 1 ;;
   esac
   FM_TESTING_SKIP_FLAGS="${FM_TESTING_SKIP_FLAGS}${FM_TESTING_SKIP_FLAGS:+ }$1"
   FM_TESTING_SKIP_COUNT=$((FM_TESTING_SKIP_COUNT + 1))
   return 0
+}
+
+# fm_testing_skip_matrix: the accepted flag/delivery-mode matrix, printed at
+# every point of refusal so a caller never has to go and look it up. Stated here
+# once and reused, rather than restated per refusal, so the rows cannot drift
+# apart from the rules immediately below them.
+fm_testing_skip_matrix() {
+  echo "error: accepted by delivery mode - no-mistakes: --local-skip or --all-testing-skip; direct-PR: --ci-skip; local-only: none, it runs no pipeline, opens no PR, and has no CI." >&2
+  echo "error: or pass --skip-testing, which resolves to the most the project's own mode allows and never needs this matrix." >&2
+}
+
+# fm_testing_skip_resolved_flag: the single concrete flag that reproduces the
+# resolved state, or nothing when no skip is on. This is what a caller hands to
+# another firstmate script, so a resolved --skip-testing is passed on as the
+# concrete flag it became rather than re-resolved a second time somewhere else.
+fm_testing_skip_resolved_flag() {
+  if [ "$FM_TESTING_SKIP_LOCAL" = on ] && [ "$FM_TESTING_SKIP_CI" = on ]; then
+    printf '%s' --all-testing-skip
+  elif [ "$FM_TESTING_SKIP_LOCAL" = on ]; then
+    printf '%s' --local-skip
+  elif [ "$FM_TESTING_SKIP_CI" = on ]; then
+    printf '%s' --ci-skip
+  fi
 }
 
 # fm_testing_skip_check_args <kind> <noun>: the argument-only rules, checkable
@@ -83,26 +121,59 @@ fm_testing_skip_check_args() {
 fm_testing_skip_check_mode() {
   local mode=${1-}
   [ -n "$FM_TESTING_SKIP_FLAGS" ] || return 0
+  # --skip-testing resolves HERE, where the mode is finally known, to the most
+  # that mode can actually honour. It can never resolve to a combination the
+  # rows below would refuse, so it needs no row of its own - only local-only,
+  # which has nothing to skip at all, and an unknown mode are refusals.
+  if [ "$FM_TESTING_SKIP_AUTO" = on ]; then
+    case "$mode" in
+      no-mistakes)
+        FM_TESTING_SKIP_LOCAL=on
+        FM_TESTING_SKIP_CI=on
+        echo "note: --skip-testing on a no-mistakes project resolves to --all-testing-skip (local pipeline off, CI test jobs waived)" >&2
+        ;;
+      direct-PR)
+        FM_TESTING_SKIP_LOCAL=off
+        FM_TESTING_SKIP_CI=on
+        echo "note: --skip-testing on a direct-PR project resolves to --ci-skip (that mode runs no local pipeline)" >&2
+        ;;
+      local-only)
+        echo "error: --skip-testing has nothing to skip on a local-only project: it runs no pipeline, opens no PR, and has no CI to waive." >&2
+        fm_testing_skip_matrix
+        return 1
+        ;;
+      *)
+        echo "error: --skip-testing is not supported for delivery mode '$mode'" >&2
+        fm_testing_skip_matrix
+        return 1
+        ;;
+    esac
+    return 0
+  fi
   case "$mode" in
     no-mistakes)
       if [ "$FM_TESTING_SKIP_CI" = on ] && [ "$FM_TESTING_SKIP_LOCAL" = off ]; then
         echo "error: --ci-skip alone cannot be honoured for a no-mistakes project: that pipeline owns the push and the PR, and it may add fix commits, so the head commit a waiver must cover is not known until after the PR already exists - and editing a PR body does not re-run CI." >&2
         echo "error: use --all-testing-skip (the worker then opens the PR itself, with the waiver in the body on the first CI run), or drop --ci-skip." >&2
+        fm_testing_skip_matrix
         return 1
       fi
       ;;
     direct-PR)
       if [ "$FM_TESTING_SKIP_LOCAL" = on ]; then
         echo "error: --local-skip and --all-testing-skip do not apply to a direct-PR project: that mode already runs no local pipeline. Use --ci-skip." >&2
+        fm_testing_skip_matrix
         return 1
       fi
       ;;
     local-only)
       echo "error: $FM_TESTING_SKIP_FLAGS does not apply to a local-only project: it runs no pipeline, opens no PR, and has no CI to waive." >&2
+      fm_testing_skip_matrix
       return 1
       ;;
     *)
       echo "error: $FM_TESTING_SKIP_FLAGS is not supported for delivery mode '$mode'" >&2
+      fm_testing_skip_matrix
       return 1
       ;;
   esac

@@ -106,13 +106,19 @@ make_case() {  # <id> <mode>
   CASE_HOME="$dir/home"
   CASE_PROJ="$dir/alpha"
   CASE_WT="$dir/wt"
-  mkdir -p "$CASE_HOME/data/$id" "$CASE_HOME/state" "$CASE_HOME/config" "$CASE_PROJ" "$dir/responses"
-  printf 'brief for %s\n' "$id" > "$CASE_HOME/data/$id/brief.md"
+  mkdir -p "$CASE_HOME/data" "$CASE_HOME/state" "$CASE_HOME/config" "$CASE_PROJ" "$dir/responses"
   touch "$CASE_HOME/state/.last-watcher-beat"
   {
     echo '# Projects'
     printf -- '- alpha [%s] - test project (added 2026-08-05)\n' "$mode"
   } > "$CASE_HOME/data/projects.md"
+  # A REAL scaffolded brief rather than a stand-in string. A dispatch now
+  # rewrites the brief's own testing-skip regions, so a hand-written fixture
+  # would exercise a shape bin/fm-brief.sh never produces - and would pass while
+  # every real dispatch refused.
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_HOME" FM_DATA_OVERRIDE="$CASE_HOME/data" \
+    FM_STATE_OVERRIDE="$CASE_HOME/state" FM_CONFIG_OVERRIDE="$CASE_HOME/config" \
+    "$ROOT/bin/fm-brief.sh" "$id" alpha >/dev/null
   CASE_LOG="$dir/log"
   CASE_RESP="$dir/responses"
   : > "$CASE_LOG"
