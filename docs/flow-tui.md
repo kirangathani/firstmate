@@ -73,6 +73,26 @@ Width is recovered without ever cutting a box in half, in this order:
 
 The header itself drops segments by stated priority rather than being clipped from the right, because the rightmost segment is the data age and that is the one fact the view exists to keep honest.
 
+### Text that does not fit says so
+
+Fitting the frame is not the same as fitting a cell.
+On the captain's second run the pre-merge summary read `11/11 - your wo`: seventeen characters of `11/11 - your word` centred into a fifteen-column field, cut at the edge with no ellipsis and no wrap.
+A value shortened in silence is unreadable, and worse, indistinguishable from a value that really is that short.
+
+Two changes, in that order of preference.
+The phrase itself was shortened to `11/11 your word`, fifteen columns at the two-digit check counts a real fleet produces, so nothing is cut at all.
+Under that, `fit()` shortens anything still over-long to the cell width with a one-column ellipsis, and `clip()` does the same for a whole line that is wider than the terminal.
+`tests/fm-flow-tui.test.sh` sweeps every variable-length value a cell can hold and requires each to arrive whole or ending in the ellipsis.
+
+### The window moves only when the selector would leave it
+
+Up and down move the selector between agent rows.
+The window scrolls only when the selector is already on the top row and goes up, or already on the bottom row and goes down.
+
+That rule needs the window position to persist between frames, and it did not: the viewer passed no `top` at all, so every frame recomputed one from the selection alone against a default of zero.
+The effect is that the selector is pinned to the bottom row of the window once the fleet is longer than the window, and scrolling back up drags the window with it row for row.
+`resolveTop()` now owns the rule and the viewer holds its result between frames.
+
 ## Resolving which pipeline run belongs to which agent
 
 This is the part that is easy to get wrong, and the reasoning matters more than the code.
@@ -153,8 +173,59 @@ A collector that trusted the column would animate four dead pipelines forever, w
 Two mechanisms keep it honest, and neither is a staleness threshold.
 A timestamp cutoff was considered and rejected: a legitimately parked run also sits still for hours, so a cutoff misclassifies it.
 
-1. The agent list comes from `bin/fm-fleet-snapshot.sh`, so a torn-down task never appears at all, whatever its abandoned row still claims.
+1. The agent list is filtered to tasks whose recorded endpoint still resolves, so a stood-down worker never appears at all, whatever its abandoned row still claims.
 2. For a task that is still present, the snapshot emits the run's `updated_at` age and the task's endpoint liveness as separate fields, and the renderer draws a live-looking state only when the fleet still considers that worker alive.
+
+## An agent is a task with a live worker behind it
+
+The first version took the agent list to be the task list, and a task record outlives its worker.
+`state/<id>.meta` is durable on purpose - it is what recovery reads after a restart - and firstmate stands a finished worker down by killing its window, which leaves the record behind.
+On the captain's second run that produced fourteen agents against two live tmux windows: seventeen records, sixteen of them naming a window that no longer resolved.
+
+The view was rendering those records faithfully.
+That is the point: the view cannot fix firstmate's bookkeeping, and it must not draw a finished worker as a running one while it waits for someone to.
+So the collector asks, per task, whether the recorded endpoint still resolves.
+
+The question is not answered here.
+`fm_backend_target_exists` in `bin/fm-backend.sh` already owns it for the whole fleet, `bin/fm-fleet-snapshot.sh` already calls it and publishes the answer as `endpoint.exists`, and this collector consumes that field.
+A second implementation of "is this worker alive" is exactly the kind of thing that ends with two parts of firstmate disagreeing about the same window.
+
+The split, in one line: liveness filtering belongs to the view, and cleaning up leftover records does not.
+The record is durable state that other tools read, this collector is read-only by contract, and deleting a record because a window is gone would destroy what `stuck-crewmate-recovery` inspects.
+The leftover records are worth fixing in the teardown path that creates them; that is separate work and does not block the view from telling the truth today.
+
+Nothing is dropped silently.
+A task whose endpoint no longer resolves moves to `omitted`, with its window and the reason, and the header states the count.
+A live worker this view has no row for - a scout or a secondmate, neither of which runs a pipeline - is listed in `out_of_scope` and counted in the header too, because the captain reconciles this list against the windows in front of them and a live worker that is simply absent is the same failure as a dead one that is present.
+`--include-dead` puts the held-back records back, as ordinary agents carrying `endpoint_alive: false`, which the renderer marks `worker gone`.
+
+## Enter opens the worker's window, or it says it did not
+
+Enter is agent-scoped.
+It opens the selected worker's window whatever cell is highlighted; no cell carries an action of its own, including `GITHUB CI`, and the selected agent's row says what enter does on every frame rather than leaving the captain to discover it by pressing.
+
+Which terminal moves is the whole of `--open`, and the first version got it wrong.
+`tmux select-window` changes the target session's current window and does nothing whatever to the terminal the command was typed in.
+Run from a terminal that is not a client of that session - which is how the captain ran it - it exits 0 having moved a view nobody was looking at, and the viewer flashed `opened <id>` over a screen where nothing had happened.
+
+`bin/fm-flow.sh --open` therefore picks its action from what this terminal already is, and refuses when there is nothing to move:
+
+| This terminal | Action | Getting back |
+|---|---|---|
+| already a tmux client (`$TMUX` set) | `switch-client` moves this client to the worker's window | the view is still running in its own window |
+| a terminal, not in tmux | `tmux attach-session`, which blocks | detach, prefix then `d` |
+| not a terminal at all | refuse | nothing moved |
+
+The refusal matters as much as the actions.
+`switch-client` with no client of its own to name moves whatever client is attached to the invoking pane's session, so a script or an agent running inside a tmux pane would yank the captain's own terminal onto some other window - observed on 2026-08-09 while reproducing this defect.
+
+Two mechanics follow from the attach case.
+The viewer suspends for the command: alternate screen off, raw mode off, its own terminal handed to the child as stdin and stdout, all timers held, and the screen restored and fully repainted when the command returns.
+That terminal is the viewer's own stdout, not a fresh open of `/dev/tty`, because `ttyname()` on a descriptor opened that way answers `/dev/tty` and tmux refuses a client whose terminal is that - `server_client_open`, `can't use /dev/tty`, seen exactly once in the first cut of this.
+
+Finally, the footer reports what the command SAID it did, not what its exit code implies.
+`--open` prints its own outcome line - `switched to <window>`, `back from <window>`, or the error - and the viewer flashes that.
+A message reporting an action that did not occur is worse than an error, so an exit code alone is never enough to claim one.
 
 ## Wire format
 
@@ -203,11 +274,25 @@ Exact fields, flags, and environment knobs are owned by that script's header and
       "ci": {
         "collection": { "ok": true, "reason": "" },
         "checks": [
-          { "workflow": "CI", "name": "Lint shell scripts", "status": "COMPLETED", "conclusion": "SUCCESS" }
+          {
+            "workflow": "CI", "name": "Lint shell scripts",
+            "started": "2026-08-09T11:49:35Z",
+            "status": "COMPLETED", "conclusion": "SUCCESS", "verdict": "passed"
+          }
         ],
-        "total": 11, "passed": 11, "failed": 0, "pending": 0
+        "total": 11, "passed": 10, "failed": 1, "pending": 0
       }
     }
+  ],
+  "omitted": [
+    {
+      "id": "fm-arm-lock-gate-q4",
+      "window": "firstmate:fm-fm-arm-lock-gate-q4",
+      "reason": "recorded window no longer exists"
+    }
+  ],
+  "out_of_scope": [
+    { "id": "nm-ci-duplication-of-effort", "kind": "scout", "window": "firstmate:fm-nm-ci-duplication-of-effort" }
   ]
 }
 ```
@@ -223,6 +308,30 @@ Guarantees the renderer is entitled to rely on:
   These are different claims: pending reads as "not started yet", which is a fact this snapshot does not have.
 - `ci.collection` is separate from the agent's `collection`, because a GitHub read can fail while the local read succeeds.
 - `run.present` false means no pipeline run exists for that branch, which is the ordinary state of a task that has not yet started validating.
+- Every entry of `agents` has a recorded endpoint that resolved at collection time, unless `--include-dead` was passed.
+  `omitted` names every task held back for that reason, and `out_of_scope` names every live worker this view has no row for.
+  Both are always present, empty when there is nothing to report.
+- `ci.passed`, `ci.failed` and `ci.pending` partition `ci.checks`, and their sum is always `ci.total`.
+
+### The CI counts must agree with `gh pr checks`
+
+That is the comparison the captain makes, and two things had to be fixed for it to hold.
+
+A re-run leaves its earlier attempt in `statusCheckRollup`, so the rollup holds more entries than there are checks.
+PR 40 held 13 entries for 11 checks and was reported as `11/13` with two failures where `gh pr checks 40` reports 10 of 11 passing and one failing.
+The latest attempt of a workflow-plus-name is the verdict; the rest are superseded and counted nowhere.
+
+The three buckets must also partition the checks.
+Reading `conclusion` without first checking `status` counted PR 33's re-running `Repo invariants` as both passed and pending, on the strength of a conclusion its previous attempt had left behind - 8 + 3 + 1 buckets over 11 checks.
+A check that has not `COMPLETED` has no verdict yet, whatever field is still sitting on it.
+
+Verified 2026-08-09 against seven real PRs on this repository, comparing the collector's counts with `gh pr checks <n>`:
+
+| PR | `gh pr checks` | collector, before | collector, after |
+|---|---|---|---|
+| 40 | 11 total, 10 pass, 1 fail | 13 total, 11 pass, 2 fail | 11 total, 10 pass, 1 fail |
+| 33 | 11 total, 7 pass, 3 fail, 1 pending | 11 total, 8 pass, 3 fail, 1 pending | 11 total, 7 pass, 3 fail, 1 pending |
+| 39, 38, 37, 36, 35 | 11 total, 10 pass, 1 fail | - | 11 total, 10 pass, 1 fail |
 
 ## Cost
 
@@ -245,3 +354,7 @@ At the captain's fleet size that command currently fails outright, tracked separ
 Facts in this document were established by running the commands shown, on 2026-08-08, against no-mistakes v1.37.0 (78e4dcb) with the daemon running.
 CI check names on this repository are not unique: `CI testing waiver` appears under both the `CI` and `Require no-mistakes` workflows on PR 25, so checks are keyed on workflow plus name.
 The no-mistakes version-update banner is written to stderr, so stdout parsing does not need to strip it.
+
+The five defects above were each reproduced in a real terminal on 2026-08-09 before being changed, and the fixed behaviour reproduced the same way afterwards, driving the actual viewer rather than asserting a helper.
+The harness was a sandbox tmux session of live worker windows plus deliberately stale `state/<id>.meta` records, with the viewer run in a second session so its pane could be captured with `tmux capture-pane` and driven with `tmux send-keys`.
+Two facts came out of that run rather than out of reading the code, and both are recorded where they bite: tmux refuses a client whose terminal descriptor was opened through `/dev/tty`, and `switch-client` without an explicit client moves whichever client is attached to the invoking pane's session.

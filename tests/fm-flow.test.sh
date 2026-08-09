@@ -127,12 +127,23 @@ assert_contains "$out" "not implemented" "an unsupported backend was not named a
 assert_contains "$out" "ws-7" "the refusal did not tell the captain where the worker is"
 pass "--open refuses an unverified backend and still names the target"
 
-# The live-tmux case runs on a PRIVATE tmux server (its own TMUX_TMPDIR, with
-# TMUX unset so tmux does not treat it as nested). --open ends in
-# `switch-client`, which moves an ATTACHED client to the target session: on the
-# shared server that is the captain's own terminal being yanked into a test
-# fixture mid-run. A private server has no attached client, so the same call is
-# a real exercise of the code and a no-op for anyone watching.
+# --- --open moves THIS terminal, or it does nothing at all -------------------
+#
+# `select-window` changes the target SESSION's current window and does nothing
+# to the terminal the command was typed in. Run from a terminal that is not a
+# client of that session - which is how the captain ran it - the shipped version
+# exited 0 having moved a view nobody was looking at, and the viewer duly
+# flashed `opened <id>`. Reproduced 2026-08-09 before this change.
+#
+# Worse, `switch-client` with no client of its own to name moves whatever client
+# IS attached to the invoking pane's session. A test, a script or an agent
+# running inside a tmux pane with no terminal of its own would therefore yank
+# the captain's terminal onto a fixture window. Observed on 2026-08-09 while
+# reproducing this defect: the captain's only client spent the reproduction
+# attached to a sandbox session.
+#
+# So both the action and the refusal are asserted, and the refusal is asserted
+# to have CHANGED NOTHING - that is the whole point of it.
 if command -v tmux >/dev/null 2>&1; then
   # Short path on purpose: a unix socket path is capped near 108 bytes, and
   # TMPDIR here can already be long enough to blow that on its own.
@@ -144,20 +155,65 @@ if command -v tmux >/dev/null 2>&1; then
   sess="fmflowtest$$"
   if tmux new-session -d -s "$sess" -n first 2>/dev/null; then
     tmux new-window -d -t "$sess" -n second
+    tmux select-window -t "$sess:first"
     printf 'window=%s:second\nproject=/p\n' "$sess" >"$state/real-1.meta"
-    FM_HOME="$TMP_ROOT/home" "$FLOW" --open real-1 || fail "--open failed on a live tmux window"
+
+    # No terminal: there is nothing to put on that window, so nothing happens
+    # and it says so. The session's current window is the evidence - a refusal
+    # that had still run select-window would be the original defect wearing an
+    # error message.
+    out=$(FM_HOME="$TMP_ROOT/home" "$FLOW" --open real-1 </dev/null 2>&1); rc=$?
+    expect_code 1 $rc "--open with no terminal must refuse"
+    assert_contains "$out" "not a terminal" "the refusal did not say what was missing"
     active=$(tmux display-message -p -t "$sess" '#{window_name}')
-    [ "$active" = "second" ] || fail "--open did not focus the worker's window (active: $active)"
+    [ "$active" = "first" ] ||
+      fail "a refused --open still moved the session's current window to $active"
+    pass "--open with no terminal to show it in refuses and moves nothing"
+
+    # With a real terminal it commits to an action, and which action depends on
+    # whether that terminal is already a tmux client. The dry run is the seam:
+    # it reports the decision without attaching anything to this test's pty.
+    if command -v script >/dev/null 2>&1; then
+      dry() {  # <env-assignments...>
+        script -qec "env $* FM_HOME='$TMP_ROOT/home' FM_FLOW_OPEN_DRY_RUN=1 '$FLOW' --open real-1" \
+          /dev/null 2>/dev/null | tr -d '\r'
+      }
+      got=$(dry "TMUX=")
+      assert_contains "$got" "action=attach" "a terminal outside tmux must be attached, got: $got"
+      got=$(dry "TMUX=/tmp/fake,1,0")
+      assert_contains "$got" "action=switch" "a terminal already in tmux must be switched, got: $got"
+      pass "--open attaches a plain terminal and switches one that is already a tmux client"
+    else
+      echo "skip: script not found, cannot give --open a terminal"
+    fi
 
     printf 'window=%s:gone\nproject=/p\n' "$sess" >"$state/missing-1.meta"
     out=$(FM_HOME="$TMP_ROOT/home" "$FLOW" --open missing-1 2>&1); rc=$?
     expect_code 1 $rc "--open on a window that does not exist must fail"
     assert_contains "$out" "gone" "the refusal did not name the missing window"
+    pass "--open refuses a window that is no longer there"
     tmux kill-server 2>/dev/null
-    pass "--open focuses a live tmux window and refuses a dead one"
   else
     echo "skip: could not create a private tmux server"
   fi
 else
   echo "skip: tmux not found"
 fi
+
+# --- the viewer is told what enter will do, in words that fit this terminal ---
+#
+# Whether enter switches a tmux client or attaches a plain terminal decides how
+# the captain gets BACK, and only this script knows which. The viewer must not
+# guess, so it is handed the sentence rather than composing one.
+: >"$FAKE_TUI_ARGV"
+cat >"$mirror/fm-flow-snapshot.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '{"schema":"fm-flow-snapshot.v1","generated_epoch":1,"agents":[]}\n'
+EOF
+chmod +x "$mirror/fm-flow-snapshot.sh"
+
+TMUX='' "$mirror/fm-flow.sh" >/dev/null 2>&1 || fail "the entry point failed with TMUX unset"
+hint=$(grep -A1 -- '--open-hint' "$FAKE_TUI_ARGV" | tail -1)
+assert_contains "$hint" "attach" "a terminal outside tmux was not told enter attaches"
+assert_contains "$hint" "come back" "the hint did not say how to get back"
+pass "the viewer is handed the sentence that is true for this terminal"
