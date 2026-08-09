@@ -82,6 +82,13 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# The two one-shot actions do different things to this terminal, so a command
+# line asking for both is refused rather than given a silent precedence.
+if [ -n "$OPEN_ID" ] && [ -n "$DETAIL_ID" ]; then
+  echo "error: pass --open or --detail, not both: one hands this terminal to the worker, the other draws its pipeline here" >&2
+  exit 2
+fi
+
 # --- --detail: one task's pipeline, in full, on this terminal ----------------
 #
 # The row already states a CI verdict per agent, so the obvious next move from

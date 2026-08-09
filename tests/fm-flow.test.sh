@@ -250,6 +250,9 @@ pass "--detail runs the existing per-task pipeline view rather than a second cop
 
 out=$("$FLOW" --detail 2>&1); rc=$?
 expect_code 2 $rc "--detail with no value must be a usage error"
+out=$(FM_HOME="$TMP_ROOT/home" "$FLOW" --open detail-1 --detail detail-1 2>&1); rc=$?
+expect_code 2 $rc "--open and --detail together must be a usage error, not a silent precedence"
+assert_contains "$out" "not both" "the refusal did not say the two actions are exclusive"
 out=$("$FLOW" --help)
 assert_contains "$out" "--detail" "help does not document --detail"
 pass "--detail is documented and refuses a missing task id"
