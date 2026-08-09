@@ -15,6 +15,12 @@ set -u
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$ROOT/bin/fm-supervision-lib.sh"
+# Sourced for FM_ACK_GRACE_DEFAULT: the unactioned-report cases below must be
+# sized from the window the guard actually enforces, read at run time. A hardcoded
+# offset would keep passing after that window was widened past it, which is the
+# one change those cases exist to catch.
+# shellcheck source=bin/fm-ack-lib.sh
+. "$ROOT/bin/fm-ack-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
@@ -249,6 +255,167 @@ test_hook_silent_with_live_lock_and_fresh_beacon() {
   expect_code 0 "$status" "hook must exit 0 with a live identity-matched watcher lock and fresh beacon"
   [ -z "$out" ] || fail "hook produced output despite a live fresh watcher lock: $out"
   pass "fm-turnend-guard: silent no-op with a live watcher lock and fresh beacon"
+}
+
+# --- reason 3: a reported state left unanswered -------------------------------
+#
+# bin/fm-guard.sh has raised this exact finding since #35 and exits 0, so acting
+# on it was the agent's to choose. These cases pin the consequence: with
+# supervision perfectly healthy, a turn still cannot END while a worker's
+# reported state sits unanswered.
+#
+# Every offset is derived from FM_ACK_GRACE_DEFAULT rather than written down, so
+# widening that window cannot leave these cases passing against a guard that no
+# longer fires when they say it does.
+UNACTIONED_PAST_GRACE=$(( FM_ACK_GRACE_DEFAULT * 2 ))
+UNACTIONED_INSIDE_GRACE=$(( FM_ACK_GRACE_DEFAULT / 2 ))
+
+# A primary whose supervision is entirely healthy: live identity-matched watcher
+# lock, fresh beacon. Anything these cases block on is therefore reason 3 alone.
+# Echoes "<dir> <pid>"; the caller must reap the pid.
+make_supervised_primary() {  # <dir>
+  local dir pid identity
+  dir=$(make_primary_dir "$1")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  # A deterministic current-state reader, so these cases test the guard rather
+  # than whatever a real reader makes of a scenario dir with no worker in it.
+  cat > "$dir/crew-state-stub" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_TEST_CREW_STATE:-state: done · source: status-log · finished}"
+SH
+  chmod +x "$dir/crew-state-stub"
+  printf '%s %s\n' "$dir" "$pid"
+}
+
+# run_hook with the clock advanced, so a status line ages without sleeping.
+run_hook_aged() {  # <dir> <age-seconds>
+  local dir=$1 age=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" \
+    FM_ACK_NOW="$(( $(date +%s) + age ))" \
+    FM_CREW_STATE_BIN="$dir/crew-state-stub" \
+    bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+test_hook_blocks_on_a_reported_state_left_unanswered() {
+  local dir pid out status
+  read -r dir pid < <(make_supervised_primary "$TMP_ROOT/hook-unactioned")
+  printf 'done: implementation committed on fm/task1\n' > "$dir/state/task1.status"
+
+  out=$(run_hook_aged "$dir" "$UNACTIONED_PAST_GRACE"); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  expect_code 2 "$status" \
+    "supervision was healthy and a finished task sat unanswered past the grace window; the turn ended anyway"
+  assert_contains "$out" "TURN WOULD END WITH A REPORTED STATE UNANSWERED" \
+    "the block did not name its reason"
+  assert_contains "$out" "task1" "the block did not name the task"
+  assert_contains "$out" "implementation committed" \
+    "the block did not quote the worker's own line as evidence"
+  assert_contains "$out" "bin/fm-ack.sh" "the block did not say how to record the action"
+  assert_not_contains "$out" "SUPERVISION IS OFF" \
+    "a healthy watcher was reported as down - reason 3 must not borrow reason 1's banner"
+  pass "fm-turnend-guard: a turn cannot end with a worker's reported state unanswered"
+}
+
+# The noise bound. A guard that fired on every fresh report would block turns
+# constantly and be turned off, which is worse than no guard.
+test_hook_silent_on_a_report_inside_the_grace_window() {
+  local dir pid out status
+  read -r dir pid < <(make_supervised_primary "$TMP_ROOT/hook-unactioned-fresh")
+  printf 'done: implementation committed on fm/task1\n' > "$dir/state/task1.status"
+
+  out=$(run_hook_aged "$dir" "$UNACTIONED_INSIDE_GRACE"); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  expect_code 0 "$status" "the guard blocked a turn on a report firstmate had only just been handed"
+  [ -z "$out" ] || fail "the guard printed on a healthy turn: $out"
+  pass "fm-turnend-guard: a report still inside the grace window neither blocks nor prints"
+}
+
+# Every silencer bin/fm-ack-lib.sh owns has to hold at this surface too, or the
+# block would fire on states that are legitimately someone else's turn.
+test_hook_silent_once_the_state_has_been_acted_on() {
+  local dir pid out status
+  read -r dir pid < <(make_supervised_primary "$TMP_ROOT/hook-unactioned-acked")
+  printf 'needs-decision: sync or async client\n' > "$dir/state/task1.status"
+
+  out=$(run_hook_aged "$dir" "$UNACTIONED_PAST_GRACE"); status=$?
+  expect_code 2 "$status" "precondition: an unrelayed decision past grace must block"
+
+  FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" "$dir/bin/fm-ack.sh" task1 "relayed to captain" >/dev/null 2>&1
+
+  # Now the captain owns it. Blocking every turn until they answer would make the
+  # guard fire constantly, which is exactly how a guard gets disabled.
+  local age
+  for age in "$UNACTIONED_PAST_GRACE" 86400; do
+    out=$(run_hook_aged "$dir" "$age"); status=$?
+    expect_code 0 "$status" "the guard blocked a turn on a decision already relayed to the captain (${age}s)"
+    [ -z "$out" ] || fail "the guard printed on a relayed decision after ${age}s: $out"
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "fm-turnend-guard: a state firstmate has already acted on never blocks a turn again"
+}
+
+test_hook_silent_on_a_task_the_captain_exempted() {
+  local dir pid out status
+  read -r dir pid < <(make_supervised_primary "$TMP_ROOT/hook-unactioned-exempt")
+  printf 'blocked: vendor outage\n' > "$dir/state/task1.status"
+  mkdir -p "$dir/config"
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$dir/config/ci-waiver-secret"
+  chmod 600 "$dir/config/ci-waiver-secret"
+
+  out=$(run_hook_aged "$dir" "$UNACTIONED_PAST_GRACE"); status=$?
+  expect_code 2 "$status" "precondition: an unactioned blocker past grace must block"
+
+  FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" \
+    "$dir/bin/fm-monitor.sh" --exempt task1 --reason "captain is chasing the vendor" >/dev/null 2>&1
+
+  out=$(run_hook_aged "$dir" "$UNACTIONED_PAST_GRACE"); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "the captain's per-task exemption did not stop the turn-end block"
+  [ -z "$out" ] || fail "the guard printed on an exempted task: $out"
+  pass "fm-turnend-guard: a captain-signed exemption is the one thing that stops this block"
+}
+
+# The reasons are independent and must be reported together, so a permanently
+# unactioned report cannot hide a supervision blackout, or the reverse. This is
+# also the case that proves reason 3 did not weaken reason 1, the assertion that
+# has caught two real blackouts on this box.
+test_hook_reports_blind_turn_and_unanswered_state_together() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-blind-and-unactioned")
+  : > "$dir/state/task1.meta"
+  printf 'done: implementation committed on fm/task1\n' > "$dir/state/task1.status"
+  cat > "$dir/crew-state-stub" <<'SH'
+#!/usr/bin/env bash
+printf 'state: done · source: status-log · finished\n'
+SH
+  chmod +x "$dir/crew-state-stub"
+  # No watcher lock and no beacon at all: supervision is off AND a report is
+  # unanswered.
+  out=$(run_hook_aged "$dir" "$UNACTIONED_PAST_GRACE"); status=$?
+  expect_code 2 "$status" "hook must block when both reasons hold"
+  assert_contains "$out" "SUPERVISION IS OFF" \
+    "the supervision-alive assertion stopped being reported once a second reason was present"
+  assert_contains "$out" "$REQUIRED_REASON" \
+    "the supervision repair instruction was dropped from a combined banner"
+  assert_contains "$out" "TURN WOULD END WITH A REPORTED STATE UNANSWERED" \
+    "the unanswered-report reason was dropped from a combined banner"
+  pass "fm-turnend-guard: a blind turn and an unanswered report are reported together, neither hiding the other"
 }
 
 test_hook_blocks_with_live_lock_and_stale_beacon() {
@@ -1170,6 +1337,11 @@ test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
+test_hook_blocks_on_a_reported_state_left_unanswered
+test_hook_silent_on_a_report_inside_the_grace_window
+test_hook_silent_once_the_state_has_been_acted_on
+test_hook_silent_on_a_task_the_captain_exempted
+test_hook_reports_blind_turn_and_unanswered_state_together
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_silent_when_another_session_owns_the_fleet

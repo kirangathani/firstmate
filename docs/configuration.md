@@ -159,6 +159,11 @@ Because it is derived, a stolen repository key reveals nothing about the master 
 A single shared secret would instead have handed over every repository at once and stayed valid until a rotate plus a re-publish everywhere.
 The dispatch token keeps using the master, so a stolen repository key cannot mint one either.
 
+The master is this home's captain-held signing key, and CI waivers were its first use rather than its only one.
+The per-task monitoring exemption (`bin/fm-monitor.sh --exempt`) signs under its own payload domain with the same master, for the same reason: without a key there is a string to type or a line to append that grants the authorization, and with one there is not.
+`bin/fm-ci-waiver-lib.sh` owns every domain, and each is separated so a token minted for one can never be replayed as the other.
+A home with no master can therefore neither waive CI nor exempt a task from monitoring; both refuse rather than falling back to an unsigned marker.
+
 Create the master with `bin/fm-ci-waiver.sh init` and enrol a repository with `bin/fm-ci-waiver.sh publish <owner/repo>`, once per repository whose CI must honour waivers; both paths keep every value out of terminals, argv, and environment variables, so nothing is ever committed, printed, or given to a worker.
 `--rotate` is the only way to replace an existing master, because rotating invalidates every signature already published on an open PR and requires re-publishing to every repository.
 The master is not inherited by secondmate homes: a home that dispatches its own waived work runs its own `init` and `publish`.

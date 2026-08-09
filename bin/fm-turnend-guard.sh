@@ -16,11 +16,29 @@
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
-# It blocks for TWO independent reasons, reported together in one banner so a
-# permanently broken watcher cannot hide the other:
-#   1. in-flight work with no live watcher (the original blind-turn reason), and
+# It blocks for THREE independent reasons, reported together in one banner so a
+# permanently broken watcher cannot hide the others:
+#   1. in-flight work with no live watcher (the original blind-turn reason),
 #   2. an in-flight branch whose CI was measured against a base that has since
-#      moved (bin/fm-stale-base.sh, which owns that predicate and its remedy).
+#      moved (bin/fm-stale-base.sh, which owns that predicate and its remedy), and
+#   3. a direct report sitting in a state that owes firstmate an action, past the
+#      grace window, unacted on (bin/fm-ack-lib.sh, which owns that predicate).
+#
+# Why reason 3 is here and not only in bin/fm-guard.sh. That guard has raised
+# this exact finding since #35, and it exits 0 - it warns, then the turn ends
+# anyway, so acting on it was a matter of the agent choosing to. The finding was
+# never the weak part; its consequence was. Reason 1 is the precedent: it is also
+# a condition bin/fm-guard.sh warns about, and making it block at turn end is
+# what has caught two real supervision blackouts on this box. Reason 3 is the
+# same predicate given the same consequence, so a turn cannot end with a worker's
+# reported state unanswered.
+#
+# Reason 3 stays quiet on a healthy fleet for the reasons bin/fm-ack-lib.sh owns:
+# a ten-minute grace, an ack that silences a state firstmate has already handled
+# for as long as the captain takes to answer, and a current-state confirm that
+# clears a worker which has provably moved on. A task the captain has signed an
+# exemption for never reaches this check at all. A guard that fired constantly
+# would be turned off, which is worse than no guard.
 #
 # Ships with TRACKED harness hook files at the repo root, so this file is
 # checked out into every worktree of this repo: the primary checkout, every
@@ -60,6 +78,8 @@ STALE_BASE_TIMEOUT=${FM_STALE_BASE_TIMEOUT:-10}
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# shellcheck source=bin/fm-ack-lib.sh
+. "$SCRIPT_DIR/fm-ack-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -146,7 +166,21 @@ if [ -x "$SCRIPT_DIR/fm-stale-base.sh" ]; then
   fi
 fi
 
-[ "$blind" = 1 ] || [ -n "$STALE_BASE" ] || exit 0
+# Third, independent block reason: a direct report whose reported state still
+# owes firstmate an action. bin/fm-ack-lib.sh owns the predicate, the grace, both
+# silencers, and the captain-signed exemption; this only gives its verdict a
+# consequence. The cheap filter there means a healthy fleet forks nothing, so
+# this adds no measurable cost to a turn end.
+#
+# It is deliberately NOT bounded by a timeout the way the stale-base sweep is:
+# every read it makes is a local file stat except the current-state confirm,
+# which is capped per invocation and cached, and swallowing its verdict on
+# expiry would mean silently ending a turn on exactly the finding this reason
+# exists to force. A confirm that cannot be read already reports as unreadable
+# and still alarms.
+UNACTIONED=$(fm_ack_unactioned "$STATE" 2>/dev/null || true)
+
+[ "$blind" = 1 ] || [ -n "$STALE_BASE" ] || [ -n "$UNACTIONED" ] || exit 0
 
 rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 {
@@ -168,6 +202,21 @@ rule='━━━━━━━━━━━━━━━━━━━━━━━━�
     printf '%s\n' "$STALE_BASE" | while IFS= read -r stale_line; do
       printf '●  %s\n' "$stale_line"
     done
+  fi
+  if [ -n "$UNACTIONED" ]; then
+    { [ "$blind" = 1 ] || [ -n "$STALE_BASE" ]; } && printf '●%s\n' "$rule"
+    printf '●  TURN WOULD END WITH A REPORTED STATE UNANSWERED\n'
+    while IFS=$'\t' read -r u_id u_verb u_age u_verdict u_last; do
+      [ -n "$u_id" ] || continue
+      printf '●  %s reported "%s" %ss ago and firstmate has not acted (state: %s).\n' \
+        "$u_id" "$u_verb" "$u_age" "$u_verdict"
+      printf '●      %s\n' "$u_last"
+    done <<EOF
+$UNACTIONED
+EOF
+    printf '●  Do what each state owes, then record it: bin/fm-ack.sh <id> "<what you did>"\n'
+    printf '●  A state waiting on the CAPTAIN is recorded once you have relayed it to them.\n'
+    printf '●  Run bin/fm-monitor.sh for the full per-task sweep.\n'
   fi
   printf '●%s\n' "$rule"
 } >&2

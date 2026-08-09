@@ -430,6 +430,290 @@ test_merge_local_acks() {
   pass "fm-merge-local: an approved local merge acks the ready-in-branch state"
 }
 
+# --- the confirm cannot wedge a turn, and cannot silence one -----------------
+
+# This predicate now runs at turn end, and that hook is the one place a hang
+# wedges a whole session. The current-state reader shells out to panes and to
+# no-mistakes, so it is not a call that can be assumed to return.
+#
+# The bound must fail the SAFE way. A timeout is not evidence the worker moved
+# on, so it has to read as unconfirmed and still alarm - a bound that swallowed
+# the finding would end turns silently on exactly the case it was added for.
+test_a_wedged_current_state_read_still_alarms_and_still_returns() {
+  local home id out start elapsed
+  id=wedge-w8
+  home=$(make_home wedge "$id")
+  crew_reports "$home" "$id" "done: implementation committed"
+  # A reader that never returns, which is what a wedged pane probe looks like.
+  printf '#!/usr/bin/env bash\nsleep 300\n' > "$home/crew-state-stub"
+  chmod +x "$home/crew-state-stub"
+
+  start=$(date +%s)
+  out=$(run_guard "$home" "$INCIDENT_SECS" FM_ACK_CONFIRM_TIMEOUT=2)
+  elapsed=$(( $(date +%s) - start ))
+
+  [ "$elapsed" -lt 60 ] || fail "the guard hung for ${elapsed}s on a wedged current-state read - at turn end that wedges the session"
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "a current-state read that timed out silenced the alarm - a bound may cost accuracy about the worker, never the finding"
+  assert_contains "$out" "$id" "the alarm did not name the task whose confirm timed out"
+  pass "fm-ack-lib: a wedged current-state read is bounded, and times out into alarming rather than into silence"
+}
+
+# --- the forced sweep --------------------------------------------------------
+
+# Give <home> a signing key, so exemptions can be minted there.
+give_key() {  # <home>
+  mkdir -p "$1/config"
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$1/config/ci-waiver-secret"
+  chmod 600 "$1/config/ci-waiver-secret"
+}
+
+run_monitor() {  # <home> <age-seconds> [args...]
+  local home=$1 age=$2
+  shift 2
+  FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    FM_ACK_NOW="$(( $(date +%s) + age ))" \
+    FM_CREW_STATE_BIN="$home/crew-state-stub" \
+    "$ROOT/bin/fm-monitor.sh" "$@" 2>&1
+}
+
+# The captain's question is "have you gone over everything", and only a render
+# that accounts for every task can answer it. A surface that printed just the
+# problems is indistinguishable from one that did not look, which is the failure
+# the captain ruled on when he required every class named on every render
+# including zeros.
+test_sweep_accounts_for_every_task_and_every_class() {
+  local home out status
+  home=$(make_home sweep-all quiet-one)
+  fm_write_meta "$home/state/owed-two.meta" "window=x" "kind=ship"
+  fm_write_meta "$home/state/acked-three.meta" "window=x" "kind=ship"
+  crew_reports "$home" quiet-one "working: still going"
+  crew_reports "$home" owed-two "done: implementation committed"
+  crew_reports "$home" acked-three "needs-decision: sync or async"
+  run_ack "$home" acked-three "relayed to captain" >/dev/null
+
+  out=$(run_monitor "$home" "$INCIDENT_SECS") && status=0 || status=$?
+  expect_code 1 "$status" "a sweep that found an unactioned report must not exit 0"
+
+  # Every task named, whatever class it fell in.
+  assert_contains "$out" "quiet-one" "sweep omitted a task that owed nothing - then it did not go over everything"
+  assert_contains "$out" "owed-two" "sweep omitted the unactioned task"
+  assert_contains "$out" "acked-three" "sweep omitted the task firstmate had already acted on"
+  assert_contains "$out" "3 task(s) supervised" "sweep did not state how many tasks it covered"
+
+  # Every class named on the counts line, including the ones that are zero.
+  local class
+  for class in needs-action just-reported acted moved-on exempt nothing-owed; do
+    assert_contains "$out" "$class" "counts line dropped the '$class' class - an absent class reads as 'none' and as 'not checked' identically"
+  done
+  assert_contains "$out" "exempt 0" "a zero class must be printed as a zero, not omitted"
+  pass "fm-monitor: the sweep names every supervised task and every class, zeros included"
+}
+
+# The sweep and the turn-end block must never disagree, which is only guaranteed
+# if they read the same predicate. Assert they agree on the same fleet rather
+# than that each is individually plausible.
+test_sweep_and_alarm_agree() {
+  local home id sweep alarm
+  id=agree-a1
+  home=$(make_home agree "$id")
+  crew_reports "$home" "$id" "done: implementation committed"
+
+  sweep=$(run_monitor "$home" "$INCIDENT_SECS")
+  alarm=$(run_guard "$home" "$INCIDENT_SECS")
+  assert_contains "$sweep" "NEEDS ACTION" "sweep did not flag what the alarm flags"
+  assert_contains "$alarm" "UNACTIONED DIRECT REPORT" "alarm did not fire on what the sweep flags"
+
+  run_ack "$home" "$id" "triggered validation" >/dev/null
+  sweep=$(run_monitor "$home" "$INCIDENT_SECS")
+  alarm=$(run_guard "$home" "$INCIDENT_SECS")
+  assert_not_contains "$sweep" "NEEDS ACTION" "sweep still demanded action on an acked task the alarm had gone quiet on"
+  assert_not_contains "$alarm" "UNACTIONED DIRECT REPORT" "alarm fired on a task the sweep called clear"
+  pass "fm-monitor: the render and the alarm answer from one predicate and cannot disagree"
+}
+
+# --- the per-task exemption --------------------------------------------------
+
+# The captain was explicit that a blanket on/off is not enough: he must be able
+# to say "don't monitor this one".
+test_signed_exemption_silences_one_task_only() {
+  local home out
+  home=$(make_home exempt-one exempt-me)
+  give_key "$home"
+  fm_write_meta "$home/state/watch-me.meta" "window=x" "kind=ship"
+  crew_reports "$home" exempt-me "blocked: vendor outage, captain is handling it"
+  crew_reports "$home" watch-me "done: implementation committed"
+
+  run_monitor "$home" 0 --exempt exempt-me --reason "captain is chasing the vendor by hand" >/dev/null
+
+  out=$(run_guard "$home" "$INCIDENT_SECS")
+  assert_not_contains "$out" "exempt-me" "an exempted task must not alarm"
+  assert_contains "$out" "watch-me" "an exemption on one task silenced another - it must be per task, not a blanket switch"
+  pass "fm-monitor: a signed exemption silences exactly the one task it names"
+}
+
+# The captain's own test: could the entity being checked have produced the thing
+# being checked. A worker appends its own status lines into this same directory
+# and firstmate writes here constantly, so a plain marker file would be
+# self-exemption by one append.
+test_an_unsigned_record_is_not_an_exemption() {
+  local home id out f
+  id=forge-f1
+  home=$(make_home forge "$id")
+  give_key "$home"
+  crew_reports "$home" "$id" "done: implementation committed"
+  f="$home/state/$id.monitor-exempt"
+
+  # Every shape something without the key could plausibly write.
+  local rec label
+  while IFS='|' read -r rec label; do
+    [ -n "$label" ] || continue
+    printf '%s\n' "$rec" > "$f"
+    out=$(run_guard "$home" "$INCIDENT_SECS")
+    assert_contains "$out" "UNACTIONED DIRECT REPORT" \
+      "guard was silenced by $label - anything firstmate or a worker can type must not grant an exemption"
+  done <<'ROWS'
+exempt|a bare word
+1	deadbeef	because I said so|a short, obviously invalid signature
+1	00000000000000000000000000000000000000000000000000000000000000ff	because I said so|a well-formed but wrong 64-hex signature
+ROWS
+
+  # And a real signature lifted from a DIFFERENT task cannot be replayed here,
+  # because the task id is inside the signed payload.
+  fm_write_meta "$home/state/other-o2.meta" "window=x" "kind=ship"
+  run_monitor "$home" 0 --exempt other-o2 --reason "a genuine exemption elsewhere" >/dev/null
+  cp "$home/state/other-o2.monitor-exempt" "$f"
+  out=$(run_guard "$home" "$INCIDENT_SECS")
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "a real exemption copied from another task silenced this one - the task id must be bound into the signature"
+  pass "fm-ack-lib: only a record signed for THIS task with this home's key is an exemption"
+}
+
+# The stated reason is what the captain will read months later and what session
+# start announces. If it could be rewritten after signing, the record would
+# claim an authorization the captain never gave.
+test_the_reason_is_bound_to_the_signature() {
+  local home id out rec sig
+  id='reason-r2'
+  home=$(make_home reason "$id")
+  give_key "$home"
+  crew_reports "$home" "$id" "done: implementation committed"
+  run_monitor "$home" 0 --exempt "$id" --reason "vendor outage until Friday" >/dev/null
+  out=$(run_guard "$home" "$INCIDENT_SECS")
+  assert_not_contains "$out" "UNACTIONED DIRECT REPORT" "precondition: the genuine exemption must hold"
+
+  # Keep the signature, rewrite what it claims to authorize.
+  IFS= read -r rec < "$home/state/$id.monitor-exempt"
+  sig=$(printf '%s' "$rec" | cut -f2)
+  printf '1\t%s\t%s\n' "$sig" "permanently exempt, no reason needed" > "$home/state/$id.monitor-exempt"
+  out=$(run_guard "$home" "$INCIDENT_SECS")
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "the reason was rewritten under a valid signature and the exemption still held"
+  pass "fm-monitor: an exemption's stated reason cannot be edited after it was granted"
+}
+
+# An exemption is durable state, not a session's memory: it has to survive a
+# restart, which here means a completely fresh process reading only what is on
+# disk. Every invocation in this suite is already a fresh process, so this asserts
+# the record is what carries it - and that no in-memory clock or cache is needed.
+test_exemption_survives_a_restart() {
+  local home id out age
+  id=restart-s3
+  home=$(make_home restart "$id")
+  give_key "$home"
+  crew_reports "$home" "$id" "blocked: waiting on the captain's vendor call"
+  run_monitor "$home" 0 --exempt "$id" --reason "captain is handling this one directly" >/dev/null
+
+  # Far past any window, across many separate processes.
+  for age in "$INCIDENT_SECS" 86400 604800; do
+    out=$(run_guard "$home" "$age")
+    assert_not_contains "$out" "UNACTIONED DIRECT REPORT" \
+      "the exemption stopped holding after ${age}s in a fresh process - it must be carried by the record, not by a live session"
+  done
+  out=$(run_monitor "$home" 604800 --list-exempt)
+  assert_contains "$out" "$id" "--list-exempt lost a standing exemption"
+  assert_contains "$out" "captain is handling this one directly" "--list-exempt dropped the signed reason"
+  pass "fm-monitor: an exemption is durable and holds across restarts until it is cleared"
+}
+
+# Without a key nothing can be signed. Writing an unsigned record anyway would
+# be strictly worse than refusing: it would look like an exemption to a human
+# reading state/ and be exactly the self-granted marker the design forbids.
+test_exemption_refused_without_a_key() {
+  local home id out status
+  id=nokey-n4
+  home=$(make_home nokey "$id")
+  crew_reports "$home" "$id" "done: implementation committed"
+
+  out=$(run_monitor "$home" 0 --exempt "$id" --reason "no key here") && status=0 || status=$?
+  expect_code 2 "$status" "fm-monitor must refuse to exempt when it cannot sign"
+  assert_contains "$out" "cannot be signed" "the refusal did not say why"
+  assert_absent "$home/state/$id.monitor-exempt" "a refused exemption still wrote a record"
+
+  # And a key that disappears later does not silence the fleet: an exemption that
+  # cannot be verified is not an exemption.
+  give_key "$home"
+  run_monitor "$home" 0 --exempt "$id" --reason "signed while the key existed" >/dev/null
+  out=$(run_guard "$home" "$INCIDENT_SECS")
+  assert_not_contains "$out" "UNACTIONED DIRECT REPORT" "precondition: the signed exemption must hold"
+  mv "$home/config/ci-waiver-secret" "$home/config/ci-waiver-secret.gone"
+  out=$(run_guard "$home" "$INCIDENT_SECS")
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "removing the key silenced the alarm - an unverifiable exemption must fall back to NOT exempt"
+  pass "fm-monitor: no key means no exemption can be granted, and no key means none can be believed"
+}
+
+# An exemption suppresses an alarm. It must not remove the task from the
+# accounting, or a self-granted one could quietly drop a task out of supervision.
+test_an_exemption_is_never_silent() {
+  local home id out
+  id=loud-l5
+  home=$(make_home loud "$id")
+  give_key "$home"
+  crew_reports "$home" "$id" "blocked: vendor outage"
+  run_monitor "$home" 0 --exempt "$id" --reason "captain is chasing the vendor" >/dev/null
+
+  # Still on the render, with its reason, even in the trimmed view.
+  out=$(run_monitor "$home" "$INCIDENT_SECS")
+  assert_contains "$out" "EXEMPT by the captain" "the sweep hid an exempted task"
+  assert_contains "$out" "captain is chasing the vendor" "the sweep hid the exemption's stated reason"
+  out=$(run_monitor "$home" "$INCIDENT_SECS" --quiet)
+  assert_contains "$out" "EXEMPT by the captain" \
+    "the trimmed view hid the exemption - a standing suppression of a safety check must stay in front of the captain"
+
+  # And announced at session start without anyone asking for it.
+  out=$(FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1 || true)
+  assert_contains "$out" "MONITOR_EXEMPT: $id" "session start did not announce a standing exemption"
+  assert_contains "$out" "captain is chasing the vendor" "the session-start announcement dropped the reason"
+  pass "fm-monitor: an exemption is announced on every sweep and at every session start, never silent"
+}
+
+test_unexempt_restores_monitoring() {
+  local home id out
+  id=undo-u6
+  home=$(make_home undo "$id")
+  give_key "$home"
+  crew_reports "$home" "$id" "done: implementation committed"
+  run_monitor "$home" 0 --exempt "$id" --reason "temporarily out of scope" >/dev/null
+  out=$(run_guard "$home" "$INCIDENT_SECS")
+  assert_not_contains "$out" "UNACTIONED DIRECT REPORT" "precondition: the exemption must hold"
+
+  run_monitor "$home" 0 --unexempt "$id" >/dev/null
+  assert_absent "$home/state/$id.monitor-exempt" "--unexempt left the record in place"
+  out=$(run_guard "$home" "$INCIDENT_SECS")
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" "--unexempt did not restore the alarm"
+  pass "fm-monitor: clearing an exemption puts the task straight back under the alarm"
+}
+
+test_exemption_record_is_torn_down_with_the_task() {
+  assert_grep "\$ID.monitor-exempt" "$ROOT/bin/fm-teardown.sh" \
+    "fm-teardown must remove the per-task monitoring exemption with the rest of the task's state"
+  assert_grep "\$child_id.monitor-exempt" "$ROOT/bin/fm-teardown.sh" \
+    "secondmate teardown must remove each child's exemption record too"
+  pass "fm-teardown: a finished task's exemption is cleaned up with its other state"
+}
+
 test_incident_reproduction
 test_captain_wait_never_alarms
 test_ack_rearms_on_new_status
@@ -443,3 +727,14 @@ test_confirm_is_gated_by_the_cheap_filter
 test_ack_cli
 test_teardown_removes_the_record
 test_merge_local_acks
+test_a_wedged_current_state_read_still_alarms_and_still_returns
+test_sweep_accounts_for_every_task_and_every_class
+test_sweep_and_alarm_agree
+test_signed_exemption_silences_one_task_only
+test_an_unsigned_record_is_not_an_exemption
+test_the_reason_is_bound_to_the_signature
+test_exemption_survives_a_restart
+test_exemption_refused_without_a_key
+test_an_exemption_is_never_silent
+test_unexempt_restores_monitoring
+test_exemption_record_is_torn_down_with_the_task
