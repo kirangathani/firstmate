@@ -82,6 +82,27 @@
 #        lets an EMPTY rollup pass the checks-green gate
 #   (p4) `assumed-covered:` lines are disclosed with a count in the merge log
 #        and are never treated as a finding
+#
+# The attestation exemption (contract in bin/fm-pr-merge.sh's header): exactly
+# one named check may be excused, and only on authority the PR cannot supply.
+#   (x1) a direct-PR project merges past a FAILED attestation check, and the log
+#        names the exemption and its authority
+#   (x2) the same PR with any OTHER check failing refuses
+#   (x3) the same PR with a check still pending refuses, distinctly
+#   (x4) a skip-flagged task whose meta carries a VALID signature merges past it
+#   (x5) the same flag with a MISSING signature refuses - the forgery this whole
+#        design exists to stop, since a worker can append the flag line itself
+#   (x6) the same flag with a WRONG signature refuses, and says the key does not
+#        reproduce it
+#   (x7) a signature minted under the OTHER flag's payload domain does not
+#        transfer, so one authorized skip never widens into the other
+#   (x8) a no-mistakes project with no skip flag refuses exactly as before
+#   (x9) an exempted check is not evidence, so a rollup holding nothing else
+#        refuses as a zero-check PR would
+#   (x10) a RENAMED attestation check is no longer recognized, so it is no longer
+#        excused and refuses (the rename direction that costs a merge, never
+#        grants one)
+#   (x11) the excused name still equals the workflow job name that reports it
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1595,6 +1616,323 @@ test_assumed_covered_findings_are_disclosed_and_do_not_block() {
   pass "assumed-covered identifiers are disclosed in the merge log and never block"
 }
 
+# --- the attestation exemption (contract in bin/fm-pr-merge.sh's header) ------
+#
+# The one check whose failure the merge gate may excuse. Written out here rather
+# than read back out of the script, so this file is an INDEPENDENT statement of
+# the name: (x11) then catches either side drifting from the workflow job that
+# actually reports it.
+ATTESTATION_CHECK='PR must be raised via no-mistakes'
+
+# A rollup line for that check, failed exactly as CI reports it when a PR was not
+# raised through the pipeline.
+attestation_failed_line() {
+  printf 'CheckRun\tCOMPLETED\tFAILURE\t-\t%s\n' "$ATTESTATION_CHECK"
+}
+
+# give_case_a_signing_key <case_dir>: a throwaway key for this case alone.
+# NEVER the captain's real config/ci-waiver-secret: nothing here reads, needs, or
+# could be made to accept it, and every signature below is minted from and
+# verified against the value generated right here.
+give_case_a_signing_key() {
+  local case_dir=$1
+  mkdir -p "$case_dir/fmhome/config"
+  printf '%s\n' 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0 \
+    > "$case_dir/fmhome/config/ci-waiver-secret"
+  chmod 600 "$case_dir/fmhome/config/ci-waiver-secret"
+}
+
+# mint_dispatch_token <case_dir> <task-id> <local|ci>: a REAL token, minted
+# through the same library bin/fm-spawn.sh mints with, so a "valid signature"
+# case exercises the actual HMAC rather than a constant the test and the script
+# happened to agree on.
+mint_dispatch_token() {
+  local case_dir=$1 id=$2 kind=$3 fn=fm_ci_waiver_dispatch_local_token
+  [ "$kind" = local ] || fn=fm_ci_waiver_dispatch_token
+  bash -c '. "$0/bin/fm-ci-waiver-lib.sh"; "$1" "$2"' "$ROOT" "$fn" "$id" \
+    < "$case_dir/fmhome/config/ci-waiver-secret"
+}
+
+# write_projects_registry <case_dir> <mode>: the private fleet registry
+# bin/fm-project-mode.sh resolves a delivery mode from. make_case's project dir
+# is always basenamed "project".
+write_projects_registry() {
+  local case_dir=$1 mode=$2
+  mkdir -p "$case_dir/fmhome/data"
+  {
+    printf '%s\n' '# Projects'
+    printf -- '- project [%s] - test project (added 2026-08-09)\n' "$mode"
+  } > "$case_dir/fmhome/data/projects.md"
+}
+
+# make_attestation_case <name> <mode> [<extra rollup line>...]: a case whose PR
+# reports the attestation check FAILED plus one ordinary green check, so the
+# exemption is the only thing that can decide the merge.
+make_attestation_case() {
+  local name=$1 mode=$2 case_dir
+  shift 2
+  case_dir=$(make_case "$name")
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" c0ffee0000000000000000000000000000000001
+  : > "$case_dir/gh-axi.log"
+  write_projects_registry "$case_dir" "$mode"
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts' \
+    "$(attestation_failed_line)" \
+    "$@"
+  printf '%s\n' "$case_dir"
+}
+
+test_direct_pr_project_merges_past_a_failed_attestation() {
+  local case_dir rc
+  case_dir=$(make_attestation_case attest-direct-pr direct-PR)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/101 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "attest-direct-pr: a direct-PR project's PR must merge past the attestation check"
+  grep -qxF 'pr merge 101 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "attest-direct-pr: the PR was not merged"
+  assert_grep 'ATTESTATION CHECK EXEMPTED (before the remaining gates)' "$case_dir/stderr" \
+    "attest-direct-pr: the exemption was not disclosed before the gates"
+  assert_grep 'ATTESTATION CHECK EXEMPTED (MERGING NOW)' "$case_dir/stderr" \
+    "attest-direct-pr: the exemption was not disclosed again at the merge"
+  assert_grep "$ATTESTATION_CHECK" "$case_dir/stderr" \
+    "attest-direct-pr: the banner did not name the excused check"
+  assert_grep 'registered as a direct-PR project' "$case_dir/stderr" \
+    "attest-direct-pr: the banner did not name the authority it merged on"
+  pass "a direct-PR project merges past the failed attestation check, and says so"
+}
+
+test_another_failing_check_refuses_under_the_exemption() {
+  local case_dir rc
+  case_dir=$(make_attestation_case attest-other-red direct-PR \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tBehavior tests (shard 1)')
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/102 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attest-other-red: the exemption must not carry a second failing check"
+  assert_grep 'PR check is failing: Behavior tests (shard 1)' "$case_dir/stderr" \
+    "attest-other-red: the genuinely failing check was not named"
+  assert_grep 'refusing to merge a red PR' "$case_dir/stderr" \
+    "attest-other-red: the red-PR refusal did not fire"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attest-other-red: a PR with an unrelated failing check was merged"
+  pass "the exemption excuses one named check and nothing else that is failing"
+}
+
+test_pending_check_refuses_under_the_exemption() {
+  local case_dir rc
+  case_dir=$(make_attestation_case attest-pending direct-PR \
+    $'CheckRun\tIN_PROGRESS\t-\t-\tBehavior tests (shard 2)')
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/103 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attest-pending: an unfinished check must still refuse under the exemption"
+  assert_grep 'PR check has not finished: Behavior tests (shard 2)' "$case_dir/stderr" \
+    "attest-pending: the unfinished check was not named"
+  assert_grep 'it is unfinished' "$case_dir/stderr" \
+    "attest-pending: the refusal did not distinguish unfinished from red"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attest-pending: a PR with an unfinished check was merged"
+  pass "a pending check still refuses when the attestation check is exempted"
+}
+
+test_signed_skip_merges_past_a_failed_attestation() {
+  local case_dir rc token
+  case_dir=$(make_attestation_case attest-signed-skip no-mistakes)
+  give_case_a_signing_key "$case_dir"
+  token=$(mint_dispatch_token "$case_dir" task-x1 local)
+  add_skip_flags "$case_dir" 'local_skip=on' "local_skip_auth=$token"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/104 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "attest-signed-skip: a signed testing skip must authorize the exemption"
+  grep -qxF 'pr merge 104 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "attest-signed-skip: the PR was not merged"
+  assert_grep 'ATTESTATION CHECK EXEMPTED' "$case_dir/stderr" \
+    "attest-signed-skip: the exemption was not disclosed"
+  assert_grep 'local-pipeline skip on this task, signed at dispatch' "$case_dir/stderr" \
+    "attest-signed-skip: the banner did not name the signed skip as the authority"
+  assert_grep 'TESTING WAIVER' "$case_dir/stderr" \
+    "attest-signed-skip: the separate waiver disclosure stopped printing"
+  pass "a testing skip carrying this home's own signature authorizes the exemption"
+}
+
+# THE case this whole design exists for: a worker appends its status lines into
+# the same state directory, so it can append `local_skip=on` to its own record.
+# That line must buy it nothing.
+test_unsigned_skip_flag_refuses() {
+  local case_dir rc
+  case_dir=$(make_attestation_case attest-unsigned-skip no-mistakes)
+  give_case_a_signing_key "$case_dir"
+  add_skip_flags "$case_dir" 'local_skip=on'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/105 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attest-unsigned-skip: a bare skip flag must not authorize the exemption"
+  assert_grep 'no usable local_skip_auth= signature' "$case_dir/stderr" \
+    "attest-unsigned-skip: the missing signature was not called out"
+  assert_grep "PR check is failing: $ATTESTATION_CHECK" "$case_dir/stderr" \
+    "attest-unsigned-skip: the attestation check was not refused as an ordinary red check"
+  assert_no_grep 'ATTESTATION CHECK EXEMPTED' "$case_dir/stderr" \
+    "attest-unsigned-skip: an unsigned flag produced an exemption banner"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attest-unsigned-skip: a self-appended skip flag obtained a merge"
+  pass "a skip flag with no signature authorizes nothing, so the merge refuses"
+}
+
+test_wrong_signature_on_skip_flag_refuses() {
+  local case_dir rc
+  case_dir=$(make_attestation_case attest-wrong-sig no-mistakes)
+  give_case_a_signing_key "$case_dir"
+  # Correctly SHAPED (64 hex) but not a value this home's key produces, which is
+  # the best a forger without the secret can do.
+  add_skip_flags "$case_dir" 'local_skip=on' \
+    'local_skip_auth=abababababababababababababababababababababababababababababababab'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/106 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attest-wrong-sig: a forged signature must not authorize the exemption"
+  assert_grep 'does NOT reproduce' "$case_dir/stderr" \
+    "attest-wrong-sig: the refusal did not say the key does not reproduce the signature"
+  assert_no_grep 'ATTESTATION CHECK EXEMPTED' "$case_dir/stderr" \
+    "attest-wrong-sig: a forged signature produced an exemption banner"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attest-wrong-sig: a forged signature obtained a merge"
+  pass "a signature this home's key does not reproduce authorizes nothing"
+}
+
+test_cross_domain_signature_does_not_transfer() {
+  local case_dir rc token
+  case_dir=$(make_attestation_case attest-cross-domain no-mistakes)
+  give_case_a_signing_key "$case_dir"
+  # A genuine token for this very task, minted under the CI-skip payload domain
+  # and pasted beside the LOCAL flag.
+  token=$(mint_dispatch_token "$case_dir" task-x1 ci)
+  add_skip_flags "$case_dir" 'local_skip=on' "local_skip_auth=$token"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/107 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attest-cross-domain: a token from the other flag's domain must not transfer"
+  assert_grep 'does NOT reproduce' "$case_dir/stderr" \
+    "attest-cross-domain: the cross-domain token was not rejected as unreproducible"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attest-cross-domain: a CI-skip token authorized a local-skip exemption"
+  pass "a dispatch token minted for the other skip does not authorize this one"
+}
+
+test_no_mistakes_project_without_a_skip_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_attestation_case attest-no-authority no-mistakes)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/108 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attest-no-authority: an unauthorized PR must still be refused"
+  assert_grep "PR check is failing: $ATTESTATION_CHECK" "$case_dir/stderr" \
+    "attest-no-authority: the attestation check was not named in the refusal"
+  assert_grep 'can only be excused by' "$case_dir/stderr" \
+    "attest-no-authority: the refusal did not say what would have excused it"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attest-no-authority: a PR with no exemption authority was merged"
+  pass "a no-mistakes project with no authorized skip refuses exactly as before"
+}
+
+test_exempted_check_alone_is_not_evidence_of_ci() {
+  local case_dir rc
+  case_dir=$(make_case attest-only-check)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" c0ffee0000000000000000000000000000000002
+  : > "$case_dir/gh-axi.log"
+  write_projects_registry "$case_dir" direct-PR
+  write_pr_checks "$case_dir" "$(attestation_failed_line)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/109 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attest-only-check: an exempted check must not count as CI having reported"
+  assert_grep 'only check(s) were the exempted attestation check' "$case_dir/stderr" \
+    "attest-only-check: the refusal did not explain that nothing verified the branch"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attest-only-check: a PR whose only check was exempted was merged"
+  pass "an exempted check is not evidence, so a PR reporting nothing else refuses"
+}
+
+# A rename can only ever cost a merge, never grant one: the renamed check is no
+# longer recognized, so it is no longer excused.
+test_renamed_attestation_check_is_not_excused() {
+  local case_dir rc
+  case_dir=$(make_case attest-renamed)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" c0ffee0000000000000000000000000000000003
+  : > "$case_dir/gh-axi.log"
+  write_projects_registry "$case_dir" direct-PR
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via the pipeline'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/110 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attest-renamed: a check that is not the excused name must refuse"
+  assert_grep 'PR check is failing: PR must be raised via the pipeline' "$case_dir/stderr" \
+    "attest-renamed: the renamed check was not refused as an ordinary red check"
+  assert_no_grep 'ATTESTATION CHECK EXEMPTED' "$case_dir/stderr" \
+    "attest-renamed: a check with a different name was excused"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attest-renamed: a renamed attestation check was silently excused"
+  pass "only the exact excused name is excused; a renamed check refuses"
+}
+
+# The drift guard the exemption's exact-name match depends on. The merge gate
+# cannot read a workflow that lives in another repository, so the name is
+# necessarily duplicated; this is what keeps the two copies equal.
+test_exempted_check_name_matches_the_workflow_job() {
+  local wf="$ROOT/.github/workflows/no-mistakes-required.yml"
+  assert_grep "    name: $ATTESTATION_CHECK" "$wf" \
+    "the attestation workflow's check job name no longer matches the name the merge gate excuses"
+  assert_grep "ATTESTATION_CHECK_NAME='$ATTESTATION_CHECK'" "$ROOT/bin/fm-pr-merge.sh" \
+    "bin/fm-pr-merge.sh no longer excuses the name that workflow's check job reports"
+  pass "the excused check name still equals the workflow job name that reports it"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_merge_asserts_the_branch_suite_premise_to_the_kept_gate
@@ -1648,3 +1986,14 @@ test_unwaived_pr_prints_no_waiver_banner
 test_waiver_does_not_excuse_a_red_pr
 test_waiver_does_not_excuse_zero_checks
 test_kept_tests_gate_still_runs_under_every_skip
+test_direct_pr_project_merges_past_a_failed_attestation
+test_another_failing_check_refuses_under_the_exemption
+test_pending_check_refuses_under_the_exemption
+test_signed_skip_merges_past_a_failed_attestation
+test_unsigned_skip_flag_refuses
+test_wrong_signature_on_skip_flag_refuses
+test_cross_domain_signature_does_not_transfer
+test_no_mistakes_project_without_a_skip_still_refuses
+test_exempted_check_alone_is_not_evidence_of_ci
+test_renamed_attestation_check_is_not_excused
+test_exempted_check_name_matches_the_workflow_job

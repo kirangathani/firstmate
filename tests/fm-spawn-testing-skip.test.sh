@@ -24,6 +24,12 @@
 #   (j) an unflagged spawn records neither field, so existing meta is unchanged
 #   (j2) a CI skip also records the dispatch authorization the signer requires,
 #        and refuses outright when no secret exists to mint one
+#   (j3) a LOCAL skip records its own dispatch authorization, under its own
+#        payload domain so the two tokens differ for the same task, and the value
+#        recorded is one this home's key actually reproduces
+#   (j4) a local skip with NO secret still spawns - the enforcement below needs
+#        none - but says on stderr exactly what the missing key costs and how to
+#        get it back, rather than silently recording an unusable flag
 #   (k) --local-skip puts the shim FIRST on the worker pane's own PATH
 #   (l) a real `no-mistakes` invocation under that PATH never reaches the real
 #       binary, exits 0, and is told the skip was intentional
@@ -208,6 +214,8 @@ test_meta_records_only_the_flags_that_were_passed() {
   assert_grep "ci_skip=on" "$CASE_HOME/state/bothskip.meta" "--all-testing-skip did not record ci_skip"
   assert_grep "ci_skip_auth=" "$CASE_HOME/state/bothskip.meta" \
     "--all-testing-skip did not record the dispatch authorization the signer requires"
+  assert_grep "local_skip_auth=" "$CASE_HOME/state/bothskip.meta" \
+    "--all-testing-skip did not record the local skip's own dispatch authorization"
   assert_contains "$out" "local_skip=on ci_skip=on" "spawn summary did not disclose the skips"
 
   make_case ciskip direct-PR
@@ -218,6 +226,8 @@ test_meta_records_only_the_flags_that_were_passed() {
   assert_grep "ci_skip=on" "$CASE_HOME/state/ciskip.meta" "--ci-skip did not record ci_skip"
   assert_no_grep "local_skip=on" "$CASE_HOME/state/ciskip.meta" "--ci-skip wrongly recorded a local skip"
   assert_grep "ci_skip_auth=" "$CASE_HOME/state/ciskip.meta" "--ci-skip did not record its dispatch authorization"
+  assert_no_grep "local_skip_auth=" "$CASE_HOME/state/ciskip.meta" \
+    "--ci-skip wrongly minted the local skip's authorization"
   assert_absent "/tmp/fm-ciskip/skip-bin" "--ci-skip must not install the local-pipeline shim"
 
   make_case noskip no-mistakes
@@ -227,6 +237,8 @@ test_meta_records_only_the_flags_that_were_passed() {
   assert_no_grep "local_skip=" "$CASE_HOME/state/noskip.meta" "an unflagged task recorded a local skip field"
   assert_no_grep "ci_skip=" "$CASE_HOME/state/noskip.meta" "an unflagged task recorded a ci skip field"
   assert_no_grep "ci_skip_auth=" "$CASE_HOME/state/noskip.meta" "an unflagged task recorded a dispatch authorization"
+  assert_no_grep "local_skip_auth=" "$CASE_HOME/state/noskip.meta" \
+    "an unflagged task recorded a local dispatch authorization"
   assert_absent "/tmp/fm-noskip/skip-bin" "an unflagged task must install no shim"
   pass "meta and shim record exactly the flags that were passed, and nothing else"
 }
@@ -251,6 +263,59 @@ test_ci_skip_without_a_secret_refuses() {
   assert_contains "$out" "fm-ci-waiver.sh init" "the refusal did not say how to fix it"
   assert_absent "$CASE_HOME/state/nosecret.meta" "a refused --ci-skip spawn wrote task metadata"
   pass "--ci-skip refuses when no waiver secret exists to authorize it"
+}
+
+# The local skip's own dispatch authorization: the value bin/fm-pr-merge.sh
+# checks before that flag may excuse anything. Recomputed here through the same
+# library the spawn mints with, from the throwaway key give_case_a_waiver_secret
+# planted, so this asserts the RECORDED value is one the home's key reproduces
+# rather than merely that some hex was written.
+expected_dispatch_token() {  # <task-id> <local|ci>
+  local id=$1 kind=$2 fn=fm_ci_waiver_dispatch_local_token
+  [ "$kind" = local ] || fn=fm_ci_waiver_dispatch_token
+  bash -c '. "$0/bin/fm-ci-waiver-lib.sh"; "$1" "$2"' "$ROOT" "$fn" "$id" \
+    < "$CASE_HOME/config/ci-waiver-secret"
+}
+
+test_local_skip_records_its_own_dispatch_authorization() {
+  local out local_token ci_token
+  make_case localauth no-mistakes
+  give_case_a_waiver_secret
+  arm_orca_success
+  out=$(run_spawn localauth --local-skip)
+  expect_code 0 $? "spawn with --local-skip should succeed"$'\n'"$out"
+
+  local_token=$(expected_dispatch_token localauth local)
+  ci_token=$(expected_dispatch_token localauth ci)
+  assert_grep "local_skip_auth=$local_token" "$CASE_HOME/state/localauth.meta" \
+    "--local-skip did not record an authorization this home's key reproduces"
+  assert_no_grep "ci_skip=" "$CASE_HOME/state/localauth.meta" \
+    "--local-skip wrongly recorded a CI skip"
+  [ "$local_token" != "$ci_token" ] \
+    || fail "the two skip flags mint the SAME token for one task, so either would authorize the other"
+  pass "--local-skip records a dispatch authorization of its own, in its own payload domain"
+}
+
+# --local-skip must keep working in a home that has never run fm-ci-waiver.sh
+# init, because its enforcement needs no key at all. What it must not do is stay
+# quiet: the loss only shows up much later, as a merge refusal.
+test_local_skip_without_a_secret_warns_but_still_spawns() {
+  local out
+  make_case localnosecret no-mistakes
+  arm_orca_success
+  out=$(run_spawn localnosecret --local-skip)
+  expect_code 0 $? "--local-skip must still spawn without a signing key"$'\n'"$out"
+  assert_grep "local_skip=on" "$CASE_HOME/state/localnosecret.meta" \
+    "--local-skip did not record the skip it still enforces"
+  assert_no_grep "local_skip_auth=" "$CASE_HOME/state/localnosecret.meta" \
+    "a spawn with no signing key recorded an authorization token anyway"
+  assert_present "/tmp/fm-localnosecret/skip-bin" \
+    "--local-skip did not install its enforcement shim without a key"
+  assert_contains "$out" "WITHOUT an authorization token" \
+    "the spawn did not say the skip was recorded unauthorized"
+  assert_contains "$out" "fm-ci-waiver.sh init" \
+    "the spawn did not say how to get the authorization back"
+  pass "--local-skip without a signing key still spawns, and says exactly what that costs"
 }
 
 test_local_skip_cannot_be_run_around() {
@@ -333,4 +398,6 @@ test_secondmate_refuses_a_skip_flag
 test_a_planted_temp_root_symlink_is_refused
 test_meta_records_only_the_flags_that_were_passed
 test_ci_skip_without_a_secret_refuses
+test_local_skip_records_its_own_dispatch_authorization
+test_local_skip_without_a_secret_warns_but_still_spawns
 test_local_skip_cannot_be_run_around

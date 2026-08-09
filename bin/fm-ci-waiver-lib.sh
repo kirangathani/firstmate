@@ -46,17 +46,17 @@
 # every previously issued signature, which is the intended effect of a scheme
 # change.
 FM_CI_WAIVER_SCHEME='fm-ci-waiver.v1'
-# A SEPARATE domain for the dispatch-authorization token bin/fm-spawn.sh writes
-# beside ci_skip=on in a task's meta, so a token from one domain can never be
-# replayed as a signature in the other.
+# A SEPARATE domain for the dispatch-authorization tokens bin/fm-spawn.sh writes
+# beside a testing-skip flag in a task's meta, so a token from one domain can
+# never be replayed as a signature in the other.
 #
-# Why that token exists at all: a worker appends its own status lines into the
+# Why those tokens exist at all: a worker appends its own status lines into the
 # firstmate home's state/ directory, so it can also reach state/<id>.meta and
-# append `ci_skip=on` to its own record. Without a token, that one line would be
-# a worker authorizing its own waiver - the same "an agent can just type it"
-# failure the whole design exists to avoid, only in a different file. The token
-# is an HMAC over the task id under this scheme, so it cannot be produced
-# without the secret and cannot be lifted from another task's record.
+# append `ci_skip=on` or `local_skip=on` to its own record. Without a token, that
+# one line would be a worker authorizing its own skip - the same "an agent can
+# just type it" failure the whole design exists to avoid, only in a different
+# file. The token is an HMAC over the task id under this scheme, so it cannot be
+# produced without the secret and cannot be lifted from another task's record.
 #
 # Residual limit, stated rather than papered over: a worker runs as the same OS
 # user as firstmate, so a worker that deliberately reads config/ci-waiver-secret
@@ -69,6 +69,11 @@ FM_CI_WAIVER_DISPATCH_SCHEME='fm-ci-dispatch.v1'
 # Second payload field for a dispatch token, so the token names WHICH
 # authorization it carries rather than the task alone.
 FM_CI_WAIVER_DISPATCH_CI_SKIP='ci_skip'
+# The second field's other value, for the local-pipeline skip. Naming the flag in
+# the payload is what keeps the two apart: a token minted for a `--ci-skip`
+# dispatch cannot be pasted beside `local_skip=on` and verify, or the reverse, so
+# one authorized skip can never silently widen into the other.
+FM_CI_WAIVER_DISPATCH_LOCAL_SKIP='local_skip'
 # A THIRD domain, for deriving the per-repository secret that is published to a
 # repository's Actions secrets.
 #
@@ -180,6 +185,19 @@ fm_ci_waiver_dispatch_token() {
 # fm_ci_waiver_dispatch_check <task-id> <candidate-hex>; secret on stdin.
 fm_ci_waiver_dispatch_check() {
   fm_ci_waiver_hmac_check "$FM_CI_WAIVER_DISPATCH_SCHEME" "$1" "$FM_CI_WAIVER_DISPATCH_CI_SKIP" "$2"
+}
+
+# fm_ci_waiver_dispatch_local_token <task-id>; secret on stdin. The value
+# bin/fm-spawn.sh records as local_skip_auth= beside local_skip=on, and the only
+# thing that makes that flag authority for anything (bin/fm-pr-merge.sh's
+# attestation exemption).
+fm_ci_waiver_dispatch_local_token() {
+  fm_ci_waiver_hmac_hex "$FM_CI_WAIVER_DISPATCH_SCHEME" "$1" "$FM_CI_WAIVER_DISPATCH_LOCAL_SKIP"
+}
+
+# fm_ci_waiver_dispatch_local_check <task-id> <candidate-hex>; secret on stdin.
+fm_ci_waiver_dispatch_local_check() {
+  fm_ci_waiver_hmac_check "$FM_CI_WAIVER_DISPATCH_SCHEME" "$1" "$FM_CI_WAIVER_DISPATCH_LOCAL_SKIP" "$2"
 }
 
 # fm_ci_waiver_repo_key <owner/repo>; the MASTER secret on stdin. Prints the hex
