@@ -243,6 +243,130 @@ describe('app', () => {
 EOF
 }
 
+# --- the gate's own locale must not reach the tests it runs ------------------
+#
+# The gate exports LC_ALL=C so its sort and comm collate deterministically, and
+# that export used to be inherited by every base test file it spawned. Under a
+# byte-oriented locale awk's length() counts BYTES, so firstmate's own
+# tests/fm-flow-tui.test.sh read its box-drawing frame as five over-wide lines,
+# its baseline "failed on the base itself", and all 29 of its assertions came
+# back `unexecuted:` - refusing a branch that was clean (PR 56, 2026-08-09).
+# Only a PR that MODIFIES a base test file runs that baseline, which is why it
+# lay dormant for so long.
+#
+# Two cases, because one of them alone would not have caught it: the mechanism
+# (what the child's environment says) and the consequence (what a UTF-8-aware
+# assertion measures).
+
+# A shell-only repo whose single base test file is written by the caller, with
+# main and the work branch identical: nothing here is about a lost assertion,
+# only about the environment the baseline run happens in. Self-contained (its
+# own pass/fail helpers) for the same reason the PR-base fixtures are, and
+# shell-only so no missing Python or JS runner turns the case into a different
+# finding.
+locale_repo() {  # <name> <test-file-body-on-stdin>
+  local dir="$TMP_ROOT/$1"
+  mkdir -p "$dir/tests"
+  git init -q -b main "$dir" 2>/dev/null || {
+    git init -q "$dir"
+    git -C "$dir" checkout -q -b main
+  }
+  {
+    cat <<'PREAMBLE'
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "$1"; }
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+PREAMBLE
+    cat
+  } > "$dir/tests/app.test.sh"
+  commit_all "$dir" "baseline"
+  git -C "$dir" checkout -q -b work
+  printf '%s\n' "$dir"
+}
+
+# The mechanism, asserted on any host: whatever locale the CALLER set is what
+# the base test file runs under. The value is chosen from what this host really
+# has - a UTF-8 locale when there is one, POSIX otherwise - because a name with
+# no locale data behind it makes every child warn on startup. Either value is
+# distinguishable from the `C` the gate exports, which is the whole assertion.
+test_gate_locale_does_not_reach_the_test_files_it_runs() {
+  local dir out code got sentinel
+  sentinel=$(locale -a 2>/dev/null | grep -iE '\.(utf-?8)$' | head -1 || true)
+  [ -n "$sentinel" ] || sentinel=POSIX
+  dir=$(locale_repo locale-passthrough <<'EOF'
+printf '%s\n' "${LC_ALL-<unset>}" > "$FM_LOCALE_PROBE_OUT"
+pass "alpha holds"
+EOF
+)
+  : > "$dir/probe"
+
+  set +e
+  out=$(FM_LOCALE_PROBE_OUT="$dir/probe" LC_ALL="$sentinel" \
+    run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "locale-passthrough: a clean branch must still exit 0"$'\n'"$out"
+  [ -s "$dir/probe" ] || fail "locale-passthrough: the base test file never ran, so nothing was measured"
+  got=$(cat "$dir/probe")
+  [ "$got" = "$sentinel" ] ||
+    fail "locale-passthrough: the base test file ran under LC_ALL='$got', not the caller's '$sentinel'"
+  pass "the gate's own LC_ALL never reaches the base test files it runs"
+}
+
+# The consequence. An assertion of exactly the shape that broke: a character
+# count over a multi-byte string. The expectation is DERIVED at run time by
+# measuring the same string both ways rather than written down, so the case
+# cannot drift from what the locale actually does on this host.
+test_multibyte_base_test_measures_characters_not_bytes() {
+  local dir out code utf8
+  utf8=$(locale -a 2>/dev/null | grep -iE '\.(utf-?8)$' | head -1 || true)
+  if [ -z "$utf8" ]; then
+    echo "skip: no UTF-8 locale installed, so byte-vs-character counting cannot be exercised here"
+    return 0
+  fi
+  dir=$(locale_repo locale-multibyte <<'EOF'
+# The frame glyphs bin/fm-flow-tui.mjs draws: three characters, nine bytes. The
+# expectation is derived by measuring the same string both ways rather than
+# written down, so it cannot drift from what this host's locale really does.
+box='┌─┐'
+chars=$(awk -v s="$box" 'BEGIN { print length(s) }')
+bytes=$(LC_ALL=C awk -v s="$box" 'BEGIN { print length(s) }')
+[ "$chars" != "$bytes" ] || fail "a multi-byte string is measured in characters, not bytes"
+pass "a multi-byte string is measured in characters, not bytes"
+EOF
+)
+
+  set +e
+  out=$(LC_ALL="$utf8" run_explicit "$dir" 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "locale-multibyte: a UTF-8-aware base assertion must verify, not refuse"$'\n'"$out"$'\n'"$(cat "$dir/stderr")"
+  assert_not_contains "$out" 'unexecuted:' \
+    "locale-multibyte: the baseline could not run, so a clean branch was reported unverified"
+  assert_not_contains "$out" 'fails on the base itself' \
+    "locale-multibyte: the base's own test failed under the gate's locale"
+  pass "a base assertion that counts characters verifies instead of failing its own baseline"
+}
+
+# The fix rests on bin/fm-test-exec-lib.sh capturing the caller's locale BEFORE
+# the gate overrides it, which is an ordering between two lines in one file and
+# is therefore invisible to both cases above once it is reversed.
+test_the_lib_is_sourced_before_the_gate_overrides_the_locale() {
+  local src export_line
+  src=$(grep -n 'fm-test-exec-lib.sh' "$ROOT/bin/fm-assert-tests-kept.sh" | grep -v '^[0-9]*:#' | head -1 | cut -d: -f1)
+  export_line=$(grep -n '^export LC_ALL=C' "$ROOT/bin/fm-assert-tests-kept.sh" | head -1 | cut -d: -f1)
+  [ -n "$src" ] || fail "bin/fm-assert-tests-kept.sh no longer sources bin/fm-test-exec-lib.sh"
+  [ -n "$export_line" ] || fail "bin/fm-assert-tests-kept.sh no longer exports LC_ALL, so the capture reads the wrong thing"
+  [ "$src" -lt "$export_line" ] ||
+    fail "bin/fm-assert-tests-kept.sh exports LC_ALL=C (line $export_line) before sourcing the runner lib (line $src), so the caller's locale is captured as C"
+  # shellcheck disable=SC2016  # the literal source line, not an expansion
+  assert_grep 'FM_TEST_EXEC_CHILD_LOCALE=${LC_ALL:-}' "$ROOT/bin/fm-test-exec-lib.sh" \
+    "bin/fm-test-exec-lib.sh no longer captures the caller's locale for the test files it runs"
+  pass "the runner lib is sourced before the gate overrides the locale it captures"
+}
+
 # make_repo <name>: a plain local repo with the baseline committed on main and
 # a work branch checked out, for the explicit --worktree/--base mode. Echoes dir.
 make_repo() {
@@ -2291,6 +2415,9 @@ test_unparseable_recorded_pr_refuses_before_any_github_call
 test_pr_repo_mismatch_refusal_never_leaks_origin_credentials
 test_task_without_a_pr_still_resolves_the_default_branch
 test_explicit_mode_never_consults_github
+test_gate_locale_does_not_reach_the_test_files_it_runs
+test_multibyte_base_test_measures_characters_not_bytes
+test_the_lib_is_sourced_before_the_gate_overrides_the_locale
 test_removed_shell_test_reported_via_meta
 test_removed_python_test_reported
 test_added_tests_removed_none_loses_nothing
