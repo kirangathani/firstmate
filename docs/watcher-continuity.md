@@ -37,9 +37,13 @@ That classification is the third and fourth outcomes, and it exists because thos
 A cycle always ends with no watcher running and the lock released, so "the cycle ended" is equally true of a healthy close and a dead one and separates nothing; reporting both as `watcher: FAILED - cycle ended without an actionable reason` made a genuine lapse unnoticeable among the benign closes that produce it several times an hour.
 The discriminator is the durable wake counter `fm_wake_seq` (`bin/fm-wake-lib.sh`), snapshotted when a cycle begins: only `fm_wake_append` advances it, only `bin/fm-watch.sh` calls that, and no drain resets it, so a change across the cycle is positive proof the watcher produced a wake rather than merely stopping.
 
-- `wake-delivered`: the counter advanced, so the cycle ended by queueing a real wake. The reason line went to the arm that OWNS that watcher and the wake itself is durable, so this arm prints `watcher: cycle-complete ...` and exits 0. It is not a failure and it is not an empty no-op.
-- `lapsed`: no wake, and `state/.last-watcher-beat` is stale past `FM_GUARD_GRACE`. Nobody is supervising the fleet. The arm prints `watcher: FAILED - supervision LAPSED: ...` naming the beacon age and the grace it passed, and exits nonzero.
-- `no-wake`: no wake, but the beacon is still inside the grace, so supervision was alive until this close and produced nothing. The arm keeps the original `watcher: FAILED - cycle ended without an actionable reason` wording, now carrying that beacon evidence, and exits nonzero.
+- `wake-delivered`: the counter advanced, so the cycle ended by queueing a real wake.
+  The reason line went to the arm that OWNS that watcher and the wake itself is durable, so this arm prints `watcher: cycle-complete ...` and exits 0.
+  It is not a failure and it is not an empty no-op.
+- `lapsed`: no wake, and `state/.last-watcher-beat` is stale past `FM_GUARD_GRACE`, so nobody is supervising the fleet.
+  The arm prints `watcher: FAILED - supervision LAPSED: ...` naming the beacon age and the grace it passed, and exits nonzero.
+- `no-wake`: no wake, but the beacon is still inside the grace, so supervision was alive until this close and produced nothing.
+  The arm keeps the original `watcher: FAILED - cycle ended without an actionable reason` wording, now carrying that beacon evidence, and exits nonzero.
 
 The same `cycle_outcome` value is written to the ledger's `outcome=` field, so the reported line and the durable record cannot disagree.
 Both adapters classify a `watcher: cycle-complete` close as a completed cycle rather than a failure, restoring continuity and delivering the line as a wake note; without that they reported a false failure AND spent a retry slot per benign close, so a fleet producing them steadily would exhaust the retry budget and declare supervision dead while it was healthy.
