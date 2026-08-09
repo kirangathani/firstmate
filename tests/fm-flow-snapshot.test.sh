@@ -459,12 +459,20 @@ jq -n --arg h "$ATT_HOME" '{tasks:[
 ]}' > "$TMP_ROOT/att-fleet.json"
 
 ATTOUT="$TMP_ROOT/att-out.json"
+# Hashed across this run too, not only the earlier one: resolving the exemption
+# reads a signing key, a project registry and a task record, and a viewer that
+# is documented not to write is not a boundary until it is measured on the path
+# that reads the most.
+att_hash() { find "$ATT_HOME" -type f -exec cksum {} \; | LC_ALL=C sort; }
+att_before=$(att_hash)
 PATH="$FAKEBIN:$PATH" FM_HOME="$ATT_HOME" \
   FM_TEST_ROLLUP="$TMP_ROOT/att-rollup.json" \
   FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
   FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/att-fleet.json" \
   "$SNAPSHOT" --json > "$ATTOUT" 2>/dev/null
 expect_code 0 $? "the attestation snapshot exits clean"
+[ "$att_before" = "$(att_hash)" ] ||
+  fail "resolving the attestation exemption mutated the home it read"
 
 got=$(jq -r '.agents[] | select(.id=="shipped-a1")
   | "\(.ci.failed)/\(.ci.excused)/\(.ci.passed)/\(.ci.skipped)"' "$ATTOUT")
