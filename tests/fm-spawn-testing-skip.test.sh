@@ -323,7 +323,7 @@ test_an_unflagged_dispatch_undoes_a_brief_that_still_carries_a_skip() {
 # It must resolve to the most each mode can honour, say what it resolved to, and
 # deliver both halves of that resolution.
 test_skip_testing_resolves_per_delivery_mode() {
-  local out
+  local out status
   make_case autoall no-mistakes
   give_case_a_waiver_secret
   arm_orca_success
@@ -352,8 +352,8 @@ test_skip_testing_resolves_per_delivery_mode() {
   # local-only has nothing to skip, so the one flag that never needs the matrix
   # still refuses rather than resolving to a no-op.
   make_case autonone local-only
-  out=$(run_spawn autonone --skip-testing)
-  [ "$?" -eq 0 ] && fail "--skip-testing must refuse a local-only project"
+  out=$(run_spawn autonone --skip-testing); status=$?
+  [ "$status" -ne 0 ] || fail "--skip-testing must refuse a local-only project"
   assert_contains "$out" "nothing to skip on a local-only project" \
     "--skip-testing on local-only did not say why there was nothing to do"
   assert_absent "$CASE_HOME/state/autonone.meta" "a refused --skip-testing spawn wrote task metadata"
@@ -363,10 +363,10 @@ test_skip_testing_resolves_per_delivery_mode() {
 # Every mode refusal prints the matrix at the point of refusal, so the accepted
 # combinations are never something to go and look up mid-dispatch.
 test_refusals_print_the_accepted_matrix() {
-  local out
+  local out status
   make_case matrixhint direct-PR
-  out=$(run_spawn matrixhint --local-skip)
-  [ "$?" -eq 0 ] && fail "direct-PR must refuse --local-skip"
+  out=$(run_spawn matrixhint --local-skip); status=$?
+  [ "$status" -ne 0 ] || fail "direct-PR must refuse --local-skip"
   assert_contains "$out" "accepted by delivery mode" "the refusal did not print the accepted matrix"
   assert_contains "$out" "or pass --skip-testing" "the refusal did not name the flag that needs no matrix"
   pass "a refused combination prints the accepted matrix and the flag that avoids it"
@@ -376,13 +376,13 @@ test_refusals_print_the_accepted_matrix() {
 # worker running ordinary instructions under a record that says its testing was
 # skipped is precisely the silent half-skip this arrangement removes.
 test_a_brief_that_cannot_carry_the_skip_stops_the_dispatch() {
-  local out
+  local out status
   make_case nomarkers no-mistakes
   give_case_a_waiver_secret
   arm_orca_success
   printf 'a brief written before this contract existed\n' > "$CASE_HOME/data/nomarkers/brief.md"
-  out=$(run_spawn nomarkers --all-testing-skip)
-  [ "$?" -eq 0 ] && fail "a spawn must refuse a brief it cannot bring into agreement"
+  out=$(run_spawn nomarkers --all-testing-skip); status=$?
+  [ "$status" -ne 0 ] || fail "a spawn must refuse a brief it cannot bring into agreement"
   assert_contains "$out" "has no machine-written testing-skip regions" \
     "the refusal did not name what was wrong with the brief"
   assert_absent "$CASE_HOME/state/nomarkers.meta" "a refused spawn wrote task metadata"
