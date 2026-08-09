@@ -127,7 +127,12 @@ cycle_watcher_pid=none
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
-cycle_wake_seq_before=0
+# Empty until a cycle registers one. Never pre-seeded with 0: a home that has
+# produced wakes before reads a nonzero counter, so a 0 default would "differ"
+# from it and report a benign outcome for a cycle that was never registered at
+# all. An unregistered cycle can prove nothing, and the whole point of this
+# classification is that only proof buys silence.
+cycle_wake_seq_before=
 
 cycle_begin() {
   cycle_watcher_pid=$1
@@ -159,8 +164,11 @@ cycle_begin() {
 #                   not the silent multi-minute lapse the case above is.
 #
 # One function so the ledger record and the reported line can never disagree.
+# The wake-delivered arm requires a registered snapshot to compare against, so
+# the quiet outcome is the only one that can never be reached by default. Every
+# way of failing to know lands on a reported failure instead.
 cycle_outcome() {
-  if [ "$(fm_wake_seq)" != "$cycle_wake_seq_before" ]; then
+  if [ -n "$cycle_wake_seq_before" ] && [ "$(fm_wake_seq)" != "$cycle_wake_seq_before" ]; then
     printf 'wake-delivered'
     return
   fi
