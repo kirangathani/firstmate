@@ -138,6 +138,15 @@ function classifyArmClose(stdout, stderr, code, signal) {
   // and is correct behavior, so it must never be reported as a watcher failure.
   const readOnly = combined.split(/\r?\n/).find((line) => /^watcher: read-only\b/.test(line));
   if (readOnly) return { kind: "read-only", message: readOnly };
+  // An arm that attached to someone else's cycle gets no reason line when that
+  // cycle ends: the reason went to the arm that OWNS the watcher, and the wake
+  // itself is already durable. That close is a completed cycle, not a failure,
+  // and the arm now says so. Without this branch it falls to the catch-all
+  // below, which both reports a false failure and spends a retry slot, so a
+  // fleet producing these several times an hour would exhaust the retry budget
+  // and declare supervision dead while it is healthy.
+  const cycleComplete = combined.split(/\r?\n/).find((line) => /^watcher: cycle-complete\b/.test(line));
+  if (cycleComplete) return { kind: "cycle-complete", message: cycleComplete };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -368,7 +377,8 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     const classification = classifyArmClose(stdout, stderr, code, signal);
-    settleReadiness(classification.kind === "actionable" ? "wake" : classification.kind === "read-only" ? "read-only" : "failed");
+    const completed = classification.kind === "actionable" || classification.kind === "cycle-complete";
+    settleReadiness(completed ? "wake" : classification.kind === "read-only" ? "read-only" : "failed");
     const predecessor = String(armChild.pid ?? "");
     if (classification.kind === "read-only") {
       // The arm declined for a lock this session does not hold. Retrying would
@@ -376,7 +386,10 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       setArmStatus("read-only");
       return;
     }
-    if (classification.kind === "actionable") {
+    // A cycle-complete close takes the actionable path: restore continuity
+    // first, then hand the model the line. It carries no reason of its own, so
+    // what the model is told is that a wake is waiting in the durable queue.
+    if (completed) {
       retryFailures = 0;
       setArmStatus("wake");
       const previousRestoration = restorationInFlight;
