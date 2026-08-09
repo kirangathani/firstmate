@@ -39,6 +39,21 @@
 #       parses stdout alone cannot read exit 0 as a pipeline that ran and passed
 #   (o) a symlink planted at the predictable per-task temp root is refused before
 #       anything is written through it
+#
+# One action (the defect these were added for): a skip used to need the flag on
+# this script AND the same flag on bin/fm-brief.sh, and giving it to only one
+# silently produced an ordinary task.
+#   (q1) one flag writes both halves - the authorization the signer checks and
+#        the instructions the worker reads
+#   (q2) an unflagged dispatch of a brief that still carries skip text restores
+#        the ordinary instructions and records no skip, so a brief can never
+#        outlive the dispatch that justified it
+#   (q3) --skip-testing resolves to the most each delivery mode can honour, says
+#        what it resolved to, and refuses local-only rather than resolving to a
+#        no-op
+#   (q4) every mode refusal prints the accepted matrix
+#   (q5) a brief that cannot carry the skip stops the dispatch before any
+#        worktree, terminal, or temp root exists
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -249,6 +264,133 @@ test_meta_records_only_the_flags_that_were_passed() {
   pass "meta and shim record exactly the flags that were passed, and nothing else"
 }
 
+# --- one action -------------------------------------------------------------
+
+# The defect this suite's newest cases exist for: authorizing a skip used to
+# take the flag on THIS script plus the same flag on bin/fm-brief.sh, and
+# passing it to only one of the two silently produced an ordinary task. The
+# dispatch now writes both halves from one flag, so the brief the worker
+# actually reads and the record the signer actually checks cannot disagree.
+test_one_flag_writes_both_halves() {
+  local out brief
+  make_case oneflag no-mistakes
+  give_case_a_waiver_secret
+  arm_orca_success
+  out=$(run_spawn oneflag --all-testing-skip)
+  expect_code 0 $? "spawn with --all-testing-skip should succeed"$'\n'"$out"
+  brief="$CASE_HOME/data/oneflag/brief.md"
+  # The record the signer checks...
+  assert_grep "ci_skip=on" "$CASE_HOME/state/oneflag.meta" "the dispatch did not record the CI skip"
+  # ...and the instructions the worker reads, from that same one flag.
+  assert_grep "CI waiver handshake" "$brief" \
+    "the dispatch minted a CI-skip authorization but never told the worker how to use it"
+  assert_grep "local testing skipped" "$brief" \
+    "the dispatch switched the local pipeline off but the brief still reads as an ordinary task"
+  assert_grep '<!-- fm:definition-of-done skip=all -->' "$brief" \
+    "the brief does not record the skip its dispatch was authorized for"
+  pass "one flag at dispatch writes both the authorization and the worker's own instructions"
+}
+
+# The other direction. A brief carrying skip text is not a skip, so a dispatch
+# without the flag must put the ordinary instructions back AND record nothing -
+# otherwise a brief could outlive the dispatch that justified it and quietly
+# steer a later, unauthorized task.
+test_an_unflagged_dispatch_undoes_a_brief_that_still_carries_a_skip() {
+  local out brief
+  make_case stalebrief no-mistakes
+  give_case_a_waiver_secret
+  arm_orca_success
+  brief="$CASE_HOME/data/stalebrief/brief.md"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_HOME" FM_DATA_OVERRIDE="$CASE_HOME/data" \
+    "$ROOT/bin/fm-brief.sh" --apply-testing-skip stalebrief --mode no-mistakes --all-testing-skip >/dev/null
+  assert_grep "CI waiver handshake" "$brief" "the fixture did not actually carry a skip"
+
+  out=$(run_spawn stalebrief)
+  expect_code 0 $? "an unflagged spawn should succeed"$'\n'"$out"
+  assert_no_grep "ci_skip=" "$CASE_HOME/state/stalebrief.meta" \
+    "a brief carrying skip text produced a recorded skip"
+  assert_no_grep "local_skip=" "$CASE_HOME/state/stalebrief.meta" \
+    "a brief carrying skip text produced a recorded skip"
+  assert_no_grep "CI waiver handshake" "$brief" \
+    "an unflagged dispatch left the worker asking for a waiver it was never authorized"
+  assert_no_grep "local testing skipped" "$brief" \
+    "an unflagged dispatch left the worker told its pipeline was switched off"
+  assert_grep "no-mistakes doctor" "$brief" "the ordinary pipeline instructions were not restored"
+  pass "an unflagged dispatch restores the ordinary brief and records no skip"
+}
+
+# --skip-testing exists so the accepted matrix stops being something to look up.
+# It must resolve to the most each mode can honour, say what it resolved to, and
+# deliver both halves of that resolution.
+test_skip_testing_resolves_per_delivery_mode() {
+  local out
+  make_case autoall no-mistakes
+  give_case_a_waiver_secret
+  arm_orca_success
+  out=$(run_spawn autoall --skip-testing)
+  expect_code 0 $? "--skip-testing should succeed on a no-mistakes project"$'\n'"$out"
+  assert_contains "$out" "resolves to --all-testing-skip" "--skip-testing did not say what it resolved to"
+  assert_grep "local_skip=on" "$CASE_HOME/state/autoall.meta" "--skip-testing did not take the local pipeline"
+  assert_grep "ci_skip=on" "$CASE_HOME/state/autoall.meta" "--skip-testing did not take CI"
+  assert_grep "local_skip_auth=" "$CASE_HOME/state/autoall.meta" \
+    "--skip-testing recorded a local skip with no authorization behind it"
+  assert_grep "ci_skip_auth=" "$CASE_HOME/state/autoall.meta" \
+    "--skip-testing recorded a CI skip with no authorization behind it"
+  assert_grep "CI waiver handshake" "$CASE_HOME/data/autoall/brief.md" \
+    "--skip-testing did not write the worker's half"
+
+  make_case autoci direct-PR
+  give_case_a_waiver_secret
+  arm_orca_success
+  out=$(run_spawn autoci --skip-testing)
+  expect_code 0 $? "--skip-testing should succeed on a direct-PR project"$'\n'"$out"
+  assert_contains "$out" "resolves to --ci-skip" "--skip-testing did not say what it resolved to"
+  assert_grep "ci_skip=on" "$CASE_HOME/state/autoci.meta" "--skip-testing did not take CI on a direct-PR project"
+  assert_no_grep "local_skip=on" "$CASE_HOME/state/autoci.meta" \
+    "--skip-testing invented a local-pipeline skip for a mode that runs no pipeline"
+
+  # local-only has nothing to skip, so the one flag that never needs the matrix
+  # still refuses rather than resolving to a no-op.
+  make_case autonone local-only
+  out=$(run_spawn autonone --skip-testing)
+  [ "$?" -eq 0 ] && fail "--skip-testing must refuse a local-only project"
+  assert_contains "$out" "nothing to skip on a local-only project" \
+    "--skip-testing on local-only did not say why there was nothing to do"
+  assert_absent "$CASE_HOME/state/autonone.meta" "a refused --skip-testing spawn wrote task metadata"
+  pass "--skip-testing resolves to the most each delivery mode can honour, and says so"
+}
+
+# Every mode refusal prints the matrix at the point of refusal, so the accepted
+# combinations are never something to go and look up mid-dispatch.
+test_refusals_print_the_accepted_matrix() {
+  local out
+  make_case matrixhint direct-PR
+  out=$(run_spawn matrixhint --local-skip)
+  [ "$?" -eq 0 ] && fail "direct-PR must refuse --local-skip"
+  assert_contains "$out" "accepted by delivery mode" "the refusal did not print the accepted matrix"
+  assert_contains "$out" "or pass --skip-testing" "the refusal did not name the flag that needs no matrix"
+  pass "a refused combination prints the accepted matrix and the flag that avoids it"
+}
+
+# A dispatch that cannot write the worker's half must not launch at all: a
+# worker running ordinary instructions under a record that says its testing was
+# skipped is precisely the silent half-skip this arrangement removes.
+test_a_brief_that_cannot_carry_the_skip_stops_the_dispatch() {
+  local out
+  make_case nomarkers no-mistakes
+  give_case_a_waiver_secret
+  arm_orca_success
+  printf 'a brief written before this contract existed\n' > "$CASE_HOME/data/nomarkers/brief.md"
+  out=$(run_spawn nomarkers --all-testing-skip)
+  [ "$?" -eq 0 ] && fail "a spawn must refuse a brief it cannot bring into agreement"
+  assert_contains "$out" "has no machine-written testing-skip regions" \
+    "the refusal did not name what was wrong with the brief"
+  assert_absent "$CASE_HOME/state/nomarkers.meta" "a refused spawn wrote task metadata"
+  assert_not_contains "$(cat "$CASE_LOG")" "worktree" "the spawn refused only after creating a worktree"
+  assert_absent "/tmp/fm-nomarkers" "the spawn refused only after creating the per-task temp root"
+  pass "a brief that cannot carry the skip stops the dispatch before anything is created"
+}
+
 # --- enforcement ------------------------------------------------------------
 
 # The demonstration, not an assertion: a real `no-mistakes` binary is placed on
@@ -403,6 +545,11 @@ test_refused_combinations
 test_secondmate_refuses_a_skip_flag
 test_a_planted_temp_root_symlink_is_refused
 test_meta_records_only_the_flags_that_were_passed
+test_one_flag_writes_both_halves
+test_an_unflagged_dispatch_undoes_a_brief_that_still_carries_a_skip
+test_skip_testing_resolves_per_delivery_mode
+test_refusals_print_the_accepted_matrix
+test_a_brief_that_cannot_carry_the_skip_stops_the_dispatch
 test_ci_skip_without_a_secret_refuses
 test_local_skip_records_its_own_dispatch_authorization
 test_local_skip_without_a_secret_warns_but_still_spawns
