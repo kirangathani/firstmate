@@ -137,6 +137,9 @@ pid_gone() {
 # scoring a second "win" that is correct behavior wrongly reported as a race bug.
 # Args: $1 lib, $2 lockdir, $3 wins file, $4 attempts file, $5 held-proof file,
 #       $6 contender count, $7 poll ceiling.
+# The single quotes are required: this body is handed to `bash -c` and its $N are
+# that inner shell's positional arguments, so expanding them here would be wrong.
+# shellcheck disable=SC2016
 CONTENDER_BODY='
   . "$1"
   if fm_lock_try_acquire "$2"; then
