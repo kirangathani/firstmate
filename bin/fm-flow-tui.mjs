@@ -608,12 +608,18 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   // The facts line. It carries the two things no cell has room for and no
   // reader should have to infer: the complete check tally, and - when the task
   // carries one - the plain sentence saying its short chain is authorised
-  // rather than broken. The skip sentence goes FIRST because it is the rarer
-  // and more urgent of the two, so a terminal narrow enough to cut this line
-  // cuts the counts the boxes above already summarise, not the disclosure
-  // nothing else on screen states.
+  // rather than broken.
+  //
+  // The tally goes FIRST, and that ordering was measured rather than chosen.
+  // The captain's standing rule is that a count is never dropped, and with the
+  // sentence in front the two together ran 124 columns, so a 120-column
+  // terminal cut the tally mid-class. The sentence is the half that can be
+  // shortened without breaking a rule: the stages above already say `skipped`
+  // in their own colour, so it explains what is on screen rather than being the
+  // only trace of it, and a clip leaves its opening words - which are the ones
+  // that matter - intact.
   const skip = skipDisclosure(agent);
-  const facts = (skip ? `${blue(skip)}  ${dim("·")}  ` : "") + dim(ciTally(agent));
+  const facts = dim(ciTally(agent)) + (skip ? `  ${dim("·")}  ${blue(skip)}` : "");
 
   return [
     head,

@@ -649,6 +649,30 @@ assert_not_contains "$ciout" "local pipeline" "a CI-only skip claimed the local 
 # only about the sentence naming them.
 pass "the skip is disclosed in plain words, naming exactly which halves were skipped"
 
+# The disclosure shares its line with the tally, and the captain's rule is that
+# a count is never dropped to make room. With the sentence in front the pair ran
+# 124 columns and a 120-column terminal cut the tally mid-class, so the counts
+# come first and the sentence is the half that shortens.
+#
+# The width swept is derived from the line itself, not from the number that
+# happened to expose it: every width from the tally's own length upwards must
+# carry the whole tally.
+tallyline=$(printf '%s\n' "$bothout" | grep -o 'CI 11 checks:.*pending' | head -1)
+[ -n "$tallyline" ] || fail "no tally line to size this from"
+# The floor is the tally's own length plus the two-column indent plus the one
+# column clip() spends on the ellipsis that marks a cut. Narrower than that and
+# the line is visibly shortened like any other over-wide line, on a terminal
+# whose stage window is already truncated and says so in the header.
+for cols in $(( ${#tallyline} + 3 )) 100 110 120 130 150 200; do
+  got=$(render "$(snap "[$(agent_with sk6 '[]' "$BOTHSKIP")]")" --cols "$cols" |
+    sed 's/\x1b\[[0-9;]*m//g' | grep -o 'CI 11 checks:[^·]*' | head -1)
+  case $got in
+    *"0 pending"*) ;;
+    *) fail "at $cols columns the tally lost a count: '$got'" ;;
+  esac
+done
+pass "every check count survives at any width the tally itself fits in"
+
 # A skipped stage must not look like one that has simply not been reached.
 # `skipped` and `pending` shared the dim slot, so the only difference on screen
 # was the four-letter timer word underneath.

@@ -380,6 +380,10 @@ The captain's standing rule governs the display, and he has ruled it three times
 every class is named on every render, zeros included; a green or ready flag only when every class is clear; and a class that was never evaluated renders as a dash, never as a `0`.
 Five counts do not fit the 15-column timer under a 13-wide cell, so they live on a line of their own with the words spelled out rather than being thinned to fit - the rule allows compact labels or a legend, never a dropped count.
 
+That line is shared with the skip disclosure when a task carries one, and their order was measured rather than chosen.
+With the sentence in front the pair ran 124 columns, so a 120-column terminal cut the tally mid-class.
+The counts therefore come first: the sentence is the half that can shorten, because the stages above already say `skipped` in their own colour, so it explains what is on screen rather than being the only trace of it.
+
 ### The CI counts must agree with `gh pr checks`
 
 That is the comparison the captain makes, and two things had to be fixed for it to hold.
