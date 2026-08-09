@@ -302,8 +302,15 @@ $out"
   # The claim that the loss is PERMANENT, not merely reworded, is what makes this
   # a real defect rather than a style difference. Assert it against the tree as
   # it stands now rather than trusting the finding.
-  git -C "$ROOT" grep -q -F 'Leaving them unfixed was an explicit scope decision' -- . 2>/dev/null \
-    && fail "(k) the fixture assumes this content is still absent from the repo; it is present, so pick another loss case"
+  #
+  # Scoped to the file the content was deleted FROM, not to the whole repo. A
+  # repo-wide grep matches this very line, because the phrase it searches for is
+  # written here - so it passed while this file was still untracked and went red
+  # the moment it was committed. Scoping is also the more precise claim: what
+  # must still be true is that the section never came back to its own document.
+  git -C "$ROOT" grep -q -F 'Leaving them unfixed was an explicit scope decision' \
+      -- docs/watcher-continuity.md 2>/dev/null \
+    && fail "(k) the fixture assumes this section is still absent from docs/watcher-continuity.md; it is back, so pick another loss case"
   pass "(k) a real merge that permanently lost a documentation section is caught"
 
   # (l) the same reference conflict, replayed as the two resolutions that discard
