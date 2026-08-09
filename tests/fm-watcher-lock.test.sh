@@ -661,11 +661,33 @@ test_watcher_self_evicts_on_lock_takeover() {
   out="$dir/watch.out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for lock_pid_is "$state/.watch.lock" "$pid" || true
+  # The lock naming this watcher is NOT enough to take it over. fm_lock_try_acquire
+  # writes the holder pid twice - once in fm_lock_prepare_owner before the symlink
+  # goes up, again in fm_lock_claim after - and a claim that loses its validation
+  # discards that owner dir and re-links the lock to a fresh one. So between the
+  # first observable "lock names the watcher" and the acquire actually settling,
+  # a takeover written here is silently erased: either overwritten by the second
+  # claim write, or stranded in an owner dir the lock no longer points at. The
+  # watcher then keeps seeing its own pid, never self-evicts, and the ceiling
+  # expires - a fixture that was undone, reported as the watcher ignoring a
+  # takeover. Observed directly under load: the lock moved from
+  # .owner.T0HGae (holding this test's write) to .owner.NcNVIN (holding the
+  # watcher's own pid) one poll after the takeover.
+  #
+  # The beacon is the settled-acquire signal: only the main loop touches it, and
+  # the loop is reached after the acquire completes, so its presence proves no
+  # further claim write is coming. Both halves are then verified before and after
+  # the takeover, so a lost write is its own named setup failure instead of a
+  # 60-second wait for a self-eviction that was never actually requested.
+  wait_for seed_watcher_ready "$state" "$pid" || true
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] || fail "watcher did not record its own pid in the lock"
+  [ -e "$state/.last-watcher-beat" ] \
+    || fail "test setup: the watcher took the lock but never reached the poll loop that would observe a takeover"
   # Simulate a second watcher taking over the singleton lock. $$ (the test
   # runner) is a live pid that is not the watcher.
   printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  wait_for lock_pid_is "$state/.watch.lock" "$$" \
+    || fail "test setup: the simulated takeover did not stick in the lock, so no takeover was ever presented to the watcher"
   wait_for_exit "$pid" "$WAIT_TICKS" || fail "watcher did not self-evict after lock takeover"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   [ "$lock_pid" = "$$" ] || fail "self-evicting watcher clobbered the new holder's lock (got '$lock_pid')"
