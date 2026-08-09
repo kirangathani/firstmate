@@ -237,10 +237,21 @@
 #     it differs run to run by definition, so a supersession over one needs the
 #     `ids:` glob form, and fixing the test is the real answer.
 #   - `summary: missing=<n> failing=<n> unexecuted=<n> skipped=<n>
-#     unaccounted=<n> assumed-covered=<n> unstable=<n>` always, as the last
-#     line, whether or not anything was found. `assumed-covered=` and
-#     `unstable=` are appended after the five older fields so those keep their
-#     positions for anything already reading them.
+#     unaccounted=<n> assumed-covered=<n> unstable=<n> executed-files=<n>`
+#     always, as the last line, whether or not anything was found.
+#     `assumed-covered=`, `unstable=` and `executed-files=` are appended after
+#     the five older fields so those keep their positions for anything already
+#     reading them.
+#   - `executed-files=<n>` is the ONLY field counted in FILES rather than
+#     identifiers, and its name says so. It is the number of base test files
+#     check 2 actually ran against the compare side - both runs attempted, the
+#     baseline green. It exists because a green verdict alone cannot distinguish
+#     "the base's assertions were re-run against this branch and held" from
+#     "there was nothing left to run", and a caller that renders those two the
+#     same way turns a never-evaluated result into a pass. The distinction is
+#     entirely a function of this script's own selection, so deriving it outside
+#     would mean a second copy of that selection; the count is published here
+#     instead. bin/fm-reverify-base.sh is the caller that reads it.
 #   - Exit 1 when ANY of `missing:`, `failing:`, `unexecuted:` or `unstable:` is
 #     non-empty, exit 0 when all four are empty. `skipped:`, `unaccounted:` and
 #     `assumed-covered:` are reported but do NOT affect the exit code. This
@@ -619,6 +630,10 @@ comm -23 "$TMPD/base" "$TMPD/branch" > "$TMPD/missing"
 : > "$TMPD/unstable"
 : > "$TMPD/unstable-report"
 : > "$TMPD/assumed"
+# One line per base test file check 2 actually ran against the compare side.
+# Created here rather than inside the exec block so the summary's count is 0
+# rather than an error on every path that never reaches a run at all.
+: > "$TMPD/executed"
 
 # idents_for_file <file>: the check-1 identifiers the base enumerated for <file>.
 # They are both what a run is bounded to and what an unexecuted file reports.
@@ -821,6 +836,11 @@ if [ -s "$TMPD/execfiles" ]; then
     branch_rc=0
     run_base_test_file "$spec" "$TMPD/branch-tree" "$f" \
       "$TMPD/run-branch" "$TMPD/run-branch.err" ${idents[@]+"${idents[@]}"} || branch_rc=$?
+    # Recorded HERE, after the baseline came back green and the branch run was
+    # actually attempted, so the count means "re-run against the branch" and
+    # never "reached in the loop". Every earlier `continue` above is an
+    # unexecuted file and must not be counted as one that ran.
+    printf '%s\n' "$f" >> "$TMPD/executed"
     passing_idents "$spec" "$TMPD/run-base" "$TMPD/base-tree/$f" > "$TMPD/ok-base"
     passing_idents "$spec" "$TMPD/run-branch" "$TMPD/branch-tree/$f" > "$TMPD/ok-branch"
     comm -23 "$TMPD/ok-base" "$TMPD/ok-branch" > "$TMPD/ok-delta"
@@ -930,9 +950,12 @@ SKIPPED_COUNT=$(grep -c . "$TMPD/skipped.sorted" || true)
 UNACCOUNTED_COUNT=$(grep -c . "$TMPD/unaccounted.sorted" || true)
 ASSUMED_COUNT=$(grep -c . "$TMPD/assumed.sorted" || true)
 UNSTABLE_COUNT=$(grep -c . "$TMPD/unstable.sorted" || true)
-printf 'summary: missing=%s failing=%s unexecuted=%s skipped=%s unaccounted=%s assumed-covered=%s unstable=%s\n' \
+# Files, not identifiers - the one field on this line that is. See the header.
+EXECUTED_FILE_COUNT=$(sort -u "$TMPD/executed" | grep -c . || true)
+printf 'summary: missing=%s failing=%s unexecuted=%s skipped=%s unaccounted=%s assumed-covered=%s unstable=%s executed-files=%s\n' \
   "$MISSING_COUNT" "$FAILING_COUNT" "$UNEXEC_COUNT" \
-  "$SKIPPED_COUNT" "$UNACCOUNTED_COUNT" "$ASSUMED_COUNT" "$UNSTABLE_COUNT"
+  "$SKIPPED_COUNT" "$UNACCOUNTED_COUNT" "$ASSUMED_COUNT" "$UNSTABLE_COUNT" \
+  "$EXECUTED_FILE_COUNT"
 
 if [ "$MISSING_COUNT" -eq 0 ] && [ "$FAILING_COUNT" -eq 0 ] && [ "$UNEXEC_COUNT" -eq 0 ] \
   && [ "$UNSTABLE_COUNT" -eq 0 ]; then

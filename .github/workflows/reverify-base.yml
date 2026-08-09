@@ -1,0 +1,136 @@
+# The cheap re-verification of a PR against a base that has MOVED under it.
+#
+# THE PROBLEM. GitHub re-runs a PR's checks only when the PR's own head changes,
+# never when the base moves. On 2026-08-09 PRs 31-36 all still showed green
+# measured against a base that four later merges had replaced. The platform's
+# only remedy is to push the branch again, which re-drives all four behaviour
+# shards, lint, repo invariants and the macOS stock-Bash check - for every open
+# PR, every time main moves.
+#
+# THE CHEAP PATH. RE-RUN THIS WORKFLOW (`gh run rerun <run-id>`, or "Re-run all
+# jobs" on it). It re-fetches the base at run time, so it always measures
+# against the base as it is NOW, and it runs only the base test files that
+# DIFFER from the branch's copies. No new push, no new head, and nothing else
+# re-run. Measured on this repo (2026-08-09): 2 of 85 base test files needed
+# running.
+#
+# WHY IT IS ITS OWN WORKFLOW rather than a job inside ci.yml. Re-running one job
+# of a large run means finding that job's id first; re-running a standalone
+# workflow is one command against the run itself, which is the whole ergonomic
+# point. The cost is that it cannot take `needs:` on CI's jobs, so it reads this
+# head's own check results instead - see bin/fm-reverify-premise.sh, which is
+# also the stronger reading, because it is re-read on every re-run.
+#
+# IT IS A REQUIRED CHECK, not advisory (captain's decision, 2026-08-09): the
+# equivalent gate inside bin/fm-pr-merge.sh is bypassed entirely by merging from
+# the GitHub UI, which is how main has gone red before. So every path below
+# either publishes a verdict or FAILS; none of them can go green having checked
+# nothing.
+#
+# NEITHER SCRIPT'S WORK IS RE-SPELLED HERE. bin/fm-assert-tests-kept.sh is the
+# single owner of which of the base's test files still need running,
+# bin/fm-reverify-base.sh renders its verdict, and bin/fm-reverify-premise.sh
+# establishes the premise the skip rests on. This file wires them together and
+# decides nothing.
+name: Base re-verification
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  # The premise is this head's own behaviour-suite result, read from its check
+  # runs. Nothing here writes.
+  checks: read
+
+jobs:
+  reverify-base:
+    name: Base assertions re-verified
+    runs-on: ubuntu-latest
+    # Two waits in series: up to ~25 minutes for this head's behaviour suite to
+    # conclude (the premise), then the re-verification itself. Its worst case is
+    # a PR that rewrites many of the base's test files, since each is run twice -
+    # the same worst case bin/fm-pr-merge.sh already pays at merge time, moved
+    # earlier rather than added. A timeout here fails the job, which is the
+    # correct reading: no verdict was established.
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The PR's own head, never refs/pull/N/merge. The question is whether
+          # the branch AS IT IS still satisfies the base's current assertions,
+          # and a merge ref has already merged the base in, which would answer a
+          # different question and answer it green every time.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Establish the premise the cheap path rests on
+        id: premise
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Both names are published by .github/workflows/ci.yml, which owns
+          # them. tests/fm-reverify-base.test.sh derives both from that file at
+          # run time and asserts these match, so they cannot drift into a second,
+          # quietly wrong copy.
+          FANIN_CHECK: Behavior tests complete
+          SHARD_CHECK_PREFIX: 'Behavior tests (shard '
+          # Through env rather than interpolated into the command, matching
+          # ci.yml's rule for every value that comes off the event payload.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          bin/fm-reverify-premise.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --sha "$HEAD_SHA" \
+            --fanin-check "$FANIN_CHECK" \
+            --shard-check-prefix "$SHARD_CHECK_PREFIX"
+
+      - name: Report the CI waiver instead of a verdict
+        if: steps.premise.outputs.premise == 'waived'
+        run: |
+          set -eu
+          echo "reverify: waived"
+          echo "::warning::the base's assertions were NOT re-verified against this branch: this PR carries a verified firstmate CI waiver, so it has no green suite to rest the cheap path on and no test evidence to re-verify"
+
+      # The base's OWN test files are what run below, so this job needs what the
+      # behaviour-suite job installs for them; a base test file whose baseline
+      # cannot run here is reported unexecuted, which blocks.
+      - name: Install pinned ShellCheck
+        if: steps.premise.outputs.premise == 'green'
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Install tasks-axi for backlog-handoff delegation
+        if: steps.premise.outputs.premise == 'green'
+        run: |
+          set -eu
+          npm install -g tasks-axi
+          tasks-axi --version
+
+      - name: Fetch the base branch as it is NOW
+        if: steps.premise.outputs.premise == 'green'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -eu
+          # This fetch is the whole trick: it runs at JOB time, so re-running
+          # this workflow after main moves measures against the new main without
+          # the PR's head changing at all.
+          git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          git log -1 --format='base %H %s' "origin/$BASE_REF"
+
+      - name: Re-verify the base's assertions against this branch
+        if: steps.premise.outputs.premise == 'green'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          bin/fm-reverify-base.sh \
+            --worktree . \
+            --base "origin/$BASE_REF" \
+            --branch "$HEAD_SHA" \
+            --assume-branch-suite-green
