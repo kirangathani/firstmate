@@ -50,8 +50,24 @@
 # short TTL (FM_ACK_RECHECK) in state/.unactioned-<id>, so a genuinely
 # unactioned task does not re-pay the read on every fleet command.
 #
-# This library states the contract; bin/fm-guard.sh is its only alarm surface
-# and bin/fm-ack.sh is its only captain-facing verb.
+# PER-TASK MONITORING EXEMPTION
+#   A task may be exempted from the alarm by state/<id>.monitor-exempt, whose
+#   format and captain-only minting are owned by bin/fm-monitor.sh. This library
+#   only VERIFIES one, because the verdict has to be identical everywhere the
+#   predicate runs. An exemption that cannot be verified is not an exemption:
+#   deleting this home's key does not silence the fleet, it only stops new
+#   exemptions from being minted.
+#
+# THE CLASSIFICATION IS THE PREDICATE
+#   fm_ack_classify is the single owner of "has this task been actioned". Both
+#   consumers are thin loops over it: fm_ack_unactioned emits only the alarming
+#   class for bin/fm-guard.sh and bin/fm-turnend-guard.sh, and fm_ack_sweep emits
+#   every task in every class for bin/fm-monitor.sh's render. A second copy of
+#   this rule is exactly what would drift, so there is not one.
+#
+# This library states the contract; bin/fm-guard.sh and bin/fm-turnend-guard.sh
+# are its alarm surfaces, bin/fm-monitor.sh is its render surface, and
+# bin/fm-ack.sh is its captain-facing verb.
 
 _FM_ACK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_ACK_LIB_DIR="."
 
@@ -61,6 +77,23 @@ _FM_ACK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$_FM_ACK_LIB_DIR/fm-classify-lib.sh"
+# fm-ci-waiver-lib.sh owns every HMAC payload domain in this repo, including the
+# monitoring exemption's. Sourcing it defines variables and functions only.
+# shellcheck source=bin/fm-ci-waiver-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_ACK_LIB_DIR/fm-ci-waiver-lib.sh"
+# fm-bounded-lib.sh bounds the current-state confirm below. It is probed rather
+# than sourced unconditionally: several callers of this library run in trimmed
+# scenario trees, and an unconditional `.` of a missing sibling prints to stderr,
+# which would turn a silent healthy turn into a noisy one. A host with no bounder
+# at all still works - fm_ack_confirm_state falls back to the unbounded read
+# rather than skipping the confirm, because skipping it would clear nothing and
+# alarm on every resumed worker.
+if [ -r "$_FM_ACK_LIB_DIR/fm-bounded-lib.sh" ]; then
+  # shellcheck source=bin/fm-bounded-lib.sh
+  # shellcheck disable=SC1091
+  . "$_FM_ACK_LIB_DIR/fm-bounded-lib.sh"
+fi
 
 # The status-log verbs that owe firstmate an action. `paused` is deliberately
 # absent: it is a declared external wait that firstmate is meant to leave alone
@@ -181,9 +214,26 @@ fm_ack_is_current() {  # <state-dir> <id>
 # Prints owed | clear | unconfirmed. An unreadable verdict is `unconfirmed`, not
 # `clear`: the cheap filter already established the task looks owed, and a
 # failed read is no evidence that it is not.
+#
+# The read is WALL-CLOCK BOUNDED, because this predicate is now on the turn-end
+# path (bin/fm-turnend-guard.sh), and that hook is the one place a hang wedges a
+# whole session - the same reason its stale-base sweep is bounded. Bounding the
+# CONFIRM is not the same as swallowing the FINDING: on expiry the verdict is
+# `unconfirmed`, which still alarms, so the bound can only ever cost accuracy
+# about a worker's current state, never silence a report that was left
+# unanswered. fm-crew-state.sh reads panes and can shell out to no-mistakes, so
+# it is not a call that can be assumed to return.
+FM_ACK_CONFIRM_TIMEOUT_DEFAULT=15
 fm_ack_confirm_state() {  # <id>
-  local line state
-  line=$("$FM_CREW_STATE_BIN" "$1" 2>/dev/null) || true
+  local line state rc=0 bound
+  bound=${FM_ACK_CONFIRM_TIMEOUT:-$FM_ACK_CONFIRM_TIMEOUT_DEFAULT}
+  case "$bound" in ''|*[!0-9]*) bound=$FM_ACK_CONFIRM_TIMEOUT_DEFAULT ;; esac
+  if command -v fm_bounded_available >/dev/null 2>&1 && fm_bounded_available; then
+    line=$(fm_bounded_run "$bound" "$FM_CREW_STATE_BIN" "$1" 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 124 ]; then printf 'unconfirmed'; return 0; fi
+  else
+    line=$("$FM_CREW_STATE_BIN" "$1" 2>/dev/null) || true
+  fi
   case "$line" in
     state:*) ;;
     *) printf 'unconfirmed'; return 0 ;;
@@ -223,47 +273,218 @@ fm_ack_cache_write() {  # <state-dir> <id> <fingerprint> <verdict> <now>
   return 0
 }
 
-# The predicate. Prints one TAB-separated row per direct report sitting in a
-# terminal or firstmate-owed state that firstmate has not acted on:
-#   <id>\t<verb>\t<age-seconds>\t<confirm-verdict>\t<last-status-line>
-# Prints nothing when the fleet is clean. Always returns 0.
-fm_ack_unactioned() {  # <state-dir> [grace-seconds]
-  local state=$1 grace=${2:-${FM_ACK_GRACE:-$FM_ACK_GRACE_DEFAULT}}
-  local meta id log last verb now age m fp verdict cap confirms=0
+# --- the per-task monitoring exemption --------------------------------------
+#
+# The record lives at state/<id>.monitor-exempt, one line:
+#   <epoch>\t<hmac-hex>\t<reason>
+# bin/fm-monitor.sh owns minting it; this file owns believing it.
+
+fm_ack_exempt_file() {  # <state-dir> <id>
+  printf '%s' "$1/$2.monitor-exempt"
+}
+
+# The master key this home signs exemptions with. FM_ACK_SECRET_FILE is the test
+# and caller override; otherwise it is the config sibling of the state dir, which
+# is how every firstmate home is laid out.
+fm_ack_secret_file() {  # <state-dir>
+  if [ -n "${FM_ACK_SECRET_FILE:-}" ]; then
+    printf '%s' "$FM_ACK_SECRET_FILE"
+  elif [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
+    printf '%s/ci-waiver-secret' "$FM_CONFIG_OVERRIDE"
+  else
+    printf '%s/config/ci-waiver-secret' "${1%/*}"
+  fi
+}
+
+# 0 iff <id> carries a monitoring exemption whose signature this home's key
+# reproduces. Every failure path returns non-zero: an absent key, an unreadable
+# record, a malformed line, or a signature that does not verify all mean NOT
+# exempt. A guard that fell back to "exempt" whenever it could not check would be
+# silenced by deleting a file, which is the opposite of the point.
+# On success, FM_ACK_EXEMPT_REASON holds the signed reason.
+FM_ACK_EXEMPT_REASON=
+fm_ack_is_exempt() {  # <state-dir> <id>
+  local f rec ts sig reason secret
+  FM_ACK_EXEMPT_REASON=
+  f=$(fm_ack_exempt_file "$1" "$2")
+  [ -f "$f" ] || return 1
+  IFS= read -r rec < "$f" 2>/dev/null || return 1
+  ts=${rec%%$'\t'*}
+  case "$ts" in ''|*[!0-9]*) return 1 ;; esac
+  rec=${rec#*$'\t'}
+  sig=${rec%%$'\t'*}
+  fm_ci_waiver_valid_sig "$sig" || return 1
+  case "$rec" in *$'\t'*) reason=${rec#*$'\t'} ;; *) return 1 ;; esac
+  secret=$(fm_ack_secret_file "$1")
+  fm_ci_waiver_secret_readable "$secret" || return 1
+  fm_ci_waiver_monitor_exempt_check "$2" "$reason" "$sig" < "$secret" || return 1
+  FM_ACK_EXEMPT_REASON=$reason
+  return 0
+}
+
+# --- the predicate ----------------------------------------------------------
+#
+# fm_ack_classify is the ONE owner of "has this task been actioned". It sets:
+#   FM_ACK_CLASS    unactioned | pending | acked | moved-on | exempt | quiet
+#   FM_ACK_VERB     the last status verb ('' when the task has no status log)
+#   FM_ACK_AGE      seconds since that log was last appended (-1 when unknown)
+#   FM_ACK_VERDICT  the crew-state confirm's answer, or '' when none was made
+#   FM_ACK_LAST     the crew's own last status line, as evidence
+#   FM_ACK_REASON   the signed exemption reason, for class `exempt`
+# It also increments FM_ACK_CONFIRMS, the caller's per-invocation confirm budget.
+#
+# Two modes, because the two consumers pay different costs for the same verdict:
+#   alarm  (default) the cheap filter gates every subprocess, so a healthy fleet
+#                    forks nothing. This runs on bin/fm-send.sh's path.
+#   render           classify every task fully, including confirming a task the
+#                    cheap filter would have skipped. This is the captain's
+#                    on-demand sweep, where "we did not look" is not an answer.
+FM_ACK_CLASS=
+FM_ACK_VERB=
+FM_ACK_AGE=-1
+FM_ACK_VERDICT=
+FM_ACK_LAST=
+FM_ACK_REASON=
+FM_ACK_CONFIRMS=0
+fm_ack_classify() {  # <state-dir> <id> <grace> <now> [alarm|render]
+  local state=$1 id=$2 grace=$3 now=$4 mode=${5:-alarm}
+  local log last verb m age fp verdict cap owed=0
   cap=${FM_ACK_CONFIRM_MAX:-$FM_ACK_CONFIRM_MAX_DEFAULT}
-  case "$grace" in ''|*[!0-9]*) grace=$FM_ACK_GRACE_DEFAULT ;; esac
   case "$cap" in ''|*[!0-9]*) cap=$FM_ACK_CONFIRM_MAX_DEFAULT ;; esac
+
+  FM_ACK_CLASS=quiet
+  FM_ACK_VERB=
+  FM_ACK_AGE=-1
+  FM_ACK_VERDICT=
+  FM_ACK_LAST=
+  FM_ACK_REASON=
+
+  log="$state/$id.status"
+  if [ -f "$log" ]; then
+    last=$(last_status_line "$log")
+    if [ -n "$last" ]; then
+      FM_ACK_LAST=$last
+      verb=$(status_line_verb "$last")
+      FM_ACK_VERB=$verb
+      fm_ack_verb_is_owed "$verb" && owed=1
+      m=$(fm_ack_stat_mtime "$log")
+      case "$m" in ''|*[!0-9]*) ;; *) age=$((now - m)); FM_ACK_AGE=$age ;; esac
+    fi
+  fi
+
+  # An exemption outranks every other class, so the render always names it and
+  # the alarm path can never fire on an exempt task. In alarm mode the node fork
+  # it costs is paid only by a task that would otherwise alarm; in render mode it
+  # is paid for every task, because the captain is owed the full accounting.
+  if [ "$mode" = render ] && fm_ack_is_exempt "$state" "$id"; then
+    FM_ACK_CLASS=exempt
+    FM_ACK_REASON=$FM_ACK_EXEMPT_REASON
+    if [ "$FM_ACK_CONFIRMS" -lt "$cap" ]; then
+      FM_ACK_VERDICT=$(fm_ack_confirm_state "$id")
+      FM_ACK_CONFIRMS=$((FM_ACK_CONFIRMS + 1))
+    fi
+    return 0
+  fi
+
+  if [ "$owed" -eq 0 ]; then
+    # Nothing is owed. The render still reports what the task is actually doing,
+    # because "gone over every task" cannot mean "read a file and stopped".
+    if [ "$mode" = render ] && [ "$FM_ACK_CONFIRMS" -lt "$cap" ]; then
+      FM_ACK_VERDICT=$(fm_ack_confirm_state "$id")
+      FM_ACK_CONFIRMS=$((FM_ACK_CONFIRMS + 1))
+    fi
+    return 0
+  fi
+
+  if [ "$FM_ACK_AGE" -lt 0 ]; then
+    # An unreadable mtime leaves no way to age the state. It is not silently
+    # dropped: the render says so, and the alarm path keeps its long-standing
+    # behaviour of not firing on a state it cannot date.
+    FM_ACK_CLASS=pending
+    return 0
+  fi
+
+  if fm_ack_is_current "$state" "$id"; then
+    FM_ACK_CLASS=acked
+    return 0
+  fi
+
+  if [ "$FM_ACK_AGE" -lt "$grace" ]; then
+    FM_ACK_CLASS=pending
+    return 0
+  fi
+
+  if [ "$mode" != render ] && fm_ack_is_exempt "$state" "$id"; then
+    FM_ACK_CLASS=exempt
+    FM_ACK_REASON=$FM_ACK_EXEMPT_REASON
+    return 0
+  fi
+
+  fp=$(fm_ack_fingerprint "$state" "$id")
+  verdict=$(fm_ack_cached_verdict "$state" "$id" "$fp" "$now")
+  if [ -z "$verdict" ]; then
+    if [ "$FM_ACK_CONFIRMS" -lt "$cap" ]; then
+      verdict=$(fm_ack_confirm_state "$id")
+      FM_ACK_CONFIRMS=$((FM_ACK_CONFIRMS + 1))
+      fm_ack_cache_write "$state" "$id" "$fp" "$verdict" "$now"
+    else
+      verdict=unconfirmed
+    fi
+  fi
+  FM_ACK_VERDICT=$verdict
+  if [ "$verdict" = clear ]; then
+    FM_ACK_CLASS=moved-on
+  else
+    FM_ACK_CLASS=unactioned
+  fi
+  return 0
+}
+
+fm_ack_resolve_grace() {  # [grace]
+  local grace=${1:-${FM_ACK_GRACE:-$FM_ACK_GRACE_DEFAULT}}
+  case "$grace" in ''|*[!0-9]*) grace=$FM_ACK_GRACE_DEFAULT ;; esac
+  printf '%s' "$grace"
+}
+
+# The ALARM surface's view. Prints one TAB-separated row per direct report
+# sitting in a terminal or firstmate-owed state that firstmate has not acted on:
+#   <id>\t<verb>\t<age-seconds>\t<confirm-verdict>\t<last-status-line>
+# Prints nothing when the fleet is clean, which is what lets bin/fm-guard.sh and
+# bin/fm-turnend-guard.sh stay byte-silent. Always returns 0.
+fm_ack_unactioned() {  # <state-dir> [grace-seconds]
+  local state=$1 grace meta id now
+  grace=$(fm_ack_resolve_grace "${2:-}")
   [ -d "$state" ] || return 0
   now=$(fm_ack_now)
-
+  FM_ACK_CONFIRMS=0
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
-    log="$state/$id.status"
-    [ -f "$log" ] || continue
-    last=$(last_status_line "$log")
-    [ -n "$last" ] || continue
-    verb=$(status_line_verb "$last")
-    if ! fm_ack_verb_is_owed "$verb"; then continue; fi
-    m=$(fm_ack_stat_mtime "$log")
-    case "$m" in ''|*[!0-9]*) continue ;; esac
-    age=$((now - m))
-    if [ "$age" -lt "$grace" ]; then continue; fi
-    if fm_ack_is_current "$state" "$id"; then continue; fi
+    fm_ack_classify "$state" "$id" "$grace" "$now" alarm
+    [ "$FM_ACK_CLASS" = unactioned ] || continue
+    printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$FM_ACK_VERB" "$FM_ACK_AGE" "$FM_ACK_VERDICT" "$FM_ACK_LAST"
+  done
+  return 0
+}
 
-    fp=$(fm_ack_fingerprint "$state" "$id")
-    verdict=$(fm_ack_cached_verdict "$state" "$id" "$fp" "$now")
-    if [ -z "$verdict" ]; then
-      if [ "$confirms" -lt "$cap" ]; then
-        verdict=$(fm_ack_confirm_state "$id")
-        confirms=$((confirms + 1))
-        fm_ack_cache_write "$state" "$id" "$fp" "$verdict" "$now"
-      else
-        verdict=unconfirmed
-      fi
-    fi
-    if [ "$verdict" = clear ]; then continue; fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$verb" "$age" "$verdict" "$last"
+# The RENDER surface's view: every direct report, in every class, including the
+# ones that owe nothing. Prints one TAB-separated row per task:
+#   <id>\t<class>\t<verb>\t<age-seconds>\t<confirm-verdict>\t<detail>
+# <detail> is the signed reason for class `exempt` and the crew's own last status
+# line otherwise. Always returns 0; bin/fm-monitor.sh owns the render itself.
+fm_ack_sweep() {  # <state-dir> [grace-seconds]
+  local state=$1 grace meta id now detail
+  grace=$(fm_ack_resolve_grace "${2:-}")
+  [ -d "$state" ] || return 0
+  now=$(fm_ack_now)
+  FM_ACK_CONFIRMS=0
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    fm_ack_classify "$state" "$id" "$grace" "$now" render
+    if [ "$FM_ACK_CLASS" = exempt ]; then detail=$FM_ACK_REASON; else detail=$FM_ACK_LAST; fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$id" "$FM_ACK_CLASS" "$FM_ACK_VERB" "$FM_ACK_AGE" "$FM_ACK_VERDICT" "$detail"
   done
   return 0
 }

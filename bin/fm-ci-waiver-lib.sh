@@ -74,6 +74,28 @@ FM_CI_WAIVER_DISPATCH_CI_SKIP='ci_skip'
 # dispatch cannot be pasted beside `local_skip=on` and verify, or the reverse, so
 # one authorized skip can never silently widen into the other.
 FM_CI_WAIVER_DISPATCH_LOCAL_SKIP='local_skip'
+# A domain for the per-task MONITORING EXEMPTION recorded in
+# state/<id>.monitor-exempt (bin/fm-monitor.sh owns the record; bin/fm-ack-lib.sh
+# owns the verdict). Same reasoning as the dispatch tokens, aimed one level up:
+# the entity the monitoring guard checks is firstmate itself, and firstmate can
+# write anywhere under state/, so a plain marker file would be self-exemption by
+# a single append. Requiring an HMAC over this home's master key means there is
+# no line to append and no string to type that grants one.
+#
+# Residual limit, stated rather than papered over, and WIDER here than for the
+# dispatch tokens: those are unforgeable by a WORKER, which does not hold the
+# key, but firstmate runs as the same OS user as the captain and can read
+# config/ci-waiver-secret. Against firstmate the signature is a barrier to
+# sanctioned behaviour, not a cryptographic impossibility. What closes that gap
+# is not this domain but non-silence: bin/fm-monitor.sh names every exemption and
+# its reason on every render, and bin/fm-bootstrap.sh announces every standing
+# exemption at session start, unprompted. A self-granted exemption therefore
+# reports itself to the captain rather than hiding a task.
+#
+# The reason text is the second payload field, so it is signed with the task id:
+# an exemption's stated justification cannot be edited after it was granted
+# without invalidating it.
+FM_CI_WAIVER_MONITOR_EXEMPT_SCHEME='fm-monitor-exempt.v1'
 # A THIRD domain, for deriving the per-repository secret that is published to a
 # repository's Actions secrets.
 #
@@ -198,6 +220,18 @@ fm_ci_waiver_dispatch_local_token() {
 # fm_ci_waiver_dispatch_local_check <task-id> <candidate-hex>; secret on stdin.
 fm_ci_waiver_dispatch_local_check() {
   fm_ci_waiver_hmac_check "$FM_CI_WAIVER_DISPATCH_SCHEME" "$1" "$FM_CI_WAIVER_DISPATCH_LOCAL_SKIP" "$2"
+}
+
+# fm_ci_waiver_monitor_exempt_token <task-id> <reason>; secret on stdin. The
+# value bin/fm-monitor.sh records in state/<id>.monitor-exempt.
+fm_ci_waiver_monitor_exempt_token() {
+  fm_ci_waiver_hmac_hex "$FM_CI_WAIVER_MONITOR_EXEMPT_SCHEME" "$1" "$2"
+}
+
+# fm_ci_waiver_monitor_exempt_check <task-id> <reason> <candidate-hex>; secret on
+# stdin.
+fm_ci_waiver_monitor_exempt_check() {
+  fm_ci_waiver_hmac_check "$FM_CI_WAIVER_MONITOR_EXEMPT_SCHEME" "$1" "$2" "$3"
 }
 
 # fm_ci_waiver_repo_key <owner/repo>; the MASTER secret on stdin. Prints the hex

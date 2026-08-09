@@ -113,6 +113,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-bounded-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-bounded-lib.sh"
+# shellcheck source=bin/fm-ack-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-ack-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -888,6 +890,30 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
+
+# Standing monitoring exemptions, announced unprompted at every session start.
+# This is not a convenience listing. An exemption suppresses a safety alarm for a
+# task, and the entity the alarm checks is firstmate itself, which runs as the
+# same OS user as the captain and can therefore reach the signing key
+# (bin/fm-ci-waiver-lib.sh states that limit). Announcing every exemption here,
+# unconditionally and without being asked, is what makes a self-granted one
+# report itself rather than quietly remove a task from supervision. It is
+# deliberately NOT behind FM_BOOTSTRAP_VERBOSE_FACTS: a suppression the captain
+# never sees is the failure this line exists to prevent.
+#
+# Detect-only mode still prints it. A read-only session must not repair anything,
+# but reporting what is currently suppressed is exactly what a read-only session
+# is for, and it writes nothing.
+for exempt_rec in "$STATE"/*.monitor-exempt; do
+  [ -e "$exempt_rec" ] || continue
+  exempt_id=${exempt_rec##*/}
+  exempt_id=${exempt_id%.monitor-exempt}
+  if fm_ack_is_exempt "$STATE" "$exempt_id"; then
+    echo "MONITOR_EXEMPT: $exempt_id is exempt from monitoring alarms - $FM_ACK_EXEMPT_REASON (clear it with bin/fm-monitor.sh --unexempt $exempt_id)"
+  else
+    echo "MONITOR_EXEMPT: $exempt_id carries an exemption record that does NOT verify against this home's key, so it is NOT exempt and still alarms - inspect $exempt_rec"
+  fi
+done
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   secondmate_liveness_sweep
