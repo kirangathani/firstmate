@@ -99,10 +99,10 @@ BASE_REF=$(resolve_base_ref) \
 #
 # build_old_bin echoes a directory whose bin/ subdir holds the PRE-REFACTOR
 # fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh
-# (extracted from BASE_REF), plus symlinks to every OTHER sibling script those
-# five source - all unchanged by this task, so the real files are exactly
-# what BASE_REF would have used too. FM_ROOT_OVERRIDE pointed at this dir's
-# root makes "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
+# (extracted from BASE_REF), plus a symlink to every OTHER entry under bin/ -
+# all unchanged by this task, so the real files are exactly what BASE_REF would
+# have used too. FM_ROOT_OVERRIDE pointed at this dir's root makes
+# "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
 # fm-backend.sh (and its bin/backends/ adapters) is the dispatcher every one
 # of the five REFACTORED scripts sources; it must be a real, reachable file in
 # the old bin/ too or `. "$SCRIPT_DIR/fm-backend.sh"` aborts under set -eu -
@@ -110,21 +110,46 @@ BASE_REF=$(resolve_base_ref) \
 # tmux-only conformance run the tmux adapter's behavior is what is under test,
 # and that is unchanged by any later (e.g. non-tmux backend) addition to
 # fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh"
+#
+# The sibling set is DERIVED from the real bin/ at run time, never hand-listed.
+# A hand-maintained list is a second copy of the five scripts' dependency sets,
+# and it rots silently the moment one of them gains a sibling: #35 added
+# `. "$SCRIPT_DIR/fm-ack-lib.sh"` to fm-send.sh without touching the list, the
+# extracted old fm-send.sh then aborted under set -eu on the missing source
+# before issuing a single tmux command, and every old-vs-new exit-code
+# comparison diverged (main red from 84813a34, CI run 31312882840).
+# That defect is invisible on the PR that introduces it and only fires after
+# the merge: BASE_REF is `merge-base HEAD main`, so on the branch it still
+# resolves to a parent whose fm-send.sh had no such dependency, and only once
+# the commit is ON main does BASE_REF advance to include it.
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
-  local name=$1 root bin f
+  local name=$1 root bin f dep
   root="$TMP_ROOT/$name"
   bin="$root/bin"
   mkdir -p "$bin"
-  for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
-    ln -s "$ROOT/bin/$f" "$bin/$f"
+  for f in "$ROOT"/bin/*; do
+    case " $OLD_BIN_REFACTORED " in
+      *" ${f##*/} "*) continue ;;
+    esac
+    ln -s "$f" "$bin/${f##*/}"
   done
-  ln -s "$ROOT/bin/backends" "$bin/backends"
   for f in $OLD_BIN_REFACTORED; do
     git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
     chmod +x "$bin/$f"
+  done
+  # Name the unresolvable sibling instead of leaving it to surface as a
+  # mystifying exit-code diff: an extracted script that cannot source a sibling
+  # aborts under set -eu before running any tmux command, so the only visible
+  # symptom downstream is "expected exit 1, got 0". Deriving the symlinks above
+  # rules out the rot case; what remains is a sibling BASE_REF's copy sources
+  # that today's bin/ no longer has, which is a real conformance signal.
+  for f in $OLD_BIN_REFACTORED; do
+    while read -r dep; do
+      [ -e "$bin/$dep" ] \
+        || fail "old-bin shim: $BASE_REF's bin/$f sources '$dep', which today's bin/ does not have"
+    done < <(grep -oE 'SCRIPT_DIR[}]?/fm-[A-Za-z0-9._-]+' "$bin/$f" | sed 's|.*/||' | sort -u)
   done
   printf '%s\n' "$root"
 }
