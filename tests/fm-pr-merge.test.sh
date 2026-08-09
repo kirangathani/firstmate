@@ -50,6 +50,16 @@
 #
 # Checks-green gate (classification table and zero-checks contract in
 # bin/fm-pr-merge.sh's header), driven off a mocked statusCheckRollup answer:
+# AI-attribution gate (contract in docs/attribution-gate.md), driven off a
+# mocked body/commits answer. The commit-msg hook half of the same rule, and the
+# local-only landing gate, are in tests/fm-attribution-gate.test.sh:
+#   (aa1) a PR whose commit message carries a coauthor trailer is refused
+#   (aa2) a PR whose DESCRIPTION carries a generated-with footer is refused, and
+#         the refusal says the body is already public
+#   (aa3) the gate refuses before the kept-tests gate spends its run, proven on a
+#         branch that would fail both
+#   (aa4) an unreadable body/commits query refuses as unverified
+#
 #   (z1) a red PR is refused with the failing check named, before gh-axi
 #   (z2) a pending PR is refused distinctly from a red one
 #   (z3) a red check outranks a pending one in the refusal
@@ -169,6 +179,21 @@ case "\${1:-} \${2:-}" in
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
       *baseRefName*) printf '%s\n' 'main' ; exit 0 ;;
+      *body,commits*)
+        # The AI-attribution gate's read. The case's pr-attribution.json when
+        # present, a clean body and one clean commit otherwise, and a query
+        # failure when the pr-attribution-unreadable marker exists.
+        if [ -e '$case_dir/pr-attribution-unreadable' ]; then
+          echo 'mock: body/commits query failed' >&2
+          exit 1
+        fi
+        if [ -f '$case_dir/pr-attribution.json' ]; then
+          cat '$case_dir/pr-attribution.json'
+        else
+          printf '%s\n' '{"body":"A clean description.","commits":[{"oid":"$head","messageHeadline":"baseline","messageBody":""}]}'
+        fi
+        exit 0
+        ;;
       *statusCheckRollup*)
         if [ -e '$case_dir/pr-checks-unreadable' ]; then
           echo 'mock: rollup query failed' >&2
@@ -208,6 +233,7 @@ SH
 case " $* " in
   *statusCheckRollup*) printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tmock-default-ci\n' ;;
   *baseRefName*) printf 'main\n' ;;
+  *body,commits*) printf '%s\n' '{"body":"A clean description.","commits":[{"oid":"deadbeefcafe","messageHeadline":"baseline","messageBody":""}]}' ;;
 esac
 exit 0
 SH
@@ -1198,6 +1224,17 @@ write_pr_checks() {
   fi
 }
 
+# write_pr_attribution <case-dir> <body> <commit message>: the body and single
+# commit message the gh mock will hand the AI-attribution gate. Assembled with
+# jq so an embedded newline or quote in a trailer cannot break the JSON the way
+# a hand-built string would.
+write_pr_attribution() {
+  local case_dir=$1 body=$2 message=$3
+  jq -n --arg body "$body" --arg msg "$message" \
+    '{body: $body, commits: [{oid: "abc123def456", messageHeadline: ($msg | split("\n")[0]), messageBody: ($msg | split("\n")[1:] | join("\n"))}]}' \
+    > "$case_dir/pr-attribution.json"
+}
+
 # enable_no_pr_ci <case_dir>: create the captain's per-project marker that lets
 # a zero-check PR merge for this case's project.
 enable_no_pr_ci() {
@@ -1997,3 +2034,116 @@ test_no_mistakes_project_without_a_skip_still_refuses
 test_exempted_check_alone_is_not_evidence_of_ci
 test_renamed_attestation_check_is_not_excused
 test_exempted_check_name_matches_the_workflow_job
+
+# --- AI-attribution gate (contract in docs/attribution-gate.md) --------------
+#
+# The gate firstmate runs over the artefact the worker already produced. It is
+# the boundary rather than the commit-msg hook bin/fm-spawn.sh installs, because
+# a worker can skip that hook with --no-verify and cannot reach this at all
+# (tests/fm-attribution-gate.test.sh case (k) asserts that skip is real).
+
+test_attribution_in_a_commit_message_refuses() {
+  local case_dir rc
+  case_dir=$(make_case attribution-commit)
+  add_gh_mocks "$case_dir" a111111111111111111111111111111111111111
+  : > "$case_dir/gh-axi.log"
+  write_pr_attribution "$case_dir" 'A clean description.' \
+    "$(printf 'feat: thing\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>')"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/81 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attribution-commit: a PR whose commit carries attribution must refuse"
+  assert_grep 'carries AI attribution' "$case_dir/stderr" \
+    "attribution-commit: the refusal did not say what it found"
+  assert_grep 'ai-coauthor:commit abc123def456' "$case_dir/stderr" \
+    "attribution-commit: the refusal did not name the rule and the offending commit"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attribution-commit: gh-axi pr merge ran despite the attribution"
+  pass "fm-pr-merge refuses a PR whose commit message carries AI attribution"
+}
+
+test_attribution_in_the_pr_body_refuses() {
+  local case_dir rc
+  case_dir=$(make_case attribution-body)
+  add_gh_mocks "$case_dir" a222222222222222222222222222222222222222
+  : > "$case_dir/gh-axi.log"
+  write_pr_attribution "$case_dir" \
+    "$(printf 'Adds the thing.\n\n\xf0\x9f\xa4\x96 Generated with [Claude Code](https://claude.com/claude-code)')" \
+    'feat: thing'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attribution-body: a PR whose description carries attribution must refuse"
+  assert_grep 'generated-footer:PR body' "$case_dir/stderr" \
+    "attribution-body: the refusal did not name the PR body as the source"
+  assert_grep 'damage control, not' "$case_dir/stderr" \
+    "attribution-body: the refusal should be honest that the body was already published"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attribution-body: gh-axi pr merge ran despite the attribution"
+  pass "fm-pr-merge refuses a PR whose description carries AI attribution, and says the body is already public"
+}
+
+test_attribution_runs_before_the_kept_tests_gate() {
+  local case_dir rc
+  case_dir=$(make_case attribution-first)
+  add_gh_mocks "$case_dir" a333333333333333333333333333333333333333
+  : > "$case_dir/gh-axi.log"
+  # This branch would ALSO fail the kept-tests gate: it drops the base's only
+  # assertion. If attribution were checked second, the refusal below would name
+  # the vanished assertion instead. That it names the trailer is what proves the
+  # cheap gate runs before the one that re-runs the base's tests.
+  cat > "$case_dir/wt/tests/app.test.sh" <<'EOF'
+#!/usr/bin/env bash
+EOF
+  git -C "$case_dir/wt" add -A
+  git -C "$case_dir/wt" commit -qm "drop alpha"
+  write_pr_attribution "$case_dir" 'A clean description.' \
+    "$(printf 'feat: thing\n\nClaude-Session: https://claude.ai/code/session_x')"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/83 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attribution-first: the merge must refuse"
+  assert_grep 'session-trailer:' "$case_dir/stderr" \
+    "attribution-first: the attribution refusal did not fire"
+  assert_no_grep 'missing: tests/app.test.sh' "$case_dir/stdout" \
+    "attribution-first: the expensive kept-tests gate ran before the cheap attribution read"
+  pass "the attribution gate refuses before the kept-tests gate spends its run"
+}
+
+test_unreadable_pr_body_refuses_unverified() {
+  local case_dir rc
+  case_dir=$(make_case attribution-unreadable)
+  add_gh_mocks "$case_dir" a444444444444444444444444444444444444444
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/pr-attribution-unreadable"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/84 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attribution-unreadable: an unreadable body/commits query must refuse"
+  assert_grep 'refusing to merge unverified' "$case_dir/stderr" \
+    "attribution-unreadable: the refusal did not say the merge is unverified"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attribution-unreadable: gh-axi pr merge ran without the attribution read succeeding"
+  pass "fm-pr-merge refuses when the PR's body and commits cannot be read at all"
+}
+
+test_attribution_in_a_commit_message_refuses
+test_attribution_in_the_pr_body_refuses
+test_attribution_runs_before_the_kept_tests_gate
+test_unreadable_pr_body_refuses_unverified
