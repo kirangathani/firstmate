@@ -54,6 +54,8 @@
 #   (q4) every mode refusal prints the accepted matrix
 #   (q5) a brief that cannot carry the skip stops the dispatch before any
 #        worktree, terminal, or temp root exists
+#   (q6) a relaunch that forgets the flag names the authorized skip it is
+#        dropping, since the record is rewritten wholesale
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -148,13 +150,20 @@ give_case_a_waiver_secret() {
   chmod 600 "$CASE_HOME/config/ci-waiver-secret"
 }
 
-# Arrange the fake Orca answers for one successful spawn into CASE_WT.
-arm_orca_success() {
-  fm_git_worktree "$CASE_PROJ" "$CASE_WT" "fm/spawned"
+# Arrange the fake Orca answers for one successful spawn into CASE_WT. The fake
+# answers by call NUMBER, so a case that spawns twice re-arms between the two
+# rather than running off the end of the responses the first spawn consumed.
+rearm_orca_success() {
+  rm -f "$CASE_RESP/.count"
   printf '1\n' > "$CASE_RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-x"}}}\n' > "$CASE_RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-x","path":"%s"},"terminal":{"handle":"term-x"}}}\n' \
     "$CASE_WT" > "$CASE_RESP/3.out"
+}
+
+arm_orca_success() {
+  fm_git_worktree "$CASE_PROJ" "$CASE_WT" "fm/spawned"
+  rearm_orca_success
 }
 
 run_spawn() {  # <id> [<extra spawn args>...]
@@ -317,6 +326,29 @@ test_an_unflagged_dispatch_undoes_a_brief_that_still_carries_a_skip() {
     "an unflagged dispatch left the worker told its pipeline was switched off"
   assert_grep "no-mistakes doctor" "$brief" "the ordinary pipeline instructions were not restored"
   pass "an unflagged dispatch restores the ordinary brief and records no skip"
+}
+
+# A relaunch that forgets the flag DOWNGRADES the task, because the record is
+# rewritten wholesale, so it says so rather than dropping an authorized skip
+# quietly on the way through recovery.
+test_a_relaunch_that_drops_an_authorized_skip_says_so() {
+  local out
+  make_case relaunch no-mistakes
+  give_case_a_waiver_secret
+  arm_orca_success
+  out=$(run_spawn relaunch --all-testing-skip)
+  expect_code 0 $? "the first dispatch should succeed"$'\n'"$out"
+
+  rearm_orca_success
+  out=$(run_spawn relaunch)
+  expect_code 0 $? "the relaunch should succeed"$'\n'"$out"
+  assert_contains "$out" "carries local_skip=on, but this dispatch passed no local skip" \
+    "a relaunch dropped an authorized local skip without saying so"
+  assert_contains "$out" "carries ci_skip=on, but this dispatch passed no CI skip" \
+    "a relaunch dropped an authorized CI skip without saying so"
+  assert_no_grep "ci_skip=on" "$CASE_HOME/state/relaunch.meta" \
+    "the relaunch reported the drop but kept the record"
+  pass "a relaunch that drops an authorized skip names exactly what was lost"
 }
 
 # --skip-testing exists so the accepted matrix stops being something to look up.
@@ -547,6 +579,7 @@ test_a_planted_temp_root_symlink_is_refused
 test_meta_records_only_the_flags_that_were_passed
 test_one_flag_writes_both_halves
 test_an_unflagged_dispatch_undoes_a_brief_that_still_carries_a_skip
+test_a_relaunch_that_drops_an_authorized_skip_says_so
 test_skip_testing_resolves_per_delivery_mode
 test_refusals_print_the_accepted_matrix
 test_a_brief_that_cannot_carry_the_skip_stops_the_dispatch

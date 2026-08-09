@@ -856,6 +856,20 @@ fi
 # Placed here, before any backend container, worktree, or temp root exists, so a
 # brief this dispatch cannot bring into agreement refuses without leaving an
 # orphan behind.
+#
+# A respawn that omits the flag is a real downgrade rather than a no-op, because
+# the meta written below replaces the previous record wholesale and takes the
+# skip and its token with it. Said out loud for the same reason the rest of this
+# is mechanical: a skip that quietly evaporates on a recovery relaunch is the
+# same silent half-skip in a different place.
+if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+  if [ "$LOCAL_SKIP" = off ] && grep -qx 'local_skip=on' "$STATE/$ID.meta"; then
+    echo "warn: $ID's existing record carries local_skip=on, but this dispatch passed no local skip, so that skip and its authorization are being dropped; re-run with --local-skip or --skip-testing to keep it" >&2
+  fi
+  if [ "$CI_SKIP" = off ] && grep -qx 'ci_skip=on' "$STATE/$ID.meta"; then
+    echo "warn: $ID's existing record carries ci_skip=on, but this dispatch passed no CI skip, so that skip and its authorization are being dropped; re-run with --ci-skip or --skip-testing to keep it" >&2
+  fi
+fi
 if [ "$KIND" = ship ]; then
   brief_apply_args=("$ID" --mode "$MODE")
   [ -z "$RESOLVED_SKIP_FLAG" ] || brief_apply_args+=("$RESOLVED_SKIP_FLAG")
