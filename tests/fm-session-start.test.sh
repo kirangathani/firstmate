@@ -15,6 +15,9 @@
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
+#   - the drift check's placement in the fleet digest and its escalation into
+#     the closing next step (bin/fm-drift-check.sh owns the classes themselves;
+#     tests/fm-drift-check.test.sh covers them)
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -597,6 +600,93 @@ EOF
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
 }
 
+# --- drift check: placement in the digest, escalation into the next step -----
+#
+# The digest printed the durable queue and the runtime records side by side long
+# before it compared them, which is how this home once opened a session claiming
+# 17 tasks in flight against 2 running agents. These cases pin the WIRING only -
+# that the comparison runs, lands after both of its inputs, and reaches the
+# closing next step when it is not clean. bin/fm-drift-check.sh owns what
+# counts as drift and tests/fm-drift-check.test.sh covers it.
+#
+# jq's own directory is added to PATH at run time: bin/fm-fleet-snapshot.sh
+# needs jq to parse the backlog, and it is not in /usr/bin on every host, so
+# without this the check would degrade to "could not read" and these cases would
+# assert nothing about the wiring.
+jq_dir_for_test() {
+  local resolved
+  resolved=$(command -v jq 2>/dev/null) || { printf '%s\n' "$BASE_PATH"; return 0; }
+  printf '%s\n' "${resolved%/*}"
+}
+
+write_drift_backlog() {  # <home> <in-flight-id>...
+  local home=$1 id
+  shift
+  {
+    printf '# Backlog\n\n## In flight\n'
+    for id in "$@"; do
+      printf -- '- [ ] %s - Some work (repo: proj) (kind: ship)\n' "$id"
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$home/data/backlog.md"
+}
+
+test_drift_check_runs_after_its_inputs_and_escalates_into_the_next_step() {
+  local rec root home fakebin out records_line drift_line
+  rec=$(new_world drift-wiring)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:fm-live"
+  write_drift_backlog "$home" live
+  printf 'window=fm-sess:fm-live\nkind=ship\n' > "$home/state/live.meta"
+  printf 'window=fm-sess:fm-orphan\nkind=ship\n' > "$home/state/orphan.meta"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$(jq_dir_for_test):$BASE_PATH")
+
+  assert_contains "$out" "Drift (durable queue vs live reality)" \
+    "the fleet digest did not label the drift section"
+  assert_contains "$out" "DRIFT CHECK - the durable backlog against live reality" \
+    "the real bin/fm-drift-check.sh output did not appear in the digest"
+  assert_contains "$out" "DRIFT: orphan has a durable local record but no in-flight backlog item" \
+    "the digest did not surface the drift the fixture planted"
+  assert_contains "$out" "The drift check above is NOT clean" \
+    "an unclean drift check did not reach the closing next step"
+
+  # It is the VERDICT on the two inputs above it, so it must not print first.
+  records_line=$(printf '%s\n' "$out" | grep -n 'Work under way (state/\*.meta)' | head -1 | cut -d: -f1)
+  drift_line=$(printf '%s\n' "$out" | grep -n 'Drift (durable queue vs live reality)' | head -1 | cut -d: -f1)
+  [ -n "$records_line" ] && [ -n "$drift_line" ] && [ "$drift_line" -gt "$records_line" ] \
+    || fail "drift section did not follow the runtime records it compares: $out"
+
+  pass "session start: the drift check runs after its inputs and escalates into the next step"
+}
+
+test_a_clean_drift_check_stays_quiet_in_the_next_step() {
+  local rec root home fakebin out
+  rec=$(new_world drift-wiring-clean)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:fm-live"
+  write_drift_backlog "$home" live
+  printf 'window=fm-sess:fm-live\nkind=ship\n' > "$home/state/live.meta"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$(jq_dir_for_test):$BASE_PATH")
+
+  assert_contains "$out" "DRIFT CHECK: ok - every class clear." \
+    "a clean fleet did not report the drift check as clear"
+  assert_not_contains "$out" "The drift check above is NOT clean" \
+    "a clean drift check still escalated into the closing next step"
+  assert_not_contains "$out" "DRIFT REMEDY" "a clean drift check still printed a remedy"
+
+  pass "session start: a clean drift check adds no escalation to the next step"
+}
+
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
@@ -936,6 +1026,8 @@ test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
+test_drift_check_runs_after_its_inputs_and_escalates_into_the_next_step
+test_a_clean_drift_check_stays_quiet_in_the_next_step
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
