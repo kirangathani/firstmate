@@ -2147,3 +2147,45 @@ test_attribution_in_a_commit_message_refuses
 test_attribution_in_the_pr_body_refuses
 test_attribution_runs_before_the_kept_tests_gate
 test_unreadable_pr_body_refuses_unverified
+
+# --- mock-completeness canary ------------------------------------------------
+#
+# Why this exists: adding the AI-attribution gate added a `gh pr view --json
+# body,commits` read to bin/fm-pr-merge.sh, and tests/fm-pr-check-security.test.sh
+# went red on a CI shard because its own gh mock answered every OTHER query but
+# not that one. An unanswered query is not a benign no-op - the mock returns
+# nothing, and a gate that refuses what it cannot read correctly refuses the
+# merge. The next read added to this chain would repeat that exactly.
+#
+# The fragile half is derived from the real tree at run time: the field sets are
+# read out of the scripts a merge actually executes, so a new read appears here
+# with no list to maintain. The stable half - WHICH suites stand up a gh mock
+# that has to drive a merge all the way through - stays explicit, because it
+# changes rarely and visibly, and guessing it from a grep over tests/ would be
+# the same hand-maintained rot one level up.
+test_every_merge_chain_gh_read_is_answered_by_each_merge_mock() {
+  local script fields mock missing=0 found=0
+  local -a chain=(fm-pr-merge.sh fm-pr-check.sh fm-assert-tests-kept.sh)
+  local -a mocks=(fm-pr-merge.test.sh fm-pr-check-security.test.sh)
+
+  for script in "${chain[@]}"; do
+    [ -f "$ROOT/bin/$script" ] || fail "mock-canary: bin/$script is gone; update the merge chain this canary walks"
+    while IFS= read -r fields; do
+      [ -n "$fields" ] || continue
+      found=$((found + 1))
+      for mock in "${mocks[@]}"; do
+        grep -qF -- "$fields" "$ROOT/tests/$mock" \
+          || { echo "not ok - mock-canary: tests/$mock does not answer '--json $fields', read by bin/$script" >&2; missing=1; }
+      done
+    done < <(grep -oE 'gh pr view [^|]*--json [A-Za-z,]+' "$ROOT/bin/$script" \
+      | grep -oE '\-\-json [A-Za-z,]+' | sed 's/^--json //' | sort -u)
+  done
+
+  [ "$found" -ge 4 ] \
+    || fail "mock-canary: only $found gh pr view reads were derived from the merge chain; the extraction has stopped matching the scripts"
+  [ "$missing" -eq 0 ] \
+    || fail "mock-canary: a merge-chain gh read is unanswered by a mock that must drive a merge (named above); an unanswered read makes the gate refuse a PR it cannot read"
+  pass "every gh pr view read the merge chain makes is answered by both merge-driving mocks"
+}
+
+test_every_merge_chain_gh_read_is_answered_by_each_merge_mock
