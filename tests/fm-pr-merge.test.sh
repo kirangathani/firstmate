@@ -1936,6 +1936,7 @@ test_exempted_check_name_matches_the_workflow_job() {
     "the attestation workflow's check job name no longer matches the name the merge gate excuses"
   assert_grep "FM_ATTESTATION_CHECK_NAME='$ATTESTATION_CHECK'" "$ROOT/bin/fm-attestation-lib.sh" \
     "bin/fm-attestation-lib.sh no longer excuses the name that workflow's check job reports"
+  # shellcheck disable=SC2016  # the literal source line, not an expansion
   assert_grep 'ATTESTATION_CHECK_NAME=$FM_ATTESTATION_CHECK_NAME' "$ROOT/bin/fm-pr-merge.sh" \
     "bin/fm-pr-merge.sh grew its own copy of the excused name instead of reading the shared owner"
   assert_no_grep "ATTESTATION_CHECK_NAME='" "$ROOT/bin/fm-pr-merge.sh" \

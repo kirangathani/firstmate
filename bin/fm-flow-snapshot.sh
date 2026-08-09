@@ -64,6 +64,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 NM_TIMEOUT=${FM_FLOW_SNAPSHOT_NM_TIMEOUT:-10}
 GH_TIMEOUT=${FM_FLOW_SNAPSHOT_GH_TIMEOUT:-20}
@@ -98,6 +100,13 @@ command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; ex
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# The merge gate's own owner of the excused check and its authorities, and the
+# owner of the recorded testing-skip flags. Both are read here rather than
+# reimplemented, so this view can never claim a verdict bin/fm-pr-merge.sh would
+# not reach.
+# shellcheck source=bin/fm-attestation-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-attestation-lib.sh"
 
 NOW_EPOCH=${FM_FLOW_SNAPSHOT_NOW_EPOCH:-$(date -u +%s)}
 NOW_ISO=${FM_FLOW_SNAPSHOT_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
@@ -193,20 +202,25 @@ toon_field() {  # <axi-status-output> <key>
     }'
 }
 
-ci_json() {  # <pr-url>
-  local url=$1 num raw
+CI_EMPTY='{"collection":{"ok":false,"reason":"REASON"},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"excused":0,"excused_authority":[]}'
+ci_unread() {  # <reason>
+  printf '%s' "$CI_EMPTY" | jq --arg r "$1" '.collection.reason = $r'
+}
+
+ci_json() {  # <pr-url> <task-id> <meta-file>
+  local url=$1 id=$2 meta=$3 num raw norm excuse=false authority='[]'
   num=$(printf '%s' "$url" | grep -Eo '[0-9]+$' || true)
   if [ -z "$num" ]; then
-    jq -n '{collection:{ok:false,reason:"no pr number"},checks:[],total:0,passed:0,failed:0,pending:0}'
+    ci_unread "no pr number"
     return
   fi
   if ! command -v gh >/dev/null 2>&1; then
-    jq -n '{collection:{ok:false,reason:"gh not found"},checks:[],total:0,passed:0,failed:0,pending:0}'
+    ci_unread "gh not found"
     return
   fi
   raw=$(run_bounded "$GH_TIMEOUT" gh pr view "$num" --json statusCheckRollup 2>/dev/null) || raw=
   if [ -z "$raw" ]; then
-    jq -n '{collection:{ok:false,reason:"gh read failed or timed out"},checks:[],total:0,passed:0,failed:0,pending:0}'
+    ci_unread "gh read failed or timed out"
     return
   fi
   # The counts here have ONE job: agree with what `gh pr checks <n>` prints for
@@ -230,7 +244,15 @@ ci_json() {  # <pr-url>
   # A StatusContext (a commit status, not a check run) carries `state` and
   # `context` instead; gh counts those too, so they are normalised rather than
   # dropped into the pending bucket by virtue of having no `status` field.
-  printf '%s' "$raw" | jq '
+  #
+  # 3. A deliberately-not-run check is its OWN class, never folded into passing.
+  #    A job GitHub reports SKIPPED did not verify anything, and under a
+  #    captain-authorized CI waiver the expensive lint and test jobs are exactly
+  #    those jobs - so counting them as passed reported a waived PR as more
+  #    verified than it was. bin/fm-pr-merge.sh still MERGES on a skipped check
+  #    (its verdict table treats SKIPPED as passing, unchanged); this splits how
+  #    it is COUNTED, not what the gate decides.
+  norm=$(printf '%s' "$raw" | jq -c '
     def normalize:
       if (.__typename // "") == "StatusContext" then
         { workflow: "", name: (.context // ""), started: (.createdAt // ""),
@@ -252,22 +274,56 @@ ci_json() {  # <pr-url>
     | map(del(.seq))
     | map(. + {verdict:
         (if .status != "COMPLETED" then "pending"
-         elif .conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED"
-         then "passed"
-         else "failed" end)})
+         elif .conclusion == "SKIPPED" then "skipped"
+         elif .conclusion == "SUCCESS" or .conclusion == "NEUTRAL" then "passed"
+         else "failed" end)})') || norm=
+
+  if [ -z "$norm" ]; then
+    ci_unread "check rollup could not be read"
+    return
+  fi
+
+  # The attestation exemption, resolved through bin/fm-attestation-lib.sh - the
+  # same owner bin/fm-pr-merge.sh reaches its verdict through, never a second
+  # copy of the name or of the two authorities.
+  #
+  # Resolved ONLY when that named check is actually failing here, exactly as the
+  # merge gate does: an ordinary green PR pays none of its cost, and a task whose
+  # PR is fine never runs a signature check on a refresh timer. A PENDING check of
+  # that name is deliberately not excusable, because "not finished yet" and
+  # "authorized to be red" are different states.
+  if printf '%s' "$norm" | jq -e --arg n "$FM_ATTESTATION_CHECK_NAME" \
+      'any(.[]; .verdict == "failed" and .name == $n)' >/dev/null 2>&1; then
+    local lines
+    if lines=$(FM_ATTESTATION_QUIET=1 fm_attestation_authority \
+        "$id" "$meta" "$CONFIG_DIR" "$FM_HOME" "$SCRIPT_DIR" 2>/dev/null); then
+      excuse=true
+      authority=$(printf '%s' "$lines" | jq -R -s 'split("\n") | map(select(. != ""))')
+    fi
+  fi
+
+  printf '%s' "$norm" | jq \
+    --arg attest "$FM_ATTESTATION_CHECK_NAME" \
+    --argjson excuse "$excuse" \
+    --argjson authority "$authority" '
+    map(if $excuse and .verdict == "failed" and .name == $attest
+        then .verdict = "excused" else . end)
     | {
         collection: {ok: true, reason: ""},
         checks: .,
         total: length,
         passed: (map(select(.verdict == "passed")) | length),
         failed: (map(select(.verdict == "failed")) | length),
-        pending: (map(select(.verdict == "pending")) | length)
+        pending: (map(select(.verdict == "pending")) | length),
+        skipped: (map(select(.verdict == "skipped")) | length),
+        excused: (map(select(.verdict == "excused")) | length),
+        excused_authority: $authority
       }'
 }
 
 agent_json() {  # <task-json>
   local task=$1 id kind mode project worktree window branch endpoint_alive agent_alive pr_url
-  local idx run_id run_status run_updated axi rc steps actives ci
+  local idx run_id run_status run_updated axi rc steps actives ci meta
 
   id=$(printf '%s' "$task" | jq -r '.id')
   kind=$(printf '%s' "$task" | jq -r '.kind // ""')
@@ -293,6 +349,20 @@ agent_json() {  # <task-json>
   fi
   pr_url=$(printf '%s' "$task" | jq -r '.pr.url // ""')
   branch="fm/$id"
+
+  # The captain's testing skips, read from the task's OWN record and nothing
+  # else - never a status log, never the brief. bin/fm-spawn.sh is the only
+  # thing that writes them at dispatch, and bin/fm-testing-skip-lib.sh is the
+  # one reader of what it wrote, so this view and the merge gate's waiver
+  # banner cannot disagree about which stages a task never runs.
+  #
+  # The path comes from the fleet document when it carries one, because
+  # bin/fm-fleet-snapshot.sh is this view's owner of fleet state and already
+  # resolved it; the standard construction is the fallback for a fleet document
+  # that predates the field.
+  meta=$(printf '%s' "$task" | jq -r '.paths.meta.path // ""')
+  [ -n "$meta" ] || meta="$STATE_DIR/$id.meta"
+  fm_testing_skip_read "$meta"
 
   steps='[]'
   actives='[]'
@@ -324,9 +394,9 @@ agent_json() {  # <task-json>
     fi
   fi
 
-  ci='{"collection":{"ok":false,"reason":"skipped"},"checks":[],"total":0,"passed":0,"failed":0,"pending":0}'
+  ci=$(ci_unread "skipped")
   if [ "$WANT_CI" = 1 ] && [ -n "$pr_url" ]; then
-    ci=$(ci_json "$pr_url")
+    ci=$(ci_json "$pr_url" "$id" "$meta")
   fi
 
   local pr_num
@@ -351,6 +421,8 @@ agent_json() {  # <task-json>
     --argjson endpoint_alive "$endpoint_alive" \
     --argjson collect_ok "$collect_ok" \
     --argjson pr_num "${pr_num:-null}" \
+    --argjson skip_local "$([ "$FM_TESTING_SKIP_LOCAL" = on ] && echo true || echo false)" \
+    --argjson skip_ci "$([ "$FM_TESTING_SKIP_CI" = on ] && echo true || echo false)" \
     --argjson steps "$steps" \
     --argjson actives "$actives" \
     --argjson ci "$ci" \
@@ -359,6 +431,7 @@ agent_json() {  # <task-json>
       window:$window, kind:$kind, mode:$mode,
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
+      skips:{local:$skip_local, ci:$skip_ci},
       pr:{url:(if $pr_url == "" then null else $pr_url end), number:$pr_num},
       collection:{ok:$collect_ok, reason:$collect_reason, at:$now_iso, epoch:$now_epoch},
       run:{
