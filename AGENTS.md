@@ -93,6 +93,7 @@ state/               volatile runtime signals; gitignored
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.acted           written by bin/fm-ack.sh, bin/fm-send.sh, and bin/fm-pr-check.sh: firstmate acted on this task's reported state; silences the unactioned alarm until the crew's next status append (bin/fm-ack-lib.sh); removed by teardown
   <id>.stale-base-ack  written by bin/fm-stale-base.sh --ack: firstmate acted on this task's stale-base finding; keyed to the base commit, so a base that moves again re-alarms; removed by teardown
+  <id>.monitor-exempt  captain-signed standing exemption from the monitoring alarm, written only by bin/fm-monitor.sh --exempt; the signature and stated reason are what make it authority, so an unsigned or hand-written record is NOT an exemption; announced at every session start while it stands; removed by teardown
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; a tmux task also records tmux_window_pinned=1, the guarantee that its window name cannot drift from fm-<id>, which is what licenses the exact-label liveness reads (docs/tmux-backend.md "The exact-label check needs a pinned window name to be safe"); a captain-authorized testing skip also records local_skip=on and/or ci_skip=on, each with its own local_skip_auth=/ci_skip_auth= token (section 7); kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
@@ -159,6 +160,7 @@ Do not dispatch until the required tools are present and GitHub authentication i
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi` for structured decisions or reports; consult current help rather than memorizing flags.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
+A `MONITOR_EXEMPT:` line reports a task the captain has exempted from monitoring alarms and needs no skill either; a record that line says does not verify is not an exemption, so that task still alarms.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.
 
 ## 4. Harness and runtime dispatch
@@ -376,6 +378,8 @@ A forced repair must use the home-scoped owner path emitted by supervision instr
 Guard warnings do not replace the contract.
 Queued wakes must be drained before other action, stale liveness must be repaired through the emitted protocol, and the worktree-tangle warning must be resolved without touching unlanded work.
 An unactioned-direct-report warning is answered by doing what the reported state owes, then recording it with `bin/fm-ack.sh <id> "<what you did>"` when the action leaves no other trace, above all a relay to the captain; `bin/fm-ack-lib.sh` owns the predicate, owed states, grace, and silencers.
+That same predicate blocks a turn end, so a reported state cannot survive a turn unanswered; only a captain-signed per-task exemption stops it, and every standing exemption is announced at session start.
+When the captain invokes `/monitor`, or asks whether every task has been gone over, load the `monitor` skill for the forced per-task sweep and the exemption verbs.
 The spawn assertion and generated ship brief must both enforce that project work starts in an isolated disposable worktree, never the primary checkout.
 Harness-aware turn-end guards are structural backstops, not permission to omit the live cycle.
 
