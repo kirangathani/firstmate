@@ -60,6 +60,7 @@ The check reads only local refs and never fetches, so it adds no network call to
 It resolves each task's branch from `git worktree list --porcelain` on the parent clone - git's own record, never anything an agent wrote - and it never touches a worker's worktree.
 A determinate all-clear is silent (a scout, a secondmate record, a clone with no origin remote, a task still on the pristine detached base, an unpushed branch, or a branch that already contains the base), while anything undeterminable is reported as undeterminable rather than folded into silence.
 
+The sweep is still bounded by `FM_STALE_BASE_TIMEOUT` (default 10 seconds, `bin/fm-bounded-lib.sh`) because this hook is the one place a hang wedges the whole session, and an expiry is reported as "no branch in flight has been checked" rather than treated as an all-clear.
 Both reasons print in the same banner rather than one short-circuiting the other, so a permanently broken watcher cannot hide every stale base behind it.
 The loop guard still bounds this to one forced continuation per turn.
 Because the remedy is a steer whose effect only lands when the worker pushes, a finding is silenced by `bin/fm-stale-base.sh --ack <task-id>`, which records the finding's situation key in `state/<task-id>.stale-base-ack`.
