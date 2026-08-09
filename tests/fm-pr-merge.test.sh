@@ -1924,12 +1924,22 @@ test_renamed_attestation_check_is_not_excused() {
 # The drift guard the exemption's exact-name match depends on. The merge gate
 # cannot read a workflow that lives in another repository, so the name is
 # necessarily duplicated; this is what keeps the two copies equal.
+#
+# The name now lives in bin/fm-attestation-lib.sh, because the read-only fleet
+# pipeline view has to excuse the same check the gate does and a second literal
+# in the viewer is exactly the drift this guard exists to catch. So the guard
+# covers both halves: the literal still equals the workflow job, and the gate
+# still takes the literal from that owner rather than carrying its own.
 test_exempted_check_name_matches_the_workflow_job() {
   local wf="$ROOT/.github/workflows/no-mistakes-required.yml"
   assert_grep "    name: $ATTESTATION_CHECK" "$wf" \
     "the attestation workflow's check job name no longer matches the name the merge gate excuses"
-  assert_grep "ATTESTATION_CHECK_NAME='$ATTESTATION_CHECK'" "$ROOT/bin/fm-pr-merge.sh" \
-    "bin/fm-pr-merge.sh no longer excuses the name that workflow's check job reports"
+  assert_grep "FM_ATTESTATION_CHECK_NAME='$ATTESTATION_CHECK'" "$ROOT/bin/fm-attestation-lib.sh" \
+    "bin/fm-attestation-lib.sh no longer excuses the name that workflow's check job reports"
+  assert_grep 'ATTESTATION_CHECK_NAME=$FM_ATTESTATION_CHECK_NAME' "$ROOT/bin/fm-pr-merge.sh" \
+    "bin/fm-pr-merge.sh grew its own copy of the excused name instead of reading the shared owner"
+  assert_no_grep "ATTESTATION_CHECK_NAME='" "$ROOT/bin/fm-pr-merge.sh" \
+    "bin/fm-pr-merge.sh carries a second literal copy of the excused check name"
   pass "the excused check name still equals the workflow job name that reports it"
 }
 
