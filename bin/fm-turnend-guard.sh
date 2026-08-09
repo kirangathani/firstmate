@@ -50,6 +50,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
+# Wall-clock bound on the stale-base sweep. It is purely local git reads and
+# measures ~0.2s across a ten-task fleet, but this hook is the one place a hang
+# wedges the whole session, so it is bounded anyway. Expiry is REPORTED, never
+# treated as an all-clear.
+STALE_BASE_TIMEOUT=${FM_STALE_BASE_TIMEOUT:-10}
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
@@ -114,9 +119,20 @@ fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || blind=1
 # turn-end path. bin/fm-fleet-sync.sh raises the same finding the moment a base
 # moves; this is the backstop that makes it unforgettable rather than merely
 # automatic, because an absorbed wake can be missed and a turn end cannot.
+# shellcheck source=bin/fm-bounded-lib.sh
+. "$SCRIPT_DIR/fm-bounded-lib.sh"
 STALE_BASE=
 if [ -x "$SCRIPT_DIR/fm-stale-base.sh" ]; then
-  STALE_BASE=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-stale-base.sh" 2>/dev/null) || true
+  stale_base_rc=0
+  if fm_bounded_available; then
+    STALE_BASE=$(fm_bounded_run "$STALE_BASE_TIMEOUT" \
+      env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-stale-base.sh" 2>/dev/null) || stale_base_rc=$?
+  else
+    STALE_BASE=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-stale-base.sh" 2>/dev/null) || stale_base_rc=$?
+  fi
+  if [ "$stale_base_rc" -eq 124 ]; then
+    STALE_BASE="STALE BASE UNDETERMINABLE: the stale-base sweep did not finish within ${STALE_BASE_TIMEOUT}s, so NO branch in flight has been checked against the current base"
+  fi
 fi
 
 [ "$blind" = 1 ] || [ -n "$STALE_BASE" ] || exit 0

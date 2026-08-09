@@ -748,6 +748,27 @@ test_hook_stale_base_honours_the_acknowledgement() {
   pass "fm-turnend-guard: an acknowledged stale base stops blocking turn ends"
 }
 
+test_hook_reports_a_stale_base_sweep_that_times_out() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-stale-timeout")
+  : > "$dir/state/task1.meta"
+  # A sweep that cannot finish must never read as an all-clear. The scenario's
+  # bin/ holds copies, so stubbing here cannot reach the real script.
+  printf '#!/usr/bin/env bash\nsleep 30\n' > "$dir/bin/fm-stale-base.sh"
+  chmod +x "$dir/bin/fm-stale-base.sh"
+  start_live_watcher "$dir"
+  # Exported inside the substitution subshell: a bare assignment prefixing a
+  # shell FUNCTION is not exported to the commands that function runs.
+  out=$(export FM_STALE_BASE_TIMEOUT=1; run_hook "$dir" false); status=$?
+  stop_live_watcher
+
+  expect_code 2 "$status" "a sweep that times out must block rather than pass silently"
+  assert_contains "$out" "STALE BASE UNDETERMINABLE" "an expired sweep must report as undeterminable"
+  assert_contains "$out" "NO branch in flight has been checked" \
+    "the expiry must say what was left unchecked"
+  pass "fm-turnend-guard: a stale-base sweep that times out reports instead of passing"
+}
+
 test_grok_adapter_forces_one_resume_when_unhealthy() {
   local dir fakebin log out status
   dir=$(make_primary_dir "$TMP_ROOT/grok-adapter-block")
@@ -1140,6 +1161,7 @@ test_hook_blocks_when_a_sibling_branch_is_behind
 test_hook_silent_when_every_sibling_contains_the_base
 test_hook_reports_both_reasons_together
 test_hook_stale_base_honours_the_acknowledgement
+test_hook_reports_a_stale_base_sweep_that_times_out
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
