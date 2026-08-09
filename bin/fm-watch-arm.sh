@@ -341,7 +341,16 @@ report_cycle_end() {
       return 0
       ;;
     lapsed)
-      echo "watcher: FAILED - supervision LAPSED: no live watcher and the beacon has not moved for ${age}s, past the ${GRACE}s grace - the fleet is unsupervised; re-arm with --restart"
+      # fm_path_age answers a missing path with a 999999 sentinel, which is a
+      # real answer to "is this past the grace" and a nonsense answer to "how
+      # old is it". Never print the sentinel as an age: the number ends up in a
+      # supervision report, and an 11-day beacon in a home minutes old reads as
+      # a broken clock rather than the missing beacon it is.
+      if [ -e "$BEAT" ]; then
+        echo "watcher: FAILED - supervision LAPSED: no live watcher and the beacon has not moved for ${age}s, past the ${GRACE}s grace - the fleet is unsupervised; re-arm with --restart"
+      else
+        echo "watcher: FAILED - supervision LAPSED: no live watcher and no liveness beacon at all - the fleet is unsupervised; re-arm with --restart"
+      fi
       return 1
       ;;
   esac

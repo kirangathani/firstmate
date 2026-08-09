@@ -747,6 +747,52 @@ test_arm_reports_a_stale_beacon_as_a_supervision_lapse() {
   pass "arm reports a stale beacon with no live watcher as a supervision lapse"
 }
 
+# The other half of a lapse: no live watcher and no beacon at all. fm_path_age
+# answers a missing path with a 999999 sentinel, which is a correct answer to "is
+# this past the grace" and a nonsense one to "how old is it", so the report must
+# not pass that number off as an age. An 11-day-old beacon in a home minutes old
+# reads as a broken clock, and a supervision report nobody believes is as useless
+# as one that never fires.
+test_arm_reports_a_missing_beacon_without_a_sentinel_age() {
+  local dir state fakebin out armout wpid armpid status i
+  dir=$(make_case arm-lapse-no-beacon)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  [ -e "$state/.last-watcher-beat" ] || fail "test setup: seed watcher took the lock but published no beacon to attach to"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=5 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm did not attach to the seed watcher: $(cat "$armout")"
+  kill "$wpid" 2>/dev/null || true
+  wait_for_exit "$wpid" 100
+  is_live_non_zombie "$wpid" && fail "seed watcher survived the kill, so it could republish a beacon"
+  rm -f "$state/.last-watcher-beat"
+  wait_for_exit "$armpid" 200
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "arm did not fail with no watcher and no beacon (status $status): $(cat "$armout")"
+  grep -qF 'watcher: FAILED - supervision LAPSED' "$armout" || fail "arm did not name the lapse: $(cat "$armout")"
+  grep -qF 'no liveness beacon at all' "$armout" || fail "arm did not say the beacon is missing: $(cat "$armout")"
+  ! grep -q '999999' "$armout" || fail "arm printed fm_path_age's missing-path sentinel as though it were an age: $(cat "$armout")"
+  pass "arm reports a missing beacon as a lapse without printing the missing-path sentinel as an age"
+}
+
 test_attached_arm_signal_is_recorded_in_cycle_ledger() {
   local dir state fakebin out armout i wpid armpid status
   dir=$(make_case attached-arm-signal-ledger)
@@ -1315,6 +1361,7 @@ test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_arm_reports_a_delivered_wake_as_a_completed_cycle
 test_arm_reports_a_stale_beacon_as_a_supervision_lapse
+test_arm_reports_a_missing_beacon_without_a_sentinel_age
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
