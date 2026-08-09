@@ -24,7 +24,16 @@
 //   --open-cmd C      watch only. Shell command run when the captain presses
 //                     enter on an agent, with FM_FLOW_ID, FM_FLOW_WINDOW,
 //                     FM_FLOW_WORKTREE, FM_FLOW_PROJECT and FM_FLOW_PR in its
-//                     environment. OPT-IN, no default.
+//                     environment. OPT-IN, no default. The viewer SUSPENDS for
+//                     it - alternate screen off, raw mode off, the controlling
+//                     terminal handed over on stdin and stdout - so the command
+//                     may itself be a full-screen program such as `tmux
+//                     attach`, and the view is restored when it returns.
+//   --open-hint T     watch only. What the selected agent's row says enter will
+//                     do. The caller owns this text because the caller owns
+//                     --open-cmd, and only it knows what that command does to
+//                     the captain's terminal or how to get back. Default:
+//                     "enter: open this worker's window".
 //
 // THE TWO CHANNELS ARE SEPARATE, AND THAT IS THE WHOLE POINT.
 // The snapshot arrives on stdin, so stdin is a PIPE and can never be a
@@ -138,10 +147,32 @@ export function dur(ms) {
   return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
 }
 
+// The ellipsis is ONE column wide, on purpose. A three-dot "..." costs three of
+// the columns it is trying to buy back, and in a 15-column cell that is a fifth
+// of the value.
+const ELLIPSIS = "…";
+
+// Shorten to `w` columns VISIBLY, and say so. A cell that quietly drops its
+// tail produced the captain's `11/11 - your wo`: unreadable, and indis-
+// tinguishable from a value that really is that short. Nothing in this frame
+// may cut text without leaving the mark that says it was cut.
+//
+// Callers must still choose text that fits. This is the floor under them, not
+// the layout: an ellipsis is a deliberate shortening, which is better than a
+// silent one and worse than a phrase that fits.
+export function fit(s, w) {
+  const str = String(s ?? "");
+  if (!Number.isFinite(w) || w <= 0) return "";
+  if (str.length <= w) return str;
+  if (w === 1) return ELLIPSIS;
+  return str.slice(0, w - 1) + ELLIPSIS;
+}
+
 function pad(s, w) {
-  if (s.length >= w) return s.slice(0, w);
-  const left = Math.floor((w - s.length) / 2);
-  return " ".repeat(left) + s + " ".repeat(w - s.length - left);
+  const t = fit(s, w);
+  if (t.length >= w) return t;
+  const left = Math.floor((w - t.length) / 2);
+  return " ".repeat(left) + t + " ".repeat(w - t.length - left);
 }
 
 const ANSI = /\x1b\[[0-9;]*m/g;
@@ -161,13 +192,19 @@ export const visLen = (s) => s.replace(ANSI, "").length;
 // the diff repaint below - which is how the shipped version produced both
 // half-drawn boxes on the right and an orphaned row of durations under the
 // header.
+//
+// A line it does cut ends in the ellipsis, in the last visible column, for the
+// same reason fit() does: a free-text line - an agent id, a project, a refresh
+// error - that simply stops mid-word reads as a rendering fault rather than as
+// a line too long for the terminal.
 export function clip(line, cols) {
   if (!Number.isFinite(cols) || cols <= 0) return line;
   if (visLen(line) <= cols) return line;
+  const keep = Math.max(0, Math.floor(cols) - 1);
   let out = "";
   let vis = 0;
   let i = 0;
-  while (i < line.length && vis < cols) {
+  while (i < line.length && vis < keep) {
     ANSI_AT.lastIndex = i;
     const m = ANSI_AT.exec(line);
     if (m) {
@@ -179,7 +216,7 @@ export function clip(line, cols) {
     vis++;
     i++;
   }
-  return out + R;
+  return out + ELLIPSIS + R;
 }
 
 // Border cells of a 3-row box, clockwise from the top-left, so a marching
@@ -352,7 +389,12 @@ function ciBox(agent, anim) {
     return { ...b, timer: (PAINT[state] ?? dim)(b.timer) };
   }
   if (total === 0) return box("GITHUB CI", "pending", CIW, { dashed: true });
-  const b = box("GITHUB CI", "waiting", CIW, { dashed: true, timer: `${passed}/${total} - your word` });
+  // "N/N your word" is 15 columns at two-digit counts, which is exactly the
+  // timer field under a 13-wide box. The dash this phrase used to carry cost
+  // two more and pushed it over, which is how it reached the captain as
+  // `11/11 - your wo`. fit() still guards the three-digit case; the phrase is
+  // chosen so the guard does not have to fire on a real fleet.
+  const b = box("GITHUB CI", "waiting", CIW, { dashed: true, timer: `${passed}/${total} your word` });
   return { ...b, timer: yellow(b.timer) };
 }
 
@@ -363,7 +405,9 @@ function premergeBox() {
   return box("pre-merge", "pending", MW);
 }
 
-function agentBlock(agent, n, selected, cell, anim, lay) {
+const DEFAULT_OPEN_HINT = "enter: open this worker's window";
+
+function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   const cells = STEPS.map((s) => stepBox(agent, s, anim));
   cells.push(ciBox(agent, anim));
   cells.push(premergeBox());
@@ -394,10 +438,15 @@ function agentBlock(agent, n, selected, cell, anim, lay) {
   const notes = [];
   if (agent.collection?.ok === false) notes.push(magenta(`unreadable: ${agent.collection.reason}`));
   else if (agent.endpoint_alive === false) notes.push(magenta("worker gone"));
+  // The hint rides the SELECTED agent whatever cell is highlighted, because
+  // enter is agent-scoped: it opens the worker, and no cell has an action of
+  // its own. It used to appear only while the head itself was selected, so
+  // stepping right onto GITHUB CI left the captain with a highlighted cell and
+  // nothing on screen saying what enter would do to it.
   const head =
     `${marker} ${name}  ${dim(shortProject(agent.project))}` +
     (notes.length ? `  ${notes.join("  ")}` : "") +
-    (onHead ? `  ${dim("enter: open this worker's pane")}` : "");
+    (selected ? `  ${dim(openHint || DEFAULT_OPEN_HINT)}` : "");
 
   return [head, "  " + top.join(""), "  " + mid.join(""), "  " + bot.join(""), "  " + tim.join("")];
 }
@@ -420,6 +469,32 @@ function shortProject(p) {
 // whole frame is exactly chrome + visible * BLOCK lines.
 export function visibleRows(rows, chrome) {
   return Math.max(1, Math.floor((rows - chrome) / BLOCK));
+}
+
+// The header, the two rules, the key hints, and the flash line when one is up.
+// One owner, because visibleRows() and the caller that keeps `top` between
+// frames must agree to the row about how much room the agents get.
+export const chromeRows = (flash) => 4 + (flash ? 1 : 0);
+
+// Where the window starts, given where it started LAST frame.
+//
+// The rule the captain asked for: up and down move the SELECTOR between agent
+// rows, and the window moves only when the selector would otherwise leave it -
+// already on the top row and pressing up, already on the bottom row and
+// pressing down. Anywhere in between the window stands still.
+//
+// That rule needs `top` to persist across frames, and it did not. The viewer
+// passed no top at all, so every frame recomputed one from `sel` alone against
+// a default of 0, which pins the selector to the bottom row of the window
+// forever: scrolling back up then dragged the whole window with it even though
+// the selector had rows above it to move through. Holding `top` between frames
+// is the fix; this function is where it is held to the rule.
+export function resolveTop(top, sel, visible, count) {
+  const maxTop = Math.max(0, count - visible);
+  let t = Number.isFinite(top) ? Math.max(0, Math.min(Math.floor(top), maxTop)) : 0;
+  if (sel < t) t = sel;
+  else if (sel >= t + visible) t = sel - visible + 1;
+  return Math.max(0, Math.min(t, maxTop));
 }
 
 // A status header that does not fit is worse than a shorter one: clipping cuts
@@ -450,7 +525,10 @@ export function headerLine(segs, cols) {
 }
 
 export function render(snap, opts) {
-  const { rows, cols, anim = 0, sel = 0, cell = -1, top: topIn = 0, flash = "", note = "" } = opts;
+  const {
+    rows, cols, anim = 0, sel = 0, cell = -1, top: topIn = 0,
+    flash = "", note = "", openHint = "",
+  } = opts;
   const agents = snap.agents ?? [];
   const lay = layout(cols, cell < 0 ? 0 : cell);
   const out = [];
@@ -460,11 +538,22 @@ export function render(snap, opts) {
   const ageSec = opts.ageSeconds ?? 0;
   const needs = agents.filter((a) => a.ci && a.ci.pending === 0 && a.ci.failed === 0 && a.ci.total > 0).length;
   const broken = agents.filter((a) => a.collection?.ok === false).length;
+  // Records the collector held back because nothing is running behind them.
+  // Stated, never drawn: they are not agents, so counting them in "N agents"
+  // or giving them a row would put a finished worker on screen beside live
+  // ones. Saying how many were held back is what keeps the omission honest.
+  const hidden = (snap.omitted ?? []).length;
+  // Live workers this view has no row for, because they run no pipeline. The
+  // captain reconciles this list against the windows in front of them, so the
+  // difference is stated rather than left to be discovered.
+  const elsewhere = (snap.out_of_scope ?? []).length;
   out.push(headerLine([
     { s: white("fleet pipeline"), pri: 0 },
     { s: dim(`${agents.length} agents`), pri: 3 },
     { s: needs ? yellow(`${needs} ready to merge`) : dim("0 ready to merge"), pri: needs ? 1 : 4 },
     { s: broken ? magenta(`${broken} unreadable`) : dim("0 unreadable"), pri: broken ? 1 : 5 },
+    { s: hidden ? dim(`${hidden} hidden, worker gone`) : "", pri: 3 },
+    { s: elsewhere ? dim(`${elsewhere} running no pipeline`) : "", pri: 3 },
     { s: lay.count < NCELLS ? yellow(`stages ${lay.first + 1}-${lay.first + lay.count} of ${NCELLS}`) : "", pri: 1 },
     { s: dim(`updated ${ageSec}s ago`), pri: 2 },
     // Belongs beside the age, not in the key hints: an age that keeps climbing
@@ -482,15 +571,11 @@ export function render(snap, opts) {
     return out.map((l) => clip(l, cols));
   }
 
-  const chrome = 4 + (flash ? 1 : 0);
-  const visible = visibleRows(rows, chrome);
-  let top = topIn;
-  if (sel < top) top = sel;
-  if (sel >= top + visible) top = sel - visible + 1;
-  top = Math.max(0, Math.min(top, Math.max(0, agents.length - visible)));
+  const visible = visibleRows(rows, chromeRows(flash));
+  const top = resolveTop(topIn, sel, visible, agents.length);
   const shown = agents.slice(top, top + visible);
   shown.forEach((a, i) => {
-    out.push(...agentBlock(a, top + i + 1, top + i === sel, cell, anim, lay));
+    out.push(...agentBlock(a, top + i + 1, top + i === sel, cell, anim, lay, openHint));
     out.push("");
   });
 
@@ -499,7 +584,7 @@ export function render(snap, opts) {
   const scroll = (top > 0 ? `^${top} above  ` : "") + (more > 0 ? `v${more} below  ` : "");
   out.push(
     (scroll ? green(scroll) : "") +
-      dim("up/down agent   left/right stage   enter open   r refresh   q quit"),
+      dim("up/down agent   left/right stage   enter open worker   r refresh   q quit"),
   );
   if (flash) out.push(yellow(flash));
 
@@ -513,7 +598,7 @@ export function render(snap, opts) {
 function parseArgs(argv) {
   const o = {
     watch: false, cols: null, rows: null, tick: 0, tickGiven: false,
-    refreshCmd: "", refreshMs: 10000, openCmd: "",
+    refreshCmd: "", refreshMs: 10000, openCmd: "", openHint: "",
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -524,6 +609,7 @@ function parseArgs(argv) {
     else if (a === "--refresh-cmd") o.refreshCmd = String(argv[++i] ?? "");
     else if (a === "--refresh-ms") o.refreshMs = Number(argv[++i]);
     else if (a === "--open-cmd") o.openCmd = String(argv[++i] ?? "");
+    else if (a === "--open-hint") o.openHint = String(argv[++i] ?? "");
     else if (a === "-h" || a === "--help") o.help = true;
     else { o.bad = a; }
   }
@@ -565,7 +651,7 @@ async function main() {
   if (opts.help) {
     process.stdout.write(
       "usage: fm-flow-snapshot.sh --json | fm-flow-tui.mjs [--cols N] [--rows N] [--tick N]\n" +
-        "       [--watch [--refresh-cmd CMD] [--refresh-ms N] [--open-cmd CMD]]\n" +
+        "       [--watch [--refresh-cmd CMD] [--refresh-ms N] [--open-cmd CMD] [--open-hint TEXT]]\n" +
         "       bin/fm-flow.sh is the captain-facing entry point and wires all three up.\n",
     );
     return 0;
@@ -574,8 +660,8 @@ async function main() {
     process.stderr.write(`fm-flow-tui: unknown argument ${opts.bad}\n`);
     return 2;
   }
-  if (!opts.watch && (opts.refreshCmd || opts.openCmd)) {
-    process.stderr.write("fm-flow-tui: --refresh-cmd and --open-cmd need --watch\n");
+  if (!opts.watch && (opts.refreshCmd || opts.openCmd || opts.openHint)) {
+    process.stderr.write("fm-flow-tui: --refresh-cmd, --open-cmd and --open-hint need --watch\n");
     return 2;
   }
   // Without this the process waits forever on a keyboard that is never going
@@ -682,6 +768,10 @@ const KEY = {
 function watch(snap0, cols0, rows0, opts) {
   let snap = snap0;
   let sel = 0, cell = -1, anim = 0, flash = "", flashUntil = 0;
+  // Kept BETWEEN frames, which is the whole of the scroll rule: see
+  // resolveTop(). A frame-local top makes the window follow the selector
+  // instead of the other way round.
+  let top = 0;
   const w = () => process.stdout.columns || cols0;
   const h = () => process.stdout.rows || rows0;
   // With no refresh source the age counter climbs while nothing on screen
@@ -705,19 +795,23 @@ function watch(snap0, cols0, rows0, opts) {
       anim: opts.tick,
       ageSeconds: opts.tickGiven ? 0 : ageOf(snap),
       note,
+      openHint: opts.openHint,
     });
     process.stdout.write(frame.join("\n") + "\n");
     return 0;
   }
 
-  process.stdout.write("\x1b[?1049h\x1b[2J\x1b[?25l");
+  const enterScreen = () => process.stdout.write("\x1b[?1049h\x1b[2J\x1b[?25l");
+  const leaveScreen = () => process.stdout.write("\x1b[?25h\x1b[?1049l");
+
+  enterScreen();
   let restored = false;
   const restore = () => {
     if (restored) return;
     restored = true;
     try { keyboard.setRawMode(false); } catch { /* terminal already gone */ }
     try { keyboard.destroy(); } catch { /* terminal already gone */ }
-    process.stdout.write("\x1b[?25h\x1b[?1049l");
+    leaveScreen();
   };
   const quit = () => { restore(); process.exit(0); };
   process.on("exit", restore);
@@ -740,20 +834,29 @@ function watch(snap0, cols0, rows0, opts) {
   // away instead of diffing against a layout that no longer exists.
   let prev = [];
   let prevW = w(), prevH = h();
+  // True while the terminal belongs to an --open-cmd. Every timer in this
+  // program calls paint(), so without this the animation would overwrite a
+  // full-screen program the captain is looking at, one row at a time.
+  let suspended = false;
   const paint = () => {
+    if (suspended) return;
     if (w() !== prevW || h() !== prevH) {
       prevW = w(); prevH = h(); prev = [];
       process.stdout.write("\x1b[2J");
     }
     if (flash && Date.now() > flashUntil) flash = "";
+    // Held here, not inside render(), so it survives from frame to frame.
+    top = resolveTop(top, sel, visibleRows(h(), chromeRows(flash)), (snap.agents ?? []).length);
     const next = render(snap, {
       rows: h(),
       cols: w(),
       anim,
       sel,
       cell,
+      top,
       flash,
       note,
+      openHint: opts.openHint,
       ageSeconds: ageOf(snap),
     });
     let buf = "\x1b[?2026h";
@@ -798,6 +901,20 @@ function watch(snap0, cols0, rows0, opts) {
     );
   };
 
+  // Enter is AGENT-scoped, not cell-scoped: it opens the selected worker's
+  // window whichever cell is highlighted. No cell carries an action of its own,
+  // including GITHUB CI, and the selected agent's row says so on every frame
+  // rather than leaving the captain to find out by pressing it.
+  //
+  // Two things this must never do, both of which it used to. It must not run
+  // the command with the terminal still under the alternate screen and raw
+  // mode: `tmux attach` needs a real terminal on stdin and stdout, and with the
+  // viewer holding both it could do nothing visible at all. And it must not
+  // report success on the strength of an exit code alone - `opened <id>` was
+  // printed for a command that had only changed a detached session's current
+  // window, which is the exact defect class this fleet cares about most. What
+  // the command SAYS it did is what reaches the footer; the exit code only
+  // decides whether that is an outcome or a failure.
   const open = () => {
     const a = (snap.agents ?? [])[sel];
     if (!a) return;
@@ -805,23 +922,62 @@ function watch(snap0, cols0, rows0, opts) {
       setFlash(`no open command wired up; that worker is at ${a.window || "an unrecorded window"}`);
       return;
     }
-    const res = spawnSync("/bin/sh", ["-c", opts.openCmd], {
-      encoding: "utf8",
-      timeout: 15000,
-      env: {
-        ...process.env,
-        FM_FLOW_ID: a.id ?? "",
-        FM_FLOW_WINDOW: a.window ?? "",
-        FM_FLOW_WORKTREE: a.worktree ?? "",
-        FM_FLOW_PROJECT: a.project ?? "",
-        FM_FLOW_PR: a.pr?.url ?? "",
-      },
-    });
-    // The command may have moved the terminal's view or painted over us, so
-    // the diff cache no longer describes what is on screen.
-    prev = [];
-    if (res.status === 0) setFlash(`opened ${a.id}`);
-    else setFlash(`open failed: ${firstLine(res.stderr) || `exit ${res.status ?? "signal"}`}`);
+    // Our OWN stdout, not a fresh open of /dev/tty, and it is handed to the
+    // child as both its stdin and its stdout. A terminal is opened read-write,
+    // so one descriptor serves for both, and this is the only handle that names
+    // a concrete device: `ttyname()` on an fd opened through /dev/tty answers
+    // "/dev/tty", and tmux REFUSES a client whose terminal is that
+    // (server_client_open, "can't use /dev/tty"). Verified 2026-08-09 - the
+    // first cut of this opened /dev/tty and `tmux attach` failed with exactly
+    // that message. Watch mode has already established stdout is a terminal.
+    const ttyFd = process.stdout.isTTY ? 1 : null;
+
+    suspended = true;
+    try { keyboard.setRawMode(false); } catch { /* terminal already gone */ }
+    keyboard.pause();
+    leaveScreen();
+
+    let res = null;
+    let threw = null;
+    try {
+      // No timeout. The command is allowed to be an interactive session the
+      // captain sits in for as long as they like; a timeout here would kill it
+      // out from under them.
+      res = spawnSync("/bin/sh", ["-c", opts.openCmd], {
+        encoding: "utf8",
+        stdio: ttyFd == null ? ["ignore", "ignore", "pipe"] : [ttyFd, ttyFd, "pipe"],
+        env: {
+          ...process.env,
+          FM_FLOW_ID: a.id ?? "",
+          FM_FLOW_WINDOW: a.window ?? "",
+          FM_FLOW_WORKTREE: a.worktree ?? "",
+          FM_FLOW_PROJECT: a.project ?? "",
+          FM_FLOW_PR: a.pr?.url ?? "",
+        },
+      });
+    } catch (e) {
+      // spawnSync itself refusing to start is still a failed open, and the
+      // screen has to come back either way.
+      threw = e;
+    } finally {
+      enterScreen();
+      try { keyboard.setRawMode(true); } catch { /* terminal already gone */ }
+      keyboard.resume();
+      suspended = false;
+      // The command owned the screen; nothing on it matches the diff cache.
+      prev = [];
+    }
+
+    if (threw) { setFlash(`open failed: ${threw.message}`); return; }
+    const said = firstLine(res.stderr);
+    if (res.error) setFlash(`open failed: ${res.error.message}`);
+    else if (res.status !== 0) {
+      setFlash(`open failed: ${said || `exit ${res.status ?? `signal ${res.signal}`}`}`);
+    } else if (ttyFd == null) {
+      // No terminal to hand over, so whatever the command did, the captain was
+      // not put anywhere. Saying it succeeded would be the original lie again.
+      setFlash(said || `${a.id}: open command ran, but there is no terminal to show it in`);
+    } else setFlash(said || `${a.id}: open command exited 0 without saying what it did`);
   };
 
   keyboard.setRawMode(true);

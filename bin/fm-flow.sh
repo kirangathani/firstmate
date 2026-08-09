@@ -25,9 +25,16 @@
 #   --refresh-ms <n>  collector cadence in the live view, milliseconds
 #                     (default 10000). Refreshes never overlap, so a
 #                     collector slower than this sets the real cadence.
-#   --open <task-id>  focus that worker's window and exit. This is what the
-#                     viewer runs when the captain presses enter; it is a
+#   --open <task-id>  put THIS terminal on that worker's window. This is what
+#                     the viewer runs when the captain presses enter; it is a
 #                     normal command and can be run on its own.
+#
+# Environment knobs:
+#   FM_FLOW_OPEN_DRY_RUN   --open only. Print the action it would take and the
+#                          argv it would run, change nothing, exit 0. The three
+#                          actions are `switch` (this terminal is already a tmux
+#                          client), `attach` (it is not, and it is a terminal),
+#                          and `refuse` (it is not a terminal at all).
 #
 # Read-only with respect to fleet state: it collects, it draws, and --open
 # moves the captain's own terminal view. It takes no session lock, drains no
@@ -45,7 +52,7 @@ STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 export FM_HOME
 
 usage() {
-  sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 SNAP_ARGS=()
@@ -64,14 +71,40 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# --- --open: focus one worker's window --------------------------------------
+# --- --open: put this terminal on one worker's window ------------------------
 #
 # Deliberately narrow. Focusing a window is a per-backend verb that firstmate's
 # backend interface does not carry yet, and inventing one here for five
 # runtimes off the back of a view change would be guessing. tmux is the
-# verified reference backend and its two commands are known good, so tmux
-# works and every other backend is told plainly that it does not, rather than
-# being sent a command nobody has run.
+# verified reference backend and its commands are known good, so tmux works and
+# every other backend is told plainly that it does not, rather than being sent a
+# command nobody has run.
+#
+# WHOSE terminal moves is the whole of it, and the shipped version got it
+# wrong. `select-window` changes the target SESSION's current window; it does
+# nothing to the terminal the command was typed in. Run from a terminal that is
+# not a client of that session - which is how the captain ran it - it exits 0
+# having moved a view nobody was looking at, and the viewer duly reported
+# `opened <id>`. Reproduced 2026-08-09: `--open` from a non-tmux shell returned
+# 0 and the invoking terminal was unchanged.
+#
+# So the action depends on what this terminal already is:
+#
+#   switch  $TMUX is set, so this terminal IS a tmux client. select-window then
+#           switch-client moves this client onto the worker's window; the view
+#           keeps running in its own window, which is where the captain comes
+#           back to. Verified by asking the client where it ended up.
+#   attach  $TMUX is unset and stdin/stdout are a terminal. The only way to put
+#           THIS terminal on a tmux window is to attach it, so that is what
+#           happens; detaching returns the captain to whatever was here before,
+#           which is the viewer when the viewer launched it. attach blocks for
+#           as long as the captain stays, so this command does too.
+#   refuse  not a terminal at all - a script, a pipe, a cron job. There is
+#           nothing to put anywhere, and the one thing this must never do is
+#           move a window somewhere invisible and call it success.
+#
+# The outcome line goes to STDERR because in the attach case stdout belongs to
+# tmux, and because the viewer flashes exactly what this command says it did.
 if [ -n "$OPEN_ID" ]; then
   meta="$STATE_DIR/$OPEN_ID.meta"
   [ -f "$meta" ] || { echo "error: no local record for $OPEN_ID" >&2; exit 1; }
@@ -81,15 +114,74 @@ if [ -n "$OPEN_ID" ]; then
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || { echo "error: no window recorded for $OPEN_ID" >&2; exit 1; }
+
+  # A terminal is required for BOTH actions, not just the attach. `switch-client`
+  # with no client of its own to name moves whatever client happens to be
+  # attached to the invoking pane's session - so a script or an agent running
+  # inside a tmux pane, with no terminal at all, would yank the captain's own
+  # terminal onto some other window. Observed 2026-08-09 while reproducing this
+  # very defect. No terminal, nothing to move, no action.
+  if [ ! -t 1 ]; then
+    open_action=refuse
+  elif [ -n "${TMUX:-}" ]; then
+    open_action=switch
+  elif [ -t 0 ]; then
+    open_action=attach
+  else
+    open_action=refuse
+  fi
+
   case "$backend" in
     tmux)
       command -v tmux >/dev/null 2>&1 || { echo "error: tmux is not installed" >&2; exit 1; }
-      tmux select-window -t "$target" >/dev/null 2>&1 \
-        || { echo "error: no window $target" >&2; exit 1; }
-      # Only matters when the captain is attached to a different session; a
-      # no-op otherwise, and never a reason to report failure.
-      tmux switch-client -t "${target%%:*}" >/dev/null 2>&1 || true
-      exit 0
+
+      if [ -n "${FM_FLOW_OPEN_DRY_RUN:-}" ]; then
+        printf 'action=%s target=%s\n' "$open_action" "$target"
+        exit 0
+      fi
+
+      # The window has to exist before anything is claimed about it, and the
+      # backend's own probe is what decides that for the rest of the fleet.
+      expected_label=$(fm_backend_expected_label_of_meta "$meta" "$OPEN_ID")
+      fm_backend_target_exists tmux "$target" "$expected_label" >/dev/null 2>&1 \
+        || { echo "error: no window $target; that worker is gone" >&2; exit 1; }
+
+      case "$open_action" in
+        switch)
+          client=$(tmux display-message -p '#{client_tty}' 2>/dev/null)
+          [ -n "$client" ] || {
+            echo "error: this tmux session has no attached terminal to switch" >&2
+            exit 1
+          }
+          tmux select-window -t "$target" >/dev/null 2>&1 \
+            || { echo "error: could not select $target" >&2; exit 1; }
+          tmux switch-client -c "$client" -t "${target%%:*}" >/dev/null 2>&1 \
+            || { echo "error: could not switch this terminal to ${target%%:*}" >&2; exit 1; }
+          # Proof, not assumption: ask the client itself where it now is. This
+          # is the difference between reporting an open and performing one.
+          now=$(tmux display-message -p -c "$client" '#{session_name}:#{window_name}' 2>/dev/null)
+          [ "$now" = "$target" ] || {
+            echo "error: asked for $target but this terminal is showing ${now:-nothing}" >&2
+            exit 1
+          }
+          echo "switched to $target" >&2
+          exit 0
+          ;;
+        attach)
+          tmux select-window -t "$target" >/dev/null 2>&1 \
+            || { echo "error: could not select $target" >&2; exit 1; }
+          if tmux attach-session -t "${target%%:*}"; then
+            echo "back from $target" >&2
+            exit 0
+          fi
+          echo "error: could not attach this terminal to ${target%%:*}" >&2
+          exit 1
+          ;;
+        *)
+          echo "error: $target is live, but this is not a terminal to show it in" >&2
+          exit 1
+          ;;
+      esac
       ;;
     *)
       echo "error: focusing a $backend window is not implemented; that worker is at $target" >&2
@@ -121,11 +213,23 @@ if ! "${COLLECT[@]}" >"$first"; then
   exit 1
 fi
 
+# What enter does, and how the captain gets back, depends on whether this
+# terminal is already a tmux client - the same fork --open takes above. The
+# viewer cannot work that out, and must not guess: it is handed the sentence
+# that is true for THIS terminal, and prints it against the selected agent.
+if [ -n "${TMUX:-}" ]; then
+  here=$(tmux display-message -p '#{session_name}:#{window_name}' 2>/dev/null)
+  OPEN_HINT="enter: switch to this worker's window (this view stays in ${here:-its own window})"
+else
+  OPEN_HINT="enter: attach to this worker's window (detach, prefix then d, to come back here)"
+fi
+
 # Not exec: the temp file holding the first frame is removed by the EXIT trap,
 # and exec would replace this shell before the trap could ever run.
 "$TUI" --watch \
   --refresh-cmd "$refresh_cmd" \
   --refresh-ms "$REFRESH_MS" \
   --open-cmd "$(printf '%q' "$SCRIPT_DIR/fm-flow.sh") --open \"\$FM_FLOW_ID\"" \
+  --open-hint "$OPEN_HINT" \
   <"$first"
 exit $?
