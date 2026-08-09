@@ -15,6 +15,61 @@ LIB="$ROOT/bin/fm-wake-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
+# Reap every background process this file starts, including when an assertion
+# aborts the run. fail() exits the whole file, so the kill/wait pair at the end
+# of a test body runs ONLY when that test passes: any failing assertion left its
+# real watcher running, and the EXIT cleanup then deleted the fixture directory
+# out from under a process that kept going. Measured on the captain's box
+# 2026-08-09: 18 orphaned bin/fm-watch.sh processes, aged 2h19m to 4h45m, every
+# one adopted by init and every one still pointing FM_STATE_OVERRIDE at a
+# long-deleted temp root from this file's fixtures.
+#
+# The pid set is read from the shell's OWN job table rather than from a registry
+# each spawn site would have to remember to update, so a background process added
+# to this file later is covered the day it is added, with nothing to keep in sync.
+# A job already waited on is gone from that table, so this only ever sees the
+# genuinely un-reaped ones. The ppid guard is what makes killing safe on a loaded
+# box: a pid that exited and was recycled onto an unrelated process no longer
+# reports this shell as its parent, so it is skipped rather than signalled.
+reap_background_jobs() {
+  local pid ppid i alive
+  for pid in $(jobs -p 2>/dev/null); do
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    [ "$ppid" = "$$" ] || continue
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  # A watcher handles TERM only after its current poll sleep returns, so give the
+  # graceful path a bounded window before forcing it. Bounded, not unbounded: a
+  # cleanup that can hang is a second way to leave the box worse than it found it.
+  i=0
+  while [ "$i" -lt 50 ]; do
+    alive=0
+    for pid in $(jobs -p 2>/dev/null); do
+      is_live_non_zombie "$pid" && alive=1
+    done
+    [ "$alive" -eq 0 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  for pid in $(jobs -p 2>/dev/null); do
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    [ "$ppid" = "$$" ] || continue
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}
+
+# tests/lib.sh installs fm_test_cleanup as the EXIT trap on its first temp root,
+# and documents that a file needing extra teardown replaces that trap and calls
+# it from inside. Reap first, so no surviving process is still writing into a
+# fixture directory while it is being removed.
+watcher_lock_cleanup() {
+  trap - EXIT
+  reap_background_jobs
+  fm_test_cleanup
+}
+trap watcher_lock_cleanup EXIT
+
 mark_pr_check_migration_complete() {
   local state=$1
   printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
@@ -566,6 +621,130 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after seed died (status $status)"
   grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" || fail "attached arm did not emit the typed cycle-end failure"
   pass "arm attaches to a live fresh watcher and fails loudly when that cycle has no successor"
+}
+
+# The benign direction, which is the ordinary case in a live fleet: on the
+# captain's box on 2026-08-09 the cycle ledger held 735 wake-producing cycles
+# against 78 attached closes, and every one of those closes was reported with the
+# same wording as a genuine lapse. The wake here is produced by the real watcher
+# through the real registered-check path and is asserted to arrive in the durable
+# queue, so what this pins is an actual fm_wake_append, not a counter the test
+# poked. The check fires only once the trigger file appears, so the arm is
+# attached and following the cycle before the wake lands rather than racing it.
+test_arm_reports_a_delivered_wake_as_a_completed_cycle() {
+  local dir state fakebin out armout drain_out check_file wpid armpid status i
+  dir=$(make_case arm-cycle-complete)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  drain_out="$dir/drain.out"
+  check_file="$state/task.check.sh"
+  mark_pr_check_migration_complete "$state"
+  cat > "$check_file" <<'SH'
+#!/usr/bin/env bash
+[ -e "${FM_STATE_OVERRIDE:-/nonexistent}/wake-now" ] || exit 0
+printf 'merged: https://example.test/pr/9\n'
+SH
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register the delivered-wake check"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  [ -e "$state/.last-watcher-beat" ] || fail "test setup: seed watcher took the lock but published no beacon to attach to"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm did not attach to the seed watcher: $(cat "$armout")"
+  # Release the wake. The seed watcher queues it, prints the reason to its OWN
+  # stdout - the arm that owns it is the one that gets that line - and exits. This
+  # attached arm sees only that the cycle ended, which is precisely the input it
+  # used to call a failure.
+  touch "$state/wake-now"
+  wait_for_exit "$wpid" 100
+  grep -qF 'check: ' "$out" || fail "seed watcher did not produce the check wake: $(cat "$out")"
+  wait_for_exit "$armpid" 100
+  status=$?
+  [ "$status" -eq 0 ] || fail "arm exited $status for a cycle that delivered a wake: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "arm reported FAILED for a cycle that delivered a wake: $(cat "$armout")"
+  grep -qF 'watcher: cycle-complete' "$armout" || fail "arm did not name the completed cycle: $(cat "$armout")"
+  grep -q 'outcome=wake-delivered' "$state/.watch-cycle-exits.log" \
+    || fail "completed cycle was not classified in the lifecycle ledger"
+  # The reported line claims a wake was delivered, so prove the claim: it has to
+  # be in the durable queue for whoever drains it, or "complete" is a lie that
+  # loses a wake instead of a failure that annoys.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the completed cycle failed"
+  grep -F 'merged: https://example.test/pr/9' "$drain_out" >/dev/null \
+    || fail "arm called the cycle complete but its wake never reached the durable queue"
+  pass "arm reports a cycle that delivered a wake as complete rather than as a failure"
+}
+
+# The direction that actually matters. A fix verified only on the benign path
+# above would have verified nothing: this is the state that went unnoticed three
+# times on 2026-08-05, when the beacon was 1662s, 356s and 362s stale against the
+# 300s grace and each one needed a manual restart. The beacon is backdated rather
+# than waited out so the PRODUCTION grace is what is under test, not a threshold
+# lowered for the test's convenience.
+test_arm_reports_a_stale_beacon_as_a_supervision_lapse() {
+  local dir state fakebin out armout wpid armpid status i
+  dir=$(make_case arm-lapse)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  [ -e "$state/.last-watcher-beat" ] || fail "test setup: seed watcher took the lock but published no beacon to attach to"
+  # A five-second successor window, so backdating the beacon after the watcher is
+  # confirmed dead lands well inside it. If that ordering ever lost anyway, the
+  # arm would emit the benign-close wording and the assertions below would fail:
+  # the race can cost a run, it can never green a lapse that went unreported.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=5 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm did not attach to the seed watcher: $(cat "$armout")"
+  # Supervision dies and nothing replaces it. Kill first, confirm the exit, and
+  # only then backdate: a watcher still alive would touch the beacon again.
+  kill "$wpid" 2>/dev/null || true
+  wait_for_exit "$wpid" 100
+  is_live_non_zombie "$wpid" && fail "seed watcher survived the kill, so the beacon could still move"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  wait_for_exit "$armpid" 200
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "arm did not fail for a lapsed supervision chain (status $status): $(cat "$armout")"
+  grep -qF 'watcher: FAILED - supervision LAPSED' "$armout" || fail "arm did not name the lapse: $(cat "$armout")"
+  grep -qF 'the fleet is unsupervised' "$armout" || fail "lapse line did not state the consequence: $(cat "$armout")"
+  ! grep -qF 'watcher: cycle-complete' "$armout" || fail "arm called a lapsed chain a completed cycle: $(cat "$armout")"
+  ! grep -qF 'cycle ended without an actionable reason' "$armout" \
+    || fail "a lapse was still reported with the wording a benign close uses: $(cat "$armout")"
+  grep -q 'outcome=lapsed' "$state/.watch-cycle-exits.log" \
+    || fail "the lapse was not classified in the lifecycle ledger"
+  pass "arm reports a stale beacon with no live watcher as a supervision lapse"
 }
 
 test_attached_arm_signal_is_recorded_in_cycle_ledger() {
@@ -1134,6 +1313,8 @@ test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
+test_arm_reports_a_delivered_wake_as_a_completed_cycle
+test_arm_reports_a_stale_beacon_as_a_supervision_lapse
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
