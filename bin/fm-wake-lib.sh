@@ -125,8 +125,17 @@ fm_pid_identity_matches() {
   [ "$legacy" = "$recorded" ]
 }
 
+# Resolved ONCE at source time, not per call: the OS cannot change during the
+# process's life, and a per-call `uname` fork costs more than the stat it selects.
+# This library is on the watcher's poll cycle, so the helper below runs
+# continuously. The failure branch is explicit rather than left to the
+# assignment's exit status: callers source this under `set -e`, so an absent
+# `uname` must leave the value empty and take the Linux branch, not abort the
+# sourcing script.
+FM_WAKE_UNAME_S=$(uname 2>/dev/null) || FM_WAKE_UNAME_S=
+
 fm_path_mtime() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_WAKE_UNAME_S" = Darwin ]; then
     stat -f %m "$1" 2>/dev/null
   else
     stat -c %Y "$1" 2>/dev/null
