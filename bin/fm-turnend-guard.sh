@@ -119,12 +119,23 @@ fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || blind=1
 # turn-end path. bin/fm-fleet-sync.sh raises the same finding the moment a base
 # moves; this is the backstop that makes it unforgettable rather than merely
 # automatic, because an absorbed wake can be missed and a turn end cannot.
-# shellcheck source=bin/fm-bounded-lib.sh
-. "$SCRIPT_DIR/fm-bounded-lib.sh"
+#
+# The bounder and the sweep are BOTH optional siblings, and each is probed
+# before use. This hook must stay byte-silent whenever it has nothing to say -
+# every caller captures its output, and a healthy turn that prints anything is
+# indistinguishable from an alarm. An unconditional `.` of a missing sibling
+# prints "No such file or directory" to stderr, and calling an undefined
+# function prints "command not found", so either one would turn a silent
+# healthy turn into a noisy one. That is the same fail-open-and-quiet rule the
+# missing-jq and empty-stdin paths above already follow.
+if [ -r "$SCRIPT_DIR/fm-bounded-lib.sh" ]; then
+  # shellcheck source=bin/fm-bounded-lib.sh
+  . "$SCRIPT_DIR/fm-bounded-lib.sh"
+fi
 STALE_BASE=
 if [ -x "$SCRIPT_DIR/fm-stale-base.sh" ]; then
   stale_base_rc=0
-  if fm_bounded_available; then
+  if command -v fm_bounded_available >/dev/null 2>&1 && fm_bounded_available; then
     STALE_BASE=$(fm_bounded_run "$STALE_BASE_TIMEOUT" \
       env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-stale-base.sh" 2>/dev/null) || stale_base_rc=$?
   else

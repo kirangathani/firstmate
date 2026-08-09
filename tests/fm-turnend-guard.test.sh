@@ -769,6 +769,41 @@ test_hook_reports_a_stale_base_sweep_that_times_out() {
   pass "fm-turnend-guard: a stale-base sweep that times out reports instead of passing"
 }
 
+# The scenario bin/ above is a full copy of the real bin/, which is right for
+# every other case here but MASKS one: an optional sibling that is simply not
+# there. A healthy turn must stay byte-silent, and an unconditional `.` of a
+# missing file, or a call to a function that file was meant to define, prints to
+# stderr - which every caller of this hook captures, making a healthy turn
+# indistinguishable from an alarm. That is exactly how this branch first broke
+# main's own assertions, so the degradation is pinned here directly.
+test_hook_stays_silent_when_its_optional_siblings_are_absent() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-no-optional-siblings")
+  : > "$dir/state/task1.meta"
+  rm -f "$dir/bin/fm-bounded-lib.sh" "$dir/bin/fm-stale-base.sh"
+  start_live_watcher "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  stop_live_watcher
+
+  expect_code 0 "$status" "a healthy turn must still exit 0 with the optional siblings absent"
+  [ -z "$out" ] || fail "hook spoke on a healthy turn with its optional siblings absent: $out"
+  pass "fm-turnend-guard: stays silent on a healthy turn when its optional siblings are absent"
+}
+
+test_hook_blocks_cleanly_when_its_optional_siblings_are_absent() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-no-siblings-unhealthy")
+  : > "$dir/state/task1.meta"
+  rm -f "$dir/bin/fm-bounded-lib.sh" "$dir/bin/fm-stale-base.sh"
+  out=$(run_hook "$dir" false); status=$?
+
+  expect_code 2 "$status" "the supervision reason must still block with the optional siblings absent"
+  assert_contains "$out" "$REQUIRED_REASON" "the supervision repair instruction must survive"
+  assert_not_contains "$out" "No such file or directory" "a missing optional sibling must not leak a shell error"
+  assert_not_contains "$out" "command not found" "an undefined optional helper must not leak a shell error"
+  pass "fm-turnend-guard: blocks cleanly when its optional siblings are absent"
+}
+
 test_grok_adapter_forces_one_resume_when_unhealthy() {
   local dir fakebin log out status
   dir=$(make_primary_dir "$TMP_ROOT/grok-adapter-block")
@@ -1162,6 +1197,8 @@ test_hook_silent_when_every_sibling_contains_the_base
 test_hook_reports_both_reasons_together
 test_hook_stale_base_honours_the_acknowledgement
 test_hook_reports_a_stale_base_sweep_that_times_out
+test_hook_stays_silent_when_its_optional_siblings_are_absent
+test_hook_blocks_cleanly_when_its_optional_siblings_are_absent
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
