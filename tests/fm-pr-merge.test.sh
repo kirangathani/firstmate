@@ -2148,10 +2148,111 @@ test_unreadable_pr_body_refuses_unverified() {
   pass "fm-pr-merge refuses when the PR's description cannot be read at all"
 }
 
+# --- merge-resolution gate (contract in docs/merge-resolution-gate.md) --------
+#
+# The point of these two is the WIRING, not the verdict: tests/fm-merge-resolution-gate.test.sh
+# holds the verdict up against this repo's own real conflicts. What is proved
+# here is that bin/fm-pr-merge.sh actually replays the branch's merges and acts
+# on the answer, through a path the worker never invokes - the layer that makes
+# this a boundary rather than an instruction.
+
+# build_conflicted_merge <case_dir> <strategy>: give the branch and main each a
+# different appended entry in one file, then merge main into the branch with
+# <strategy>. `-X ours` and `-X theirs` auto-resolve by discarding the other
+# side outright, which is exactly the deleting resolution the gate must catch;
+# `` (empty) resolves by keeping both, which it must not.
+build_conflicted_merge() {
+  local case_dir=$1 strategy=$2 base_entry branch_entry main_entry
+  base_entry='- A backend-verification doc records empirical facts, not assumptions.'
+  branch_entry='- A test that reads an environment variable must control that variable.'
+  main_entry='- Resolve uname once at source time rather than forking it in a helper.'
+
+  # The shared base has to predate the branch, and make_case cuts the worktree
+  # at baseline, so it lands on main first and the branch fast-forwards onto it.
+  printf '%s\n' "$base_entry" > "$case_dir/project/NOTES.md"
+  git -C "$case_dir/project" add NOTES.md
+  git -C "$case_dir/project" commit -qm 'notes: the shared list'
+  git -C "$case_dir/wt" merge -q --ff-only main
+
+  printf '%s\n%s\n' "$base_entry" "$main_entry" > "$case_dir/project/NOTES.md"
+  git -C "$case_dir/project" commit -qam 'notes: main appends its entry'
+
+  printf '%s\n%s\n' "$base_entry" "$branch_entry" > "$case_dir/wt/NOTES.md"
+  git -C "$case_dir/wt" commit -qam 'notes: the branch appends its entry'
+
+  if [ -n "$strategy" ]; then
+    git -C "$case_dir/wt" merge --no-edit -X "$strategy" main >/dev/null 2>&1 \
+      || fail "merge-resolution fixture: -X $strategy should have produced a merge commit"
+  else
+    git -C "$case_dir/wt" merge --no-edit main >/dev/null 2>&1 || true
+    printf '%s\n%s\n%s\n' "$base_entry" "$branch_entry" "$main_entry" > "$case_dir/wt/NOTES.md"
+    git -C "$case_dir/wt" add NOTES.md
+    git -C "$case_dir/wt" commit -qm 'merge: keep both entries' \
+      || fail "merge-resolution fixture: the keep-both resolution should have committed"
+  fi
+}
+
+test_a_deleting_merge_resolution_refuses() {
+  local case_dir rc
+  case_dir=$(make_case merge-resolution-deleting)
+  add_gh_mocks "$case_dir" b111111111111111111111111111111111111111
+  : > "$case_dir/gh-axi.log"
+  build_conflicted_merge "$case_dir" ours
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/90 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merge-resolution-deleting: a resolution that drops a side must refuse"
+  assert_grep 'deletes content one side introduced' "$case_dir/stderr" \
+    "merge-resolution-deleting: the refusal did not name the finding"
+  assert_grep 'Resolve uname once at source time' "$case_dir/stderr" \
+    "merge-resolution-deleting: the refusal did not quote the lost line"
+  # The escalation has to be relayable as a real choice, per bin/fm-brief.sh's
+  # needs-decision contract, so both candidates must be named.
+  assert_grep 'KEEP BOTH' "$case_dir/stderr" \
+    "merge-resolution-deleting: the refusal did not name the keep-both candidate"
+  assert_grep 'DROP THEM' "$case_dir/stderr" \
+    "merge-resolution-deleting: the refusal did not name the drop candidate"
+  # There is no approval record for this gate on purpose; the way through is a
+  # separate reviewable commit, and the refusal has to say so or it will be
+  # routed around instead.
+  assert_grep 'its OWN commit' "$case_dir/stderr" \
+    "merge-resolution-deleting: the refusal did not point at the separate-commit route"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "merge-resolution-deleting: gh-axi pr merge ran despite the deleting resolution"
+  pass "fm-pr-merge refuses a PR carrying a merge resolution that deleted a side"
+}
+
+test_an_additive_merge_resolution_merges() {
+  local case_dir rc
+  case_dir=$(make_case merge-resolution-additive)
+  add_gh_mocks "$case_dir" b222222222222222222222222222222222222222
+  : > "$case_dir/gh-axi.log"
+  build_conflicted_merge "$case_dir" ''
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/91 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merge-resolution-additive: a resolution that keeps both sides must merge"
+  assert_no_grep 'deletes content one side introduced' "$case_dir/stderr" \
+    "merge-resolution-additive: an additive resolution must not be reported as deleting"
+  assert_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "merge-resolution-additive: the merge should have proceeded"
+  pass "fm-pr-merge merges a PR whose merge resolution kept both sides"
+}
+
 test_attribution_in_a_commit_message_refuses
 test_attribution_in_the_pr_body_refuses
 test_attribution_runs_before_the_kept_tests_gate
 test_unreadable_pr_body_refuses_unverified
+test_a_deleting_merge_resolution_refuses
+test_an_additive_merge_resolution_merges
 
 # --- mock-completeness canary ------------------------------------------------
 #

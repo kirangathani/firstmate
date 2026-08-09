@@ -102,6 +102,12 @@ It is its own workflow rather than a job inside `ci.yml` precisely so that re-ru
 It is a required check and it refuses rather than passing whenever it cannot evaluate, so a green reading always means assertions were actually compared.
 It re-runs the base's assertions against the branch, so it never merges the base's source in and cannot see the two sets of source changes conflicting; merging the moved base forward is still what settles that.
 
+When that forward merge conflicts, resolve it yourself whenever the resolution keeps everything both sides brought - reordering, re-indenting, renumbering, and fusing two sentences into one are all yours to choose, and none of it needs asking.
+A resolution that DELETES either side's content is not yours to choose: keep both sides in the merge, then delete the content in its own commit so the decision is visible in the diff, and say what you dropped and why.
+Both halves are enforced rather than trusted - a `commit-msg` hook refuses the deleting resolution as you commit it, and `bin/fm-pr-merge.sh` refuses it again over the merges the PR would land, with no override on either.
+`docs/merge-resolution-gate.md` owns that contract and is honest about what the check cannot catch.
+Never rebase to resolve a conflict: pushing a rebased branch is denied outright, so the forward merge is the only supported path.
+
 ## Questions
 
 Open an issue, or talk to me on [Discord](https://discord.gg/Wsy2NpnZDu).
