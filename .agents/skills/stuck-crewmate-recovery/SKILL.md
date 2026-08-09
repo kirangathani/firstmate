@@ -35,6 +35,10 @@ Preserve its uncommitted changes and commits, keep the same task identity, and r
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
+A lost worker never runs its own cleanup, so its record keeps naming a pool slot the pool has since re-leased.
+`bin/fm-teardown.sh` proves ownership before it terminates anything and refuses when another task holds the slot, naming that task; `--force` cannot cross that line, because it authorizes discarding this task's work and never another's.
+That refusal is the answer, not an obstacle: reconcile the named holder first, and clear only the lost task's own records with `bin/fm-teardown.sh <id> --release-lost-slot`, which re-proves foreign ownership and touches no worktree.
+
 ## Live-endpoint escalation
 
 Escalate in order:
