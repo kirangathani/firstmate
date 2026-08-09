@@ -565,7 +565,7 @@ ROWS
 # claim an authorization the captain never gave.
 test_the_reason_is_bound_to_the_signature() {
   local home id out rec sig
-  id=reason-r2
+  id='reason-r2'
   home=$(make_home reason "$id")
   give_key "$home"
   crew_reports "$home" "$id" "done: implementation committed"
