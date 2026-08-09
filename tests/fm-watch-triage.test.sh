@@ -566,6 +566,81 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
 }
 
+# --- stale pane frozen at a provider usage-limit dialog: surfaced with the
+#     dialog evidence, outranking the provably-working absorb path -------------
+# 2026-08-02: two live crewmates froze at claude's usage-limit dialog and sat
+# undetected, because a frozen dialog pane and a pane legitimately waiting on a
+# long test run produce the same generic stale signal. The dialog phrases
+# matched here are the signatures recorded from live claude panes (the
+# 2026-07-14 poller's DIALOG set, re-observed in the 2026-08-02 incident); the
+# surrounding fixture lines are neutral filler, since the detector's contract
+# is phrase presence anywhere in the bounded capture, not pane layout.
+
+test_stale_limit_dialog_surfaced_despite_provably_working() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case limit-dialog-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-limited"
+  printf 'You have reached your usage limit.\nWhat do you want to do?\n> 1. Stop and wait for limit reset\n  2. Upgrade your plan\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/limited.meta"
+  # Non-terminal status, .seen-* primed so the signal scan does not pre-empt
+  # the stale path.
+  printf 'working: implementing\n' > "$state/limited.status"
+  sig=$(seen_sig "$state/limited.status"); printf '%s' "$sig" > "$state/.seen-limited_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$(cat "$capture_file")")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The crew's run-step reads as actively working: exactly the state that let
+  # the real freeze hide. The visible dialog must outrank it.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a limit-dialog stale despite a provably-working run-step"
+  grep -F "usage-limit dialog visible" "$out" >/dev/null || fail "limit-dialog stale did not carry the dialog evidence in its wake reason"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced on the dialog surface"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the dialog surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "usage-limit dialog" >/dev/null || fail "the dialog wake was not queued with its evidence"
+  unset FM_FAKE_CREW_STATE
+  pass "a stale pane showing the usage-limit dialog surfaces with the dialog evidence, outranking the provably-working absorb"
+}
+
+# A crew that DECLARED its limit wait (paused:) already told firstmate about
+# the dialog, so the dialog path must not re-escalate it; whatever the pause
+# machinery decides, the wake must not carry the dialog reason.
+test_stale_limit_dialog_respects_declared_pause() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case limit-dialog-paused); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-limitwait"
+  printf 'You have reached your usage limit.\nWhat do you want to do?\n> 1. Stop and wait for limit reset\n  2. Upgrade your plan\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/limitwait.meta"
+  printf 'paused: waiting for the 19:20 usage-limit reset\n' > "$state/limitwait.status"
+  sig=$(seen_sig "$state/limitwait.status"); printf '%s' "$sig" > "$state/.seen-limitwait_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$(cat "$capture_file")")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  # The pause machinery may absorb (watcher stays live) or surface a plain
+  # stale for a live gate; either way the dialog reason must not appear.
+  if ! wait_live "$pid" 20; then
+    wait "$pid" 2>/dev/null || true
+  fi
+  reap "$pid"
+  grep -F "usage-limit dialog" "$out" >/dev/null && fail "a declared limit pause was re-escalated with the dialog reason"
+  unset FM_FAKE_CREW_STATE
+  pass "a declared limit pause is never re-escalated through the dialog path"
+}
+
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
 # The key requirement: a crew with no running pipeline that has gone quiet (and is
 # not busy) has stopped - it may be done via interactive menus, waiting, or wedged.
@@ -1312,6 +1387,8 @@ test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
+test_stale_limit_dialog_surfaced_despite_provably_working
+test_stale_limit_dialog_respects_declared_pause
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

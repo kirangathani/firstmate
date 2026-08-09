@@ -51,6 +51,15 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Ship rules carry a commit-early cadence rule and scout setup carries an
+# incremental-report rule as scaffold text, not per-task advice: leaving that
+# cadence to hand-added brief notes measurably failed (2026-08-02, four
+# high-context crewmates in two sessions each holding a large uncommitted diff
+# behind healthy-looking signals), so the contract every crewmate reads now
+# carries it structurally. Uncommitted work survives context compaction on
+# disk, but the worker loses its memory of what the diff means and worktree
+# recycling then discards the diff, so only committed (ship) or written-down
+# (scout) work is durable.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -271,6 +280,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
+Write findings into the report file as you go rather than composing it at the end, so an interruption or context compaction cannot erase what you have learned.
 
 # Rules
 1. Never push to any remote and never open a PR.
@@ -482,6 +492,10 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Commit early and often on your branch: whenever a coherent unit of work builds or passes,
+   commit it before moving on, and never sit on one large uncommitted diff. Uncommitted changes
+   are invisible to firstmate's monitoring and are discarded when this worktree is recycled;
+   commits survive any interruption, restart, or context compaction.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

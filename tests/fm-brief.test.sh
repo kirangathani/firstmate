@@ -404,6 +404,31 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# The commit-early cadence rule is structural scaffold text, not per-task
+# advice (see the header's rationale: hand-added cadence notes measurably
+# failed, 2026-08-02). Every ship mode must carry it; scouts, whose worktree
+# is scratch by contract, carry the incremental-report rule instead.
+test_commit_cadence_is_scaffold_text() {
+  local home id proj brief
+  home="$TMP_ROOT/cadence-home"
+  write_registry "$home"
+  for id_proj in "brief-cadence-n1:no-registry-proj" "brief-cadence-d2:direct-proj" "brief-cadence-l3:local-proj"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1 \
+      || fail "fm-brief.sh $id $proj exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_grep "Commit early and often" "$brief" "$id: ship brief lost the commit-early cadence rule"
+    assert_grep "discarded when this worktree is recycled" "$brief" "$id: ship brief lost the worktree-recycling justification"
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-cadence-s4 no-registry-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout cadence scaffold exited non-zero"
+  brief="$home/data/brief-cadence-s4/brief.md"
+  assert_grep "Write findings into the report file as you go" "$brief" "scout brief lost the incremental-report rule"
+  assert_no_grep "Commit early and often" "$brief" "scout brief wrongly carries the ship commit-cadence rule (its worktree is scratch)"
+  pass "fm-brief: commit-early cadence is scaffold text in every ship mode; scouts carry the incremental-report rule"
+}
+
 # The lockstep property finding 3 is about: bin/fm-brief.sh and bin/fm-spawn.sh
 # must refuse the same combinations with the same words, so a brief can never be
 # scaffolded for a combination spawn will then refuse. They drifted while each
@@ -442,3 +467,4 @@ test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_commit_cadence_is_scaffold_text
