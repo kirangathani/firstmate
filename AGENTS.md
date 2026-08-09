@@ -283,6 +283,7 @@ With `yolo` off, the captain owns ask-user findings, PR merges, and local-only m
 With `yolo` on, firstmate decides those routine gates and merges only green or otherwise approved work, but still escalates destructive, irreversible, and security-sensitive choices.
 Never merge a red PR.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
+Both refuse a landing whose commit messages or PR description carry AI attribution, with no override flag and none for `yolo` either, and `docs/attribution-gate.md` owns that contract including the exposure it cannot close.
 `bin/fm-pr-merge.sh` also gates every merge on `bin/fm-assert-tests-kept.sh`: a test assertion the base already had that is missing or failing on the PR branch is a hard refusal, even under `yolo`.
 A base assertion the gate could not execute at all against the branch is reported as unexecuted, and it refuses only for a project the captain has enabled with a `data/exec-gate/<project>` marker; otherwise it is informational.
 A base assertion the gate could not compare because the base's own test named it differently across two runs is reported as unstable and always refuses; that is a defect in the base's test, so the fix is an ordinary test-fix task naming the assertion with a constant string, never a captain decision.
