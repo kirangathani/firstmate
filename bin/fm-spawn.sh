@@ -1125,14 +1125,38 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
+
+# AI-attribution commit-msg hook (docs/attribution-gate.md). Installed for every
+# kind and every harness, because the rule binds the artefact, not the worker's
+# runtime. Git hooks are per-repository, so this is one idempotent write per
+# project rather than per task. A foreign hook is left alone (exit 3) and a
+# failure is only ever a notice: the merge gate is what actually holds the line,
+# so nothing here may cost a spawn.
+attr_hook_out=$("$FM_ROOT/bin/fm-install-commit-hook.sh" "$WT" 2>&1) || true
+case "$attr_hook_out" in
+  *'attribution-hook: installed'*) ;;
+  '') echo "note: could not install the attribution commit-msg hook for $WT; the merge gate still enforces it" >&2 ;;
+  *) printf '%s\n' "$attr_hook_out" >&2 ;;
+esac
+
 if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"
       # --claude keeps stdout empty on deny; Claude Code ignores a PreToolUse
       # deny whose stdout is non-empty (docs/arm-pretool-check.md).
+      #
+      # "attribution" turns OFF the three attribution strings Claude Code would
+      # otherwise be instructed to append. Schema read from the installed
+      # binary's own settings schema (claude 2.1.226): commit and pr are the
+      # attribution TEXT and "Empty string hides attribution"; sessionUrl
+      # "Set to false to omit the Claude-Session trailer and PR-body link".
+      # This removes the GENERATOR, which is cheap and worth doing, but it is
+      # not the control: it only covers this one harness and a model can still
+      # type the trailer by hand. docs/attribution-gate.md says which layer is
+      # actually load-bearing.
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"$(json_escape "$FIXCHECK") --claude"}]}]}}
+{"attribution":{"commit":"","pr":"","sessionUrl":false},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"$(json_escape "$FIXCHECK") --claude"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;

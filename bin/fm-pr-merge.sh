@@ -8,6 +8,14 @@
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
 #
+# AI-attribution gate: before any other gate, the PR's commit messages and its
+# description are scanned for AI attribution, and a finding is a hard refusal
+# with no override flag. bin/fm-attribution-lib.sh owns the patterns and
+# docs/attribution-gate.md owns the contract, including what the gate cannot
+# reach. It runs first because it is one cheap read and the test-keep gate below
+# is the expensive one. Like that gate this is firstmate-side, so it protects
+# every repo this fleet ships to.
+#
 # Test-keep gate: after recording and before merging, bin/fm-assert-tests-kept.sh
 # must confirm every test assertion present on the authoritative base is still
 # present (check 1, by name) and still passing against the branch's code
@@ -302,6 +310,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-supersession-lib.sh"
 # shellcheck source=bin/fm-ci-waiver-lib.sh
 . "$SCRIPT_DIR/fm-ci-waiver-lib.sh"
+# shellcheck source=bin/fm-attribution-lib.sh
+. "$SCRIPT_DIR/fm-attribution-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -506,7 +516,82 @@ grep -qxF "pr=$URL" "$META" || {
 
 KEPT_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-kept.XXXXXX")
 CHECKS_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-checks.XXXXXX")
-trap 'rm -f "$KEPT_OUT" "$CHECKS_ERR"' EXIT
+ATTR_JSON=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-attr.XXXXXX")
+ATTR_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-attrerr.XXXXXX")
+trap 'rm -f "$KEPT_OUT" "$CHECKS_ERR" "$ATTR_JSON" "$ATTR_ERR"' EXIT
+
+# --- AI-attribution gate (contract in docs/attribution-gate.md) ---------------
+# The captain's standing rule is that no AI attribution leaves this machine, and
+# THIS is where that rule is actually enforced for a PR: firstmate runs it, over
+# the artefact the worker already produced, and the worker cannot reach it. The
+# commit-msg hook bin/fm-spawn.sh installs into the task's repository catches the
+# same thing earlier and more cheaply, but it is skippable with --no-verify, so
+# it is fast feedback rather than the boundary.
+#
+# It runs FIRST, ahead of the kept-tests gate, because it is one cheap API read
+# and that gate is the dominant cost of landing a PR. A PR that will be refused
+# for attribution should not spend 20-35 minutes re-running the base's tests to
+# find that out.
+#
+# Both halves of the artefact are read, because two different paths produce them:
+# the branch's commit messages (which a squash carries into the default branch's
+# history) and the PR description (which is published on GitHub the moment the
+# PR is opened, and which no gate can un-publish - see the doc).
+set +e
+gh pr view "$URL" --json body,commits > "$ATTR_JSON" 2> "$ATTR_ERR"
+attr_read_rc=$?
+set -e
+if [ "$attr_read_rc" -ne 0 ]; then
+  cat "$ATTR_ERR" >&2
+  echo "error: could not read the PR's body and commits (gh exit $attr_read_rc, see above); refusing to merge unverified" >&2
+  echo "error: restore GitHub access so the attribution gate can read them, then re-run fm-pr-merge.sh" >&2
+  exit 1
+fi
+
+attr_findings=""
+attr_dirty=0
+attr_scan() {  # <label>; text on stdin
+  local found rc=0
+  found=$(fm_attribution_scan_stdin "$1") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    attr_dirty=1
+    attr_findings="${attr_findings}${found}"$'\n'
+  fi
+}
+
+if ! jq -e . "$ATTR_JSON" >/dev/null 2>&1; then
+  echo "error: the PR's body and commits did not come back as readable JSON; refusing to merge unverified" >&2
+  exit 1
+fi
+
+attr_scan 'PR body' <<EOF_BODY
+$(jq -r '.body // ""' "$ATTR_JSON")
+EOF_BODY
+
+attr_commits=$(jq -r '.commits | length' "$ATTR_JSON" 2>/dev/null || echo 0)
+attr_i=0
+while [ "$attr_i" -lt "$attr_commits" ]; do
+  attr_label=$(jq -r --argjson i "$attr_i" '"commit " + (.commits[$i].oid // "?" | .[0:12])' "$ATTR_JSON")
+  attr_scan "$attr_label" <<EOF_COMMIT
+$(jq -r --argjson i "$attr_i" '.commits[$i] | (.messageHeadline // "") + "\n" + (.messageBody // "")' "$ATTR_JSON")
+EOF_COMMIT
+  attr_i=$((attr_i + 1))
+done
+
+if [ "$attr_dirty" -ne 0 ]; then
+  {
+    echo "error: this PR carries AI attribution; refusing to merge it onto the default branch"
+    printf '%s' "$attr_findings" | while IFS= read -r attr_line; do
+      [ -n "$attr_line" ] && echo "error:   $attr_line"
+    done
+    fm_attribution_explain
+    echo "Have the worker rewrite the offending commit message(s) and force-update the"
+    echo "branch, and edit the PR description, then re-run fm-pr-merge.sh. A PR body"
+    echo "finding is already public on GitHub; editing it is damage control, not"
+    echo "prevention (docs/attribution-gate.md)."
+  } >&2
+  exit 1
+fi
 
 # --- the premise behind check 2's identical-file skip (contract in this
 # --- script's header) ---------------------------------------------------------
