@@ -421,8 +421,16 @@ test_checkpoint_is_gated_on_the_session_lock() {
 
 # --- bin/fm-statusline.sh ----------------------------------------------------
 
+# FM_STATUSLINE_BASE is scrubbed for the invocation, not merely left unset here:
+# bin/fm-statusline.sh reads that env var BEFORE config/statusline-base, so an
+# operator who has their own base command configured - and every crewmate pane,
+# because bin/fm-spawn.sh forwards the dispatching home's setting into the worker
+# environment - would otherwise run the real base command instead of each
+# fixture's, and the composition assertions below would assert nothing.
+# test_statusline_base_reaches_a_worktree_that_has_no_config_dir sets the var on
+# purpose and therefore does not use this helper.
 run_statusline() {  # <home>
-  printf '{"session_id":"test"}' | FM_HOME="$1" "$STATUSLINE" 2>&1
+  printf '{"session_id":"test"}' | env -u FM_STATUSLINE_BASE FM_HOME="$1" "$STATUSLINE" 2>&1
 }
 
 test_statusline_reports_fleet_control() {
