@@ -567,6 +567,33 @@ SH
   pass "fm-statusline: FM_STATUSLINE_BASE reaches a task worktree that has no config dir of its own"
 }
 
+test_statusline_fixtures_are_isolated_from_an_inherited_base() {
+  local home fixture ambient out
+  # The regression: run_statusline used to inherit FM_STATUSLINE_BASE, which
+  # bin/fm-statusline.sh resolves BEFORE config/statusline-base. On any machine
+  # whose operator has a base status line configured - and in every crewmate
+  # pane, because bin/fm-spawn.sh forwards the dispatching home's setting into
+  # the worker environment - the real base command ran instead of the fixture's,
+  # and the composition cases above silently asserted the wrong command's
+  # output. This case makes that leak fail everywhere instead of only on a
+  # machine that happens to have the setting, by exporting a hostile value for
+  # the duration of one run.
+  home="$TMP_ROOT/statusline-inherited-base"
+  fixture="$TMP_ROOT/statusline-fixture-base.sh"
+  ambient="$TMP_ROOT/statusline-ambient-base.sh"
+  mkdir -p "$home/state"
+  install_statusline_base "$home" "$fixture"
+  printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "ambient line\\n"\n' > "$ambient"
+  chmod +x "$ambient"
+  printf '%s\n' "$$" > "$home/state/.lock"
+
+  out=$(FM_STATUSLINE_BASE="$ambient" run_statusline "$home")
+  assert_contains "$out" "base line" "the fixture's base command must be the one that runs"
+  assert_not_contains "$out" "ambient line" "an inherited FM_STATUSLINE_BASE must not reach the fixture's status line"
+  assert_contains "$out" "in control of fleet" "the fleet line must still be printed"
+  pass "fm-statusline: the fixtures are isolated from an inherited FM_STATUSLINE_BASE"
+}
+
 test_statusline_other_branch_names_a_remedy() {
   local home other out
   home="$TMP_ROOT/statusline-other-remedy"
@@ -635,6 +662,7 @@ test_statusline_reports_fleet_control
 test_statusline_is_silent_and_writes_nothing_without_fleet_state
 test_statusline_composes_with_the_operators_own_status_line
 test_statusline_base_reaches_a_worktree_that_has_no_config_dir
+test_statusline_fixtures_are_isolated_from_an_inherited_base
 test_statusline_other_branch_names_a_remedy
 test_statusline_is_wired_into_claude_settings
 test_ownership_walk_has_exactly_one_implementation
