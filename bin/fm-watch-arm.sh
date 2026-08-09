@@ -330,31 +330,37 @@ wait_for_healthy_successor() {
 # a fleet that had been unsupervised for 27 minutes, and a message that means
 # both means neither.
 report_cycle_end() {
-  local age
-  age=$(fm_path_age "$BEAT")
+  local age note lapse fresh
+  # fm_path_age answers a MISSING path with a 999999 sentinel. That is a real
+  # answer to "is this past the grace" and a nonsense answer to "how old is it",
+  # so both phrasings are built here, once, and no branch below is free to print
+  # the sentinel as an age. An 11-day-old beacon in a home minutes old reads as a
+  # broken clock rather than the missing beacon it is, and a supervision report
+  # nobody believes is as useless as one that never fires.
+  if [ -e "$BEAT" ]; then
+    age=$(fm_path_age "$BEAT")
+    note="beacon ${age}s"
+    lapse="the beacon has not moved for ${age}s, past the ${GRACE}s grace"
+    fresh="the beacon moved ${age}s ago, inside the ${GRACE}s grace"
+  else
+    note="no beacon"
+    lapse="no liveness beacon at all"
+    fresh="there is no beacon to read"
+  fi
   case "$(cycle_outcome)" in
     wake-delivered)
       # Not a failure and not a no-op: the cycle did its job. The reason line
       # went to the arm that owns this watcher, and the wake itself is durable,
       # so this arm's only remaining duty is to say the cycle is over.
-      echo "watcher: cycle-complete - the watcher this arm followed delivered a wake and exited (beacon ${age}s); drain state/.wake-queue and re-arm"
+      echo "watcher: cycle-complete - the watcher this arm followed delivered a wake and exited (${note}); drain state/.wake-queue and re-arm"
       return 0
       ;;
     lapsed)
-      # fm_path_age answers a missing path with a 999999 sentinel, which is a
-      # real answer to "is this past the grace" and a nonsense answer to "how
-      # old is it". Never print the sentinel as an age: the number ends up in a
-      # supervision report, and an 11-day beacon in a home minutes old reads as
-      # a broken clock rather than the missing beacon it is.
-      if [ -e "$BEAT" ]; then
-        echo "watcher: FAILED - supervision LAPSED: no live watcher and the beacon has not moved for ${age}s, past the ${GRACE}s grace - the fleet is unsupervised; re-arm with --restart"
-      else
-        echo "watcher: FAILED - supervision LAPSED: no live watcher and no liveness beacon at all - the fleet is unsupervised; re-arm with --restart"
-      fi
+      echo "watcher: FAILED - supervision LAPSED: no live watcher and ${lapse} - the fleet is unsupervised; re-arm with --restart"
       return 1
       ;;
   esac
-  echo "watcher: FAILED - cycle ended without an actionable reason - no wake was produced and no successor took over, though the beacon is only ${age}s old (grace ${GRACE}s), so supervision was alive until this close; re-arm"
+  echo "watcher: FAILED - cycle ended without an actionable reason - no wake was produced and no successor took over, though ${fresh}, so supervision was alive until this close; re-arm"
   return 1
 }
 
