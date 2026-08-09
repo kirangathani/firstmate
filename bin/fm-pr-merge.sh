@@ -16,6 +16,21 @@
 # is the expensive one. Like that gate this is firstmate-side, so it protects
 # every repo this fleet ships to.
 #
+# Merge-resolution gate: after the attribution gate and before the expensive
+# test-keep gate, every merge commit this PR would land is replayed from its own
+# two parents and their merge base, and a resolution that DELETED content one
+# side introduced is a hard refusal. bin/fm-merge-additive-lib.sh owns the
+# verdict and docs/merge-resolution-gate.md owns the contract, including the
+# measured evidence and what the check cannot catch.
+# It has no approval record and no override flag, and does not need either: a
+# deliberate deletion is still allowed, it just may not hide inside a conflict
+# resolution. Keep both sides in the merge, then delete the content in its own
+# commit - this gate reads only merge commits, so that lands, and the deletion
+# shows up in the PR diff as a decision somebody can review.
+# This does NOT overlap the test-keep gate below. That one catches a resolution
+# that ate the base's asserted BEHAVIOR by running the base's own tests; this one
+# catches deleted CONTENT no test asserts, which is what a suite is blind to.
+#
 # Test-keep gate: after recording and before merging, bin/fm-assert-tests-kept.sh
 # must confirm every test assertion present on the authoritative base is still
 # present (check 1, by name) and still passing against the branch's code
@@ -312,6 +327,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-ci-waiver-lib.sh"
 # shellcheck source=bin/fm-attribution-lib.sh
 . "$SCRIPT_DIR/fm-attribution-lib.sh"
+# shellcheck source=bin/fm-merge-additive-lib.sh
+. "$SCRIPT_DIR/fm-merge-additive-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -647,6 +664,102 @@ if [ "$attr_dirty" -ne 0 ]; then
     echo "prevention (docs/attribution-gate.md)."
   } >&2
   exit 1
+fi
+
+# --- merge-resolution gate (contract in docs/merge-resolution-gate.md) --------
+# Every merge commit this PR would land carried a conflict resolution somebody
+# made. This replays each one from its own parents and refuses when the
+# resolution deleted content one side introduced.
+#
+# It sits here for the same reason the attribution gate sits above it: the read
+# is git-local and cheap, and a PR that will be refused should not first spend
+# the 20-35 minutes the kept-tests gate costs.
+#
+# It does NOT overlap the kept-tests gate and must not be read as covering it.
+# That gate catches a resolution that ate the base's asserted BEHAVIOR, by
+# running the base's own tests. This one catches deleted CONTENT that no test
+# asserts - documentation, comments, an evidence section - which is exactly what
+# a test suite is blind to.
+#
+# A local copy that does not resolve is noted rather than refused, the same
+# reasoned exception the attribution gate above makes and for the same reason:
+# bin/fm-assert-tests-kept.sh refuses that condition outright two gates below, so
+# a merge whose local copy is missing cannot proceed whatever this gate says.
+if [ -n "$ATTR_WT" ] && [ -n "${attr_base:-}" ] && [ -n "${attr_compare:-}" ]; then
+  res_merges=$(git -C "$ATTR_WT" rev-list --merges "$attr_base..$attr_compare" 2>/dev/null) || {
+    echo "error: could not enumerate the merge commits $attr_base..$attr_compare would land; refusing to merge unverified" >&2
+    exit 1
+  }
+  res_dirty=0
+  res_findings=
+  res_unverifiable=
+  while IFS= read -r res_sha; do
+    [ -n "$res_sha" ] || continue
+    # Parents are read one ref at a time rather than with `set --`, which would
+    # clobber this script's own positional parameters - they are still needed
+    # further down, where the caller's extra arguments are forwarded to
+    # `gh-axi pr merge`.
+    #
+    # An octopus merge has no two-side verdict, so it is reported as unverifiable
+    # rather than answered wrongly. Git cannot produce a conflicted octopus
+    # commit, so this is a completeness case, not an expected one.
+    res_p1=$(git -C "$ATTR_WT" rev-parse --verify --quiet "$res_sha^1" 2>/dev/null || true)
+    res_p2=$(git -C "$ATTR_WT" rev-parse --verify --quiet "$res_sha^2" 2>/dev/null || true)
+    res_p3=$(git -C "$ATTR_WT" rev-parse --verify --quiet "$res_sha^3" 2>/dev/null || true)
+    if [ -z "$res_p1" ] || [ -z "$res_p2" ] || [ -n "$res_p3" ]; then
+      res_unverifiable="$res_unverifiable  ${res_sha:0:12} is not a two-parent merge, so the two-side verdict does not apply"$'\n'
+      continue
+    fi
+    res_base=$(git -C "$ATTR_WT" merge-base "$res_p1" "$res_p2" 2>/dev/null | head -1 || true)
+    set +e
+    res_out=$(fm_additive_scan "$ATTR_WT" "$res_base" "$res_p1" "$res_p2" "$res_sha")
+    res_rc=$?
+    set -e
+    if [ "$res_rc" -eq 2 ]; then
+      res_unverifiable="$res_unverifiable  ${res_sha:0:12} could not be scanned"$'\n'
+      continue
+    fi
+    [ "$res_rc" -eq 1 ] || continue
+    res_dirty=1
+    res_findings="$res_findings$(printf 'merge %s:\n' "${res_sha:0:12}")"$'\n'
+    res_findings="$res_findings$res_out"$'\n'
+  done <<EOF_RES_SHAS
+$res_merges
+EOF_RES_SHAS
+
+  # An unverifiable merge is reported and does NOT block. This gate is a content
+  # check over history that already exists; the merges it cannot read are the
+  # octopus shape git cannot produce conflicted, and treating them as findings
+  # would refuse a merge for a shape that carries no resolution decision.
+  if [ -n "$res_unverifiable" ]; then
+    echo "note: the merge-resolution gate could not verify every merge this PR lands:" >&2
+    printf '%s' "$res_unverifiable" >&2
+  fi
+
+  if [ "$res_dirty" -ne 0 ]; then
+    {
+      echo "error: a merge resolution on this branch deletes content one side introduced; refusing to merge"
+      printf '%s' "$res_findings" | while IFS= read -r res_line; do
+        [ -n "$res_line" ] && echo "  $res_line"
+      done
+      echo
+      fm_additive_explain "this PR's branch" "the base it merged in"
+      echo
+      echo "There is no approval record and no override flag for this gate, because"
+      echo "it never needs one. If (a) is right, have the worker merge the base"
+      echo "forward again and redo the resolution keeping both sides. If (b) is"
+      echo "right - the captain's decision, not the worker's - the deletion still"
+      echo "does not belong inside a conflict resolution: have the worker keep both"
+      echo "sides in the merge and then delete the content in its OWN commit, with"
+      echo "its own message. This gate only reads merge commits, so a deliberate"
+      echo "deletion passes it, and the PR diff shows the decision instead of"
+      echo "burying it in a resolution nobody reviews. Never rebase to escape the"
+      echo "refusal: a rebased branch cannot be pushed at all."
+    } >&2
+    exit 1
+  fi
+else
+  echo "note: task $ID has no resolvable local copy, so the merge-resolution gate did not run; the kept-tests gate below refuses that same condition, so this merge cannot proceed on it" >&2
 fi
 
 # --- the premise behind check 2's identical-file skip (contract in this
