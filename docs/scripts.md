@@ -84,6 +84,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-commit-msg-check.sh` | Refuse a commit message carrying AI attribution; the git `commit-msg` hook target    |
 | `fm-install-commit-hook.sh` | Install that hook into the repository behind a task worktree, never clobbering a project's own |
 | `fm-assert-tests-kept.sh` | Report the base's test assertions the branch under review lost, broke, could not execute at all, or named unstably across two runs (its header owns the finding classes and exit codes) |
+| `fm-reverify-base.sh`   | Re-verify a branch against a base that moved by running only the base test files that differ, rendering verified, nothing-to-verify and could-not-verify as three distinct outcomes; a thin caller of `fm-assert-tests-kept.sh`, run as CI's required `Base assertions re-verified` check |
+| `fm-reverify-premise.sh` | Establish, from this head's own check runs, whether its behaviour suite is verified green, waived, or unreadable - the premise `fm-reverify-base.sh`'s skip rests on |
 | `fm-test-exec-lib.sh`   | Shared per-language test runners (shell, pytest, vitest, jest) and scratch-tree environment lifecycle that `fm-assert-tests-kept.sh` check 2 drives |
 | `fm-supersession-lib.sh` | Single matcher for the captain-approved supersession record, shared by the merge gate that enforces it and the viewer that displays it (`fm-pr-merge.sh`'s header owns the entry grammar) |
 | `fm-ci-waiver.sh`        | Generate, publish, sign, and (as `waive`) issue from the worker's own request the CI testing waiver, refusing to sign for a task the captain did not dispatch with a CI skip or for a repository that task does not push to |

@@ -447,6 +447,11 @@ if [ "$HAS_BEHIND" = 1 ]; then
   printf 'STALE BASE REMEDY: steer each worker above to do exactly the merge named on its line, then re-verify that branch.\n'
   # shellcheck disable=SC2016 # The backticked flag is literal text, not an expansion.
   printf 'STALE BASE REMEDY: Never rebase - a global settings rule denies `git push --force*`, so a rebased branch cannot be pushed at all.\n'
+  # A fast read BEFORE that merge, never instead of it: the CI check re-runs the
+  # base's own assertions against the branch without re-driving the suite, but
+  # it never merges the base's SOURCE in, so it cannot see the two sets of
+  # changes conflicting. The merge above is still what settles that.
+  printf "STALE BASE REMEDY: for a fast first read on a branch that has an open PR, re-run its 'Base re-verification' workflow (gh run rerun <run-id>) - it re-fetches the base and re-runs only the base test files that differ, so it needs no new push. It answers whether the base's assertions still hold, NOT whether the two sets of source changes integrate; the merge above is still required.\n"
 fi
 if [ "$HAS_UNKNOWN" = 1 ]; then
   printf 'STALE BASE REMEDY: undeterminable is not clean - resolve each one above before treating any CI result on that branch as a verdict on the branch.\n'
