@@ -10,6 +10,7 @@
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
+#                 "FLEET_SYNC: STALE BASE[ REMEDY| UNDETERMINABLE]: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
@@ -150,6 +151,11 @@ fleet_sync_relay_filtered_output() {
       *': skipped: no origin remote') ;;
       *': skipped:'*) echo "FLEET_SYNC: $line" ;;
       *': STUCK:'*) echo "FLEET_SYNC: $line" ;;
+      # bin/fm-stale-base.sh's whole report, raised when a clone's base actually
+      # moved: which open branches now have CI measured against a base that no
+      # longer exists, and the remedy. Every line of that report carries this
+      # marker so the finding and its remedy cannot be relayed apart.
+      'STALE BASE'*) echo "FLEET_SYNC: $line" ;;
       *': recovered:'*) echo "FLEET_SYNC: $line" ;;
     esac
   done < "$tmp"
