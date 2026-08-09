@@ -83,6 +83,38 @@ test_live_lock_allows_fleet_command_even_with_stale_beacon() {
   pass "continuity gate classifies the lock by live PID identity rather than beacon age"
 }
 
+test_non_owning_session_is_exempt_but_the_lock_holder_is_not() {
+  local rival rc=0
+  # The deny's only remedy is bin/fm-watch-arm.sh, which correctly declines to
+  # arm for a session that does not hold the SESSION lock (state/.lock), and the
+  # command policy allows no other fleet script. Without this exemption a
+  # non-owner is wedged out of every fleet command with no in-session escape.
+  # bin/fm-turnend-guard.sh has exactly this exemption; the two hooks fire on the
+  # same predicate and must agree.
+  rm -rf "$STATE/.watch.lock"
+  sleep 300 &
+  rival=$!
+  printf '%s\n' "$rival" > "$STATE/.lock"
+  run_command 'bin/fm-crew-state.sh task' || rc=$?
+  kill "$rival" 2>/dev/null || true
+  wait "$rival" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "a session that does not hold the session lock must be allowed through, got exit $rc: $(cat "$ERR")"
+  [ ! -s "$ERR" ] || fail "the non-owner exemption wrote stderr: $(cat "$ERR")"
+
+  # The session that DOES hold the lock is the one that should repair
+  # supervision, so the deny still stands for it.
+  printf '%s\n' "$$" > "$STATE/.lock"
+  expect_deny "lock-holding session" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
+
+  # A dead or absent holder also still denies: nobody is supervising the
+  # in-flight work, and this session is the one that should take the lock.
+  printf '%s\n' 999999999 > "$STATE/.lock"
+  expect_deny "dead lock holder" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
+  rm -f "$STATE/.lock"
+  expect_deny "absent session lock" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
+  pass "continuity gate exempts a non-owning session while keeping the deny for the session that owns the fleet"
+}
+
 test_child_worktree_and_malformed_input_fail_open() {
   local child="$TMP_ROOT/child" rc=0
   rm -rf "$STATE/.watch.lock"
@@ -116,5 +148,6 @@ test_claude_hook_registration_preserves_stop_backstop() {
 
 test_gate_scope_and_recovery_exceptions
 test_live_lock_allows_fleet_command_even_with_stale_beacon
+test_non_owning_session_is_exempt_but_the_lock_holder_is_not
 test_child_worktree_and_malformed_input_fail_open
 test_claude_hook_registration_preserves_stop_backstop

@@ -33,6 +33,10 @@ The process-identity primitive behind that match must not drift for a live proce
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
 
+It then requires this session to hold the home's SESSION lock, `state/.lock`, resolved by `bin/fm-session-lock-lib.sh` and distinct from the `state/.watch.lock` watcher singleton above.
+When another live session holds it, the guard exits 0 silently, mirroring the read-only advisory mode `bin/fm-guard.sh` already has: that session cannot arm a watcher at all, because `bin/fm-watch-arm.sh` declines from there, so a blind-turn alarm would be a hard stop-hook error on nearly every turn demanding supervision work it must not do.
+An absent lock or a dead holder still blocks, because nobody is supervising the in-flight work and this session is the one that should take the lock and arm.
+
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 because it cannot safely read loop-guard fields.
@@ -181,6 +185,6 @@ The command half of the identity comes from `/proc/<pid>/cmdline` rather than a 
 ## Tests
 
 `tests/fm-watcher-lock.test.sh` owns the regression for the process-identity primitive the match depends on: one live pid yields a byte-identical identity across repeated reads, the `/proc/<pid>/stat` parse survives a `comm` containing a space or a `)` on both synthetic lines and a real process, the `lstart` form stays the fallback when `/proc/<pid>/stat` is unreadable and stays locale-invariant there, a record written in the pre-change `lstart` format still matches its live owner, and dead, recycled, and start-marker-mismatched pids are all still rejected.
-`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the session-lock exemption (silent for a live rival owner, still alarming for this session and for a dead or absent holder), Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.

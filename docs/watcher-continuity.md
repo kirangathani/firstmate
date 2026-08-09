@@ -29,10 +29,17 @@ They remain the final backstop rather than the normal continuity mechanism.
 
 ## Arm-layer cycle contract
 
-`bin/fm-watch-arm.sh` never returns a clean empty success.
+`bin/fm-watch-arm.sh` has exactly four outcomes, and only one of them is a clean empty success.
 An actionable child output returns that reason normally.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 An attached arm follows verified identity-matched successors and reports the same typed failure if that chain ends without one.
+The fourth outcome is the session-lock refusal: when this home's session lock (`state/.lock`) is held by another live session, the arm prints one `watcher: read-only ... not arming` line and exits 0 without an actionable line.
+That is a correct refusal, not a failure, so both close classifiers - `classifyArmClose` in `.opencode/plugins/fm-primary-watch-arm.js` and `classifyClose` in `.pi/extensions/fm-primary-pi-watch.ts` - match that line explicitly and neither retries it nor reports `watcher: FAILED`.
+Without that case an adapter whose pre-check saw ownership change between the check and the arm's own gate would surface a supervision failure for correct behavior.
+The verdict is carried through the restoration wrappers as well, not just the classifiers: a stand-down is a terminal outcome distinct from an unready successor, so `restoreAfterActionableClose` stops in both adapters and the original actionable wake is delivered with a `watcher: read-only ... stood down` note rather than a failure.
+The note still names the reason, because the session does need to know supervision moved; it simply is not a `watcher: FAILED`, and nothing retries it.
+The genuine failure paths - an unresolved ownership resolver, an unready successor, a successor that will not retire - are unchanged and still retry and still report, and the trailing `after N retries` sentence is now emitted only on a path that actually retried.
+`bin/fm-watch-checkpoint.sh`, Codex's bounded foreground protocol, applies the same gate with the same three-way decision and the same wording, because it is the second entry point that takes the watcher singleton.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
@@ -47,6 +54,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 `tests/fm-pi-watch-extension.test.sh` simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, proves an in-flight `read-only` refusal is not served to a request made after the lock was acquired, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state and preserves the existing Stop registration.
+`tests/fm-session-lock-gate.test.sh` owns the session-lock gate itself: the `bin/fm-lock.sh ownership` verdicts and their read-only contract, the arm and checkpoint refusing for a live rival owner while still arming for an absent, dead, or pid-reused holder, ownership recognized several process levels down, the status line, and an assertion that only `bin/fm-session-lock-lib.sh` implements the walk.
 
 ## OpenCode arm coalescing: measured behavior, 2026-08-03 and 2026-08-04
 
@@ -94,7 +102,8 @@ It armed in 3 of 3 runs, and the control with no `.meta` file at any point corre
 The reason is structural.
 `shouldArm` is the last check in `beginArm` and is fully synchronous, so its answer is computed after every await has already resolved, at the latest possible instant.
 A coalesced caller therefore receives an answer that a launch starting at that same instant would also produce.
-`read-only` is broken for the opposite reason: `sessionOwnsLock` reads the lock file at the START of a long `ps` ancestry walk, so its answer can be older than the coalescing that inherits it.
+`read-only` is broken for the opposite reason: the ownership check reads the lock at the START of a long ancestry walk, so its answer can be older than the coalescing that inherits it.
+That check was the plugin's own `sessionOwnsLock` when this was measured; it is now `resolveSessionOwnership`, which delegates the same walk to `bin/fm-lock.sh ownership`, so the read-to-answer distance it describes is unchanged.
 The gap being fixed here is that distance between reading a precondition and answering with it, and `shouldArm` has no such distance.
 
 Two consequences worth stating, because the shape looks identical from a distance and will invite the same fix again.
