@@ -445,7 +445,7 @@ sync_and_sweep() {  # <project-dir>
   sync_project "$1"
   [ "$SYNC_BASE_MOVED" = yes ] || return 0
   [ -x "$FM_ROOT/bin/fm-stale-base.sh" ] || return 0
-  "$FM_ROOT/bin/fm-stale-base.sh" --project "$1" || true
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-stale-base.sh" --project "$1" || true
 }
 
 if [ $# -eq 1 ]; then

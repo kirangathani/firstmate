@@ -340,6 +340,64 @@ test_already_current_unchanged() {
   pass "already-current clone is reported unchanged"
 }
 
+# --- the stale-base sweep on a moved base ------------------------------------
+#
+# When a clone's origin/<default> actually moves, every OTHER open branch in this
+# home is now measuring CI against a base that no longer exists. This is the
+# IMMEDIATE half of that guarantee (bin/fm-stale-base.sh owns the predicate, and
+# bin/fm-turnend-guard.sh is the backstop): the sweep runs here because the fetch
+# has just happened, so the answer is fresh by construction. It must stay silent
+# when the base did not move, or a routine sync would print the alarm forever.
+
+# add_open_branch <home> <name> <id>: publish a task branch off the clone's
+# current origin/main and record the task meta fm-spawn would write.
+add_open_branch() {
+  local home=$1 name=$2 id=$3 clone wt
+  clone="$home/projects/$name"
+  wt="$home/wt-$id"
+  mkdir -p "$home/state"
+  git -C "$clone" worktree add -q -b "fm/$id" "$wt" origin/main
+  commit_file "$wt" "$id.txt" work "work on $id"
+  git -C "$wt" push -q -u origin "fm/$id"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$wt" \
+    "project=$clone" \
+    "harness=echo" \
+    "kind=ship" \
+    "mode=direct-PR" \
+    "yolo=off"
+}
+
+test_moved_base_names_the_now_stale_open_branches() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" staleA)
+  add_open_branch "$home" staleA sibA
+  advance_origin "$home" staleA C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "staleA: synced" "the clone must still report its own sync"
+  assert_contains "$out" "STALE BASE: sibA" "a moved base must name the sibling it left behind"
+  assert_contains "$out" "merge origin/main into fm/sibA and re-verify" \
+    "the sweep must name the remedy, not just the problem"
+  pass "fm-fleet-sync: a moved base names the open branches it left behind"
+}
+
+test_unmoved_base_sweeps_nothing() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" staleB)
+  add_open_branch "$home" staleB sibB
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "staleB: already current" "an unmoved clone still reports unchanged"
+  assert_not_contains "$out" "STALE BASE" "a sync that moved no base must not raise the alarm"
+  pass "fm-fleet-sync: a sync that moves no base sweeps nothing"
+}
+
 test_no_origin_skipped() {
   local home clone out
   home=$(new_home)
@@ -616,6 +674,8 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_moved_base_names_the_now_stale_open_branches
+test_unmoved_base_sweeps_nothing
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves

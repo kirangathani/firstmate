@@ -41,6 +41,31 @@ An absent lock or a dead holder still blocks, because nobody is supervising the 
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 because it cannot safely read loop-guard fields.
 
+## Second Block Reason: A Base That Moved
+
+The guard has a second, independent reason to block, added 2026-08-09 and computed by `bin/fm-stale-base.sh`, whose header owns the predicate, the silent cases, and the remedy wording.
+An in-flight task whose pushed branch no longer contains its project's current `origin/<default>` has had every CI result on it measured against a base that no longer exists, so those results read as verdicts on the branch and are not.
+
+The incident it exists to prevent: firstmate's `main` was red all afternoon on one assertion in `tests/fm-backend.test.sh`, PR 44 fixed it and merged at roughly 15:25, and PRs 41, 42, 43 and 45 were open at that moment.
+Exactly one of them was steered onto the fixed base.
+For about twenty minutes the other three showed a purely inherited red that was relayed as if it described those branches, and the captain noticed before firstmate did.
+The detection was one command per branch - `git merge-base --is-ancestor <new-base-sha> origin/<branch>` - which nothing in the system had asked.
+
+Two places raise it, and they are deliberately not the same place:
+
+- Immediate: `bin/fm-fleet-sync.sh`, per project, when that clone's `origin/<default>` actually moved across the fetch. That is the first instant the new base exists in this home at all, so the answer is fresh by construction. It is not raised on the merge notification itself, because that wake fires before anything has refreshed the clone: a list computed there would be measured against the OLD base and would report all clear at the exact moment it is wrong.
+- Backstop: this guard, so an absorbed wake or a skipped refresh cannot let the condition survive a whole turn.
+
+The check reads only local refs and never fetches, so it adds no network call to the turn-end path and never writes to a project clone.
+It resolves each task's branch from `git worktree list --porcelain` on the parent clone - git's own record, never anything an agent wrote - and it never touches a worker's worktree.
+A determinate all-clear is silent (a scout, a secondmate record, a clone with no origin remote, a task still on the pristine detached base, an unpushed branch, or a branch that already contains the base), while anything undeterminable is reported as undeterminable rather than folded into silence.
+
+Both reasons print in the same banner rather than one short-circuiting the other, so a permanently broken watcher cannot hide every stale base behind it.
+The loop guard still bounds this to one forced continuation per turn.
+Because the remedy is a steer whose effect only lands when the worker pushes, a finding is silenced by `bin/fm-stale-base.sh --ack <task-id>`, which records the finding's situation key in `state/<task-id>.stale-base-ack`.
+The key embeds the base commit, so the acknowledgement is scoped to the base it was made at and the sweep re-alarms the moment the base moves again.
+That is what keeps this backstop from decaying into the ignored-because-constant noise the `watcher: FAILED - cycle ended without an actionable reason` alarm became.
+
 ## Harness Integrations
 
 All verified primary harnesses have a tracked integration:
@@ -186,5 +211,7 @@ The command half of the identity comes from `/proc/<pid>/cmdline` rather than a 
 
 `tests/fm-watcher-lock.test.sh` owns the regression for the process-identity primitive the match depends on: one live pid yields a byte-identical identity across repeated reads, the `/proc/<pid>/stat` parse survives a `comm` containing a space or a `)` on both synthetic lines and a real process, the `lstart` form stays the fallback when `/proc/<pid>/stat` is unreadable and stays locale-invariant there, a record written in the pre-change `lstart` format still matches its live owner, and dead, recycled, and start-marker-mismatched pids are all still rejected.
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the session-lock exemption (silent for a live rival owner, still alarming for this session and for a dead or absent holder), Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-stale-base.test.sh` owns the stale-base predicate itself in both directions: a behind pushed branch fires and names task, branch and remedy; a branch that contains the base, a scout, a secondmate record, an unpushed branch, a still-detached worker, and a clone with no origin remote are all silent; a missing clone, an absent `origin/<default>`, a detached HEAD carrying commits, and a local copy outside the project each report as undeterminable; the four-branch shape of the incident names exactly the three behind branches; and an acknowledgement is scoped to the base it was made at.
+`tests/fm-turnend-guard.test.sh` covers the guard's half of it, and `tests/fm-fleet-sync.test.sh` covers the immediate half.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.

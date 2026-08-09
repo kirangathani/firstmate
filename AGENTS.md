@@ -92,6 +92,7 @@ state/               volatile runtime signals; gitignored
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.acted           written by bin/fm-ack.sh, bin/fm-send.sh, and bin/fm-pr-check.sh: firstmate acted on this task's reported state; silences the unactioned alarm until the crew's next status append (bin/fm-ack-lib.sh); removed by teardown
+  <id>.stale-base-ack  written by bin/fm-stale-base.sh --ack: firstmate acted on this task's stale-base finding; keyed to the base commit, so a base that moves again re-alarms; removed by teardown
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; a tmux task also records tmux_window_pinned=1, the guarantee that its window name cannot drift from fm-<id>, which is what licenses the exact-label liveness reads (docs/tmux-backend.md "The exact-label check needs a pinned window name to be safe"); a captain-authorized testing skip also records local_skip=on and/or ci_skip=on, each with its own local_skip_auth=/ci_skip_auth= token (section 7); kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
@@ -360,6 +361,8 @@ A high context reading together with uncommitted changes in the task worktree is
 `bin/fm-peek.sh` reports the uncommitted half alongside every peek, and a stale wake carrying a visible usage-limit dialog means the worker is frozen at a provider prompt, never a benign quiet pane to dismiss.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
+That refresh names every other in-flight branch the merge just left behind, whose CI results were measured against a base that no longer exists, and the turn-end guard blocks while one is unaddressed.
+Steer each named worker to merge the moved base into its own branch and re-verify, never to rebase, then record it with `bin/fm-stale-base.sh --ack <id>`.
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, always post the final completion follow-up so the link clears even if earlier follow-ups were spent.
 
 A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.

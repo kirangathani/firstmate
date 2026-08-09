@@ -16,6 +16,12 @@
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
+# It blocks for TWO independent reasons, reported together in one banner so a
+# permanently broken watcher cannot hide the other:
+#   1. in-flight work with no live watcher (the original blind-turn reason), and
+#   2. an in-flight branch whose CI was measured against a base that has since
+#      moved (bin/fm-stale-base.sh, which owns that predicate and its remedy).
+#
 # Ships with TRACKED harness hook files at the repo root, so this file is
 # checked out into every worktree of this repo: the primary checkout, every
 # secondmate home (treehouse-leased or git-cloned), and any crewmate/scout task
