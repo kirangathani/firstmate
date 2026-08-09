@@ -300,8 +300,19 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# Resolved ONCE at source time, not per call. These four helpers run thousands of
+# times per migration or poll run, and a per-call `uname` fork costs more than the
+# stat it selects; tests/fm-pr-check-security.test.sh already hoists its own copy
+# for the same reason. Deliberately NOT overridable from the environment: these
+# helpers back the mode, link-count and inode identity checks that gate custom
+# check execution, so the OS reading must come from the OS.
+# The failure branch is explicit rather than left to the assignment's exit status:
+# every caller sources this under `set -e`, so an absent `uname` must leave the
+# value empty and take the Linux branch, not abort the sourcing script.
+FM_PR_UNAME_S=$(uname 2>/dev/null) || FM_PR_UNAME_S=
+
 fm_pr_file_mode() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_PR_UNAME_S" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null
   else
     stat -c %a "$1" 2>/dev/null
@@ -309,7 +320,7 @@ fm_pr_file_mode() {
 }
 
 fm_pr_file_device() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_PR_UNAME_S" = Darwin ]; then
     stat -f %d "$1" 2>/dev/null
   else
     stat -c %d "$1" 2>/dev/null
@@ -317,7 +328,7 @@ fm_pr_file_device() {
 }
 
 fm_pr_file_link_count() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_PR_UNAME_S" = Darwin ]; then
     stat -f %l "$1" 2>/dev/null
   else
     stat -c %h "$1" 2>/dev/null
@@ -325,7 +336,7 @@ fm_pr_file_link_count() {
 }
 
 fm_pr_file_inode() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_PR_UNAME_S" = Darwin ]; then
     stat -f %i "$1" 2>/dev/null
   else
     stat -c %i "$1" 2>/dev/null
