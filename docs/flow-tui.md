@@ -15,6 +15,64 @@ The view is split across two programs so that neither can drift into the other's
 
 That seam is what makes golden-frame tests possible: a renderer that cannot read the world can be fed exact recorded bytes and asserted against an exact frame.
 
+`bin/fm-flow.sh` is the captain-facing entry point and the only invocation that is live and interactive.
+It runs the collector, feeds the result in as the first frame, and hands the viewer that same command back so the live view can refresh itself.
+
+## Two channels, one of which cannot be stdin
+
+The snapshot arrives on stdin, so stdin is a pipe.
+A pipe is not a keyboard, and `process.stdin.isTTY` is false for every invocation that has data in it.
+The first version of the viewer armed its whole key handler behind exactly that test, so no keystroke ever reached it: arrow keys fell through to the shell and printed their escape sequences at the captain's prompt.
+There was no invocation of that code which was both fed and interactive.
+
+The two requirements are not in conflict once they stop sharing a file descriptor.
+Keys are read from the controlling terminal directly, `fs.openSync("/dev/tty", "r")` wrapped in a `tty.ReadStream`, which is a different descriptor from stdin and is unaffected by what stdin is carrying.
+The data seam above is untouched.
+
+`/dev/tty` cannot always be opened - a cron run, a CI job, a session whose output is redirected.
+That is a legitimate way to use the program, not an error, so `--watch` in that situation draws one frame, says on stderr why it is not watching, and exits 0.
+The alternative, two timers spinning forever with nobody there to press `q`, is the worse failure.
+
+### Where a watch loop's fresh data comes from
+
+stdin ends the moment the first document has been read, so the viewer has no second document to read from it.
+A fix that only addressed keystrokes would leave `--watch` animating a border over a frame frozen at the moment it started, which is precisely the class of lie the data-age counter exists to prevent.
+
+The renderer therefore has to re-run the collector - but it will not guess how.
+The collector's arguments change what it collects (`--no-ci`, `--task`, and `FM_HOME` from the environment), so a viewer that re-ran a hardcoded `fm-flow-snapshot.sh --json` could silently start reporting a different home or a wider fleet than the frame the captain opened.
+
+So the command is handed in whole, and only ever by the operator:
+
+- `--refresh-cmd <command>` is opt-in with no default.
+  Without it, `--watch` is honestly static and the header says `static snapshot` beside the climbing age.
+- `bin/fm-flow.sh` builds the collector argv exactly once, uses it for the first frame, and passes the same quoted argv as `--refresh-cmd`, so the two cannot diverge.
+  `tests/fm-flow.test.sh` asserts that equality rather than trusting it.
+- `--open-cmd <command>` is the same shape for the enter key.
+
+The no-outside-reads property the golden-frame tests rely on is unchanged by this.
+`render()` is a pure function of the snapshot plus the frame options; one-shot mode never shells out at all; and a run that shells out does so only to a command it was explicitly given, which no test passes.
+
+## Fitting the terminal
+
+Nine cells at full spacing need 143 columns.
+The first version drew all 143 whatever `--cols` said, and that single fact produced both of the defects seen on the captain's first run.
+
+An over-wide line wraps.
+A wrapped line occupies two terminal rows while the flicker-free repaint below still addresses it as one, so every absolute cursor address after it points at the wrong row: the right-hand column arrived as fragments, and a row of durations survived under the header with no boxes above it after its own agent had scrolled away.
+An over-tall frame does the same thing by scrolling the whole terminal.
+
+`render()` therefore guarantees two invariants, asserted directly in `tests/fm-flow-tui.test.sh` across a sweep of sizes:
+
+- no line is wider than `cols`;
+- no frame is taller than `rows`.
+
+Width is recovered without ever cutting a box in half, in this order:
+
+1. tighten the arrow gutter, 5 to 3 to 1 columns, until all nine cells fit - this alone fits the whole pipeline into 130 columns;
+2. only if the tightest spacing still overflows, draw a contiguous window of whole cells and name it in the header (`stages 1-6 of 9`), with left/right moving the window.
+
+The header itself drops segments by stated priority rather than being clipped from the right, because the rightmost segment is the data age and that is the one fact the view exists to keep honest.
+
 ## Resolving which pipeline run belongs to which agent
 
 This is the part that is easy to get wrong, and the reasoning matters more than the code.

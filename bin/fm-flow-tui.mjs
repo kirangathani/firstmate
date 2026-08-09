@@ -6,21 +6,45 @@
 // this header owns the flags.
 //
 // Usage:
+//   bin/fm-flow.sh                                    (the captain-facing entry point)
 //   fm-flow-snapshot.sh --json | fm-flow-tui.mjs [--cols N] [--rows N] [--tick N]
-//   fm-flow-snapshot.sh --json | fm-flow-tui.mjs --watch
+//   fm-flow-snapshot.sh --json | fm-flow-tui.mjs --watch [--refresh-cmd CMD]
 //
-//   --cols N   terminal width to render for (default: the tty's, else 130)
-//   --rows N   terminal height to render for (default: the tty's, else 45)
-//   --tick N   animation frame to draw, fixed. Makes one-shot output
-//              deterministic, which is what allows byte-exact frame tests.
-//   --watch    live mode: alternate screen, raw-mode keys, diff repaint.
+//   --cols N          terminal width to render for (default: the tty's, else 130)
+//   --rows N          terminal height to render for (default: the tty's, else 45)
+//   --tick N          animation frame to draw, fixed. Passing it also pins the
+//                     stated data age to 0, so one-shot output is deterministic,
+//                     which is what allows byte-exact frame tests.
+//   --watch           live mode: alternate screen, raw-mode keys, diff repaint.
+//   --refresh-cmd C   watch only. Shell command re-run every --refresh-ms whose
+//                     stdout must be a fresh snapshot. OPT-IN, no default.
+//   --refresh-ms N    watch only, default 10000. Snapshot re-read cadence. Only
+//                     one refresh runs at a time, so a collector slower than
+//                     this sets the real cadence and the interval never stacks.
+//   --open-cmd C      watch only. Shell command run when the captain presses
+//                     enter on an agent, with FM_FLOW_ID, FM_FLOW_WINDOW,
+//                     FM_FLOW_WORKTREE, FM_FLOW_PROJECT and FM_FLOW_PR in its
+//                     environment. OPT-IN, no default.
 //
-// This program shells out to NOTHING. Every fact it draws arrives in the JSON.
-// That is what makes byte-exact frame tests possible: the renderer cannot
+// THE TWO CHANNELS ARE SEPARATE, AND THAT IS THE WHOLE POINT.
+// The snapshot arrives on stdin, so stdin is a PIPE and can never be a
+// keyboard. Keystrokes are therefore read from the controlling terminal
+// directly, /dev/tty, which is a different file descriptor from stdin. The
+// shipped version armed its key handler behind `process.stdin.isTTY`, which is
+// false for every invocation that has data, so no key ever reached it.
+//
+// This program shells out to NOTHING unless the operator hands it an explicit
+// command with --refresh-cmd or --open-cmd, and never in one-shot mode. That
+// is what keeps byte-exact frame tests possible: `render()` is a pure function
+// of the snapshot plus the frame options, and the default renderer cannot
 // reach past its input to change what it draws.
 //
 // Exit codes: 0 a frame was emitted, 1 stdin was not a readable snapshot,
 // 2 usage error.
+
+import fs from "node:fs";
+import tty from "node:tty";
+import { execFile, spawnSync } from "node:child_process";
 
 const ESC = "\x1b[";
 const R = `${ESC}0m`;
@@ -120,6 +144,44 @@ function pad(s, w) {
   return " ".repeat(left) + s + " ".repeat(w - s.length - left);
 }
 
+const ANSI = /\x1b\[[0-9;]*m/g;
+// Sticky, and deliberately its own object: it carries a mutable lastIndex, and
+// sharing that with the global ANSI above would couple two scanners through
+// one piece of hidden state for no gain.
+const ANSI_AT = /\x1b\[[0-9;]*m/y;
+export const visLen = (s) => s.replace(ANSI, "").length;
+
+// Cut a coloured line to `cols` VISIBLE columns. Escape sequences are zero
+// width and must survive the cut, and a cut that lands mid-colour has to close
+// it or the colour bleeds across the rest of the terminal line.
+//
+// This is the last line of defence, not the layout: a line that reaches here
+// over-wide has already lost. It matters because a single over-wide line
+// WRAPS, and a wrapped line desynchronises every absolute cursor address in
+// the diff repaint below - which is how the shipped version produced both
+// half-drawn boxes on the right and an orphaned row of durations under the
+// header.
+export function clip(line, cols) {
+  if (!Number.isFinite(cols) || cols <= 0) return line;
+  if (visLen(line) <= cols) return line;
+  let out = "";
+  let vis = 0;
+  let i = 0;
+  while (i < line.length && vis < cols) {
+    ANSI_AT.lastIndex = i;
+    const m = ANSI_AT.exec(line);
+    if (m) {
+      out += m[0];
+      i = ANSI_AT.lastIndex;
+      continue;
+    }
+    out += line[i];
+    vis++;
+    i++;
+  }
+  return out + R;
+}
+
 // Border cells of a 3-row box, clockwise from the top-left, so a marching
 // highlight can walk them in order.
 function perimeter(w) {
@@ -158,6 +220,62 @@ function box(label, state, width, opts = {}) {
     grid[r].map((ch, c) => (hi.get(`${r},${c}`) ?? base)(ch)).join("");
 
   return { top: row(0), mid: row(1), bot: row(2), timer: pad(timer, width + 2) };
+}
+
+// --- horizontal layout ------------------------------------------------------
+//
+// Nine cells at their full spacing need 143 columns. The shipped renderer drew
+// all 143 whatever `--cols` said, so on the captain's terminal the tail of
+// every row wrapped onto the row below and the right-hand column arrived as
+// fragments. A frame must fit the terminal it is drawn on.
+//
+// Two levers, in order, because losing a stage is worse than losing whitespace:
+//   1. tighten the arrow gutter (5 -> 3 -> 1) until all nine cells fit;
+//   2. only if even the tightest spacing overflows, show a contiguous WINDOW of
+//      cells and say so in the header.
+// Either way every cell that is drawn is drawn whole. There is no third option
+// where a box is cut in half.
+const GAPS = [5, 3, 1];
+const CELL_WIDTHS = [...STEPS.map(() => W + 2), CIW + 2, MW + 2];
+const INDENT = 2;
+
+const span = (first, count, gap) =>
+  CELL_WIDTHS.slice(first, first + count).reduce((a, b) => a + b, 0) +
+  gap * Math.max(0, count - 1);
+
+export function layout(cols, focus = 0) {
+  const avail = Math.max(1, Math.floor(cols) - INDENT);
+  const n = CELL_WIDTHS.length;
+
+  for (const gap of GAPS) {
+    const total = span(0, n, gap);
+    if (total <= avail) return { gap, first: 0, count: n, width: INDENT + total };
+  }
+
+  const gap = GAPS[GAPS.length - 1];
+  const fitFrom = (first) => {
+    let used = 0;
+    let count = 0;
+    for (let i = first; i < n; i++) {
+      const add = (count === 0 ? 0 : gap) + CELL_WIDTHS[i];
+      if (used + add > avail) break;
+      used += add;
+      count++;
+    }
+    // A terminal too narrow for even one cell still gets one whole cell and
+    // lets clip() take the overflow, because half a box is not information.
+    return count > 0 ? { count, used } : { count: 1, used: CELL_WIDTHS[first] };
+  };
+
+  const want = Math.max(0, Math.min(n - 1, Math.floor(focus)));
+  let first = 0;
+  for (;;) {
+    const f = fitFrom(first);
+    if (want < first + f.count || first >= n - 1) {
+      return { gap, first, count: f.count, width: INDENT + f.used };
+    }
+    first++;
+  }
 }
 
 // A run whose worker is gone cannot be reported as live, however the database
@@ -245,7 +363,7 @@ function premergeBox() {
   return box("pre-merge", "pending", MW);
 }
 
-function agentBlock(agent, n, selected, cell, anim) {
+function agentBlock(agent, n, selected, cell, anim, lay) {
   const cells = STEPS.map((s) => stepBox(agent, s, anim));
   cells.push(ciBox(agent, anim));
   cells.push(premergeBox());
@@ -254,14 +372,16 @@ function agentBlock(agent, n, selected, cell, anim) {
   // "the agent is here" and must keep exactly one meaning.
   if (selected && cell >= 0 && cell < cells.length) {
     const c = cells[cell];
-    const mark = (s) => `${ESC}7m${s.replace(/\x1b\[[0-9;]*m/g, "")}${R}`;
+    const mark = (s) => `${ESC}7m${s.replace(ANSI, "")}${R}`;
     cells[cell] = { top: mark(c.top), mid: mark(c.mid), bot: mark(c.bot), timer: c.timer };
   }
 
-  const arrow = dim("────→");
-  const gap = "     ";
+  const shown = cells.slice(lay.first, lay.first + lay.count);
+  const arrowGlyph = "─".repeat(Math.max(0, lay.gap - 1)) + "→";
+  const arrow = dim(arrowGlyph);
+  const gap = " ".repeat(lay.gap);
   const top = [], mid = [], bot = [], tim = [];
-  cells.forEach((c, i) => {
+  shown.forEach((c, i) => {
     if (i > 0) { top.push(gap); mid.push(arrow); bot.push(gap); tim.push(gap); }
     top.push(c.top); mid.push(c.mid); bot.push(c.bot); tim.push(c.timer);
   });
@@ -288,11 +408,51 @@ function shortProject(p) {
   return parts[parts.length - 1] ?? "";
 }
 
-const visLen = (s) => s.replace(/\x1b\[[0-9;]*m/g, "").length;
+// How many agent blocks fit, and the exact frame that follows from that.
+//
+// The window, the header and the rows have to be derived from ONE number or
+// they disagree, and a disagreement here is not cosmetic: an over-tall frame
+// scrolls the terminal, every absolute cursor address in the repaint below
+// then points one row too high, and last frame's durations survive under the
+// header with no boxes above them. That was the orphaned timing row.
+// A block is BLOCK lines: 5 of content plus one blank. `chrome` is the header,
+// the two rules, the key hint, and the flash line when one is showing, so the
+// whole frame is exactly chrome + visible * BLOCK lines.
+export function visibleRows(rows, chrome) {
+  return Math.max(1, Math.floor((rows - chrome) / BLOCK));
+}
+
+// A status header that does not fit is worse than a shorter one: clipping cuts
+// the RIGHTMOST segment, and the rightmost segment is the data age, the one
+// fact the view exists to keep honest. So segments are dropped by stated
+// priority and the survivors keep their reading order. A count that is zero is
+// the first thing to go; a count that is not, and the stage window, are not
+// droppable while anything less important is still on the line.
+const HEADER_JOIN_WIDTH = 5;
+
+export function headerLine(segs, cols) {
+  const join = `  ${dim("·")}  `;
+  const limit = Number.isFinite(cols) && cols > 0 ? cols : Infinity;
+  const keep = new Set([0]);
+  let width = visLen(segs[0].s);
+  const byPriority = segs
+    .map((seg, i) => ({ ...seg, i }))
+    .slice(1)
+    .sort((a, b) => a.pri - b.pri || a.i - b.i);
+  for (const seg of byPriority) {
+    if (!seg.s) continue;
+    const add = HEADER_JOIN_WIDTH + visLen(seg.s);
+    if (width + add > limit) continue;
+    width += add;
+    keep.add(seg.i);
+  }
+  return segs.filter((seg, i) => keep.has(i) && seg.s).map((seg) => seg.s).join(join);
+}
 
 export function render(snap, opts) {
-  const { rows, cols, anim = 0, sel = 0, cell = -1, top: topIn = 0, flash = "" } = opts;
+  const { rows, cols, anim = 0, sel = 0, cell = -1, top: topIn = 0, flash = "", note = "" } = opts;
   const agents = snap.agents ?? [];
+  const lay = layout(cols, cell < 0 ? 0 : cell);
   const out = [];
 
   // The data age must be honest and prominent. A green box that is thirty
@@ -300,54 +460,70 @@ export function render(snap, opts) {
   const ageSec = opts.ageSeconds ?? 0;
   const needs = agents.filter((a) => a.ci && a.ci.pending === 0 && a.ci.failed === 0 && a.ci.total > 0).length;
   const broken = agents.filter((a) => a.collection?.ok === false).length;
-  out.push(
-    `${white("fleet pipeline")}  ${dim(`${agents.length} agents`)}  ${dim("·")}  ` +
-      `${needs ? yellow(`${needs} ready to merge`) : dim("0 ready to merge")}  ${dim("·")}  ` +
-      (broken ? magenta(`${broken} unreadable`) : dim("0 unreadable")) +
-      `  ${dim(`· updated ${ageSec}s ago`)}`,
-  );
+  out.push(headerLine([
+    { s: white("fleet pipeline"), pri: 0 },
+    { s: dim(`${agents.length} agents`), pri: 3 },
+    { s: needs ? yellow(`${needs} ready to merge`) : dim("0 ready to merge"), pri: needs ? 1 : 4 },
+    { s: broken ? magenta(`${broken} unreadable`) : dim("0 unreadable"), pri: broken ? 1 : 5 },
+    { s: lay.count < NCELLS ? yellow(`stages ${lay.first + 1}-${lay.first + lay.count} of ${NCELLS}`) : "", pri: 1 },
+    { s: dim(`updated ${ageSec}s ago`), pri: 2 },
+    // Belongs beside the age, not in the key hints: an age that keeps climbing
+    // while nothing on screen changes needs its reason on the same line.
+    { s: note ? magenta(note) : "", pri: 1 },
+  ], cols));
 
-  const probe = agents.length ? agentBlock(agents[0], 1, false, -1, anim)[2] : "";
-  const rule = dim("─".repeat(Math.max(1, Math.min(cols - 1, visLen(probe) || 40))));
+  const ruleW = Math.max(1, Math.min(cols, agents.length ? lay.width : 40));
+  const rule = dim("─".repeat(ruleW));
   out.push(rule);
 
   if (agents.length === 0) {
     out.push(dim("  no agents in flight"));
     out.push(rule);
-    return out;
+    return out.map((l) => clip(l, cols));
   }
 
-  const chrome = 4;
-  const visible = Math.max(1, Math.floor((rows - chrome) / BLOCK));
+  const chrome = 4 + (flash ? 1 : 0);
+  const visible = visibleRows(rows, chrome);
   let top = topIn;
   if (sel < top) top = sel;
   if (sel >= top + visible) top = sel - visible + 1;
-  agents.slice(top, top + visible).forEach((a, i) => {
-    out.push(...agentBlock(a, top + i + 1, top + i === sel, cell, anim));
+  top = Math.max(0, Math.min(top, Math.max(0, agents.length - visible)));
+  const shown = agents.slice(top, top + visible);
+  shown.forEach((a, i) => {
+    out.push(...agentBlock(a, top + i + 1, top + i === sel, cell, anim, lay));
     out.push("");
   });
 
   out.push(rule);
-  const more = agents.length - (top + visible);
+  const more = agents.length - (top + shown.length);
   const scroll = (top > 0 ? `^${top} above  ` : "") + (more > 0 ? `v${more} below  ` : "");
   out.push(
     (scroll ? green(scroll) : "") +
-      dim("up/down agent   left/right stage   enter open   q quit"),
+      dim("up/down agent   left/right stage   enter open   r refresh   q quit"),
   );
   if (flash) out.push(yellow(flash));
-  return out;
+
+  // Both invariants in one place, so the frame the captain sees can never be
+  // wider or taller than the box it is being drawn into.
+  return out.slice(0, Math.max(1, Math.floor(rows))).map((l) => clip(l, cols));
 }
 
 // --- entry point ------------------------------------------------------------
 
 function parseArgs(argv) {
-  const o = { watch: false, cols: null, rows: null, tick: 0 };
+  const o = {
+    watch: false, cols: null, rows: null, tick: 0, tickGiven: false,
+    refreshCmd: "", refreshMs: 10000, openCmd: "",
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--watch") o.watch = true;
     else if (a === "--cols") o.cols = Number(argv[++i]);
     else if (a === "--rows") o.rows = Number(argv[++i]);
-    else if (a === "--tick") o.tick = Number(argv[++i]);
+    else if (a === "--tick") { o.tick = Number(argv[++i]); o.tickGiven = true; }
+    else if (a === "--refresh-cmd") o.refreshCmd = String(argv[++i] ?? "");
+    else if (a === "--refresh-ms") o.refreshMs = Number(argv[++i]);
+    else if (a === "--open-cmd") o.openCmd = String(argv[++i] ?? "");
     else if (a === "-h" || a === "--help") o.help = true;
     else { o.bad = a; }
   }
@@ -364,11 +540,33 @@ function readStdin() {
   });
 }
 
+const ageOf = (snap) =>
+  snap?.generated_epoch
+    ? Math.max(0, Math.floor(Date.now() / 1000) - snap.generated_epoch)
+    : 0;
+
+const firstLine = (s) => String(s ?? "").split("\n").find((l) => l.trim()) ?? "";
+
+function parseSnapshot(raw) {
+  let snap;
+  try {
+    snap = JSON.parse(raw);
+  } catch {
+    return { error: "not valid JSON" };
+  }
+  if (snap?.schema !== "fm-flow-snapshot.v1") {
+    return { error: `expected schema fm-flow-snapshot.v1, got ${snap?.schema ?? "none"}` };
+  }
+  return { snap };
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
     process.stdout.write(
-      "usage: fm-flow-snapshot.sh --json | fm-flow-tui.mjs [--cols N] [--rows N] [--tick N] [--watch]\n",
+      "usage: fm-flow-snapshot.sh --json | fm-flow-tui.mjs [--cols N] [--rows N] [--tick N]\n" +
+        "       [--watch [--refresh-cmd CMD] [--refresh-ms N] [--open-cmd CMD]]\n" +
+        "       bin/fm-flow.sh is the captain-facing entry point and wires all three up.\n",
     );
     return 0;
   }
@@ -376,53 +574,156 @@ async function main() {
     process.stderr.write(`fm-flow-tui: unknown argument ${opts.bad}\n`);
     return 2;
   }
+  if (!opts.watch && (opts.refreshCmd || opts.openCmd)) {
+    process.stderr.write("fm-flow-tui: --refresh-cmd and --open-cmd need --watch\n");
+    return 2;
+  }
+  // Without this the process waits forever on a keyboard that is never going
+  // to send it a snapshot, which reads as a hang rather than a mistake.
+  if (process.stdin.isTTY) {
+    process.stderr.write(
+      "fm-flow-tui: no snapshot on stdin; run bin/fm-flow.sh, or pipe fm-flow-snapshot.sh --json\n",
+    );
+    return 2;
+  }
 
   const raw = await readStdin();
-  let snap;
-  try {
-    snap = JSON.parse(raw);
-  } catch {
-    process.stderr.write("fm-flow-tui: stdin is not valid JSON\n");
-    return 1;
-  }
-  if (snap?.schema !== "fm-flow-snapshot.v1") {
-    process.stderr.write(
-      `fm-flow-tui: expected schema fm-flow-snapshot.v1, got ${snap?.schema ?? "none"}\n`,
-    );
+  const { snap, error } = parseSnapshot(raw);
+  if (error) {
+    process.stderr.write(`fm-flow-tui: stdin is ${error}\n`);
     return 1;
   }
 
-  const cols = opts.cols ?? process.stdout.columns ?? 130;
-  const rows = opts.rows ?? process.stdout.rows ?? 45;
+  // A non-numeric --cols/--rows must not reach the layout: NaN propagates
+  // silently through every Math.floor below and ends as an empty frame with no
+  // hint that a flag was mistyped.
+  const dimension = (v, fallback) => (Number.isFinite(v) && v > 0 ? Math.floor(v) : fallback);
+  const cols = dimension(opts.cols, dimension(process.stdout.columns, 130));
+  const rows = dimension(opts.rows, dimension(process.stdout.rows, 45));
 
   if (!opts.watch) {
-    const age = snap.generated_epoch
-      ? Math.max(0, Math.floor(Date.now() / 1000) - snap.generated_epoch)
-      : 0;
     const frame = render(snap, {
       rows,
       cols,
       anim: opts.tick,
-      ageSeconds: opts.tick ? 0 : age,
+      ageSeconds: opts.tickGiven ? 0 : ageOf(snap),
     });
     process.stdout.write(frame.join("\n") + "\n");
     return 0;
   }
 
-  return watch(snap, cols, rows);
+  return watch(snap, cols, rows, opts);
 }
 
-function watch(snap, cols0, rows0) {
-  let sel = 0, cell = -1, anim = 0, flash = "";
-  const startedAt = Date.now();
+// --- keyboard ---------------------------------------------------------------
+
+// The controlling terminal, NOT stdin. stdin is carrying the snapshot.
+//
+// Returns null when there is no controlling terminal to open - a cron run, a
+// CI job, a session whose stdout is redirected. That is a legitimate way to
+// use this program, so the caller degrades to a single frame rather than
+// crashing or spinning forever on timers nobody is watching.
+function openKeyboard() {
+  let fd;
+  try {
+    fd = fs.openSync("/dev/tty", "r");
+  } catch {
+    return null;
+  }
+  try {
+    const stream = new tty.ReadStream(fd);
+    if (!stream.isTTY || typeof stream.setRawMode !== "function") {
+      stream.destroy();
+      return null;
+    }
+    return stream;
+  } catch {
+    try { fs.closeSync(fd); } catch { /* already gone */ }
+    return null;
+  }
+}
+
+// One chunk of raw input can hold several keys: holding an arrow down delivers
+// "\x1b[B\x1b[B", and a terminal in application-cursor mode sends "\x1bOB"
+// instead of "\x1b[B" for the very same key. Comparing the whole chunk against
+// one literal, as the shipped version did, drops both.
+export function keysOf(chunk) {
+  const s = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+  const keys = [];
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === "\x1b") {
+      const rest = s.slice(i);
+      const m = /^\x1b(?:\[[0-9;]*[A-Za-z~]|O[A-Za-z])/.exec(rest);
+      if (m) {
+        keys.push(m[0]);
+        i += m[0].length;
+        continue;
+      }
+    }
+    keys.push(s[i]);
+    i++;
+  }
+  return keys;
+}
+
+const KEY = {
+  down: new Set(["j", "\x1b[B", "\x1bOB"]),
+  up: new Set(["k", "\x1b[A", "\x1bOA"]),
+  right: new Set(["l", "\x1b[C", "\x1bOC"]),
+  left: new Set(["h", "\x1b[D", "\x1bOD"]),
+  quit: new Set(["q", "\x03", "\x04"]),
+  open: new Set(["\r", "\n"]),
+  refresh: new Set(["r"]),
+  first: new Set(["g", "\x1b[H"]),
+  last: new Set(["G", "\x1b[F"]),
+};
+
+function watch(snap0, cols0, rows0, opts) {
+  let snap = snap0;
+  let sel = 0, cell = -1, anim = 0, flash = "", flashUntil = 0;
   const w = () => process.stdout.columns || cols0;
   const h = () => process.stdout.rows || rows0;
+  // With no refresh source the age counter climbs while nothing on screen
+  // changes. Saying so beside it is the difference between a stale view and a
+  // dishonest one.
+  const note = opts.refreshCmd ? "" : "static snapshot";
+
+  const keyboard = openKeyboard();
+  if (!keyboard || !process.stdout.isTTY) {
+    // No keyboard and/or no screen. Draw the frame that was asked for, say why
+    // it is not live, and exit. Spinning two timers forever in a cron job with
+    // nobody to press q would be the worse failure.
+    try { keyboard?.destroy(); } catch { /* nothing to close */ }
+    process.stderr.write(
+      `fm-flow-tui: ${keyboard ? "output is not a terminal" : "no controlling terminal"}; ` +
+        "drawing one frame instead of watching\n",
+    );
+    const frame = render(snap, {
+      rows: h(),
+      cols: w(),
+      anim: opts.tick,
+      ageSeconds: opts.tickGiven ? 0 : ageOf(snap),
+      note,
+    });
+    process.stdout.write(frame.join("\n") + "\n");
+    return 0;
+  }
 
   process.stdout.write("\x1b[?1049h\x1b[2J\x1b[?25l");
-  const quit = () => {
+  let restored = false;
+  const restore = () => {
+    if (restored) return;
+    restored = true;
+    try { keyboard.setRawMode(false); } catch { /* terminal already gone */ }
+    try { keyboard.destroy(); } catch { /* terminal already gone */ }
     process.stdout.write("\x1b[?25h\x1b[?1049l");
-    process.exit(0);
   };
+  const quit = () => { restore(); process.exit(0); };
+  process.on("exit", restore);
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, quit);
+
+  const setFlash = (msg) => { flash = msg; flashUntil = Date.now() + 5000; };
 
   // Flicker-free repaint. The big one first: NEVER clear the screen. `\x1b[2J`
   // blanks the pane and the redraw is a separate operation, so the terminal
@@ -432,8 +733,19 @@ function watch(snap, cols0, rows0) {
   // never paints a half-updated screen. DECSET 2026 asks it to hold
   // presentation until the frame is complete; terminals that do not know it
   // ignore it.
+  //
+  // Every row of this scheme assumes frame line i occupies exactly terminal row
+  // i+1. render() now guarantees that by fitting the frame to cols and rows; a
+  // resize breaks the assumption for one frame, so a resize throws the cache
+  // away instead of diffing against a layout that no longer exists.
   let prev = [];
+  let prevW = w(), prevH = h();
   const paint = () => {
+    if (w() !== prevW || h() !== prevH) {
+      prevW = w(); prevH = h(); prev = [];
+      process.stdout.write("\x1b[2J");
+    }
+    if (flash && Date.now() > flashUntil) flash = "";
     const next = render(snap, {
       rows: h(),
       cols: w(),
@@ -441,7 +753,8 @@ function watch(snap, cols0, rows0) {
       sel,
       cell,
       flash,
-      ageSeconds: Math.floor((Date.now() - startedAt) / 1000),
+      note,
+      ageSeconds: ageOf(snap),
     });
     let buf = "\x1b[?2026h";
     const n = Math.max(prev.length, next.length);
@@ -455,32 +768,90 @@ function watch(snap, cols0, rows0) {
     prev = next;
   };
 
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.on("data", (b) => {
-      const k = b.toString();
-      const count = (snap.agents ?? []).length;
-      if (k === "q" || k === "\x03") quit();
-      if (k === "j" || k === "\x1b[B") sel = Math.min(count - 1, sel + 1);
-      if (k === "k" || k === "\x1b[A") sel = Math.max(0, sel - 1);
-      if (k === "l" || k === "\x1b[C") cell = Math.min(NCELLS - 1, cell + 1);
-      if (k === "h" || k === "\x1b[D") cell = Math.max(-1, cell - 1);
-      if (k === "\r" || k === "\n") {
-        // Focusing a worker's pane needs a backend verb that does not exist
-        // yet, so this states the fact rather than hardcoding tmux and
-        // breaking every other runtime.
-        flash = "opening a worker's pane is not wired up yet";
-      }
-      paint();
+  // --watch's second half: where fresh data comes from.
+  //
+  // stdin ended the moment the piped snapshot was read, so a watch loop has no
+  // second document to read from it - the shipped version redrew the same
+  // frozen frame forever while an animated border implied otherwise. The
+  // renderer must therefore re-run the collector, and the collector's ARGUMENTS
+  // matter (--no-ci, --task, FM_HOME), so it will not guess them: the command
+  // is handed in whole with --refresh-cmd. bin/fm-flow.sh builds the first
+  // snapshot and that command from one array, so the two cannot diverge.
+  // Without the flag the view stays honestly static and says so.
+  let refreshing = false;
+  const refresh = () => {
+    if (!opts.refreshCmd || refreshing) return;
+    refreshing = true;
+    execFile(
+      "/bin/sh",
+      ["-c", opts.refreshCmd],
+      { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: 60000, killSignal: "SIGKILL" },
+      (err, stdout, stderr) => {
+        refreshing = false;
+        if (err) { setFlash(`refresh failed: ${firstLine(stderr) || err.message}`); paint(); return; }
+        const { snap: next, error } = parseSnapshot(stdout);
+        if (error) { setFlash(`refresh failed: snapshot is ${error}`); paint(); return; }
+        snap = next;
+        sel = Math.max(0, Math.min(sel, (snap.agents ?? []).length - 1));
+        paint();
+      },
+    );
+  };
+
+  const open = () => {
+    const a = (snap.agents ?? [])[sel];
+    if (!a) return;
+    if (!opts.openCmd) {
+      setFlash(`no open command wired up; that worker is at ${a.window || "an unrecorded window"}`);
+      return;
+    }
+    const res = spawnSync("/bin/sh", ["-c", opts.openCmd], {
+      encoding: "utf8",
+      timeout: 15000,
+      env: {
+        ...process.env,
+        FM_FLOW_ID: a.id ?? "",
+        FM_FLOW_WINDOW: a.window ?? "",
+        FM_FLOW_WORKTREE: a.worktree ?? "",
+        FM_FLOW_PROJECT: a.project ?? "",
+        FM_FLOW_PR: a.pr?.url ?? "",
+      },
     });
-  }
+    // The command may have moved the terminal's view or painted over us, so
+    // the diff cache no longer describes what is on screen.
+    prev = [];
+    if (res.status === 0) setFlash(`opened ${a.id}`);
+    else setFlash(`open failed: ${firstLine(res.stderr) || `exit ${res.status ?? "signal"}`}`);
+  };
+
+  keyboard.setRawMode(true);
+  keyboard.resume();
+  keyboard.on("data", (b) => {
+    const count = () => (snap.agents ?? []).length;
+    for (const k of keysOf(b)) {
+      if (KEY.quit.has(k)) { quit(); return; }
+      else if (KEY.down.has(k)) sel = Math.min(Math.max(0, count() - 1), sel + 1);
+      else if (KEY.up.has(k)) sel = Math.max(0, sel - 1);
+      else if (KEY.right.has(k)) cell = Math.min(NCELLS - 1, cell + 1);
+      else if (KEY.left.has(k)) cell = Math.max(-1, cell - 1);
+      else if (KEY.first.has(k)) sel = 0;
+      else if (KEY.last.has(k)) sel = Math.max(0, count() - 1);
+      else if (KEY.refresh.has(k)) refresh();
+      else if (KEY.open.has(k)) open();
+    }
+    paint();
+  });
 
   // The border chase needs a frame rate the eye reads as motion; the data
-  // behind it does not. Two timers, so a smooth animation never implies the
-  // underlying state is polled eight times a second.
+  // behind it does not. Three timers, so a smooth animation never implies the
+  // underlying state is polled eight times a second, and the collector runs on
+  // its own slower cadence again.
   setInterval(() => { anim = (anim + 1) % 10000; paint(); }, 110);
   setInterval(paint, 1000);
+  if (opts.refreshCmd) {
+    const every = Number.isFinite(opts.refreshMs) && opts.refreshMs >= 500 ? opts.refreshMs : 10000;
+    setInterval(refresh, every);
+  }
   paint();
   return new Promise(() => {});
 }
