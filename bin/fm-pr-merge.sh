@@ -685,8 +685,14 @@ if [ "$attestation_failing" -gt 0 ]; then
     checks_exempted=$attestation_failing
     attestation_banner "before the remaining gates"
   else
-    checks_failing=$((checks_failing + attestation_failing))
-    echo "error: PR check is failing: $ATTESTATION_CHECK_NAME" >&2
+    # One line per occurrence, so the count in the refusal below still matches
+    # the checks named above it when a re-run left the name in twice.
+    attestation_seen=0
+    while [ "$attestation_seen" -lt "$attestation_failing" ]; do
+      attestation_seen=$((attestation_seen + 1))
+      checks_failing=$((checks_failing + 1))
+      echo "error: PR check is failing: $ATTESTATION_CHECK_NAME" >&2
+    done
     echo "error: that check can only be excused by a captain-authorized testing skip carrying this home's own signature, or by the project being registered as direct-PR; neither applies here (contract in this script's header)" >&2
   fi
 fi
