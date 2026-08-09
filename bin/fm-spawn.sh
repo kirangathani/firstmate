@@ -1148,15 +1148,17 @@ mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 FIXCHECK="$FM_ROOT/bin/fm-fix-instructions-check.sh"
-# AI-attribution commit-msg hook (docs/attribution-gate.md). Installed for every
-# kind and every harness, because the rule binds the artefact, not the worker's
-# runtime. Git hooks are per-repository, so this is one idempotent write per
-# project rather than per task. A foreign hook is left alone (exit 3) and a
-# failure is only ever a notice: the merge gate is what actually holds the line,
-# so nothing here may cost a spawn.
+# The commit-msg hook, carrying both authorship-time checks: AI attribution in
+# the message (docs/attribution-gate.md) and a merge resolution that deletes
+# content one side introduced (docs/merge-resolution-gate.md). Installed for
+# every kind and every harness, because both rules bind the artefact, not the
+# worker's runtime. Git hooks are per-repository, so this is one idempotent write
+# per project rather than per task. A foreign hook is left alone (exit 3) and a
+# failure is only ever a notice: the landing gates are what actually hold both
+# lines, so nothing here may cost a spawn.
 attr_hook_out=$("$FM_ROOT/bin/fm-install-commit-hook.sh" "$WT" 2>&1) || true
 case "$attr_hook_out" in
-  *'attribution-hook: installed'*) ;;
+  *'commit-hook: installed'*) ;;
   *)
     # Reported as a note, never as an error: a skipped hook does not fail a
     # spawn, and the word "error" here would read as one. Each line is prefixed
@@ -1166,7 +1168,7 @@ case "$attr_hook_out" in
     done <<EOF_ATTR
 $attr_hook_out
 EOF_ATTR
-    echo "note: the attribution commit-msg hook was not installed for $WT; the merge gate still refuses AI attribution before anything lands" >&2
+    echo "note: the commit-msg hook was not installed for $WT; the landing gates still refuse AI attribution and a deleting merge resolution before anything lands" >&2
     ;;
 esac
 
