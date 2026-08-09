@@ -24,6 +24,21 @@ install_session_lock_cli() {
   chmod +x "$repo/bin/fm-lock.sh"
 }
 
+# The exact bytes bin/fm-watch-arm.sh emits when an attached cycle ends because
+# the watcher it was following delivered a wake, captured from a real run of
+# tests/fm-watcher-lock.test.sh's
+# test_arm_reports_a_delivered_wake_as_a_completed_cycle on 2026-08-09 - the
+# arm.out of a real watcher, real registered check, and real attached arm, not a
+# hand-written approximation of that line. Both adapters key on the
+# "watcher: cycle-complete" prefix; assert_cycle_complete_line_exists below pins
+# that prefix to the real script so this fixture cannot outlive it.
+ARM_CYCLE_COMPLETE_LINE='watcher: cycle-complete - the watcher this arm followed delivered a wake and exited (beacon 3s); drain state/.wake-queue and re-arm'
+
+assert_cycle_complete_line_exists() {
+  grep -qF 'watcher: cycle-complete' "$ROOT/bin/fm-watch-arm.sh" \
+    || fail "bin/fm-watch-arm.sh no longer emits a cycle-complete line, so the adapter fixtures below test a string production never produces"
+}
+
 install_pi_watch_extension_fixture() {
   local repo=$1
   mkdir -p "$repo/.pi/extensions" "$repo/node_modules/typebox"
@@ -676,6 +691,81 @@ EOF
   expect_code 0 "$status" "Pi clean empty close must trigger a bounded continuity retry"
   [ -z "$out" ] || fail "Pi empty-close retry test printed output: $out"
   pass "Pi clean empty close triggers a bounded continuity retry"
+}
+
+# A cycle-complete close is a COMPLETED cycle, not an empty one: the watcher it
+# followed produced a real wake, which is already in the durable queue, and the
+# reason line went to the arm that owns that watcher. Before the arm named that
+# case it fell through to this extension's catch-all, which reported a false
+# `watcher: FAILED` AND spent a retry slot - so a fleet producing these several
+# times an hour would exhaust the retry budget and declare supervision dead while
+# it was healthy. It must restore continuity and tell the model a wake is
+# waiting, without either of those.
+test_pi_cycle_complete_close_restores_without_a_failure() {
+  local repo home plugin log stop out status
+  assert_cycle_complete_line_exists
+  repo="$TMP_ROOT/pi-cycle-complete-root"
+  home="$TMP_ROOT/pi-cycle-complete-home"
+  log="$TMP_ROOT/pi-cycle-complete.log"
+  stop="$TMP_ROOT/pi-cycle-complete.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<SH
+#!/usr/bin/env bash
+printf 'arm=%s\n' "\$\$" >> "\${FM_ARM_LOG:?}"
+count=\$(wc -l < "\$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "\$count" -eq 1 ]; then
+  printf 'watcher: attached pid=4242 (beacon 0s)\n'
+  printf '%s\n' '$ARM_CYCLE_COMPLETE_LINE'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "\$\$"
+trap 'exit 0' TERM INT
+while [ ! -e "\$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const messages = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (text) => {
+    messages.push(text);
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-cycle-complete", {}, undefined, undefined, {});
+for (let i = 0; i < 250; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+    : [];
+  if (rows.length >= 2 && messages.length >= 1) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 2) throw new Error(`cycle-complete close did not restore continuity: ${rows.join(" | ")}`);
+if (messages.length !== 1) throw new Error(`expected one wake message, got ${messages.length}`);
+if (!messages[0].includes("watcher: cycle-complete")) throw new Error(`wake message did not carry the cycle-complete line: ${messages[0]}`);
+if (messages[0].includes("watcher: FAILED")) throw new Error(`cycle-complete close was surfaced as a failure: ${messages[0]}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi cycle-complete close must restore continuity without a failure"
+  [ -z "$out" ] || fail "Pi cycle-complete test printed output: $out"
+  pass "Pi cycle-complete close restores continuity and surfaces no failure"
 }
 
 test_pi_established_empty_close_honors_retry_limit() {
@@ -1854,6 +1944,76 @@ EOF
   pass "OpenCode clean empty close triggers a bounded continuity retry"
 }
 
+# The OpenCode half of the same contract; see the Pi case above for why a
+# cycle-complete close is a completed cycle rather than an empty one.
+test_opencode_cycle_complete_close_restores_without_a_failure() {
+  local plugin repo home log stop out status
+  assert_cycle_complete_line_exists
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-cycle-complete-root"
+  home="$TMP_ROOT/opencode-cycle-complete-home"
+  log="$TMP_ROOT/opencode-cycle-complete.log"
+  stop="$TMP_ROOT/opencode-cycle-complete.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<SH
+#!/usr/bin/env bash
+printf 'arm=%s\n' "\$\$" >> "\${FM_ARM_LOG:?}"
+count=\$(wc -l < "\$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "\$count" -eq 1 ]; then
+  printf 'watcher: attached pid=4242 (beacon 0s)\n'
+  printf '%s\n' '$ARM_CYCLE_COMPLETE_LINE'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "\$\$"
+trap 'exit 0' TERM INT
+while [ ! -e "\$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const prompts = [];
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompts.push(request.body.parts[0].text);
+    },
+  },
+};
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 250; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+    : [];
+  if (rows.length >= 2 && prompts.length >= 1) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 2) throw new Error(`cycle-complete close did not restore continuity: ${rows.join(" | ")}`);
+if (prompts.length !== 1) throw new Error(`expected one wake prompt, got ${prompts.length}`);
+if (!prompts[0].includes("watcher: cycle-complete")) throw new Error(`wake prompt did not carry the cycle-complete line: ${prompts[0]}`);
+if (prompts[0].includes("watcher: FAILED")) throw new Error(`cycle-complete close was surfaced as a failure: ${prompts[0]}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode cycle-complete close must restore continuity without a failure"
+  [ -z "$out" ] || fail "OpenCode cycle-complete test printed output: $out"
+  pass "OpenCode cycle-complete close restores continuity and surfaces no failure"
+}
+
 test_opencode_established_empty_close_honors_retry_limit() {
   local plugin repo home log out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -2136,6 +2296,7 @@ test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
 test_pi_empty_close_retries_instead_of_disappearing
+test_pi_cycle_complete_close_restores_without_a_failure
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
@@ -2155,6 +2316,7 @@ test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry
 test_opencode_late_unretired_close_resumes_supervision
 test_opencode_empty_close_retries_instead_of_disappearing
+test_opencode_cycle_complete_close_restores_without_a_failure
 test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard
