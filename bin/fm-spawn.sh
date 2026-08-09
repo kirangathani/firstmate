@@ -73,6 +73,21 @@
 #   same state directory and could append that line too - so the token is what
 #   bin/fm-ci-waiver.sh actually checks before signing, and --ci-skip refuses
 #   outright when no secret exists to mint it.
+#   --local-skip mints the SAME kind of token, recorded as local_skip_auth= under
+#   its own payload domain, for the same reason and against the same forgery: it
+#   is what bin/fm-pr-merge.sh checks before a local skip may excuse the
+#   no-mistakes attestation check at merge time. A bare local_skip=on line
+#   authorizes nothing there.
+#   Unlike --ci-skip, --local-skip does NOT refuse when the home has no secret to
+#   mint from, because the two flags lose different amounts without one. --ci-skip
+#   without a key is inert: no waiver could ever be signed for that task, so the
+#   dispatch would ask a worker for a signature nobody can produce. --local-skip
+#   still delivers its whole primary effect - the shim above enforces the skip
+#   with or without a key - so refusing would break a working flag for every home
+#   that has never run fm-ci-waiver.sh init. Minting nothing SILENTLY is the other
+#   wrong answer, because the loss would surface much later as an unexplained
+#   merge refusal, so the spawn proceeds and says on stderr exactly what was lost
+#   and the one command that fixes it.
 #   Accepted flag/delivery-mode combinations are checked before launch and every
 #   other combination refuses: no-mistakes takes --local-skip or
 #   --all-testing-skip; direct-PR takes --ci-skip; local-only takes none, having
@@ -108,7 +123,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,101p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,120p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -277,6 +292,7 @@ orca_spawn_abort_cleanup() {
           echo "model=${MODEL:-default}"
           echo "effort=${EFFORT:-default}"
           [ "$LOCAL_SKIP" = off ] || echo "local_skip=on"
+          [ -z "${LOCAL_SKIP_AUTH:-}" ] || echo "local_skip_auth=$LOCAL_SKIP_AUTH"
           [ "$CI_SKIP" = off ] || echo "ci_skip=on"
           [ -z "${CI_SKIP_AUTH:-}" ] || echo "ci_skip_auth=$CI_SKIP_AUTH"
           echo "backend=orca"
@@ -754,6 +770,37 @@ if [ "$CI_SKIP" = on ]; then
     echo "error: could not mint the CI-skip dispatch authorization for $ID" >&2
     exit 1
   }
+fi
+
+# The same dispatch authorization for a LOCAL skip, under its own payload domain
+# so neither token can stand in for the other. bin/fm-pr-merge.sh checks it
+# before a local skip may excuse the no-mistakes attestation check, for exactly
+# the reason bin/fm-ci-waiver.sh checks the CI one: `local_skip=on` on its own is
+# a line the worker could append to its own record.
+#
+# A missing secret WARNS here rather than refusing, and the header owns why: a
+# --local-skip dispatch still delivers its enforcement without a key, so the
+# spawn proceeds, states the one thing that was lost, and names the fix.
+LOCAL_SKIP_AUTH=
+if [ "$LOCAL_SKIP" = on ]; then
+  LOCAL_SKIP_SECRET_FILE="$CONFIG/ci-waiver-secret"
+  if ! fm_ci_waiver_secret_readable "$LOCAL_SKIP_SECRET_FILE"; then
+    echo "warn: no signing key at $LOCAL_SKIP_SECRET_FILE, so this --local-skip dispatch records the skip WITHOUT an authorization token" >&2
+    echo "warn: the skip itself is still enforced; what it cannot do is authorize bin/fm-pr-merge.sh to merge past the no-mistakes attestation check, which will refuse this task's PR instead" >&2
+    echo "warn: run 'bin/fm-ci-waiver.sh init' and re-dispatch if this task's PR needs that" >&2
+  else
+    # A secret that EXISTS but cannot be used is a malfunction rather than a
+    # supported configuration, so this half refuses exactly like --ci-skip does.
+    command -v node >/dev/null 2>&1 || {
+      echo "error: --local-skip needs node to mint this task's dispatch authorization (docs/configuration.md \"Toolchain\")" >&2
+      exit 1
+    }
+    LOCAL_SKIP_AUTH=$(fm_ci_waiver_dispatch_local_token "$ID" < "$LOCAL_SKIP_SECRET_FILE") || LOCAL_SKIP_AUTH=
+    fm_ci_waiver_valid_sig "$LOCAL_SKIP_AUTH" || {
+      echo "error: could not mint the local-skip dispatch authorization for $ID" >&2
+      exit 1
+    }
+  fi
 fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
@@ -1280,7 +1327,11 @@ META_WINDOW=$T
   # ci_skip=on is the ONLY thing that lets bin/fm-ci-waiver.sh sign for this
   # task, which is why it is written here, at dispatch, on the captain's machine
   # and into a directory no worker can reach.
+  # Each *_auth= token is written only when one was actually minted: an absent
+  # token means the flag was recorded without one, which every consumer must
+  # then treat as no authority rather than as a missing file to work around.
   [ "$LOCAL_SKIP" = off ] || echo "local_skip=on"
+  [ -z "$LOCAL_SKIP_AUTH" ] || echo "local_skip_auth=$LOCAL_SKIP_AUTH"
   [ "$CI_SKIP" = off ] || echo "ci_skip=on"
   [ -z "$CI_SKIP_AUTH" ] || echo "ci_skip_auth=$CI_SKIP_AUTH"
   # backend= is written only for a non-default (non-tmux) backend, so the
