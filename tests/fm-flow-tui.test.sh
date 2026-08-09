@@ -279,6 +279,154 @@ out=$(node "$TUI" --open-cmd 'true' <<<"$BIG" 2>&1); rc=$?
 expect_code 2 $rc "--open-cmd outside --watch must be a usage error"
 pass "the two shell-out flags are refused outside watch mode"
 
+# --- no cell is cut without saying so ---------------------------------------
+#
+# The captain's pre-merge summary read `11/11 - your wo`: cut mid-word at the
+# cell's right edge, with no ellipsis and no wrap. A value shortened in silence
+# is unreadable AND indistinguishable from one that is really that short.
+#
+# The assertion is over EVERY variable-length cell, not the one instance that
+# was reported: a timer that does not fit must end in the ellipsis, and the
+# phrase that produced the report must now fit whole.
+
+green11='{"pr":{"url":"https://github.com/o/r/pull/7","number":7},
+          "ci":{"collection":{"ok":true,"reason":""},"checks":[],"total":11,"passed":11,"failed":0,"pending":0}}'
+out=$(render "$(snap "[$(agent_with t1 "$(steps_all completed)" "$green11")]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$out" "11/11 your word" "the all-green summary still does not fit its cell"
+assert_not_contains "$out" "your wo…" "the all-green summary is being shortened when it fits"
+pass "the pre-merge summary fits its cell whole at real fleet check counts"
+
+# Every variable-length value any cell can hold, swept across the widths that
+# produce them. Whatever reaches the screen is either the whole value or a
+# value that ends in the ellipsis; a bare prefix is neither.
+sweep() {  # <extra-json> <needle-prefix>
+  local out
+  out=$(render "$(snap "[$(agent_with sw "$(steps_all completed)" "$1")]")" | sed 's/\x1b\[[0-9;]*m//g')
+  printf '%s\n' "$out" | grep -oE "$2[^ ]*" | head -1
+}
+for spec in \
+  '11/11:{"pr":{"url":"u/7","number":7},"ci":{"collection":{"ok":true},"checks":[],"total":11,"passed":11,"failed":0,"pending":0}}' \
+  '120/120:{"pr":{"url":"u/7","number":7},"ci":{"collection":{"ok":true},"checks":[],"total":120,"passed":120,"failed":0,"pending":0}}' \
+  '9/13:{"pr":{"url":"u/7","number":7},"ci":{"collection":{"ok":true},"checks":[],"total":13,"passed":9,"failed":4,"pending":0}}' \
+  '4/13:{"pr":{"url":"u/7","number":7},"ci":{"collection":{"ok":true},"checks":[],"total":13,"passed":4,"failed":0,"pending":9}}' \
+  '1234/1234:{"pr":{"url":"u/7","number":7},"ci":{"collection":{"ok":true},"checks":[],"total":1234,"passed":1234,"failed":0,"pending":0}}'
+do
+  needle=${spec%%:*}
+  extra=${spec#*:}
+  got=$(sweep "$extra" "$needle")
+  [ -n "$got" ] || fail "no cell rendered for $needle"
+  case $got in
+    *…) ;;                       # deliberately shortened, and it says so
+    *[a-z]) ;;                   # ends on a word, so nothing was cut
+    *[0-9]) ;;                   # a bare count, complete in itself
+    *) fail "cell '$got' ends mid-value with no ellipsis" ;;
+  esac
+done
+pass "every variable-length cell either fits or ends in an ellipsis"
+
+# A long free-text value on a line, rather than in a cell, takes the same rule.
+long='{"id":"a-task-id-far-longer-than-any-terminal-column-count-could-hold"}'
+out=$(render "$(snap "[$(agent_with x1 "$(steps_all completed)" "$long")]")" --cols 44 | sed 's/\x1b\[[0-9;]*m//g')
+printf '%s\n' "$out" | grep -q '…' || fail "an over-wide line was cut with no ellipsis"
+pass "a line too wide for the terminal ends in an ellipsis rather than mid-word"
+
+# --- the window moves only when the selector would leave it ------------------
+#
+# The captain's rule: up and down move the SELECTOR between agent rows, and the
+# window moves only when the selector is already on the top row and goes up, or
+# already on the bottom row and goes down. The viewer passed no top at all, so
+# every frame recomputed one from `sel` against a default of 0 - which pins the
+# selector to the bottom row and drags the window along on the way back up.
+
+cat >"$TMP_ROOT/scroll.mjs" <<'JS'
+const { resolveTop } = await import(process.argv[2]);
+let bad = 0;
+const eq = (got, want, what) => {
+  if (got !== want) { console.error(`${what}: got ${got}, want ${want}`); bad++; }
+};
+// 6 agents, 2 visible. Walk down to the end and back up, one key at a time,
+// carrying `top` exactly as the viewer does.
+const VIS = 2, N = 6;
+let top = 0;
+const step = (sel, wantTop, what) => { top = resolveTop(top, sel, VIS, N); eq(top, wantTop, what); };
+step(0, 0, "start");
+step(1, 0, "down to the bottom row: window still");
+step(2, 1, "down past the bottom row: window scrolls one");
+step(3, 2, "down again: window scrolls one");
+step(2, 2, "up FROM the bottom row: window must NOT move");
+step(1, 1, "up from the top row: window scrolls one");
+step(0, 0, "up from the top row again: window scrolls one");
+// Jumps land the selector at an edge rather than centring it.
+top = 0; eq(resolveTop(top, 5, VIS, N), 4, "jump to last");
+top = 4; eq(resolveTop(top, 0, VIS, N), 0, "jump to first");
+// A shrinking fleet must not leave the window pointing past the end.
+eq(resolveTop(4, 1, VIS, 3), 1, "fleet shrank under the window");
+// More room than agents: there is nowhere to scroll to.
+eq(resolveTop(0, 2, 9, 3), 0, "window taller than the fleet");
+process.exit(bad ? 1 : 0);
+JS
+node "$TMP_ROOT/scroll.mjs" "$TUI" || fail "the scroll rule moved the window off an edge"
+pass "the window moves only when the selector would otherwise leave it"
+
+# --- records with no worker are not agents -----------------------------------
+#
+# The collector holds them back; the renderer must not quietly absorb the
+# difference. They are stated, and they are not in the agent count.
+
+omitted='{"omitted":[{"id":"gone-1","window":"fm:9","reason":"recorded window no longer exists"},
+                     {"id":"gone-2","window":"fm:8","reason":"recorded window no longer exists"}],
+          "out_of_scope":[{"id":"scout-1","kind":"scout","window":"fm:7"}]}'
+DOC2=$(snap "[$(agent_with live2 "$(steps_all running)")]" | jq ". * $omitted")
+out=$(render "$DOC2" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$out" "1 agents" "the held-back records were counted as agents"
+assert_contains "$out" "2 hidden" "the held-back records were not stated"
+assert_contains "$out" "1 running no pipeline" "a live worker with no row was not stated"
+assert_not_contains "$out" "gone-1" "a held-back record was drawn as an agent"
+pass "held-back records are stated in the header and never drawn or counted"
+
+# --- what enter does is stated on the selected row, whatever cell is on -------
+#
+# Stepping right onto GITHUB CI used to leave a highlighted cell and nothing
+# saying what enter would do to it. Enter is agent-scoped, no cell carries an
+# action of its own, and the row says so on every frame.
+
+DOC3=$(snap "[$(agent_with e1 "$(steps_all completed)")]")
+out=$(render "$DOC3" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$out" "enter: open this worker's window" "the selected row does not say what enter does"
+
+# The cell is only reachable through the arrow keys, so the frame is asked for
+# directly. Cell 7 is GITHUB CI, the one the captain pressed enter on.
+cat >"$TMP_ROOT/hint.mjs" <<'JS'
+const { render } = await import(process.argv[2]);
+const snap = JSON.parse(process.argv[3]);
+const plain = (f) => f.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+let bad = 0;
+for (const cell of [-1, 0, 4, 7, 8]) {
+  const out = plain(render(snap, { rows: 60, cols: 200, sel: 0, cell }));
+  if (!out.includes("enter: open this worker's window")) {
+    console.error(`cell ${cell}: the selected row does not say what enter does`);
+    bad++;
+  }
+}
+const custom = plain(render(snap, {
+  rows: 60, cols: 200, sel: 0, cell: 7, openHint: "enter: attach (detach to come back)",
+}));
+if (!custom.includes("detach to come back")) { console.error("--open-hint did not reach the row"); bad++; }
+if (custom.includes("open this worker's window")) { console.error("--open-hint did not replace the default"); bad++; }
+process.exit(bad ? 1 : 0);
+JS
+node "$TMP_ROOT/hint.mjs" "$TUI" "$DOC3" ||
+  fail "the enter hint is missing on some cell, or the caller's hint did not reach it"
+pass "the selected agent states what enter does whichever cell is highlighted"
+
+# The caller owns that sentence end to end: only it knows what its --open-cmd
+# does to the captain's terminal and how to get back.
+out=$(setsid node "$TUI" --watch --cols 200 --rows 60 --tick 0 \
+  --open-hint 'enter: attach (detach to come back)' <<<"$DOC3" 2>/dev/null |
+  sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$out" "detach to come back" "--open-hint did not survive the flag path"
+pass "--open-hint replaces the default sentence about what enter does"
+
 # --- keys arrive in chunks, and in two encodings -----------------------------
 #
 # Raw mode delivers whatever bytes are available: holding an arrow down sends
