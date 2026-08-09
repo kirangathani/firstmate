@@ -38,8 +38,19 @@ FM_SHARED_CAPTAIN_MODE="444"
 # environment only in tests. Items must not contain whitespace.
 FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend statusline-base}"
 
+# Resolved ONCE at source time, not per call: the OS cannot change during the
+# process's life, and a per-call `uname` fork costs more than the stat it selects.
+# The three helpers below run per inheritable item per secondmate on every session
+# start. Deliberately NOT overridable from the environment: these helpers back the
+# mode, link-count and device identity checks that gate inherited-material writes,
+# so the OS reading must come from the OS. The failure branch is explicit rather
+# than left to the assignment's exit status: callers source this under `set -e`,
+# so an absent `uname` must leave the value empty and take the Linux branch, not
+# abort the sourcing script.
+FM_INHERIT_UNAME_S=$(uname 2>/dev/null) || FM_INHERIT_UNAME_S=
+
 fm_inherit_file_mode() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_INHERIT_UNAME_S" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null
   else
     stat -c %a "$1" 2>/dev/null
@@ -47,7 +58,7 @@ fm_inherit_file_mode() {
 }
 
 fm_inherit_file_device() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_INHERIT_UNAME_S" = Darwin ]; then
     stat -f %d "$1" 2>/dev/null
   else
     stat -c %d "$1" 2>/dev/null
@@ -55,7 +66,7 @@ fm_inherit_file_device() {
 }
 
 fm_inherit_file_link_count() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_INHERIT_UNAME_S" = Darwin ]; then
     stat -f %l "$1" 2>/dev/null
   else
     stat -c %h "$1" 2>/dev/null

@@ -20,10 +20,17 @@ fm_lock_log() {
   echo "${FM_LOCK_LOG_PREFIX:-fm-lock}: $*" >&2
 }
 
+# Resolved ONCE at source time, not per call: the OS cannot change during the
+# process's life, and a per-call `uname` fork costs more than the stat it selects.
+# The failure branch is explicit rather than left to the assignment's exit status:
+# callers source this under `set -e`, so an absent `uname` must leave the value
+# empty and take the Linux branch, not abort the sourcing script.
+FM_LOCK_UNAME_S=$(uname 2>/dev/null) || FM_LOCK_UNAME_S=
+
 # Portable mtime in epoch seconds. Kept self-contained so this leaf lib drags in
 # no wake-queue machinery when a caller only needs the staleness proof.
 fm_lock_path_mtime() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_LOCK_UNAME_S" = Darwin ]; then
     stat -f %m "$1" 2>/dev/null
   else
     stat -c %Y "$1" 2>/dev/null
