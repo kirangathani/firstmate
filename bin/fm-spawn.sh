@@ -373,11 +373,20 @@ launch_template() {
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # --dangerously-bypass-hook-trust is on the CREWMATE launch only, by explicit
+    # captain ruling recorded in docs/fix-instructions-gate.md. Codex gates project
+    # hooks on folder hook-trust, which this launch does not otherwise establish, so
+    # without it the fix-instructions seatbelt written to <worktree>/.codex/hooks.json
+    # is inert and every surface would read as though the rule were enforced. The
+    # accepted cost, stated before the ruling: a codex crewmate then runs a
+    # repository's own hook code at launch with no trust check, in any repo we clone.
+    # The ruling does NOT extend to the secondmate launch below, to any other
+    # harness, or to any other codex safety flag.
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
@@ -1047,9 +1056,18 @@ fi
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
 # they never block teardown's dirty check or leak into a commit.
+#
+# The same per-harness hook files also carry the fix-instructions PreToolUse
+# seatbelt (bin/fm-fix-instructions-check.sh, docs/fix-instructions-gate.md),
+# which denies a `no-mistakes axi respond --action fix` that carries no
+# substantive --instructions. It is wired here rather than per task so every
+# newly spawned crewmate receives it with no hand wiring, exactly as the turn-end
+# signal is. The check is referenced by absolute path into the firstmate code
+# root because a task worktree is a worktree of the PROJECT, not of firstmate.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+FIXCHECK="$FM_ROOT/bin/fm-fix-instructions-check.sh"
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -1061,17 +1079,44 @@ if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"
+      # --claude keeps stdout empty on deny; Claude Code ignores a PreToolUse
+      # deny whose stdout is non-empty (docs/arm-pretool-check.md).
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"$(json_escape "$FIXCHECK") --claude"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
+      # tool.execute.before blocks by throwing (verified 2026-07-09 against
+      # OpenCode 1.17.15; docs/arm-pretool-check.md). Only exit 2 blocks, so a
+      # missing or failing checker leaves the command alone.
       cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
+import { spawn } from "node:child_process"
+
+const FIX_CHECK = "$(json_escape "$FIXCHECK")"
+
+function runFixCheck(command) {
+  return new Promise((resolve) => {
+    const child = spawn(FIX_CHECK, ["--command", command], { stdio: ["ignore", "ignore", "pipe"] })
+    let stderr = ""
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString() })
+    child.on("error", () => resolve({ code: 0, stderr: "" }))
+    child.on("close", (code) => resolve({ code: code ?? 0, stderr }))
+  })
+}
+
 export const FmTurnEnd = async ({ \$ }) => ({
   event: async ({ event }) => {
     if (event.type === "session.idle") await \$\`touch $TURNEND\`
+  },
+  "tool.execute.before": async (input, output) => {
+    if (input?.tool !== "bash") return
+    const command = output?.args?.command
+    if (!command || typeof command !== "string") return
+    const result = await runFixCheck(command)
+    if (result.code !== 2) return
+    throw new Error(result.stderr.trim() || "denied by the fix-instructions PreToolUse seatbelt")
   },
 })
 EOF
@@ -1082,18 +1127,54 @@ EOF
       # loaded from inside the project (verified live), but an explicit -e path
       # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
       cat > "$STATE/$ID.pi-ext.ts" <<EOF
-// Firstmate turn-end signal; written by fm-spawn.
+// Firstmate turn-end signal and fix-instructions seatbelt; written by fm-spawn.
 // Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
 // (fires once, only when the whole run exits): the watcher needs a signal at
 // every turn boundary so an idle crewmate is surfaced, not just at shutdown.
-import { execFile } from "node:child_process";
+// pi.on("tool_call", ...) blocks by returning {block: true} (verified
+// 2026-07-09 against pi 0.80.5; docs/arm-pretool-check.md). The seatbelt rides
+// this same file so the launch needs no extra -e flag.
+import { execFile, spawn } from "node:child_process";
+const FIX_CHECK = "$(json_escape "$FIXCHECK")";
+function runFixCheck(command: string): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolveResult) => {
+    const child = spawn(FIX_CHECK, ["--command", command], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", () => resolveResult({ code: 0, stderr: "" }));
+    child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+  });
+}
 export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  pi.on("tool_call", async (event: any) => {
+    if (event.type !== "tool_call" || event.toolName !== "bash") return {};
+    const command = String(event.input?.command ?? "");
+    if (!command) return {};
+    const result = await runFixCheck(command);
+    if (result.code !== 2) return {};
+    return { block: true, reason: result.stderr.trim() || "denied by the fix-instructions PreToolUse seatbelt" };
+  });
 }
 EOF
       ;;
     codex*)
-      # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
+      # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__,
+      # so this is the one harness whose worktree carried no hook file before the
+      # fix-instructions seatbelt. Codex blocks on exit 2 and displays stderr, and
+      # reads project hooks from <project-root>/.codex/hooks.json - the same shape
+      # the firstmate primary uses. codex gates project hooks on folder hook-trust,
+      # which fm-spawn will not establish by writing codex's managed trust store, so
+      # the crewmate launch template above passes --dangerously-bypass-hook-trust to
+      # make this file load. That flag is a captain ruling with an accepted cost; see
+      # launch_template's codex comment and docs/fix-instructions-gate.md. UNVERIFIED:
+      # codex is not installed here, so that the flag makes this hook fire is an
+      # inference from codex's documented trust gate, not a measurement.
+      mkdir -p "$WT/.codex"
+      cat > "$WT/.codex/hooks.json" <<EOF
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash -lc 'payload=\$(cat 2>/dev/null || true); [ -n \"\$payload\" ] || exit 0; printf \"%s\" \"\$payload\" | $(json_escape "$(shell_quote "$FIXCHECK")")'","timeout":10}]}]}}
+EOF
+      exclude_path '.codex/hooks.json'
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
@@ -1141,6 +1222,37 @@ EOF
       chmod +x "$GROK_HOOKS_DIR/fm-turn-end.sh"
       hook_command=$(json_escape "bash $(shell_quote "$GROK_HOOKS_DIR/fm-turn-end.sh")")
       printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
+      # The fix-instructions seatbelt takes the same global-hook route and the
+      # same workspace-token guard, for the same reason: grok loads PROJECT hooks
+      # only after the folder is granted hook-trust, which firstmate will not
+      # establish by editing grok's managed trust store, while GLOBAL hooks in
+      # ~/.grok/hooks/ always load. The guard makes it a no-op for every grok
+      # session that is not a firstmate crewmate worktree, because only those
+      # carry a .fm-grok-turnend pointer into the firstmate-owned registry.
+      # Every $VAR in a grok hook command string must carry an inline :-default or
+      # the hook fails to load at all (docs/arm-pretool-check.md).
+      sq_fixcheck=$(shell_quote "$FIXCHECK")
+      cat > "$GROK_HOOKS_DIR/fm-pretool-check.sh" <<EOF
+#!/usr/bin/env bash
+set -u
+auth_dir=$sq_grok_auth_dir
+workspace=\${GROK_WORKSPACE_ROOT:-}
+payload=\$(cat 2>/dev/null || true)
+[ -n "\$workspace" ] || exit 0
+[ -n "\$payload" ] || exit 0
+p="\$workspace/.fm-grok-turnend"
+[ -f "\$p" ] || exit 0
+first=
+IFS= read -r -n 256 first < "\$p" 2>/dev/null || [ -n "\$first" ] || exit 0
+case "\$first" in token=*) token=\${first#token=} ;; *) exit 0 ;; esac
+case "\$token" in fm.????????????) : ;; *) exit 0 ;; esac
+case "\$token" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
+[ -f "\$auth_dir/\$token" ] || exit 0
+printf '%s' "\$payload" | $sq_fixcheck
+EOF
+      chmod +x "$GROK_HOOKS_DIR/fm-pretool-check.sh"
+      pretool_command=$(json_escape "bash $(shell_quote "$GROK_HOOKS_DIR/fm-pretool-check.sh")")
+      printf '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"%s","timeout":10}]}]}}\n' "$pretool_command" > "$GROK_HOOKS_DIR/fm-pretool-check.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;
