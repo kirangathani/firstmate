@@ -211,7 +211,10 @@ SKIP_FLAGS=$FM_TESTING_SKIP_FLAGS
 # non-spawn-capable backends. The resolved value is
 # recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
-# so the default path's meta stays byte-identical.
+# so the default path's meta still carries no backend= line. It is not
+# otherwise byte-identical to an older meta: a tmux spawn also writes
+# tmux_window_pinned=1 (see the meta block below), the window-name pin
+# guarantee that fm_backend_expected_label_of_meta keys off.
 if [ "$BACKEND_SET" -eq 1 ]; then
   BACKEND=$BACKEND_ARG
 else
@@ -1281,9 +1284,17 @@ META_WINDOW=$T
   [ "$CI_SKIP" = off ] || echo "ci_skip=on"
   [ -z "$CI_SKIP_AUTH" ] || echo "ci_skip_auth=$CI_SKIP_AUTH"
   # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
+  # default path's meta keeps carrying no backend= line (absent backend= means
+  # tmux; data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  # tmux_window_pinned=1 records that this window's name was pinned at
+  # creation: fm_backend_tmux_create_task now REFUSES the spawn unless
+  # automatic-rename and allow-rename could both be turned off, so reaching
+  # this line on tmux proves '#{window_name}' cannot drift from $W. Readers
+  # use it to decide whether an exact-label liveness check is safe
+  # (fm_backend_expected_label_of_meta, bin/fm-backend.sh); a meta written
+  # before this requirement carries no such line and is read leniently.
+  [ "$BACKEND" = tmux ] && echo "tmux_window_pinned=1"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"

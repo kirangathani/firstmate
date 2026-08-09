@@ -761,6 +761,16 @@ make_routine_bootstrap_fixture() {
   add_real_jq "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = list-panes ]; then
+  # Endpoint-liveness primitive (bin/backends/tmux.sh
+  # fm_backend_tmux_target_exists): the agent-liveness probe resolves the
+  # target through it before reading a command name, so this live secondmate
+  # window must answer with its own '#{window_name}'.
+  _t=""; _p=""
+  for _a in "$@"; do [ "$_p" = "-t" ] && _t="$_a"; _p="$_a"; done
+  printf '%s\n' "${_t##*:}"
+  exit 0
+fi
 if [ "${1:-}" = display-message ]; then
   printf '%s\n' codex
   exit 0

@@ -363,7 +363,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local pr pr_source event_json current_json endpoint_exists expected_label agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -432,8 +432,13 @@ task_json_lines() {
     blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 
     endpoint_exists=null
+    # The exact-label check is applied only where the endpoint's label is
+    # pinned (fm_backend_expected_label_of_meta); an unpinned tmux record from
+    # before that spawn requirement reads through tmux's own resolution
+    # instead, so a drifted window name cannot report a live task as dead.
+    expected_label=$(fm_backend_expected_label_of_meta "$meta" "$id")
     if [ -n "$target" ]; then
-      if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
+      if fm_backend_target_exists "$backend" "$target" "$expected_label" >/dev/null 2>&1; then
         endpoint_exists=true
       else
         endpoint_exists=false
@@ -441,7 +446,7 @@ task_json_lines() {
     fi
     agent_alive=not_checked
     if [ "$kind" = secondmate ] && [ -n "$target" ]; then
-      agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
+      agent_alive=$(fm_backend_agent_alive "$backend" "$target" "$expected_label" 2>/dev/null || printf unknown)
     fi
 
     [ -f "$report_path" ] && report_present=1 || report_present=0

@@ -34,6 +34,23 @@ case "${1:-}" in
     fi
     exit 0
     ;;
+  set-window-option)
+    # fm_backend_tmux_create_task pins the new window's name (automatic-rename
+    # and allow-rename off) as a HARD requirement and refuses the spawn if it
+    # cannot, so a fake tmux that rejected this would model a tmux no real
+    # captain has. Deliberately not logged: the log is asserted on for the
+    # window/send operations a spawn performs.
+    exit 0
+    ;;
+  list-panes)
+    # Endpoint-liveness primitive (bin/backends/tmux.sh
+    # fm_backend_tmux_target_exists): real tmux resolves the target and prints
+    # its '#{window_name}'; every window this fake creates stays live.
+    _t=""; _p=""
+    for _a in "$@"; do [ "$_p" = "-t" ] && _t="$_a"; _p="$_a"; done
+    printf '%s\n' "${_t##*:}"
+    exit 0
+    ;;
   display-message)
     printf 'firstmate\n'
     exit 0

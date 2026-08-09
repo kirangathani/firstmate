@@ -46,6 +46,23 @@ case "${1:-}" in
     fi
     printf '%%1\n'
     exit 0 ;;
+  list-panes)
+    # Endpoint-liveness primitive (bin/backends/tmux.sh
+    # fm_backend_tmux_target_exists): real tmux resolves the target and prints
+    # its '#{window_name}', failing on a gone window - which is what
+    # FM_FAKE_TMUX_DEAD_TARGET models here.
+    target=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) target=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ -n "${FM_FAKE_TMUX_DEAD_TARGET:-}" ] && [ "$target" = "$FM_FAKE_TMUX_DEAD_TARGET" ]; then
+      exit 1
+    fi
+    printf '%s\n' "${target##*:}"
+    exit 0 ;;
   capture-pane)
     printf '\xe2\x94\x82 \xe2\x94\x82\n'
     exit 0 ;;

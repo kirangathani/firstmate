@@ -40,9 +40,17 @@ case "${1:-}" in
       *) printf '%%1\n' ;;
     esac
     ;;
+  list-panes)
+    # Endpoint-liveness primitive (bin/backends/tmux.sh
+    # fm_backend_tmux_target_exists): real tmux resolves the target and prints
+    # its '#{window_name}', failing on a gone window. Every window this fixture
+    # records is present (a dead SECONDMATE here is a live pane sitting at a
+    # bare shell, which is what the deeper agent-liveness probe classifies).
+    printf '%s\n' "${target##*:}"
+    ;;
   capture-pane)
     case "$target" in
-      *ship-task*|*active-secondmate*) printf 'work in progress\nesc to interrupt\n' ;;
+      *ship-task*|*active-secondmate*|*stale-decision*|*stale-blocked*) printf 'work in progress\nesc to interrupt\n' ;;
       *) printf 'all quiet\n> \n' ;;
     esac
     ;;
@@ -198,7 +206,7 @@ test_event_hints_follow_reconciled_current_state() {
     "mode=ship"
   printf 'blocked: waiting on access\n' > "$home/state/active-blocked.status"
   fm_write_meta "$home/state/stale-decision.meta" \
-    "window=firstmate:fm-stale-decision-ship-task" \
+    "window=firstmate:fm-stale-decision" \
     "worktree=$home/projects/stale-decision" \
     "project=alpha" \
     "harness=codex" \
@@ -206,7 +214,7 @@ test_event_hints_follow_reconciled_current_state() {
     "mode=ship"
   printf 'needs-decision: already answered\n' > "$home/state/stale-decision.status"
   fm_write_meta "$home/state/stale-blocked.meta" \
-    "window=firstmate:fm-stale-blocked-ship-task" \
+    "window=firstmate:fm-stale-blocked" \
     "worktree=$home/projects/stale-blocked" \
     "project=alpha" \
     "harness=codex" \
