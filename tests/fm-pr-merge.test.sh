@@ -179,18 +179,18 @@ case "\${1:-} \${2:-}" in
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
       *baseRefName*) printf '%s\n' 'main' ; exit 0 ;;
-      *body,commits*)
-        # The AI-attribution gate's read. The case's pr-attribution.json when
-        # present, a clean body and one clean commit otherwise, and a query
-        # failure when the pr-attribution-unreadable marker exists.
-        if [ -e '$case_dir/pr-attribution-unreadable' ]; then
-          echo 'mock: body/commits query failed' >&2
+      *" body "*)
+        # The AI-attribution gate's one API read: the PR description as raw
+        # text. The case's pr-body.txt when present, nothing otherwise - an
+        # empty description is a real PR state and carries no attribution. The
+        # pr-body-unreadable marker makes the read FAIL, which is the case that
+        # must still refuse.
+        if [ -e '$case_dir/pr-body-unreadable' ]; then
+          echo 'mock: body query failed' >&2
           exit 1
         fi
-        if [ -f '$case_dir/pr-attribution.json' ]; then
-          cat '$case_dir/pr-attribution.json'
-        else
-          printf '%s\n' '{"body":"A clean description.","commits":[{"oid":"$head","messageHeadline":"baseline","messageBody":""}]}'
+        if [ -f '$case_dir/pr-body.txt' ]; then
+          cat '$case_dir/pr-body.txt'
         fi
         exit 0
         ;;
@@ -233,7 +233,7 @@ SH
 case " $* " in
   *statusCheckRollup*) printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tmock-default-ci\n' ;;
   *baseRefName*) printf 'main\n' ;;
-  *body,commits*) printf '%s\n' '{"body":"A clean description.","commits":[{"oid":"deadbeefcafe","messageHeadline":"baseline","messageBody":""}]}' ;;
+  *" body "*) ;;
 esac
 exit 0
 SH
@@ -1224,15 +1224,21 @@ write_pr_checks() {
   fi
 }
 
-# write_pr_attribution <case-dir> <body> <commit message>: the body and single
-# commit message the gh mock will hand the AI-attribution gate. Assembled with
-# jq so an embedded newline or quote in a trailer cannot break the JSON the way
-# a hand-built string would.
-write_pr_attribution() {
-  local case_dir=$1 body=$2 message=$3
-  jq -n --arg body "$body" --arg msg "$message" \
-    '{body: $body, commits: [{oid: "abc123def456", messageHeadline: ($msg | split("\n")[0]), messageBody: ($msg | split("\n")[1:] | join("\n"))}]}' \
-    > "$case_dir/pr-attribution.json"
+# write_pr_body <case-dir> <text>: the PR description the gh mock will hand the
+# AI-attribution gate.
+write_pr_body() {
+  printf '%s\n' "$2" > "$1/pr-body.txt"
+}
+
+# commit_on_branch <case-dir> <message>: put a real commit carrying <message> on
+# the case's fm/task-x1 worktree. The attribution gate reads commit messages out
+# of git rather than the API, so a case that needs a dirty commit needs a real
+# one - which is also a truer fixture than a JSON string claiming to be one.
+commit_on_branch() {
+  local case_dir=$1 message=$2
+  printf 'change\n' >> "$case_dir/wt/README.md"
+  git -C "$case_dir/wt" add -A
+  git -C "$case_dir/wt" commit -q -m "$message"
 }
 
 # enable_no_pr_ci <case_dir>: create the captain's per-project marker that lets
