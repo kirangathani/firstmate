@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":"hello"}}
+{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":4,"cache_read_input_tokens":52000,"cache_creation_input_tokens":1200,"output_tokens":80}}}
