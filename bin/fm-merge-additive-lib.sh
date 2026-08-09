@@ -196,8 +196,13 @@ fm_additive__awk() {
       sub(/^[0-9]+[.)] /, "", s)
       return s
     }
+    # Tokens are case-folded. Fusing two sentences into one lowercases the
+    # second one is leading word, and the captain named sentence-merging as
+    # inside the additive case, so a rescue that failed on that single letter
+    # would refuse exactly the reformat it exists to allow. Only the rescue folds
+    # case; exact line survival above it does not.
     function addtoks(s, dest,   n, i, a) {
-      n = split(s, a, /[^A-Za-z0-9_]+/)
+      n = split(tolower(s), a, /[^a-z0-9_]+/)
       for (i = 1; i <= n; i++) if (a[i] != "") dest[a[i]] = 1
     }
     {
@@ -215,7 +220,7 @@ fm_additive__awk() {
       for (k in T) if (!(k in B)) req[k] = (k in req) ? "both" : "theirs"
       for (k in req) {
         if (k in R) continue                       # rescue 1: relocation
-        nt = split(k, a, /[^A-Za-z0-9_]+/)         # rescue 2: reformat/blend
+        nt = split(tolower(k), a, /[^a-z0-9_]+/)   # rescue 2: reformat/blend
         novel = 0; survived = 0
         for (i = 1; i <= nt; i++) {
           if (a[i] == "" || a[i] in BT) continue
