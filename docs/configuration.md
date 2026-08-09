@@ -108,17 +108,30 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 Because that file is tracked and shared, it would otherwise replace whatever status line the operator already runs globally, in every worktree of this repo.
 So the script composes instead of replacing: it runs an optional base status-line command first and prints the fleet line beneath that command's output.
 
-`config/statusline-base` is a local, gitignored file whose first line is the path to that base command; `FM_STATUSLINE_BASE` overrides it.
-The path is deliberately never named in tracked material, because it is machine-specific.
-An absent, empty, or non-executable base command simply means no base line, silently and with no error.
+The base command is resolved in this order, highest first, and the resolved value is never named in tracked material because it is machine-specific:
+
+1. `FM_STATUSLINE_BASE`, the explicit environment override.
+2. `config/statusline-base`, a local, gitignored file whose first line is the base command.
+3. The harness's own user-level status-line command, read live from `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json` as `.statusLine.command`.
+4. Nothing, which means the fleet line alone.
+
+Tier 3 is the default that makes composition work with no local setup at all.
+It resolves to exactly the status line the operator would be seeing here if this repo's tracked project settings did not exist, taken live from the authoritative copy already on disk, so a fresh home, a fresh clone, and a fresh task worktree all compose correctly without anyone creating a file.
+Before it existed the default was tier 4: a home with no `config/` dir silently printed the fleet line alone and deleted the operator's own status line everywhere inside this repo, with nothing warning and nothing logged.
+Setting tier 1 or 2 to the literal value `none` stops the fallback, for an operator who wants the fleet line by itself.
+
+A resolved base command that is an existing file is executed directly, which keeps the long-standing one-path form working including paths containing spaces; anything else is run as a command line through `sh -c`, the same way Claude Code runs a `statusLine` command.
+An absent, empty, unreadable, or unparseable source simply means no base line, silently and with no error.
+`FM_STATUSLINE_COMPOSING=1` is exported across the base command, and `bin/fm-statusline.sh` skips base resolution entirely when it is already set, so a user-level status line that names `bin/fm-statusline.sh` itself neither recurses nor prints the fleet line twice.
 The harness's status-line JSON payload is captured once and forwarded to the base command on stdin, so a base command that reads it behaves exactly as it does when run directly.
 
 Composition applies even where the fleet line is absent, so a location with no fleet shows the base line alone rather than a blank status line.
+`tests/fm-statusline-render.test.sh` renders the whole thing end to end - the real command from the real settings file, the real stdin payload, assertions on the real output bytes - and its header owns the recorded-fixture provenance.
 How the setting reaches each location differs, because `config/` is gitignored and exists only in a real home:
 
-- **Primary home.** `config/statusline-base` is read directly. This is the file the operator writes.
-- **Secondmate home.** `statusline-base` is in `FM_INHERITABLE_CONFIG` (`bin/fm-config-inherit-lib.sh`), so the primary propagates it as a real `config/statusline-base` file on every convergence, and the secondmate reads its own copy. An item the primary does not set is mirrored as absence downstream, so clearing it downstream needs no extra step.
-- **Crewmate or scout task worktree.** A plain `git worktree` has no `config/` and no `state/`, so there is no file to read. `bin/fm-spawn.sh` therefore exports `FM_STATUSLINE_BASE` into the worker's launch environment, resolved from the dispatching home's `config/statusline-base`. That env override is the only way the setting reaches a task worktree; nothing is exported when the dispatching home has no setting, and no spawn ever fails over it.
+- **Primary home.** `config/statusline-base` is read directly. This is the file the operator writes when they want something other than their own user-level status line.
+- **Secondmate home.** `statusline-base` is in `FM_INHERITABLE_CONFIG` (`bin/fm-config-inherit-lib.sh`), so the primary propagates it as a real `config/statusline-base` file on every convergence, and the secondmate reads its own copy. An item the primary does not set is mirrored as absence downstream, so clearing it downstream needs no extra step, and absence downstream now falls through to tier 3 rather than to nothing.
+- **Crewmate or scout task worktree.** A plain `git worktree` has no `config/` and no `state/`, so there is no file to read. `bin/fm-spawn.sh` exports `FM_STATUSLINE_BASE` into the worker's launch environment when the dispatching home set one explicitly, which is how a deliberate per-home choice reaches the worker; nothing is exported when the dispatching home has no setting, and no spawn ever fails over it. A worker that inherits no export resolves tier 3 for itself, so a task worktree shows the operator's own status line either way.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -472,7 +485,8 @@ FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops
 FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the composer row for submit verification
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
-FM_STATUSLINE_BASE=     # path to the base status-line command bin/fm-statusline.sh composes above its fleet line; overrides config/statusline-base, and is how fm-spawn.sh carries the setting into a task worktree (see "Status-line composition" above)
+FM_STATUSLINE_BASE=     # the base status-line command bin/fm-statusline.sh composes above its fleet line; outranks config/statusline-base and the user-level fallback, "none" opts out entirely, and it is how fm-spawn.sh carries an explicit setting into a task worktree (see "Status-line composition" above)
+FM_STATUSLINE_COMPOSING=  # set to 1 by bin/fm-statusline.sh across the base command it runs; when already set it skips base resolution, so a user-level status line naming that script cannot recurse (see "Status-line composition" above)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
