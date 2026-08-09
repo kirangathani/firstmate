@@ -90,6 +90,14 @@
 #        really did decline to run it; a rewritten assertion body and a deleted
 #        base test file are both still caught under the flag; and identical
 #        content at a DIFFERENT path is never treated as identical
+#   (gg) `executed-files=`: the summary's one FILE-counted field, published so a
+#        caller can tell "the base's assertions were re-run and held" from
+#        "there was nothing left to run" - two states that are otherwise the
+#        same exit code and the same zero findings. It must count exactly the
+#        base test files check 2 really ran against the branch, so a file that
+#        was skipped as assumed-covered and a file whose baseline could not run
+#        at all are both excluded, and every count here is derived from the
+#        fixture at run time rather than written down beside it
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -2156,6 +2164,126 @@ pass "tag is readable"
   pass "a constant assertion name over a changed runtime value is compared cleanly and actually accounted for"
 }
 
+# --- (gg) the executed-files count ------------------------------------------
+#
+# The field exists because exit 0 with no findings is ambiguous: it is both "the
+# base's assertions were re-run against this branch and held" and "every base
+# test file was skipped, so nothing was checked". bin/fm-reverify-base.sh renders
+# those as different outcomes and can only do so from this count, so what the
+# count actually counts is a contract, not an incidental number.
+
+# make_counting_repo <slug> <total> <changed>: main holds <total> self-contained
+# shell test files; the work branch appends an assertion to the first <changed>
+# of them and leaves the rest byte-identical. Echoes "<dir> <changed>", so the
+# expected count comes from the fixture the case actually built rather than from
+# a literal written next to the assertion.
+make_counting_repo() {  # <slug> <total> <changed>
+  local slug=$1 total=$2 changed=$3 dir i actually_changed=0
+  dir="$TMP_ROOT/$slug"
+  mkdir -p "$dir/tests"
+  # Every git call's stdout goes to /dev/null: this function's stdout IS its
+  # return value, and `git commit` on an already-clean tree prints "On branch
+  # <name>" there, which would be read back as the fixture's path.
+  {
+    git init -q -b main "$dir" 2>/dev/null || {
+      git init -q "$dir"
+      git -C "$dir" checkout -q -b main
+    }
+  } >/dev/null
+  i=1
+  while [ "$i" -le "$total" ]; do
+    cat > "$dir/tests/t$i.test.sh" <<EOF
+#!/usr/bin/env bash
+pass() { printf 'ok - %s\n' "\$1"; }
+pass "assertion $i holds"
+EOF
+    i=$((i + 1))
+  done
+  printf 'base\n' > "$dir/src.txt"
+  commit_all "$dir" "main: $total test files" >/dev/null
+  git -C "$dir" checkout -q -b work >/dev/null
+  i=1
+  while [ "$i" -le "$changed" ]; do
+    printf 'pass "assertion %s the branch added"\n' "$i" >> "$dir/tests/t$i.test.sh"
+    actually_changed=$((actually_changed + 1))
+    i=$((i + 1))
+  done
+  # A non-test change on every branch, so the commit below is never empty even
+  # when <changed> is 0 - an empty commit is refused and the fixture would then
+  # silently be main itself.
+  printf 'the branch changed non-test content\n' > "$dir/src.txt"
+  commit_all "$dir" "work: branch appends to $actually_changed of them" >/dev/null
+  printf '%s %s\n' "$dir" "$actually_changed"
+}
+
+test_executed_files_counts_only_the_files_actually_run() {
+  local fixture dir changed out code
+  fixture=$(make_counting_repo executed-count 5 2)
+  dir=${fixture%% *}
+  changed=${fixture##* }
+
+  set +e
+  out=$(run_explicit "$dir" --assume-branch-suite-green 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "executed-count: a clean run must still exit zero"
+  assert_contains "$out" "executed-files=$changed" \
+    "executed-count: the count must equal the number of base test files the branch actually changed"
+  assert_not_contains "$out" 'executed-files=0' \
+    "executed-count: a run that really executed files must not report zero"
+  pass "executed-files counts exactly the base test files that differed and were run"
+}
+
+test_executed_files_is_zero_when_every_file_was_skipped() {
+  local fixture dir out code
+  # The state a moved base usually leaves: source moved underneath, every test
+  # file byte-identical. Nothing was checked here, and the count is what says so.
+  fixture=$(make_counting_repo executed-zero 4 0)
+  dir=${fixture%% *}
+
+  set +e
+  out=$(run_explicit "$dir" --assume-branch-suite-green 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 0 "$code" "executed-zero: an all-skipped run must still exit zero"
+  assert_contains "$out" 'executed-files=0' \
+    "executed-zero: a run that executed nothing must say so, not just report no findings"
+  assert_contains "$out" 'assumed-covered: tests/t1.test.sh::assertion 1 holds' \
+    "executed-zero: the skipped identifiers must still be reported in their own class"
+  pass "executed-files is zero when every base test file was skipped as assumed-covered"
+}
+
+test_executed_files_never_counts_a_file_that_could_not_run() {
+  local fixture dir changed out code
+  # A file whose BASELINE fails is `unexecuted:` - it was reached in the loop and
+  # never run against the branch. Counting it would let a run whose every
+  # selected file failed to start report itself as a re-verification.
+  fixture=$(make_counting_repo executed-unexec 3 2)
+  dir=${fixture%% *}
+  changed=${fixture##* }
+  # main's t1 stops running green, on main alone. The branch's t1 already
+  # differs from it (make_counting_repo appended an assertion there), so t1 is
+  # still SELECTED - it is just no longer executable, which is the whole point.
+  git -C "$dir" checkout -q main
+  printf 'exit 3\n' >> "$dir/tests/t1.test.sh"
+  commit_all "$dir" "main: t1 cannot run green on the base itself" >/dev/null
+  git -C "$dir" checkout -q work
+
+  set +e
+  out=$(run_explicit "$dir" --assume-branch-suite-green 2> "$dir/stderr")
+  code=$?
+  set -e
+
+  expect_code 1 "$code" "executed-unexec: an unexecutable base test file must still refuse"
+  assert_contains "$out" 'unexecuted: tests/t1.test.sh::assertion 1 holds' \
+    "executed-unexec: the file that could not run must be reported unexecuted"
+  assert_contains "$out" "executed-files=$((changed - 1))" \
+    "executed-unexec: the unexecutable file must not be counted among those that ran"
+  pass "executed-files never counts a base test file whose baseline could not run"
+}
+
 test_pr_base_branch_is_compared_against_the_pr_target
 test_unreadable_pr_base_refuses_rather_than_assuming_default
 test_pr_in_another_github_repo_refuses_before_any_fetch
@@ -2205,3 +2333,6 @@ test_moving_assertion_name_is_unstable_not_a_vanished_assertion
 test_unstable_name_does_not_swallow_a_real_failing_assertion
 test_unstable_name_does_not_mask_a_deleted_assertion
 test_constant_name_over_a_changed_value_is_fully_verified
+test_executed_files_counts_only_the_files_actually_run
+test_executed_files_is_zero_when_every_file_was_skipped
+test_executed_files_never_counts_a_file_that_could_not_run
