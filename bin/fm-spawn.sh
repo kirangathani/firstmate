@@ -1455,8 +1455,10 @@ META_WINDOW=$T
   # Testing skips are written only when ON, so an unflagged task's meta stays
   # byte-identical to before these flags existed; an absent field means off.
   # ci_skip=on is the ONLY thing that lets bin/fm-ci-waiver.sh sign for this
-  # task, which is why it is written here, at dispatch, on the captain's machine
-  # and into a directory no worker can reach.
+  # task, which is why it is written here, at dispatch, on the captain's machine.
+  # A worker CAN reach this directory - it appends its status lines beside this
+  # file - so the flag line alone is not what protects anything; the token below
+  # is, because it is an HMAC over a secret the worker was never told about.
   # Each *_auth= token is written only when one was actually minted: an absent
   # token means the flag was recorded without one, which every consumer must
   # then treat as no authority rather than as a missing file to work around.
