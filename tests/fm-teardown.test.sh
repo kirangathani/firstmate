@@ -490,11 +490,288 @@ SH
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
+  run_teardown_id "$case_dir" task-x1 "$@"
+}
+
+# Same, for a case that has more than one task recorded in its state dir.
+run_teardown_id() {
+  local case_dir=$1 id=$2; shift 2
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
-    "$TEARDOWN" task-x1 "$@"
+    "$TEARDOWN" "$id" "$@"
+}
+
+# --- slot-recycling collision ------------------------------------------------
+#
+# A recorded `worktree=` path is a treehouse pool LEASE, not a task identity: the
+# pool takes a slot back when a task ends and hands the same path to a later
+# task. So an old task's meta can name a slot a DIFFERENT task now holds, and
+# `treehouse return --force` on it terminates that task's live agent - which is
+# exactly what happened on 2026-07-31, when tearing down fm-watcher-identity-p6
+# killed the live kept-exec-p2 claude process that had been leased its old slot.
+#
+# Sizing: the guarded limit is "no process belonging to another task is
+# terminated", so the fixture is sized from that limit rather than from a
+# convenient proxy. The treehouse mock below reproduces the real tool's stated
+# behaviour ("Terminate lingering processes and return a worktree", treehouse
+# v2.0.0 `return --help`) by actually signalling the processes whose cwd is the
+# worktree, and the surviving task is a real background process sitting in that
+# worktree. A refusal that skipped the kill would pass either way; this fixture
+# fails unless teardown stops BEFORE the return runs.
+add_process_killing_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+# `treehouse return --force <wt>`: terminate processes living in the worktree,
+# then succeed - the same order the real tool documents.
+if [ "${1:-}" = return ]; then
+  shift
+  wt=""
+  for a in "$@"; do
+    case "$a" in --*) ;; *) wt=$a ;; esac
+  done
+  if [ -n "$wt" ] && [ -d "$wt" ]; then
+    wt_real=$(cd "$wt" && pwd -P)
+    for pid_dir in /proc/[0-9]*; do
+      pid=${pid_dir#/proc/}
+      cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
+      [ "$cwd" = "$wt_real" ] || continue
+      kill -9 "$pid" 2>/dev/null || true
+    done
+  fi
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# Start a real process whose cwd is the worktree, standing in for the live agent
+# the recycled slot now belongs to. Echoes its pid.
+start_worktree_process() {
+  local wt=$1 pid
+  # Both stream redirections are load-bearing, not tidiness: this runs inside a
+  # command substitution, so a background child that inherits its stdout pipe
+  # keeps that pipe open and blocks the substitution until the child exits.
+  ( cd "$wt" && exec sleep 120 ) >/dev/null 2>&1 &
+  pid=$!
+  # Wait for the child to actually be in the worktree before the assertion
+  # depends on it, rather than assuming the fork has landed.
+  for _ in $(seq 1 50); do
+    [ "$(readlink "/proc/$pid/cwd" 2>/dev/null || true)" = "$(cd "$wt" && pwd -P)" ] && break
+    sleep 0.1
+  done
+  printf '%s\n' "$pid"
+}
+
+process_alive() {
+  kill -0 "$1" 2>/dev/null
+}
+
+# Record a second, LIVE task holding the same worktree, and mark the worktree as
+# that task's the way bin/fm-spawn.sh does when it claims the slot.
+claim_worktree_for_task() {
+  local case_dir=$1 id=$2
+  fm_write_meta "$case_dir/state/$id.meta" \
+    "window=fm-$id" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'id=%s\n' "$id" > "$case_dir/wt/.fm-task"
+}
+
+test_stale_meta_never_tears_down_a_recycled_slot() {
+  local case_dir victim rc
+  case_dir=$(make_case slot-recycled)
+  # task-x1's own record still names the slot, but the slot has been re-leased to
+  # task-y2, which is live in it. task-x1's work landed, so nothing but the
+  # ownership check stands between teardown and the kill.
+  write_meta "$case_dir" no-mistakes ship
+  add_process_killing_treehouse "$case_dir"
+  claim_worktree_for_task "$case_dir" task-y2
+  git -C "$case_dir/wt" checkout -q -b fm/task-y2
+  victim=$(start_worktree_process "$case_dir/wt")
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "slot-recycled: teardown of a recycled slot must refuse"
+  assert_grep "REFUSED" "$case_dir/stderr" \
+    "slot-recycled: teardown did not refuse a slot held by another task"
+  assert_grep "task-y2" "$case_dir/stderr" \
+    "slot-recycled: refusal did not name the task that actually holds the slot"
+  process_alive "$victim" \
+    || fail "slot-recycled: teardown terminated the live task-y2 process in the recycled slot"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "slot-recycled: a refusal must preserve the task's own records"
+  kill -9 "$victim" 2>/dev/null || true
+  pass "teardown refuses a worktree a different live task now holds, and kills nothing"
+}
+
+test_force_cannot_discard_another_tasks_slot() {
+  local case_dir victim rc
+  case_dir=$(make_case slot-recycled-force)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  add_process_killing_treehouse "$case_dir"
+  claim_worktree_for_task "$case_dir" task-y2
+  git -C "$case_dir/wt" checkout -q -b fm/task-y2
+  victim=$(start_worktree_process "$case_dir/wt")
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "slot-recycled-force: --force must not waive the ownership check"
+  assert_grep "task-y2" "$case_dir/stderr" \
+    "slot-recycled-force: refusal did not name the holder"
+  process_alive "$victim" \
+    || fail "slot-recycled-force: --force terminated another task's live process"
+  kill -9 "$victim" 2>/dev/null || true
+  pass "--force discards this task's work, never another task's slot"
+}
+
+test_stale_meta_alone_refuses_without_a_marker() {
+  local case_dir rc
+  case_dir=$(make_case slot-collision-meta)
+  # The pre-marker shape of the same collision: two records name one worktree and
+  # neither carries a marker, so the durable records are the only evidence. The
+  # worktree is left detached so neither task can prove ownership by branch.
+  write_meta "$case_dir" no-mistakes ship
+  fm_write_meta "$case_dir/state/task-y2.meta" \
+    "window=fm-task-y2" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  git -C "$case_dir/wt" checkout -q --detach
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "slot-collision-meta: two records naming one worktree must refuse"
+  assert_grep "task-y2" "$case_dir/stderr" \
+    "slot-collision-meta: refusal did not name the colliding task"
+  pass "a second record naming the same worktree refuses even with no marker"
+}
+
+test_own_marker_allows_teardown_despite_a_stale_record() {
+  local case_dir rc
+  case_dir=$(make_case slot-owner-allowed)
+  # The mirror case: task-x1 genuinely holds the slot and a dead task's record
+  # still names it. Ownership is proven, so the ordinary teardown must run
+  # unchanged - including its landed-work refusal, which this case satisfies.
+  write_meta "$case_dir" local-only ship
+  printf 'id=%s\n' task-x1 > "$case_dir/wt/.fm-task"
+  fm_write_meta "$case_dir/state/task-dead.meta" \
+    "window=fm-task-dead" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "slot-owner-allowed: the slot's real owner must still tear down"
+  assert_no_grep "REFUSED" "$case_dir/stderr" \
+    "slot-owner-allowed: teardown refused the task that owns the slot"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "slot-owner-allowed: teardown did not clear the owning task's records"
+  pass "a task that still holds its slot tears down exactly as before"
+}
+
+test_owning_task_still_refuses_unlanded_work() {
+  local case_dir rc
+  case_dir=$(make_case slot-owner-unlanded)
+  write_meta "$case_dir" local-only ship
+  printf 'id=%s\n' task-x1 > "$case_dir/wt/.fm-task"
+  wt_commit "$case_dir" "unpushed work"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "slot-owner-unlanded: the landed-work refusal must survive"
+  assert_grep "not yet merged into main" "$case_dir/stderr" \
+    "slot-owner-unlanded: the unlanded-work refusal was replaced by something else"
+  pass "proving slot ownership does not weaken the unlanded-work refusal"
+}
+
+test_release_lost_slot_clears_records_without_touching_the_slot() {
+  local case_dir victim rc
+  case_dir=$(make_case slot-release)
+  write_meta "$case_dir" no-mistakes ship
+  add_process_killing_treehouse "$case_dir"
+  claim_worktree_for_task "$case_dir" task-y2
+  git -C "$case_dir/wt" checkout -q -b fm/task-y2
+  victim=$(start_worktree_process "$case_dir/wt")
+
+  set +e
+  run_teardown "$case_dir" --release-lost-slot > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "slot-release: releasing a lost slot's records should succeed"
+  process_alive "$victim" \
+    || fail "slot-release: the release path terminated the holder's process"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "slot-release: the lost task's own record was not cleared"
+  [ -f "$case_dir/state/task-y2.meta" ] \
+    || fail "slot-release: the holder's record was cleared too"
+  [ -f "$case_dir/wt/.fm-task" ] \
+    || fail "slot-release: the holder's worktree marker was removed"
+  assert_grep "task-y2" "$case_dir/wt/.fm-task" \
+    "slot-release: the holder's worktree marker was rewritten"
+  kill -9 "$victim" 2>/dev/null || true
+  pass "--release-lost-slot clears only the lost task's records"
+}
+
+test_release_lost_slot_refuses_when_the_slot_is_still_ours() {
+  local case_dir rc
+  case_dir=$(make_case slot-release-owned)
+  write_meta "$case_dir" local-only ship
+  printf 'id=%s\n' task-x1 > "$case_dir/wt/.fm-task"
+  wt_commit "$case_dir" "unpushed work"
+
+  set +e
+  run_teardown "$case_dir" --release-lost-slot > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "slot-release-owned: releasing an owned slot must refuse"
+  assert_grep "still holds" "$case_dir/stderr" \
+    "slot-release-owned: the refusal did not say the task still holds its slot"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "slot-release-owned: records were cleared for a task that still owns its worktree"
+  pass "--release-lost-slot is not a second escape hatch for an owned worktree"
+}
+
+test_unknown_teardown_option_is_rejected() {
+  local case_dir rc
+  case_dir=$(make_case slot-bad-flag)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+
+  set +e
+  run_teardown "$case_dir" --forse > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 2 "$rc" "slot-bad-flag: a mistyped flag must not read as no flag"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "slot-bad-flag: teardown acted on a mistyped flag"
+  pass "a mistyped teardown flag is refused instead of silently ignored"
 }
 
 test_local_only_fork_remote_allows() {
@@ -1293,3 +1570,11 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_stale_meta_never_tears_down_a_recycled_slot
+test_force_cannot_discard_another_tasks_slot
+test_stale_meta_alone_refuses_without_a_marker
+test_own_marker_allows_teardown_despite_a_stale_record
+test_owning_task_still_refuses_unlanded_work
+test_release_lost_slot_clears_records_without_touching_the_slot
+test_release_lost_slot_refuses_when_the_slot_is_still_ours
+test_unknown_teardown_option_is_rejected
