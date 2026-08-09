@@ -289,9 +289,16 @@ report_stuck() {
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
 }
 
+# Set by sync_project when this clone's origin/<default> actually moved across
+# the fetch, read by sync_and_sweep below. That is the instant the base every
+# open branch is measured against changes, and the first instant the new base
+# exists in this home at all.
+SYNC_BASE_MOVED=no
+
 sync_project() {
   PROJ=$1
   label=$(project_label)
+  SYNC_BASE_MOVED=no
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
@@ -311,6 +318,12 @@ sync_project() {
     echo "$label: skipped: no origin remote"
     return 0
   fi
+
+  # The base every open branch is measured against is origin/<default>, so the
+  # "did the base move" reading is taken across the fetch itself rather than
+  # from the local checkout's fast-forward. A clone left STUCK on a named branch
+  # still saw its base move, and its siblings are just as stale.
+  base_before=$(git -C "$PROJ" rev-parse --verify --quiet "origin/$(default_branch 2>/dev/null)^{commit}" 2>/dev/null) || base_before=
 
   if ! fetch_with_packed_refs_lock_guard; then
     reason="fetch failed"
@@ -332,6 +345,8 @@ sync_project() {
     echo "$label: skipped: $BASE does not exist"
     return 0
   fi
+  base_after=$(git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" 2>/dev/null) || base_after=
+  [ "$base_before" = "$base_after" ] || SYNC_BASE_MOVED=yes
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no
@@ -417,8 +432,24 @@ sync_project() {
   return 0
 }
 
+# Sync one clone, then - only when its origin/<default> actually moved - name
+# the sibling branches now measuring CI against the base it just replaced.
+# This is the IMMEDIATE half of the stale-base guarantee (bin/fm-stale-base.sh
+# owns the predicate and the remedy wording, bin/fm-turnend-guard.sh is the
+# backstop). It belongs here rather than on the merge notification itself
+# because the merge wake fires before anything has refreshed this clone: a list
+# computed there would be measured against the OLD base and would report all
+# clear at the exact moment it is wrong. Here the fetch has already happened, so
+# the answer is fresh by construction and costs no extra network.
+sync_and_sweep() {  # <project-dir>
+  sync_project "$1"
+  [ "$SYNC_BASE_MOVED" = yes ] || return 0
+  [ -x "$FM_ROOT/bin/fm-stale-base.sh" ] || return 0
+  "$FM_ROOT/bin/fm-stale-base.sh" --project "$1" || true
+}
+
 if [ $# -eq 1 ]; then
-  sync_project "$(resolve_project_arg "$1")"
+  sync_and_sweep "$(resolve_project_arg "$1")"
   exit 0
 fi
 
@@ -426,5 +457,5 @@ fi
 for proj in "$PROJECTS"/*; do
   [ -e "$proj" ] || continue
   [ -d "$proj" ] || continue
-  sync_project "$proj"
+  sync_and_sweep "$proj"
 done

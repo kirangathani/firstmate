@@ -85,30 +85,57 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
-fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
 
 # Supervision belongs to the session holding this home's SESSION lock
-# (state/.lock - not the watcher singleton state/.watch.lock checked above).
+# (state/.lock - not the watcher singleton state/.watch.lock checked below).
 # A session that does not hold it cannot arm a watcher (bin/fm-watch-arm.sh
 # declines from there), so telling it to repair supervision would block nearly
-# every turn on work it must not touch. This mirrors the read-only advisory mode
-# bin/fm-guard.sh already uses. A dead or absent holder still alarms: nobody is
-# supervising the in-flight work, and this session is the one that should take
-# the lock and arm.
+# every turn on work it must not touch. The same reasoning covers the stale-base
+# alarm: a read-only session must not be steering another session's workers.
+# This mirrors the read-only advisory mode bin/fm-guard.sh already uses. A dead
+# or absent holder still alarms: nobody is supervising the in-flight work, and
+# this session is the one that should take the lock and arm.
 [ "$(fm_session_lock_ownership "$STATE")" = other ] && exit 0
 
-afk=0
-[ -e "$STATE/.afk" ] && afk=1
-x_mode=0
-[ -f "$CONFIG/x-mode.env" ] && x_mode=1
-REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
-  || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
+blind=0
+fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || blind=1
+
+# Second, independent block reason: an in-flight branch that no longer contains
+# its project's current default-branch head. Every CI result on such a branch was
+# measured against a base that no longer exists, so it reads as a verdict on the
+# branch and is not. bin/fm-stale-base.sh owns the predicate, the silent cases,
+# and the remedy wording; it is local-ref only, so it adds no network call to the
+# turn-end path. bin/fm-fleet-sync.sh raises the same finding the moment a base
+# moves; this is the backstop that makes it unforgettable rather than merely
+# automatic, because an absorbed wake can be missed and a turn end cannot.
+STALE_BASE=
+if [ -x "$SCRIPT_DIR/fm-stale-base.sh" ]; then
+  STALE_BASE=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-stale-base.sh" 2>/dev/null) || true
+fi
+
+[ "$blind" = 1 ] || [ -n "$STALE_BASE" ] || exit 0
+
 rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 {
   printf '●%s\n' "$rule"
-  printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
-  printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
-  printf '●  %s\n' "$REASON"
+  if [ "$blind" = 1 ]; then
+    afk=0
+    [ -e "$STATE/.afk" ] && afk=1
+    x_mode=0
+    [ -f "$CONFIG/x-mode.env" ] && x_mode=1
+    REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+      || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
+    printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
+    printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+    printf '●  %s\n' "$REASON"
+  fi
+  if [ -n "$STALE_BASE" ]; then
+    [ "$blind" = 1 ] && printf '●%s\n' "$rule"
+    printf '●  TURN WOULD END WITH CI MEASURED AGAINST A BASE THAT MOVED\n'
+    printf '%s\n' "$STALE_BASE" | while IFS= read -r stale_line; do
+      printf '●  %s\n' "$stale_line"
+    done
+  fi
   printf '●%s\n' "$rule"
 } >&2
 exit 2
