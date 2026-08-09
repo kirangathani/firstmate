@@ -29,11 +29,21 @@ They remain the final backstop rather than the normal continuity mechanism.
 
 ## Arm-layer cycle contract
 
-`bin/fm-watch-arm.sh` has exactly four outcomes, and only one of them is a clean empty success.
+`bin/fm-watch-arm.sh` has exactly five outcomes, and none of them is a clean empty success.
 An actionable child output returns that reason normally.
-A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
-An attached arm follows verified identity-matched successors and reports the same typed failure if that chain ends without one.
-The fourth outcome is the session-lock refusal: when this home's session lock (`state/.lock`) is held by another live session, the arm prints one `watcher: read-only ... not arming` line and exits 0 without an actionable line.
+A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or classifies the close through `cycle_outcome` and reports it.
+An attached arm follows verified identity-matched successors and takes the same classified close when that chain ends without one.
+That classification is the third and fourth outcomes, and it exists because those two used to share one line.
+A cycle always ends with no watcher running and the lock released, so "the cycle ended" is equally true of a healthy close and a dead one and separates nothing; reporting both as `watcher: FAILED - cycle ended without an actionable reason` made a genuine lapse unnoticeable among the benign closes that produce it several times an hour.
+The discriminator is the durable wake counter `fm_wake_seq` (`bin/fm-wake-lib.sh`), snapshotted when a cycle begins: only `fm_wake_append` advances it, only `bin/fm-watch.sh` calls that, and no drain resets it, so a change across the cycle is positive proof the watcher produced a wake rather than merely stopping.
+
+- `wake-delivered`: the counter advanced, so the cycle ended by queueing a real wake. The reason line went to the arm that OWNS that watcher and the wake itself is durable, so this arm prints `watcher: cycle-complete ...` and exits 0. It is not a failure and it is not an empty no-op.
+- `lapsed`: no wake, and `state/.last-watcher-beat` is stale past `FM_GUARD_GRACE`. Nobody is supervising the fleet. The arm prints `watcher: FAILED - supervision LAPSED: ...` naming the beacon age and the grace it passed, and exits nonzero.
+- `no-wake`: no wake, but the beacon is still inside the grace, so supervision was alive until this close and produced nothing. The arm keeps the original `watcher: FAILED - cycle ended without an actionable reason` wording, now carrying that beacon evidence, and exits nonzero.
+
+The same `cycle_outcome` value is written to the ledger's `outcome=` field, so the reported line and the durable record cannot disagree.
+Both adapters classify a `watcher: cycle-complete` close as a completed cycle rather than a failure, restoring continuity and delivering the line as a wake note; without that they reported a false failure AND spent a retry slot per benign close, so a fleet producing them steadily would exhaust the retry budget and declare supervision dead while it was healthy.
+The fifth outcome is the session-lock refusal: when this home's session lock (`state/.lock`) is held by another live session, the arm prints one `watcher: read-only ... not arming` line and exits 0 without an actionable line.
 That is a correct refusal, not a failure, so both close classifiers - `classifyArmClose` in `.opencode/plugins/fm-primary-watch-arm.js` and `classifyClose` in `.pi/extensions/fm-primary-pi-watch.ts` - match that line explicitly and neither retries it nor reports `watcher: FAILED`.
 Without that case an adapter whose pre-check saw ownership change between the check and the arm's own gate would surface a supervision failure for correct behavior.
 The verdict is carried through the restoration wrappers as well, not just the classifiers: a stand-down is a terminal outcome distinct from an unready successor, so `restoreAfterActionableClose` stops in both adapters and the original actionable wake is delivered with a `watcher: read-only ... stood down` note rather than a failure.
@@ -42,7 +52,7 @@ The genuine failure paths - an unresolved ownership resolver, an unready success
 `bin/fm-watch-checkpoint.sh`, Codex's bounded foreground protocol, applies the same gate with the same three-way decision and the same wording, because it is the second entry point that takes the watcher singleton.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
-Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
+Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, the `cycle_outcome` classification, and successor disposition.
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 
@@ -52,7 +62,9 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, proves an in-flight `read-only` refusal is not served to a request made after the lock was acquired, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
-`tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+`tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination, and both cycle-end directions: a cycle that delivers a real wake through the real registered-check path is reported complete with exit 0 and its wake is drained to prove the claim, while a dead watcher whose beacon is backdated past the production grace still fails loudly with the lapse wording.
+That file reaps its own background processes from the shell's job table on EXIT, because `fail()` exits the whole file and any failing assertion previously orphaned a real watcher.
+`tests/fm-pi-watch-extension.test.sh` covers the adapter half of the same contract for Pi and OpenCode, using the exact captured `watcher: cycle-complete` bytes and a guard that fails if `bin/fm-watch-arm.sh` stops emitting that line.
 `tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state and preserves the existing Stop registration.
 `tests/fm-session-lock-gate.test.sh` owns the session-lock gate itself: the `bin/fm-lock.sh ownership` verdicts and their read-only contract, the arm and checkpoint refusing for a live rival owner while still arming for an absent, dead, or pid-reused holder, ownership recognized several process levels down, the status line, and an assertion that only `bin/fm-session-lock-lib.sh` implements the walk.
 
