@@ -46,7 +46,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `backends/cmux.sh`       | Experimental cmux session-provider adapter                                           |
 | `fm-config-push.sh`      | Push declared inherited local material to live secondmate homes mid-session          |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`           |
-| `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
+| `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval, refusing commit messages carrying AI attribution |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker, detector, and idempotent transformation         |
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
@@ -79,7 +79,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR-poll sidecars              |
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
-| `fm-pr-merge.sh`         | Record PR metadata, gate on `fm-assert-tests-kept.sh` and on the PR's checks being green, then merge a task's canonical full GitHub URL |
+| `fm-pr-merge.sh`         | Record PR metadata, gate on AI attribution in the PR's commits and description, on `fm-assert-tests-kept.sh`, and on the PR's checks being green, then merge a task's canonical full GitHub URL |
+| `fm-attribution-lib.sh`  | Single owner of the AI-attribution pattern set and the scan every enforcer reads (docs/attribution-gate.md) |
+| `fm-commit-msg-check.sh` | Refuse a commit message carrying AI attribution; the git `commit-msg` hook target    |
+| `fm-install-commit-hook.sh` | Install that hook into the repository behind a task worktree, never clobbering a project's own |
 | `fm-assert-tests-kept.sh` | Report the base's test assertions the branch under review lost, broke, could not execute at all, or named unstably across two runs (its header owns the finding classes and exit codes) |
 | `fm-test-exec-lib.sh`   | Shared per-language test runners (shell, pytest, vitest, jest) and scratch-tree environment lifecycle that `fm-assert-tests-kept.sh` check 2 drives |
 | `fm-supersession-lib.sh` | Single matcher for the captain-approved supersession record, shared by the merge gate that enforces it and the viewer that displays it (`fm-pr-merge.sh`'s header owns the entry grammar) |
