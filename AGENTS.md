@@ -72,7 +72,7 @@ config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitig
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/statusline-base  optional override of the operator's own status-line command, composed above bin/fm-statusline.sh's fleet-control line; LOCAL, gitignored; absent means the harness's own user-level status line is composed instead, so no home needs this file; inherited by secondmate homes and forwarded to task worktrees as FM_STATUSLINE_BASE (docs/configuration.md "Status-line composition")
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
-config/ci-waiver-secret  optional CI testing waiver MASTER key; LOCAL, gitignored, mode 600; created by bin/fm-ci-waiver.sh init, never printed, published, given to a worker, or inherited by secondmate homes (docs/configuration.md "The CI testing waiver secret")
+config/ci-waiver-secret  optional captain-held MASTER signing key, used by the CI testing waiver and by the per-task monitoring exemption; LOCAL, gitignored, mode 600; created by bin/fm-ci-waiver.sh init, never printed, published, given to a worker, or inherited by secondmate homes (docs/configuration.md "The CI testing waiver secret")
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update

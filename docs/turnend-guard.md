@@ -67,6 +67,30 @@ Because the remedy is a steer whose effect only lands when the worker pushes, a 
 The key embeds the base commit, so the acknowledgement is scoped to the base it was made at and the sweep re-alarms the moment the base moves again.
 That is what keeps this backstop from decaying into the ignored-because-constant noise the `watcher: FAILED - cycle ended without an actionable reason` alarm became.
 
+## Third Block Reason: A Reported State Left Unanswered
+
+Added 2026-08-09 and computed by `fm_ack_unactioned` in `bin/fm-ack-lib.sh`, whose header owns the predicate, the owed states, the grace window, and both silencers.
+A direct report sitting in a terminal or firstmate-owed state, past the grace window, that firstmate has not acted on, blocks the turn.
+
+This reason adds no new detection.
+`bin/fm-guard.sh` has raised exactly this finding since #35 and exits 0: it warns, the turn ends anyway, and acting on it was the agent's to choose.
+The first block reason is the precedent - it too is a condition `bin/fm-guard.sh` warns about, and giving it a consequence at turn end is what has caught two supervision blackouts on this box.
+The third reason is that same treatment applied to the states workers report, which is why it reuses the predicate rather than adding a second one.
+
+The measured failure it closes, 2026-07-30: a finished ship task sat unanswered for twenty minutes.
+Its wake was durably queued, correctly drained, and read - and draining is what destroys the evidence, so nothing downstream could tell that the state had been dropped rather than handled.
+
+Quiet on a healthy fleet, by the mechanics `bin/fm-ack-lib.sh` owns rather than by a separate rule here: a ten-minute grace, an acknowledgement that silences a state firstmate has already handled for as long as the captain takes to answer, and a current-state confirm that clears a worker which has provably moved on.
+Unlike the stale-base sweep it is not bounded by a timeout, because every read it makes is a local file stat except the current-state confirm, which is already capped per invocation and cached, and swallowing the verdict on expiry would mean silently ending a turn on exactly the finding this reason exists to force.
+A confirm that cannot be read reports as unreadable and still blocks.
+
+The one thing that stops it is a captain-signed per-task exemption in `state/<task-id>.monitor-exempt`, written only by `bin/fm-monitor.sh --exempt`, whose header owns the record and its limits.
+An unsigned or unverifiable record is not an exemption, so the alarm cannot be silenced by writing a file.
+Every standing exemption is announced at session start by `bin/fm-bootstrap.sh`, which is what makes a self-granted one report itself rather than quietly drop a task out of supervision.
+
+`bin/fm-monitor.sh` renders the same predicate for every supervised task on demand, and is what the captain's `/monitor` reaches.
+The alarm surface stays silent when clean; the render surface names every task and every class including zeros, because a silent all-clear cannot be told apart from not having looked.
+
 ## Harness Integrations
 
 All verified primary harnesses have a tracked integration:
@@ -214,5 +238,7 @@ The command half of the identity comes from `/proc/<pid>/cmdline` rather than a 
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the session-lock exemption (silent for a live rival owner, still alarming for this session and for a dead or absent holder), Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
 `tests/fm-stale-base.test.sh` owns the stale-base predicate itself in both directions: a behind pushed branch fires and names task, branch and remedy; a branch that contains the base, a scout, a secondmate record, an unpushed branch, a still-detached worker, and a clone with no origin remote are all silent; a missing clone, an absent `origin/<default>`, a detached HEAD carrying commits, and a local copy outside the project each report as undeterminable; the four-branch shape of the incident names exactly the three behind branches; and an acknowledgement is scoped to the base it was made at.
 `tests/fm-turnend-guard.test.sh` covers the guard's half of it, and `tests/fm-fleet-sync.test.sh` covers the immediate half.
+`tests/fm-unactioned-guard.test.sh` owns the unanswered-report predicate, the forced sweep's full accounting, and every limit of the captain-signed exemption: an unsigned or wrong-signature record, and a real signature lifted from another task, all fail to silence the alarm; the signed reason cannot be edited afterwards; removing the key restores the alarm rather than suppressing it; and the exemption is announced on every render and at session start.
+`tests/fm-turnend-guard.test.sh` covers the guard's half - that a healthy watcher plus an unanswered report still blocks, that a report inside the grace window neither blocks nor prints, that acknowledging or exempting it goes silent, and that the supervision-alive assertion is still reported alongside it - with every offset derived from `FM_ACK_GRACE_DEFAULT` at run time rather than written down.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.
