@@ -49,15 +49,20 @@
 # did confirm plus an `incomplete:` note. The `ok` line appears only when all
 # four classes are zero AND all four were fully evaluated.
 #
-# COST. The backlog parse is one `bin/fm-fleet-snapshot.sh --backlog-json` -
-# 0.10s against this repo's real 50KB backlog - and the endpoint reads are the
-# same per-task probes session start already performs. GitHub is queried only
-# for an IN-FLIGHT task that has a recorded PR link, so a healthy fleet that has
-# just dispatched work queries nothing at all; the drifted fleet above would
-# have queried 12. Lookups run FM_DRIFT_PR_PARALLEL at a time, are capped at
-# FM_DRIFT_PR_LOOKUPS in total, and each is bounded by FM_PR_GH_TIMEOUT.
-# Measured end to end on this repo's home: 0.4s with no PR to look up, 0.8s
-# with one.
+# COST, measured 2026-08-09 on this machine, best of three each:
+#   0.18-0.24s  this repo's real home - 4 in flight, 5 runtime records, no
+#               recorded PR in flight, so no GitHub call at all.
+#   0.37-0.45s  the same shape plus ONE real GitHub lookup.
+#   1.12-1.19s  the whole 2026-08-09 incident rebuilt - 12 in flight, each with
+#               a recorded PR, all 12 queried against real GitHub.
+# The backlog parse is one `bin/fm-fleet-snapshot.sh --backlog-json`, 0.10s
+# against this repo's real 50KB backlog, and the endpoint reads are the same
+# per-task probes session start already performs. GitHub is queried ONLY for an
+# in-flight task that has a recorded PR link, so a healthy fleet that has just
+# dispatched work queries nothing. Lookups run FM_DRIFT_PR_PARALLEL at a time,
+# are capped at FM_DRIFT_PR_LOOKUPS in total, and each is bounded by
+# FM_PR_GH_TIMEOUT, so the worst case is bounded by the cap and not by how far
+# the queue has drifted.
 #
 # WHEN GITHUB IS UNREACHABLE the class degrades VISIBLY: a lookup that fails,
 # times out, or is refused for lack of `gh` leaves its task unresolved, and an
