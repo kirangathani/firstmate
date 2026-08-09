@@ -87,10 +87,21 @@ fmx_poll_shim_v1_content() {
     "exec $(printf '%q' "$root/bin/fm-x-poll.sh")"
 }
 
+# Resolved ONCE at source time, not per call: the OS cannot change during the
+# process's life, and a per-call `uname` fork costs more than the stat it selects.
+# The three validators below are called per artifact across an inbox drain, so the
+# fork dominated. Deliberately NOT overridable from the environment: these back
+# the mode, link-count and device identity checks that gate X-mode artifact trust,
+# so the OS reading must come from the OS. The failure branch is explicit rather
+# than left to the assignment's exit status: callers source this under `set -e`,
+# so an absent `uname` must leave the value empty and take the Linux branch, not
+# abort the sourcing script.
+FMX_UNAME_S=$(uname 2>/dev/null) || FMX_UNAME_S=
+
 fmx_single_link_file_valid() {
   local file=$1 expected_device=${2-} links device
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FMX_UNAME_S" = Darwin ]; then
     links=$(stat -f %l "$file" 2>/dev/null) || return 1
     device=$(stat -f %d "$file" 2>/dev/null) || return 1
   else
@@ -104,7 +115,7 @@ fmx_single_link_file_valid() {
 fmx_single_link_file_mode_valid() {
   local file=$1 expected_mode=$2 expected_device=${3-} mode
   fmx_single_link_file_valid "$file" "$expected_device" || return 1
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FMX_UNAME_S" = Darwin ]; then
     mode=$(stat -f %Lp "$file" 2>/dev/null) || return 1
   else
     mode=$(stat -c %a "$file" 2>/dev/null) || return 1
@@ -115,7 +126,7 @@ fmx_single_link_file_mode_valid() {
 fmx_private_artifact_dir_device() {
   local dir=$1 mode device
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FMX_UNAME_S" = Darwin ]; then
     mode=$(stat -f %Lp "$dir" 2>/dev/null) || return 1
     device=$(stat -f %d "$dir" 2>/dev/null) || return 1
   else

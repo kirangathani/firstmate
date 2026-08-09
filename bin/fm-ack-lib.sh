@@ -90,12 +90,21 @@ fm_ack_now() {
   if [ -n "${FM_ACK_NOW:-}" ]; then printf '%s' "$FM_ACK_NOW"; else date +%s; fi
 }
 
+# Resolved ONCE at source time, not per call: the OS cannot change during the
+# process's life, and a per-call `uname` fork costs more than the stat it selects.
+# The two helpers below run once per task per watcher poll, so the fork was the
+# dominant cost of the unactioned-alarm predicate. The failure branch is explicit
+# rather than left to the assignment's exit status: callers source this under
+# `set -e`, so an absent `uname` must leave the value empty and take the Linux
+# branch, not abort the sourcing script.
+FM_ACK_UNAME_S=$(uname 2>/dev/null) || FM_ACK_UNAME_S=
+
 # Portable mtime/size; Linux stat lacks -f, macOS stat lacks -c.
 fm_ack_stat_mtime() {  # <file>
-  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
+  if [ "$FM_ACK_UNAME_S" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
 }
 fm_ack_stat_size() {  # <file>
-  if [ "$(uname)" = Darwin ]; then stat -f %z "$1" 2>/dev/null; else stat -c %s "$1" 2>/dev/null; fi
+  if [ "$FM_ACK_UNAME_S" = Darwin ]; then stat -f %z "$1" 2>/dev/null; else stat -c %s "$1" 2>/dev/null; fi
 }
 
 fm_ack_verb_is_owed() {  # <status-verb>
