@@ -3,12 +3,16 @@
 # accumulation, and both refusal matrices.
 #
 # WHY THIS IS ONE FILE. bin/fm-spawn.sh and bin/fm-brief.sh must stay in
-# lockstep by design - a brief can never be scaffolded for a combination that
-# spawn will then refuse to launch - and they had already drifted while holding
-# two copies of the same rules: the same refusal carried a fuller two-line
-# explanation in one script and a shortened one-liner in the other. Rules that
-# must agree belong in one place, so this states them once and both scripts
-# consume it.
+# lockstep by design, and they had already drifted while holding two copies of
+# the same rules: the same refusal carried a fuller two-line explanation in one
+# script and a shortened one-liner in the other. Rules that must agree belong in
+# one place, so this states them once and both scripts consume it.
+#
+# The two now consume it for different reasons. bin/fm-spawn.sh is the ONLY
+# script a captain passes a skip flag to; bin/fm-brief.sh refuses one at scaffold
+# and takes a resolved flag only from spawn's own --apply-testing-skip call, so
+# these rules are checked once at dispatch and re-checked where the worker's
+# instructions are actually written.
 #
 # Nothing here grants a skip. Every function either records what was passed or
 # refuses a combination that cannot actually be delivered; the enforcement lives
