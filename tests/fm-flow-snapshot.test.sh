@@ -347,13 +347,14 @@ got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2")
 [ "$got" = "SUCCESS" ] || fail "kept the superseded attempt, not the latest: $got"
 pass "a re-run supersedes its earlier attempt instead of being counted twice"
 
-# Passed, failed and pending must PARTITION the checks. A check still running
-# carries whatever conclusion its previous attempt left behind, and reading that
-# without the status put it in two buckets at once.
+# Every class must PARTITION the checks. A check still running carries whatever
+# conclusion its previous attempt left behind, and reading that without the
+# status put it in two buckets at once. The sum is over all five classes: a
+# class added without being counted here would go missing silently.
 sum=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2")
-  | .ci | (.passed + .failed + .pending)' "$CIOUT")
+  | .ci | (.passed + .failed + .pending + .skipped + .excused)' "$CIOUT")
 tot=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .ci.total' "$CIOUT")
-[ "$sum" = "$tot" ] || fail "buckets overlap: passed+failed+pending=$sum over $tot checks"
+[ "$sum" = "$tot" ] || fail "buckets overlap or leak: class counts sum to $sum over $tot checks"
 got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2")
   | .ci.checks[] | select(.name=="Repo invariants") | .verdict' "$CIOUT")
 [ "$got" = "pending" ] || fail "a running check with a stale conclusion counted as $got"
@@ -401,3 +402,118 @@ pass "refuses to emit an empty fleet when the fleet read fails"
 got=$(run_snapshot --no-ci --task eager-dispatch-e2 | jq -r '[.agents[].id] | join(",")')
 [ "$got" = "eager-dispatch-e2" ] || fail "--task did not restrict the snapshot: $got"
 pass "--task restricts the snapshot to one agent"
+
+# --- the excused attestation check ------------------------------------------
+#
+# `PR must be raised via no-mistakes` cannot pass on a PR the pipeline did not
+# raise, so it fails on every firstmate PR by construction and bin/fm-pr-merge.sh
+# excuses it on exactly that authority. Counting it as a plain failure is what
+# painted a permanent red over healthy PRs on the captain's screen 2026-08-09.
+#
+# The verdict is resolved through bin/fm-attestation-lib.sh, the same owner the
+# merge gate reaches its verdict through, so the two cannot disagree - and the
+# authority is what decides, never the name alone. Both directions are asserted.
+
+ATT_HOME="$TMP_ROOT/att"
+mkdir -p "$ATT_HOME/state" "$ATT_HOME/data" "$ATT_HOME/config"
+{
+  echo '# Projects'
+  echo '- shipped [direct-PR] - a project whose PRs are raised without the pipeline (added 2026-08-09)'
+  echo '- gated [no-mistakes] - a project whose PRs must come from the pipeline (added 2026-08-09)'
+} > "$ATT_HOME/data/projects.md"
+
+# Minimal task records: only the fields the excusal reads. The format they are
+# written in is bin/fm-spawn.sh's, and tests/fm-spawn-testing-skip.test.sh holds
+# the drift guard between what that script writes and what this one reads.
+while IFS=' ' read -r task proj; do
+  [ -n "$task" ] || continue
+  printf 'window=fm:%s\nworktree=/wt/%s\nproject=/p/%s\nkind=ship\n' "$task" "$task" "$proj" \
+    > "$ATT_HOME/state/$task.meta"
+done <<'ROWS'
+shipped-a1 shipped
+gated-b2 gated
+ROWS
+
+cat > "$TMP_ROOT/att-rollup.json" <<'JSON'
+{"statusCheckRollup":[
+{"__typename":"CheckRun","name":"Lint shell scripts","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"CI"},
+{"__typename":"CheckRun","name":"Behavior tests (shard 1)","status":"COMPLETED","conclusion":"SKIPPED","workflowName":"CI"},
+{"__typename":"CheckRun","name":"PR must be raised via no-mistakes","status":"COMPLETED","conclusion":"FAILURE","workflowName":"Require no-mistakes"}
+]}
+JSON
+cat > "$FAKEBIN/gh" <<SH
+#!/usr/bin/env bash
+cat "\${FM_TEST_ROLLUP:-$TMP_ROOT/ci-rollup.json}"
+SH
+chmod +x "$FAKEBIN/gh"
+
+jq -n --arg h "$ATT_HOME" '{tasks:[
+  {id:"shipped-a1",kind:"ship",mode:"direct-PR",project:"/p/shipped",
+   paths:{worktree:{path:"/wt/1"},meta:{path:($h+"/state/shipped-a1.meta"),present:true}},
+   endpoint:{target:"fm:1",exists:true},
+   pr:{url:"https://github.com/o/r/pull/51"}},
+  {id:"gated-b2",kind:"ship",mode:"no-mistakes",project:"/p/gated",
+   paths:{worktree:{path:"/wt/2"},meta:{path:($h+"/state/gated-b2.meta"),present:true}},
+   endpoint:{target:"fm:2",exists:true},
+   pr:{url:"https://github.com/o/r/pull/52"}}
+]}' > "$TMP_ROOT/att-fleet.json"
+
+ATTOUT="$TMP_ROOT/att-out.json"
+PATH="$FAKEBIN:$PATH" FM_HOME="$ATT_HOME" \
+  FM_TEST_ROLLUP="$TMP_ROOT/att-rollup.json" \
+  FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/att-fleet.json" \
+  "$SNAPSHOT" --json > "$ATTOUT" 2>/dev/null
+expect_code 0 $? "the attestation snapshot exits clean"
+
+got=$(jq -r '.agents[] | select(.id=="shipped-a1")
+  | "\(.ci.failed)/\(.ci.excused)/\(.ci.passed)/\(.ci.skipped)"' "$ATTOUT")
+[ "$got" = "0/1/1/1" ] ||
+  fail "a direct-PR project's excused check was not moved out of failing (failed/excused/passed/skipped: $got)"
+got=$(jq -r '.agents[] | select(.id=="shipped-a1") | .ci.excused_authority[0]' "$ATTOUT")
+assert_contains "$got" "direct-PR" "the excusal did not record what authorised it"
+pass "the one excusable check is counted as excused when an authority exists"
+
+got=$(jq -r '.agents[] | select(.id=="gated-b2")
+  | "\(.ci.failed)/\(.ci.excused)"' "$ATTOUT")
+[ "$got" = "1/0" ] ||
+  fail "the same red check was excused with no authority for it (failed/excused: $got)"
+got=$(jq -r '.agents[] | select(.id=="gated-b2") | .ci.excused_authority | length' "$ATTOUT")
+[ "$got" = 0 ] || fail "an unexcused check still recorded an authority"
+pass "the same check with no authority behind it stays a failure"
+
+# The name is matched by exact equality and taken from the merge gate's own
+# owner, so a rename stops the exemption applying in the safe direction: the
+# renamed check is not recognised, so it is not excused.
+ATT_NAME=$(bash -c '. "'"$ROOT"'/bin/fm-attestation-lib.sh"; printf "%s" "$FM_ATTESTATION_CHECK_NAME"')
+[ -n "$ATT_NAME" ] || fail "bin/fm-attestation-lib.sh names no excusable check"
+assert_grep "$ATT_NAME" "$ROOT/.github/workflows/no-mistakes-required.yml" \
+  "the excused name no longer matches the workflow job that reports it"
+sed "s/$ATT_NAME/PR must be raised via the pipeline/" "$TMP_ROOT/att-rollup.json" \
+  > "$TMP_ROOT/att-renamed.json"
+got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$ATT_HOME" \
+  FM_TEST_ROLLUP="$TMP_ROOT/att-renamed.json" \
+  FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/att-fleet.json" \
+  "$SNAPSHOT" --json 2>/dev/null |
+  jq -r '.agents[] | select(.id=="shipped-a1") | "\(.ci.failed)/\(.ci.excused)"')
+[ "$got" = "1/0" ] || fail "a differently-named red check was excused (failed/excused: $got)"
+pass "only the exact excused name is excused; a renamed check stays a failure"
+
+# --- the captain's testing skips reach the view ------------------------------
+#
+# Read from the task's own record and nothing else. A worker writes its status
+# lines into this same directory, so the flag is disclosure-grade evidence, not
+# authority - which is why it is read through the flags' own owner and not by a
+# grep invented here.
+
+printf 'local_skip=on\nci_skip=on\n' >> "$ATT_HOME/state/shipped-a1.meta"
+got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$ATT_HOME" \
+  FM_TEST_ROLLUP="$TMP_ROOT/att-rollup.json" \
+  FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/att-fleet.json" \
+  "$SNAPSHOT" --json 2>/dev/null |
+  jq -r '.agents[] | "\(.id):\(.skips.local)/\(.skips.ci)"' | sort | tr '\n' ' ')
+[ "$got" = "gated-b2:false/false shipped-a1:true/true " ] ||
+  fail "the recorded testing skips did not reach the view: $got"
+pass "a task's recorded testing skips reach the view, and an unflagged task's do not"

@@ -217,3 +217,39 @@ hint=$(grep -A1 -- '--open-hint' "$FAKE_TUI_ARGV" | tail -1)
 assert_contains "$hint" "attach" "a terminal outside tmux was not told enter attaches"
 assert_contains "$hint" "come back" "the hint did not say how to get back"
 pass "the viewer is handed the sentence that is true for this terminal"
+
+# --- the drill-in from a row to that agent's own pipeline --------------------
+#
+# The row states a CI verdict per agent, so the obvious next move is that
+# agent's pipeline in detail - and until this existed the only way there was to
+# know bin/fm-nm-flow.sh by name and type it. Enter is a different and equally
+# useful action and keeps its key, so the drill-in gets its own.
+
+detail=$(grep -A1 -- '--detail-cmd' "$FAKE_TUI_ARGV" | tail -1)
+[ -n "$detail" ] || fail "the viewer was given no way into the pipeline detail"
+assert_contains "$detail" "--detail" "the drill-in command does not run the detail path"
+assert_contains "$detail" "FM_FLOW_ID" "the drill-in command does not name the selected agent"
+dhint=$(grep -A1 -- '--detail-hint' "$FAKE_TUI_ARGV" | tail -1)
+assert_contains "$dhint" "pipeline" "the drill-in hint does not say what the key shows"
+assert_contains "$dhint" "back" "the drill-in hint does not say how to come back"
+pass "the viewer is wired to the pipeline detail and told how to come back from it"
+
+out=$(FM_HOME="$TMP_ROOT/home" "$FLOW" --detail ghost-1 2>&1); rc=$?
+expect_code 1 $rc "--detail on an unknown task must fail"
+assert_contains "$out" "ghost-1" "the refusal did not name the task"
+pass "--detail on a task with no local record refuses"
+
+# The dry run is the seam: it proves which command would run without starting a
+# watch loop this test would then have to interrupt.
+printf 'window=x:1\nproject=/p\nworktree=/wt\n' >"$state/detail-1.meta"
+out=$(FM_HOME="$TMP_ROOT/home" FM_FLOW_DETAIL_DRY_RUN=1 "$FLOW" --detail detail-1 2>&1); rc=$?
+expect_code 0 $rc "--detail dry run must exit 0"
+assert_contains "$out" "detail-1" "the dry run did not name the task"
+assert_contains "$out" "fm-nm-flow.sh" "the drill-in does not reuse the existing detail view"
+pass "--detail runs the existing per-task pipeline view rather than a second copy of it"
+
+out=$("$FLOW" --detail 2>&1); rc=$?
+expect_code 2 $rc "--detail with no value must be a usage error"
+out=$("$FLOW" --help)
+assert_contains "$out" "--detail" "help does not document --detail"
+pass "--detail is documented and refuses a missing task id"

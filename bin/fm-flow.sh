@@ -18,6 +18,7 @@
 # Usage:
 #   fm-flow.sh [--no-ci] [--task <id>] [--refresh-ms <n>]
 #   fm-flow.sh --open <task-id>
+#   fm-flow.sh --detail <task-id>
 #
 #   --no-ci           pass through to fm-flow-snapshot.sh: skip every GitHub
 #                     read, so the whole view is local and cheap
@@ -28,6 +29,11 @@
 #   --open <task-id>  put THIS terminal on that worker's window. This is what
 #                     the viewer runs when the captain presses enter; it is a
 #                     normal command and can be run on its own.
+#   --detail <task-id>  show that one task's pipeline in detail, live, by
+#                     running bin/fm-nm-flow.sh --watch on this terminal. This
+#                     is what the viewer runs when the captain presses d. Ctrl-C
+#                     ends it and returns to whatever launched it. Strictly
+#                     read-only, and it moves no window.
 #
 # Environment knobs:
 #   FM_FLOW_OPEN_DRY_RUN   --open only. Print the action it would take and the
@@ -35,12 +41,15 @@
 #                          actions are `switch` (this terminal is already a tmux
 #                          client), `attach` (it is not, and it is a terminal),
 #                          and `refuse` (it is not a terminal at all).
+#   FM_FLOW_DETAIL_DRY_RUN --detail only. Print the argv it would run, change
+#                          nothing, exit 0.
 #
-# Read-only with respect to fleet state: it collects, it draws, and --open
-# moves the captain's own terminal view. It takes no session lock, drains no
-# wakes, and writes nothing under state/.
+# Read-only with respect to fleet state: it collects, it draws, --open moves the
+# captain's own terminal view, and --detail draws one task. It takes no session
+# lock, drains no wakes, and writes nothing under state/.
 #
-# Exit codes: 0 clean exit, 1 the snapshot or the open failed, 2 usage error.
+# Exit codes: 0 clean exit, 1 the snapshot, the open, or the detail view failed,
+# 2 usage error.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,12 +61,13 @@ STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 export FM_HOME
 
 usage() {
-  sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,51p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 SNAP_ARGS=()
 REFRESH_MS=10000
 OPEN_ID=
+DETAIL_ID=
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -65,11 +75,60 @@ while [ $# -gt 0 ]; do
     --task) shift; [ $# -gt 0 ] || { echo "error: --task needs an id" >&2; exit 2; }; SNAP_ARGS+=(--task "$1") ;;
     --refresh-ms) shift; [ $# -gt 0 ] || { echo "error: --refresh-ms needs a number" >&2; exit 2; }; REFRESH_MS=$1 ;;
     --open) shift; [ $# -gt 0 ] || { echo "error: --open needs a task id" >&2; exit 2; }; OPEN_ID=$1 ;;
+    --detail) shift; [ $# -gt 0 ] || { echo "error: --detail needs a task id" >&2; exit 2; }; DETAIL_ID=$1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
+
+# --- --detail: one task's pipeline, in full, on this terminal ----------------
+#
+# The row already states a CI verdict per agent, so the obvious next move from
+# it is that agent's own pipeline - and until this existed the captain had to
+# know bin/fm-nm-flow.sh by name and type it with the right task id. This is the
+# path from the view to that command, and it is deliberately the SAME command
+# rather than a second renderer: that script is already the read-only detailed
+# view of one task's delivery flow, and a copy of it here would drift.
+#
+# Ctrl-C is the way back, so this traps it and reports the return rather than
+# dying with a signal - the viewer shows the first stderr line as its footer
+# flash, and "interrupted" is not what happened from the captain's side.
+if [ -n "$DETAIL_ID" ]; then
+  meta="$STATE_DIR/$DETAIL_ID.meta"
+  [ -f "$meta" ] || { echo "error: no local record for $DETAIL_ID" >&2; exit 1; }
+  NM="$SCRIPT_DIR/fm-nm-flow.sh"
+  [ -x "$NM" ] || { echo "error: $NM is missing" >&2; exit 1; }
+
+  if [ -n "${FM_FLOW_DETAIL_DRY_RUN:-}" ]; then
+    printf 'action=detail target=%s cmd=%s\n' "$DETAIL_ID" "$NM"
+    exit 0
+  fi
+
+  # One function, named by both the trap and the ordinary return, so the two
+  # paths cannot say different things. It is a function rather than an inline
+  # trap string on purpose: the trap body is re-parsed by the shell when the
+  # signal arrives, so an apostrophe inside it has to survive two rounds of
+  # quoting. The first cut of this did not, and the captain's own return from
+  # the detail view flashed `unexpected EOF while looking for matching '`
+  # instead of the outcome. Observed 2026-08-09 in a live terminal.
+  detail_returned() {
+    echo "back from the pipeline detail for $DETAIL_ID" >&2
+  }
+  trap 'detail_returned; exit 0' INT
+
+  detail_rc=0
+  "$NM" "$DETAIL_ID" --watch || detail_rc=$?
+  # 130 is the shell's own encoding of "interrupted", which is how the captain
+  # is expected to leave; every other non-zero exit is a real failure and must
+  # not be reported as a clean return.
+  if [ "$detail_rc" -ne 0 ] && [ "$detail_rc" -ne 130 ]; then
+    echo "error: the pipeline detail for $DETAIL_ID stopped with exit $detail_rc" >&2
+    exit 1
+  fi
+  detail_returned
+  exit 0
+fi
 
 # --- --open: put this terminal on one worker's window ------------------------
 #
@@ -231,5 +290,7 @@ fi
   --refresh-ms "$REFRESH_MS" \
   --open-cmd "$(printf '%q' "$SCRIPT_DIR/fm-flow.sh") --open \"\$FM_FLOW_ID\"" \
   --open-hint "$OPEN_HINT" \
+  --detail-cmd "$(printf '%q' "$SCRIPT_DIR/fm-flow.sh") --detail \"\$FM_FLOW_ID\"" \
+  --detail-hint "d this agent's pipeline (ctrl-c back)" \
   <"$first"
 exit $?
