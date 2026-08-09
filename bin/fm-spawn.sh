@@ -1209,14 +1209,46 @@ mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 FIXCHECK="$FM_ROOT/bin/fm-fix-instructions-check.sh"
+# AI-attribution commit-msg hook (docs/attribution-gate.md). Installed for every
+# kind and every harness, because the rule binds the artefact, not the worker's
+# runtime. Git hooks are per-repository, so this is one idempotent write per
+# project rather than per task. A foreign hook is left alone (exit 3) and a
+# failure is only ever a notice: the merge gate is what actually holds the line,
+# so nothing here may cost a spawn.
+attr_hook_out=$("$FM_ROOT/bin/fm-install-commit-hook.sh" "$WT" 2>&1) || true
+case "$attr_hook_out" in
+  *'attribution-hook: installed'*) ;;
+  *)
+    # Reported as a note, never as an error: a skipped hook does not fail a
+    # spawn, and the word "error" here would read as one. Each line is prefixed
+    # so the installer's own wording cannot be mistaken for fm-spawn's.
+    while IFS= read -r attr_hook_line; do
+      [ -n "$attr_hook_line" ] && echo "note: $attr_hook_line" >&2
+    done <<EOF_ATTR
+$attr_hook_out
+EOF_ATTR
+    echo "note: the attribution commit-msg hook was not installed for $WT; the merge gate still refuses AI attribution before anything lands" >&2
+    ;;
+esac
+
 if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"
       # --claude keeps stdout empty on deny; Claude Code ignores a PreToolUse
       # deny whose stdout is non-empty (docs/arm-pretool-check.md).
+      #
+      # "attribution" turns OFF the three attribution strings Claude Code would
+      # otherwise be instructed to append. Schema read from the installed
+      # binary's own settings schema (claude 2.1.226): commit and pr are the
+      # attribution TEXT and "Empty string hides attribution"; sessionUrl
+      # "Set to false to omit the Claude-Session trailer and PR-body link".
+      # This removes the GENERATOR, which is cheap and worth doing, but it is
+      # not the control: it only covers this one harness and a model can still
+      # type the trailer by hand. docs/attribution-gate.md says which layer is
+      # actually load-bearing.
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"$(json_escape "$FIXCHECK") --claude"}]}]}}
+{"attribution":{"commit":"","pr":"","sessionUrl":false},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"$(json_escape "$FIXCHECK") --claude"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;

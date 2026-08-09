@@ -8,6 +8,14 @@
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
 #
+# AI-attribution gate: before any other gate, the PR's commit messages and its
+# description are scanned for AI attribution, and a finding is a hard refusal
+# with no override flag. bin/fm-attribution-lib.sh owns the patterns and
+# docs/attribution-gate.md owns the contract, including what the gate cannot
+# reach. It runs first because it is one cheap read and the test-keep gate below
+# is the expensive one. Like that gate this is firstmate-side, so it protects
+# every repo this fleet ships to.
+#
 # Test-keep gate: after recording and before merging, bin/fm-assert-tests-kept.sh
 # must confirm every test assertion present on the authoritative base is still
 # present (check 1, by name) and still passing against the branch's code
@@ -302,6 +310,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-supersession-lib.sh"
 # shellcheck source=bin/fm-ci-waiver-lib.sh
 . "$SCRIPT_DIR/fm-ci-waiver-lib.sh"
+# shellcheck source=bin/fm-attribution-lib.sh
+. "$SCRIPT_DIR/fm-attribution-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -506,7 +516,138 @@ grep -qxF "pr=$URL" "$META" || {
 
 KEPT_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-kept.XXXXXX")
 CHECKS_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-checks.XXXXXX")
-trap 'rm -f "$KEPT_OUT" "$CHECKS_ERR"' EXIT
+ATTR_JSON=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-attr.XXXXXX")
+ATTR_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-attrerr.XXXXXX")
+trap 'rm -f "$KEPT_OUT" "$CHECKS_ERR" "$ATTR_JSON" "$ATTR_ERR"' EXIT
+
+# --- AI-attribution gate (contract in docs/attribution-gate.md) ---------------
+# The captain's standing rule is that no AI attribution leaves this machine, and
+# THIS is where that rule is actually enforced for a PR: firstmate runs it, over
+# the artefact the worker already produced, and the worker cannot reach it. The
+# commit-msg hook bin/fm-spawn.sh installs into the task's repository catches the
+# same thing earlier and more cheaply, but it is skippable with --no-verify, so
+# it is fast feedback rather than the boundary.
+#
+# It runs FIRST, ahead of the kept-tests gate, because it is one cheap API read
+# and that gate is the dominant cost of landing a PR. A PR that will be refused
+# for attribution should not spend 20-35 minutes re-running the base's tests to
+# find that out.
+#
+# Both halves of the artefact are read, because two different paths produce them:
+# the branch's commit messages (which a squash carries into the default branch's
+# history) and the PR description (which is published on GitHub the moment the
+# PR is opened, and which no gate can un-publish - see the doc).
+#
+# WHY THE COMMIT MESSAGES COME FROM GIT AND NOT FROM THE API
+# They are read out of the task's own local copy, not through `gh`. Git is the
+# authority for what a commit message says, and reading it there costs no
+# network call and cannot be answered wrongly by anything but git itself. It
+# also keeps this gate from being the one input a caller has to arrange before
+# the merge can be verified at all.
+# The ref this reads is chosen exactly as bin/fm-assert-tests-kept.sh chooses
+# its compare side, deliberately: the PR head when it is recorded and resolvable
+# locally, and the local branch with a warning when it is not. The merge already
+# trusts that same resolution for its test verdict, so the attribution verdict is
+# measured against the same commits, never a second opinion about which they are.
+attr_findings=""
+attr_dirty=0
+attr_scan() {  # <label>; text on stdin
+  local found rc=0
+  found=$(fm_attribution_scan_stdin "$1") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    attr_dirty=1
+    attr_findings="${attr_findings}${found}"$'\n'
+  fi
+}
+
+# A local copy that does not resolve is NOT refused here, and that is a reasoned
+# exception rather than a hole. bin/fm-assert-tests-kept.sh, two gates below in
+# this same run, refuses outright when it cannot resolve the task's worktree, so
+# a merge whose local copy is missing cannot proceed whatever this gate says.
+# Refusing here as well would buy nothing and would make this gate the first
+# thing to break on an unrelated worktree problem, reported as an attribution
+# failure. It says so out loud instead of skipping quietly.
+ATTR_WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -n "$ATTR_WT" ] && git -C "$ATTR_WT" rev-parse --git-dir >/dev/null 2>&1; then
+  # The base this diffs against is resolved locally, the same three-step
+  # bin/fm-merge-local.sh uses for the same question: origin/HEAD when the local
+  # copy tracks one, else main, else master. No network read and no dependence on
+  # a configured remote, so a local copy without one is still verifiable.
+  attr_base=$(git -C "$ATTR_WT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -z "$attr_base" ]; then
+    for attr_candidate in main master; do
+      if git -C "$ATTR_WT" rev-parse --verify --quiet "$attr_candidate^{commit}" >/dev/null 2>&1; then
+        attr_base=$attr_candidate
+        break
+      fi
+    done
+  fi
+  if [ -z "$attr_base" ]; then
+    echo "error: cannot determine the base this PR would land on, so the commits it would add cannot be enumerated; refusing to merge unverified" >&2
+    exit 1
+  fi
+
+  ATTR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  attr_compare=HEAD
+  if [ -n "$ATTR_HEAD_RECORDED" ] \
+    && git -C "$ATTR_WT" rev-parse --verify --quiet "$ATTR_HEAD_RECORDED^{commit}" >/dev/null 2>&1; then
+    attr_compare=$ATTR_HEAD_RECORDED
+  else
+    echo "note: the PR head is not present in this local copy, so the attribution gate reads the local branch; it may lag the open PR (bin/fm-assert-tests-kept.sh degrades the same way for the same reason)" >&2
+  fi
+
+  attr_shas=$(git -C "$ATTR_WT" rev-list "$attr_base..$attr_compare" 2>/dev/null) || {
+    echo "error: could not enumerate the commits $attr_base..$attr_compare would land; refusing to merge unverified" >&2
+    exit 1
+  }
+  while IFS= read -r attr_sha; do
+    [ -n "$attr_sha" ] || continue
+    attr_msg=$(git -C "$ATTR_WT" log -1 --format=%B "$attr_sha" 2>/dev/null) || {
+      echo "error: could not read the commit message of $attr_sha; refusing to merge unverified" >&2
+      exit 1
+    }
+    attr_scan "commit ${attr_sha:0:12}" <<EOF_COMMIT
+$attr_msg
+EOF_COMMIT
+  done <<EOF_SHAS
+$attr_shas
+EOF_SHAS
+else
+  echo "note: task $ID has no resolvable local copy, so the attribution gate read its PR description only; the kept-tests gate below refuses that same condition, so this merge cannot proceed on it" >&2
+fi
+
+# The PR description has no local source, so this half is the one API read. It
+# asks for the field as raw text rather than as JSON: on a real PR the answer IS
+# the description, and a PR with no description legitimately answers with
+# nothing, which carries no attribution and is therefore not a finding. A read
+# that actually FAILS still exits non-zero and still refuses below. The limit of
+# that choice is named in docs/attribution-gate.md rather than left implicit.
+set +e
+gh pr view "$URL" --json body -q '.body' > "$ATTR_JSON" 2> "$ATTR_ERR"
+attr_read_rc=$?
+set -e
+if [ "$attr_read_rc" -ne 0 ]; then
+  cat "$ATTR_ERR" >&2
+  echo "error: could not read the PR's description (gh exit $attr_read_rc, see above); refusing to merge unverified" >&2
+  echo "error: restore GitHub access so the attribution gate can read it, then re-run fm-pr-merge.sh" >&2
+  exit 1
+fi
+attr_scan 'PR body' < "$ATTR_JSON"
+
+if [ "$attr_dirty" -ne 0 ]; then
+  {
+    echo "error: this PR carries AI attribution; refusing to merge it onto the default branch"
+    printf '%s' "$attr_findings" | while IFS= read -r attr_line; do
+      [ -n "$attr_line" ] && echo "error:   $attr_line"
+    done
+    fm_attribution_explain
+    echo "Have the worker rewrite the offending commit message(s) and force-update the"
+    echo "branch, and edit the PR description, then re-run fm-pr-merge.sh. A PR body"
+    echo "finding is already public on GitHub; editing it is damage control, not"
+    echo "prevention (docs/attribution-gate.md)."
+  } >&2
+  exit 1
+fi
 
 # --- the premise behind check 2's identical-file skip (contract in this
 # --- script's header) ---------------------------------------------------------

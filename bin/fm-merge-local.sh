@@ -9,6 +9,11 @@
 # auto-approves), and only as a clean fast-forward - it refuses a diverged branch
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
+#
+# It also refuses when any commit message this fast-forward would land carries AI
+# attribution, the local-only twin of the same gate in bin/fm-pr-merge.sh.
+# bin/fm-attribution-lib.sh owns the patterns and docs/attribution-gate.md owns
+# the contract.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -18,6 +23,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-ack-lib.sh
 . "$SCRIPT_DIR/fm-ack-lib.sh"
+# shellcheck source=bin/fm-attribution-lib.sh
+. "$SCRIPT_DIR/fm-attribution-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=${1:?usage: fm-merge-local.sh <task-id>}
 META="$STATE/$ID.meta"
@@ -61,6 +68,36 @@ fi
 if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
+  exit 1
+fi
+
+# AI-attribution gate (docs/attribution-gate.md). This is the local-only twin of
+# the same gate in bin/fm-pr-merge.sh, and it is the boundary rather than the
+# commit-msg hook: firstmate runs it, on the artefact the worker produced, at the
+# point of landing, so no --no-verify and no deleted hook reaches past it. It
+# scans every commit message this fast-forward would put on the default branch.
+attr_findings=""
+attr_rc=0
+while IFS= read -r sha; do
+  [ -n "$sha" ] || continue
+  msg=$(git -C "$PROJ" log -1 --format=%B "$sha" 2>/dev/null) || {
+    echo "error: could not read the commit message of $sha; refusing to merge unverified" >&2
+    exit 1
+  }
+  found=$(printf '%s\n' "$msg" | fm_attribution_scan_stdin "${sha:0:12}") || attr_rc=1
+  [ -z "$found" ] || attr_findings="${attr_findings}${found}"$'\n'
+done <<EOF_SHAS
+$(git -C "$PROJ" rev-list "$DEFAULT..$BRANCH")
+EOF_SHAS
+if [ "$attr_rc" -ne 0 ]; then
+  {
+    echo "REFUSED: commit message(s) on $BRANCH carry AI attribution:"
+    printf '%s' "$attr_findings" | while IFS= read -r line; do
+      [ -n "$line" ] && echo "  $line"
+    done
+    fm_attribution_explain
+    echo "Have the worker rewrite those messages on $BRANCH, then retry."
+  } >&2
   exit 1
 fi
 
