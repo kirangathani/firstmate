@@ -81,8 +81,10 @@ The measured failure it closes, 2026-07-30: a finished ship task sat unanswered 
 Its wake was durably queued, correctly drained, and read - and draining is what destroys the evidence, so nothing downstream could tell that the state had been dropped rather than handled.
 
 Quiet on a healthy fleet, by the mechanics `bin/fm-ack-lib.sh` owns rather than by a separate rule here: a ten-minute grace, an acknowledgement that silences a state firstmate has already handled for as long as the captain takes to answer, and a current-state confirm that clears a worker which has provably moved on.
-Unlike the stale-base sweep it is not bounded by a timeout, because every read it makes is a local file stat except the current-state confirm, which is already capped per invocation and cached, and swallowing the verdict on expiry would mean silently ending a turn on exactly the finding this reason exists to force.
-A confirm that cannot be read reports as unreadable and still blocks.
+Every read it makes is a local file stat except the current-state confirm, which is already capped per invocation and cached, and is additionally wall-clock bounded (`FM_ACK_CONFIRM_TIMEOUT`, default 15 seconds) for the same reason the stale-base sweep is: this hook is the one place a hang wedges a whole session, and `bin/fm-crew-state.sh` reads panes and can shell out to `no-mistakes`, so it is not a call that can be assumed to return.
+Bounding the confirm is not the same as swallowing the finding.
+On expiry the verdict is `unconfirmed`, which still blocks, so the bound can only ever cost accuracy about a worker's current state and can never silence a report that was left unanswered.
+That is the opposite of the stale-base sweep's expiry, which has no such fallback and therefore has to report "no branch has been checked" instead.
 
 Measured 2026-08-09 on this machine (Linux 6.6.87.2-microsoft-standard-WSL2), `fm_ack_unactioned` in-process over a synthetic ten-task home, mean of 50 calls:
 

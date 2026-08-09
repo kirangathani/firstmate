@@ -430,6 +430,35 @@ test_merge_local_acks() {
   pass "fm-merge-local: an approved local merge acks the ready-in-branch state"
 }
 
+# --- the confirm cannot wedge a turn, and cannot silence one -----------------
+
+# This predicate now runs at turn end, and that hook is the one place a hang
+# wedges a whole session. The current-state reader shells out to panes and to
+# no-mistakes, so it is not a call that can be assumed to return.
+#
+# The bound must fail the SAFE way. A timeout is not evidence the worker moved
+# on, so it has to read as unconfirmed and still alarm - a bound that swallowed
+# the finding would end turns silently on exactly the case it was added for.
+test_a_wedged_current_state_read_still_alarms_and_still_returns() {
+  local home id out start elapsed
+  id=wedge-w8
+  home=$(make_home wedge "$id")
+  crew_reports "$home" "$id" "done: implementation committed"
+  # A reader that never returns, which is what a wedged pane probe looks like.
+  printf '#!/usr/bin/env bash\nsleep 300\n' > "$home/crew-state-stub"
+  chmod +x "$home/crew-state-stub"
+
+  start=$(date +%s)
+  out=$(run_guard "$home" "$INCIDENT_SECS" FM_ACK_CONFIRM_TIMEOUT=2)
+  elapsed=$(( $(date +%s) - start ))
+
+  [ "$elapsed" -lt 60 ] || fail "the guard hung for ${elapsed}s on a wedged current-state read - at turn end that wedges the session"
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "a current-state read that timed out silenced the alarm - a bound may cost accuracy about the worker, never the finding"
+  assert_contains "$out" "$id" "the alarm did not name the task whose confirm timed out"
+  pass "fm-ack-lib: a wedged current-state read is bounded, and times out into alarming rather than into silence"
+}
+
 # --- the forced sweep --------------------------------------------------------
 
 # Give <home> a signing key, so exemptions can be minted there.
@@ -698,6 +727,7 @@ test_confirm_is_gated_by_the_cheap_filter
 test_ack_cli
 test_teardown_removes_the_record
 test_merge_local_acks
+test_a_wedged_current_state_read_still_alarms_and_still_returns
 test_sweep_accounts_for_every_task_and_every_class
 test_sweep_and_alarm_agree
 test_signed_exemption_silences_one_task_only

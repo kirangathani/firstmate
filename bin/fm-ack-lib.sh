@@ -82,6 +82,18 @@ _FM_ACK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _
 # shellcheck source=bin/fm-ci-waiver-lib.sh
 # shellcheck disable=SC1091
 . "$_FM_ACK_LIB_DIR/fm-ci-waiver-lib.sh"
+# fm-bounded-lib.sh bounds the current-state confirm below. It is probed rather
+# than sourced unconditionally: several callers of this library run in trimmed
+# scenario trees, and an unconditional `.` of a missing sibling prints to stderr,
+# which would turn a silent healthy turn into a noisy one. A host with no bounder
+# at all still works - fm_ack_confirm_state falls back to the unbounded read
+# rather than skipping the confirm, because skipping it would clear nothing and
+# alarm on every resumed worker.
+if [ -r "$_FM_ACK_LIB_DIR/fm-bounded-lib.sh" ]; then
+  # shellcheck source=bin/fm-bounded-lib.sh
+  # shellcheck disable=SC1091
+  . "$_FM_ACK_LIB_DIR/fm-bounded-lib.sh"
+fi
 
 # The status-log verbs that owe firstmate an action. `paused` is deliberately
 # absent: it is a declared external wait that firstmate is meant to leave alone
@@ -202,9 +214,26 @@ fm_ack_is_current() {  # <state-dir> <id>
 # Prints owed | clear | unconfirmed. An unreadable verdict is `unconfirmed`, not
 # `clear`: the cheap filter already established the task looks owed, and a
 # failed read is no evidence that it is not.
+#
+# The read is WALL-CLOCK BOUNDED, because this predicate is now on the turn-end
+# path (bin/fm-turnend-guard.sh), and that hook is the one place a hang wedges a
+# whole session - the same reason its stale-base sweep is bounded. Bounding the
+# CONFIRM is not the same as swallowing the FINDING: on expiry the verdict is
+# `unconfirmed`, which still alarms, so the bound can only ever cost accuracy
+# about a worker's current state, never silence a report that was left
+# unanswered. fm-crew-state.sh reads panes and can shell out to no-mistakes, so
+# it is not a call that can be assumed to return.
+FM_ACK_CONFIRM_TIMEOUT_DEFAULT=15
 fm_ack_confirm_state() {  # <id>
-  local line state
-  line=$("$FM_CREW_STATE_BIN" "$1" 2>/dev/null) || true
+  local line state rc=0 bound
+  bound=${FM_ACK_CONFIRM_TIMEOUT:-$FM_ACK_CONFIRM_TIMEOUT_DEFAULT}
+  case "$bound" in ''|*[!0-9]*) bound=$FM_ACK_CONFIRM_TIMEOUT_DEFAULT ;; esac
+  if command -v fm_bounded_available >/dev/null 2>&1 && fm_bounded_available; then
+    line=$(fm_bounded_run "$bound" "$FM_CREW_STATE_BIN" "$1" 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 124 ]; then printf 'unconfirmed'; return 0; fi
+  else
+    line=$("$FM_CREW_STATE_BIN" "$1" 2>/dev/null) || true
+  fi
   case "$line" in
     state:*) ;;
     *) printf 'unconfirmed'; return 0 ;;
