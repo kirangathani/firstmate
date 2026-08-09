@@ -450,7 +450,10 @@ if [ "$APPLY_SKIP" -eq 1 ]; then
       exit 1
     }
   done
-  cat "$TMPD/out" > "$BRIEF"
+  # Renamed rather than written over the original, so an interruption mid-write
+  # can never leave the worker a truncated brief; the temp dir is a sibling, so
+  # the rename is atomic.
+  mv "$TMPD/out" "$BRIEF"
   echo "applied: $BRIEF (mode=$APPLY_MODE, testing skip $HAVE_STATE -> $WANT_STATE)"
   exit 0
 fi
