@@ -465,7 +465,10 @@ attestation_banner() {  # <where>
   local line
   {
     echo "================================================================================"
-    echo "ATTESTATION CHECK EXEMPTED ($1): this merge passes a FAILING PR check."
+    # Deliberately states what was EXCUSED rather than what the merge will do:
+    # this prints before the remaining refusals too, so a run that still refuses
+    # on a pending or unrelated red check must not read as an announced merge.
+    echo "ATTESTATION CHECK EXEMPTED ($1): one FAILING PR check was excused."
     echo "  task:            $ID"
     echo "  check:           $ATTESTATION_CHECK_NAME"
     echo "  why it is red:   this PR was not raised through the no-mistakes pipeline, so"
@@ -478,8 +481,8 @@ $ATTESTATION_AUTHORITY
 EOF_AUTH
     echo "  still enforced:  every OTHER check must be green, no check may be pending, an"
     echo "                   unreadable check still refuses, and the base's own test"
-    echo "                   assertions still gate this merge. Exactly one check was"
-    echo "                   excused, matched by its exact name."
+    echo "                   assertions still gate this merge. Only the check named"
+    echo "                   above was excused, matched by its exact name."
     echo "================================================================================"
   } >&2
 }
