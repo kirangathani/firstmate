@@ -526,7 +526,7 @@ pass "a class whose count is zero is still printed, as a 0"
 # dashes, and the reason is stated.
 noci=$(render "$(snap "[$(agent_with ex4 "$(steps_all pending)")]")" | sed 's/\x1b\[[0-9;]*m//g')
 dashes=$(printf '%s\n' "$noci" | grep -o 'CI checks:.*')
-[ "$dashes" = "CI checks:  - pass  - fail  - excused  - skipped  - pending  (no PR yet)" ] ||
+[ "$dashes" = "CI checks:  - pass  - fail  - excused  - skipped  - pending  (no PR)" ] ||
   fail "an unevaluated row did not render dashes with its reason: $dashes"
 pass "a class that was never evaluated renders as a dash and says why"
 
@@ -639,7 +639,7 @@ assert_contains "$localout" "captain-authorised skip: local pipeline" \
 assert_contains "$localout" "skipped" "a local-skip task drew no skipped stage"
 assert_contains "$localout" "by hand" "a local-skip task did not show its hand-run push and PR"
 bothout=$(render "$(snap "[$(agent_with sk2 '[]' "$BOTHSKIP")]")" | sed 's/\x1b\[[0-9;]*m//g')
-assert_contains "$bothout" "captain-authorised skip: local pipeline and CI test jobs" \
+assert_contains "$bothout" "captain-authorised skip: local pipeline, CI test jobs" \
   "a task carrying both skips named only one of them"
 ciout=$(render "$(snap "[$(agent_with sk3 "$(steps_all completed)" "$CISKIP")]")" | sed 's/\x1b\[[0-9;]*m//g')
 assert_contains "$ciout" "captain-authorised skip: CI test jobs" \

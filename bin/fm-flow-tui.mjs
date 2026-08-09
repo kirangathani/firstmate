@@ -189,13 +189,18 @@ export function skipsOf(agent) {
 
 // The one sentence naming what this task's record says was authorised. Empty
 // when it records no skip, which is every ordinary task.
+//
+// The halves are comma-joined rather than joined with " and " for four columns:
+// with both skips and an unevaluated CI tally sharing the line, those four are
+// the difference between the sentence finishing and being cut at 130 columns,
+// which is an ordinary terminal width.
 export function skipDisclosure(agent) {
   const s = skipsOf(agent);
   const parts = [];
   if (s.local) parts.push("local pipeline");
   if (s.ci) parts.push("CI test jobs");
   if (!parts.length) return "";
-  return `captain-authorised skip: ${parts.join(" and ")}`;
+  return `captain-authorised skip: ${parts.join(", ")}`;
 }
 
 export function dur(ms) {
@@ -548,8 +553,12 @@ export function ciTally(agent) {
     `${cell(ci?.passed)} pass  ${cell(ci?.failed)} fail  ` +
     `${cell(ci?.excused)} excused  ${cell(ci?.skipped)} skipped  ${cell(ci?.pending)} pending`;
   if (ok) return `CI ${ci.total ?? 0} checks:  ${counts}`;
+  // "no PR" rather than "no PR yet": those three columns are the difference
+  // between the skip sentence sharing this line finishing and being cut at 130
+  // columns, and the distinction that matters here is against "not read" -
+  // nobody looked - which the other branch states in full.
   const why = !agent.pr?.url
-    ? "no PR yet"
+    ? "no PR"
     : `not read: ${ci?.collection?.reason || "no reason recorded"}`;
   return `CI checks:  ${counts}  (${why})`;
 }

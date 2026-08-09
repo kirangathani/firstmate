@@ -451,5 +451,5 @@ Enter still reported honestly in the same session: from a session with no attach
 
 **The skip rendering.**
 Verified in the same kind of session against a home whose `state/<id>.meta` was written by a real `bin/fm-spawn.sh --all-testing-skip` dispatch rather than by hand; only the recorded endpoint was rewritten afterwards, so the flag lines the view reads are the bytes that spawn wrote.
-The flagged task drew `skipped` under `intent`, `rebase`, `review`, `test`, `docs` and `lint`, `by hand` under `push+PR`, nothing under `pre-merge`, and the row read `captain-authorised skip: local pipeline and CI test jobs`.
+The flagged task drew `skipped` under `intent`, `rebase`, `review`, `test`, `docs` and `lint`, `by hand` under `push+PR`, nothing under `pre-merge`, and the row read `captain-authorised skip: local pipeline, CI test jobs`.
 An unflagged task in the same frame was unchanged.
