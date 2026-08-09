@@ -18,7 +18,7 @@ type ArmResult = {
 type LockOwnership = "owned" | "missing" | "other" | "unresolved";
 
 type CloseClassification = {
-  kind: "actionable" | "failure" | "read-only";
+  kind: "actionable" | "cycle-complete" | "failure" | "read-only";
   message: string;
 };
 
@@ -108,6 +108,15 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   // line and is correct behavior, never a watcher failure.
   const readOnly = combined.split(/\r?\n/).find((line) => /^watcher: read-only\b/.test(line));
   if (readOnly) return { kind: "read-only", message: readOnly };
+  // An arm that attached to someone else's cycle gets no reason line when that
+  // cycle ends: the reason went to the arm that OWNS the watcher, and the wake
+  // itself is already durable. That close is a completed cycle, not a failure.
+  // Without this branch it falls to the catch-all below, which both reports a
+  // false failure and spends a retry slot, so a fleet producing these several
+  // times an hour would exhaust the retry budget and declare supervision dead
+  // while it is healthy.
+  const cycleComplete = combined.split(/\r?\n/).find((line) => /^watcher: cycle-complete\b/.test(line));
+  if (cycleComplete) return { kind: "cycle-complete", message: cycleComplete };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -359,7 +368,10 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       settleReadiness("unready");
-      if (classification.kind === "actionable") {
+      // A cycle-complete close takes the actionable path: restore continuity
+      // first, then hand the model the line. It carries no reason of its own, so
+      // what the model is told is that a wake is waiting in the durable queue.
+      if (classification.kind === "actionable" || classification.kind === "cycle-complete") {
         retryFailures = 0;
         restoring = true;
         void (async () => {

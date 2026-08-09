@@ -25,24 +25,43 @@
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
+#   watcher: cycle-complete - ... delivered a wake and exited ...
+#                                                        - the cycle this arm followed ended by
+#                                                          producing a real wake. Exit 0.
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
-#   watcher: FAILED - cycle ended without an actionable reason
+#   watcher: FAILED - cycle ended without an actionable reason ...
 #                                                        - a clean cycle ended with no wake and no
-#                                                          verified healthy successor
+#                                                          verified healthy successor, beacon fresh
+#   watcher: FAILED - supervision LAPSED: ...            - no wake, no successor, and the beacon is
+#                                                          stale past GRACE: nobody is supervising
+#
+# The last three used to be one line, and that is the defect the split fixes. A
+# cycle always ends with no watcher running and the lock released, so "the cycle
+# ended" is equally true of a healthy close and a dead one; reporting both as the
+# same failure made the real one unnoticeable among the benign ones. Measured in
+# the captain's home on 2026-08-09: all 52 watcher pids that ever produced this
+# failure also had an owning `started` record classified actionable-signal/stale/
+# check/heartbeat, i.e. every single one was a completed cycle whose wake had
+# already been delivered to the arm that owned it. The discriminator is the
+# durable wake counter (fm_wake_seq in bin/fm-wake-lib.sh), which only a real
+# fm_wake_append advances and which no drain resets, cross-checked against the
+# beacon; see cycle_outcome below.
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
 # reason; on attached it stays live across identity-matched successors. An
-# attached cycle that ends without a healthy successor is a typed nonzero failure,
-# never a clean empty completion. On FAILED it exits non-zero so the failure is
-# loud. A live cycle already present means re-arm attaches - do not start a second
-# watcher.
+# attached cycle that ends without a healthy successor is never a clean EMPTY
+# completion an adapter could mistake for a no-op: it is either the typed nonzero
+# failure or the named cycle-complete line, and both say what happened and what to
+# do next. On FAILED it exits non-zero so the failure is loud. A live cycle already
+# present means re-arm attaches - do not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
-# lock identity before and after close, and successor disposition. The separate
+# lock identity before and after close, the cycle_outcome classification, and
+# successor disposition. The separate
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
 #
@@ -108,13 +127,65 @@ cycle_watcher_pid=none
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
+# Empty until a cycle registers one. Never pre-seeded with 0: a home that has
+# produced wakes before reads a nonzero counter, so a 0 default would "differ"
+# from it and report a benign outcome for a cycle that was never registered at
+# all. An unregistered cycle can prove nothing, and the whole point of this
+# classification is that only proof buys silence.
+cycle_wake_seq_before=
 
+# Register a cycle so an interrupt from here on is recorded. ALWAYS call this
+# BEFORE report_attached announces the cycle, never after. cycle_log_append is a
+# no-op while cycle_active is 0, so an arm that announced an attach it had not yet
+# registered would exit correctly on a signal and record NOTHING - the one hole in
+# the one-record-per-observed-cycle contract in docs/watcher-continuity.md. The
+# announcement is also the only observable an attach publishes, so anything acting
+# on it (an adapter, a test) necessarily acts inside that window. Verified by
+# widening the gap to two seconds in a scratch copy: announce-then-register lost
+# the record on every run, register-then-announce kept it on every run.
 cycle_begin() {
   cycle_watcher_pid=$1
   cycle_origin=$2
   cycle_started_at=$(date +%s)
   cycle_lock_before=$(lock_snapshot)
+  cycle_wake_seq_before=$(fm_wake_seq)
   cycle_active=1
+}
+
+# What this cycle did, as opposed to merely that it ended. Every cycle ends with
+# no watcher running and the lock released, so "no watcher is running now" is
+# true of a perfectly healthy close and of a dead one alike and separates
+# nothing. These two observables do:
+#
+#   wake-delivered  the durable wake counter advanced during this cycle, so the
+#                   watcher appended a real wake and exited on it. The wake is in
+#                   state/.wake-queue for whoever drains it, and the session that
+#                   OWNS that watcher gets the reason line on its own arm's exit.
+#                   Nothing is wrong and nothing is lost - this arm was simply
+#                   following someone else's completed cycle.
+#   lapsed          no wake, and the beacon is stale past GRACE. Only the watcher
+#                   touches that beacon, so this is supervision that stopped
+#                   beating without being replaced: the fleet is unsupervised.
+#   no-wake         no wake, but the beacon is still inside GRACE. Supervision was
+#                   alive until this close and produced nothing, e.g. a watcher
+#                   killed mid-cycle or a duplicate that stood down. No watcher is
+#                   running now either, so it still needs a re-arm - it just is
+#                   not the silent multi-minute lapse the case above is.
+#
+# One function so the ledger record and the reported line can never disagree.
+# The wake-delivered arm requires a registered snapshot to compare against, so
+# the quiet outcome is the only one that can never be reached by default. Every
+# way of failing to know lands on a reported failure instead.
+cycle_outcome() {
+  if [ -n "$cycle_wake_seq_before" ] && [ "$(fm_wake_seq)" != "$cycle_wake_seq_before" ]; then
+    printf 'wake-delivered'
+    return
+  fi
+  if [ "$(fm_path_age "$BEAT")" -ge "$GRACE" ]; then
+    printf 'lapsed'
+    return
+  fi
+  printf 'no-wake'
 }
 
 cycle_refresh_lock_before() {
@@ -133,11 +204,12 @@ cycle_signal_name() {
 }
 
 cycle_log_append() {
-  local exit_code=$1 signal=$2 reason=$3 successor=$4 ended_at beacon_age lock_after size tmp raw i
+  local exit_code=$1 signal=$2 reason=$3 successor=$4 ended_at beacon_age lock_after outcome size tmp raw i
   [ "$cycle_active" -eq 1 ] || return 0
   ended_at=$(date +%s)
   beacon_age=$(fm_path_age "$BEAT")
   lock_after=$(lock_snapshot)
+  outcome=$(cycle_outcome)
 
   i=0
   while ! fm_lock_try_acquire "$CYCLE_LOG_LOCK"; do
@@ -145,7 +217,7 @@ cycle_log_append() {
     sleep 0.02
     i=$((i + 1))
   done
-  printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\tsuccessor=%s\n' \
+  printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\toutcome=%s\tsuccessor=%s\n' \
     "$ARM_PID" \
     "$(cycle_clean_field "$cycle_watcher_pid")" \
     "$(cycle_clean_field "$cycle_origin")" \
@@ -157,6 +229,7 @@ cycle_log_append() {
     "$beacon_age" \
     "$(cycle_clean_field "$cycle_lock_before")" \
     "$(cycle_clean_field "$lock_after")" \
+    "$outcome" \
     "$(cycle_clean_field "$successor")" >> "$CYCLE_LOG" 2>/dev/null || true
 
   size=$(wc -c < "$CYCLE_LOG" 2>/dev/null | tr -d '[:space:]')
@@ -260,8 +333,43 @@ wait_for_healthy_successor() {
   done
 }
 
-fail_unexplained_cycle() {
-  echo "watcher: FAILED - cycle ended without an actionable reason"
+# Close a cycle this arm did not get a wake reason from. Three different things
+# reach here and only one of them is a supervision problem, so they must not
+# share one line: the first covered both a benign several-times-an-hour close and
+# a fleet that had been unsupervised for 27 minutes, and a message that means
+# both means neither.
+report_cycle_end() {
+  local age note lapse fresh
+  # fm_path_age answers a MISSING path with a 999999 sentinel. That is a real
+  # answer to "is this past the grace" and a nonsense answer to "how old is it",
+  # so both phrasings are built here, once, and no branch below is free to print
+  # the sentinel as an age. An 11-day-old beacon in a home minutes old reads as a
+  # broken clock rather than the missing beacon it is, and a supervision report
+  # nobody believes is as useless as one that never fires.
+  if [ -e "$BEAT" ]; then
+    age=$(fm_path_age "$BEAT")
+    note="beacon ${age}s"
+    lapse="the beacon has not moved for ${age}s, past the ${GRACE}s grace"
+    fresh="the beacon moved ${age}s ago, inside the ${GRACE}s grace"
+  else
+    note="no beacon"
+    lapse="no liveness beacon at all"
+    fresh="there is no beacon to read"
+  fi
+  case "$(cycle_outcome)" in
+    wake-delivered)
+      # Not a failure and not a no-op: the cycle did its job. The reason line
+      # went to the arm that owns this watcher, and the wake itself is durable,
+      # so this arm's only remaining duty is to say the cycle is over.
+      echo "watcher: cycle-complete - the watcher this arm followed delivered a wake and exited (${note}); drain state/.wake-queue and re-arm"
+      return 0
+      ;;
+    lapsed)
+      echo "watcher: FAILED - supervision LAPSED: no live watcher and ${lapse} - the fleet is unsupervised; re-arm with --restart"
+      return 1
+      ;;
+  esac
+  echo "watcher: FAILED - cycle ended without an actionable reason - no wake was produced and no successor took over, though ${fresh}, so supervision was alive until this close; re-arm"
   return 1
 }
 
@@ -275,8 +383,8 @@ attach_and_wait() {
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
-        report_attached
         cycle_begin "$attached_pid" attached
+        report_attached
       fi
       sleep "$ATTACH_POLL"
       continue
@@ -284,13 +392,13 @@ attach_and_wait() {
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
-      report_attached
       cycle_begin "$attached_pid" attached
+      report_attached
       continue
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
-    fail_unexplained_cycle
-    return 1
+    report_cycle_end
+    return $?
   done
 }
 
@@ -381,8 +489,8 @@ fi
 # this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-  report_attached
   cycle_begin "$HEALTHY_PID" attached
+  report_attached
   attach_and_wait "$HEALTHY_PID"
   exit $?
 fi
@@ -449,8 +557,8 @@ owned_child_finished() {
       child=
       child_out=
       cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-      report_attached
       cycle_begin "$HEALTHY_PID" attached
+      report_attached
       attach_and_wait "$HEALTHY_PID"
       return $?
     fi
@@ -459,8 +567,8 @@ owned_child_finished() {
     rm -f "$child_out" 2>/dev/null || true
     child=
     child_out=
-    fail_unexplained_cycle
-    return 1
+    report_cycle_end
+    return $?
   fi
 
   reason_type="nonzero-exit"
