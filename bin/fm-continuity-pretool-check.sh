@@ -5,7 +5,8 @@
 # command other than bin/fm-wake-drain.sh or bin/fm-watch-arm.sh, and only when
 # the active primary home has task metadata in flight but no identity-matched
 # live watcher holds the home lock. Ordinary shell commands, recovery commands,
-# healthy supervision, fleet-idle homes, and child worktrees are always allowed.
+# healthy supervision, fleet-idle homes, child worktrees, and sessions that do
+# not hold this home's session lock are always allowed.
 #
 # The existing turn-end guard remains the unchanged final backstop. This gate
 # closes the long-turn gap before another fleet mutation, but does not replace or
@@ -76,6 +77,8 @@ POLICY="$SCRIPT_DIR/fm-continuity-command-policy.mjs"
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 fm_supervision_status "$STATE" "${FM_GUARD_GRACE:-300}"
@@ -84,6 +87,17 @@ LOCK_PID=$(cat "$STATE/.watch.lock/pid" 2>/dev/null || true)
 if fm_pid_alive "$LOCK_PID" && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$LOCK_PID" "$FM_HOME"; then
   exit 0
 fi
+
+# Supervision belongs to the session holding the SESSION lock (state/.lock - not
+# the watcher singleton state/.watch.lock checked just above), so a session that
+# does not hold it is allowed through, exactly as bin/fm-turnend-guard.sh exempts
+# it. Without this the deny below is UNSATISFIABLE for a non-owner: its remedy is
+# bin/fm-watch-arm.sh, which correctly declines to arm for a non-owner, and
+# bin/fm-continuity-command-policy.mjs allows no other fleet script - so the
+# session would be wedged out of every fleet command with no in-session escape.
+# The deny still stands for the lock holder, and for a dead or absent holder,
+# because there the session is the one that should arm.
+[ "$(fm_session_lock_ownership "$STATE")" = other ] && exit 0
 
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0

@@ -12,6 +12,18 @@ EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 # unrelated to plugin output, which the assertions intentionally require empty.
 export NODE_NO_WARNINGS=1
 
+# Both adapters resolve session-lock ownership through `bin/fm-lock.sh
+# ownership` rather than carrying their own copy of the ancestry walk
+# (bin/fm-session-lock-lib.sh is the single implementation), so every fixture
+# repo has to carry those two real scripts.
+install_session_lock_cli() {
+  local repo=$1
+  mkdir -p "$repo/bin"
+  cp "$ROOT/bin/fm-lock.sh" "$repo/bin/fm-lock.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$repo/bin/fm-session-lock-lib.sh"
+  chmod +x "$repo/bin/fm-lock.sh"
+}
+
 install_pi_watch_extension_fixture() {
   local repo=$1
   mkdir -p "$repo/.pi/extensions" "$repo/node_modules/typebox"
@@ -42,10 +54,32 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
   assert_contains "$text" 'fileURLToPath(import.meta.url)' "tracked extension does not self-locate via import.meta.url"
   assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "other"' "tracked extension does not distinguish missing lock from another owner"
-  assert_contains "$text" "readFileSync(\`\${state}/.lock\`" "tracked extension does not read the effective session lock"
-  assert_contains "$text" 'return pidAlive(lockPid) ? "other" : "missing"' "tracked extension does not allow a pre-lock load marker"
-  assert_contains "$text" 'if (lockOwnership() === "other") return' "tracked extension overwrites another live session marker"
+  # Ownership resolution moved to its single owner (bin/fm-session-lock-lib.sh,
+  # reached through `bin/fm-lock.sh ownership`), so the extension must delegate
+  # with the EFFECTIVE state dir rather than reading the lock itself.
+  assert_contains "$text" "spawnSync(\`\${fmRoot}/bin/fm-lock.sh\`, [\"ownership\"]" "tracked extension does not delegate session-lock ownership"
+  assert_contains "$text" 'FM_STATE_OVERRIDE: state' "tracked extension does not resolve ownership against the effective session lock"
+  assert_not_contains "$text" "readFileSync(\`\${state}/.lock\`" "tracked extension still carries its own session-lock reader"
+  # "A dead holder reads as missing" (which is what allows a pre-lock load
+  # marker) is now the resolver's rule; the extension must pass that answer
+  # through rather than collapse it into the live-other refusal.
+  # test_pi_arm_distinguishes_session_lock_ownership proves it end to end.
+  assert_contains "$text" 'if (ownership === "owned" || ownership === "other" || ownership === "missing") return ownership' "tracked extension does not allow a pre-lock load marker"
+  # A resolver FAILURE (missing or non-executable bin/fm-lock.sh, spawn error,
+  # no verdict on stdout) is not a verdict about the lock, and answering it with
+  # "run bin/fm-session-start.sh" is advice that cannot fix it.
+  assert_contains "$text" 'return "unresolved"' "tracked extension collapses a failed ownership resolver into a lock verdict"
+  assert_contains "$text" 'ownership failed (exit' "tracked extension does not surface the real ownership-resolver failure"
+  assert_contains "$text" 'if (ownership === "unresolved")' "tracked extension arm does not distinguish a failed resolver from a missing lock"
+  assert_contains "$text" 'if (ownership === "other") return' "tracked extension overwrites another live session marker"
   assert_contains "$text" 'const ownership = lockOwnership()' "tracked extension arm does not inspect the distinct lock ownership state"
+  # One arm resolves ownership once: markLoaded takes the verdict startArm
+  # already paid for instead of spawning bin/fm-lock.sh a second time.
+  assert_contains "$text" 'function markLoaded(ownership: LockOwnership = lockOwnership())' "tracked extension does not accept an already-resolved ownership verdict"
+  assert_contains "$text" 'markLoaded(ownership)' "tracked extension arm resolves session-lock ownership twice per arm"
+  # The arm's own session-lock gate can refuse after this pre-check; that
+  # refusal is exit 0 with no actionable line and is correct, not a failure.
+  assert_contains "$text" 'kind: "read-only", message: readOnly' "tracked extension reports the arm's correct read-only refusal as a watcher failure"
   assert_contains "$text" 'if (ownership === "other") return { ok: false' "tracked extension arm does not preserve the live-other read-only refusal"
   assert_contains "$text" 'if (ownership === "missing")' "tracked extension arm collapses a stale or absent lock into the live-other refusal"
   assert_contains "$text" "no live session holds the lock" "tracked extension arm missing stale-lock recovery guidance"
@@ -83,6 +117,7 @@ test_pi_extension_reports_external_healthy_watcher() {
   repo="$TMP_ROOT/pi-external-healthy-root"
   home="$TMP_ROOT/pi-external-healthy-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -157,6 +192,7 @@ test_pi_tool_returns_agent_tool_result() {
   repo="$TMP_ROOT/pi-tool-result-root"
   home="$TMP_ROOT/pi-tool-result-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -208,6 +244,7 @@ test_pi_actionable_close_starts_single_successor_before_delivery() {
   log="$TMP_ROOT/pi-continuous-rearm.log"
   stop="$TMP_ROOT/pi-continuous-rearm.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -278,12 +315,79 @@ EOF
   pass "Pi actionable close starts one successor before wake delivery settles"
 }
 
+test_pi_read_only_successor_close_stands_down_quietly() {
+  local repo home plugin log out status
+  # The successor arm passes this extension's ownership pre-check and is then
+  # refused by the arm's OWN session-lock gate, because the lock changed in
+  # between. That refusal is exit 0 with no actionable line, and it is correct
+  # behavior: the restoration wrapper must stand down terminally rather than
+  # treat it as an unready successor, retry it, or wake the model with a failure.
+  repo="$TMP_ROOT/pi-read-only-close-root"
+  home="$TMP_ROOT/pi-read-only-close-home"
+  log="$TMP_ROOT/pi-read-only-close.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic wake\n'
+  exit 0
+fi
+printf "watcher: read-only - another firstmate session holds this home's session lock; not arming\n"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_PI_ARM_READY_TIMEOUT_MS=250 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-read-only-close", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!prompt.includes("signal: synthetic wake")) throw new Error(`original wake was lost: ${prompt}`);
+if (prompt.includes("watcher: FAILED")) throw new Error(`a correct read-only stand-down was reported as a failure: ${prompt}`);
+if (/after \d+ retries/.test(prompt)) throw new Error(`a path that never retried claimed retries: ${prompt}`);
+await new Promise((resolve) => setTimeout(resolve, 150));
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+if (rows.length !== 2) throw new Error(`a read-only stand-down must not launch another arm, got ${rows.length}: ${rows.join(" | ")}`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must stand down quietly when its successor arm declines for a lock it does not own"
+  [ -z "$out" ] || fail "Pi read-only-close test printed output: $out"
+  pass "Pi read-only successor close stands down without a failure wake or an extra arm"
+}
+
 test_pi_hung_successor_falls_back_to_typed_wake() {
   local repo home plugin log out status
   repo="$TMP_ROOT/pi-hung-successor-root"
   home="$TMP_ROOT/pi-hung-successor-home"
   log="$TMP_ROOT/pi-hung-successor.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -351,6 +455,7 @@ test_pi_unretired_successor_falls_back_without_retry() {
   log="$TMP_ROOT/pi-unretired-successor.log"
   release="$TMP_ROOT/pi-unretired-successor.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -426,6 +531,7 @@ test_pi_late_unretired_close_resumes_supervision() {
     release="$TMP_ROOT/pi-late-$kind.release"
     stop="$TMP_ROOT/pi-late-$kind.stop"
     mkdir -p "$repo/bin" "$home/state" "$home/config"
+    install_session_lock_cli "$repo"
     install_pi_watch_extension_fixture "$repo"
     plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
     cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -519,6 +625,7 @@ test_pi_empty_close_retries_instead_of_disappearing() {
   log="$TMP_ROOT/pi-empty-close.log"
   stop="$TMP_ROOT/pi-empty-close.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -577,6 +684,7 @@ test_pi_established_empty_close_honors_retry_limit() {
   home="$TMP_ROOT/pi-established-empty-close-home"
   log="$TMP_ROOT/pi-established-empty-close.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -629,6 +737,7 @@ test_pi_actionable_close_rechecks_session_lock() {
   log="$TMP_ROOT/pi-close-lock.log"
   release="$TMP_ROOT/pi-close-lock.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -687,6 +796,7 @@ test_pi_arm_distinguishes_session_lock_ownership() {
   home="$TMP_ROOT/pi-lock-ownership-home"
   log="$TMP_ROOT/pi-lock-ownership.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -767,6 +877,7 @@ test_pi_process_exit_cleanup_listener_lifecycle() {
   repo="$TMP_ROOT/pi-exit-listener-root"
   home="$TMP_ROOT/pi-exit-listener-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : > "$repo/bin/fm-watch-arm.sh"
@@ -808,6 +919,7 @@ test_pi_process_exit_cleanup_stops_arm_child() {
   cleanup_log="$TMP_ROOT/pi-process-exit-cleaned"
   pid_file="$TMP_ROOT/pi-process-exit-child.pid"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -871,7 +983,14 @@ test_opencode_primary_watch_plugin_static_wiring() {
   assert_contains "$text" "promptAsync" "OpenCode plugin does not wake with promptAsync"
   assert_contains "$text" ".fm-secondmate-home" "OpenCode plugin does not scope out secondmate homes"
   assert_contains "$text" "rev-parse\", \"--git-dir" "OpenCode plugin does not check linked worktree scope"
-  assert_contains "$text" "sessionOwnsLock" "OpenCode plugin does not gate arm attempts on the session lock"
+  assert_contains "$text" "resolveSessionOwnership" "OpenCode plugin does not gate arm attempts on the session lock"
+  # A resolver FAILURE is not "not owned": a missing or non-executable
+  # bin/fm-lock.sh would otherwise silently mean supervision is never armed,
+  # with no diagnostic naming the real cause.
+  assert_contains "$text" 'return "unresolved"' "OpenCode plugin collapses a failed ownership resolver into a lock verdict"
+  assert_contains "$text" 'ownership failed (exit' "OpenCode plugin does not surface the real ownership-resolver failure"
+  assert_contains "$text" 'status === "ownership-unresolved"' "OpenCode plugin does not distinguish a failed resolver from a read-only refusal"
+  assert_contains "$text" 'kind: "read-only", message: readOnly' "OpenCode plugin reports the arm's correct read-only refusal as a watcher failure"
   assert_contains "$text" 'fm-watch-arm.sh" --restart' "OpenCode plugin does not restart into its own watcher child"
   assert_contains "$text" 'setArmStatus("external")' "OpenCode plugin still treats an external healthy watcher as armed"
   pass "OpenCode primary watcher plugin has the verified TUI wake wiring"
@@ -903,6 +1022,7 @@ test_opencode_primary_watch_plugin_uses_effective_state_home() {
   home="$TMP_ROOT/opencode-effective-state-home"
   log="$TMP_ROOT/opencode-effective-state.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -953,6 +1073,7 @@ test_opencode_primary_watch_plugin_sources_effective_config() {
   home="$TMP_ROOT/opencode-effective-config-home"
   log="$TMP_ROOT/opencode-effective-config.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   printf 'export FM_POLL=7\n' > "$home/config/x-mode.env"
@@ -1002,6 +1123,7 @@ test_opencode_primary_watch_plugin_requires_session_lock() {
   home="$TMP_ROOT/opencode-lock-home"
   log="$TMP_ROOT/opencode-lock.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1058,6 +1180,11 @@ test_opencode_arm_does_not_reuse_a_stale_read_only_refusal() {
   release="$TMP_ROOT/opencode-stale-refusal.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config" "$shim"
   git init -q "$repo"
+  # Ownership now resolves through `bin/fm-lock.sh ownership`, so the ancestry
+  # walk this test pins with its ps shim runs in that subprocess. Without the
+  # real scripts the spawn simply fails, the walk never reaches ps, and the
+  # coalescing window this test depends on is never established.
+  install_session_lock_cli "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -1153,6 +1280,7 @@ test_opencode_watch_arm_coordinator_respects_primary_scope() {
   log="$TMP_ROOT/opencode-coordinator.log"
   fm_git_worktree "$base" "$repo" fm/opencode-coordinator
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -1199,6 +1327,7 @@ test_opencode_primary_watch_plugin_rearms_after_wake() {
   log="$TMP_ROOT/opencode-rearm.log"
   stop="$TMP_ROOT/opencode-rearm.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1280,6 +1409,7 @@ test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   retired="$TMP_ROOT/opencode-pre-ready-actionable.retired"
   stop="$TMP_ROOT/opencode-pre-ready-actionable.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1353,6 +1483,73 @@ EOF
   pass "OpenCode pre-ready actionable close preserves its successor"
 }
 
+test_opencode_read_only_successor_close_stands_down_quietly() {
+  local plugin repo home log out status
+  # Same race as the Pi case: the successor arm passes this plugin's ownership
+  # pre-check and is refused by the arm's own gate. Standing down is correct, so
+  # it must be terminal and quiet - no retry, no watcher: FAILED, and no
+  # "after N retries" sentence on a path that never retried.
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-read-only-close-root"
+  home="$TMP_ROOT/opencode-read-only-close-home"
+  log="$TMP_ROOT/opencode-read-only-close.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic wake\n'
+  exit 0
+fi
+printf "watcher: read-only - another firstmate session holds this home's session lock; not arming\n"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_ARM_READY_TIMEOUT_MS=250 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompt = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompt += request.body.parts[0].text;
+    },
+  },
+};
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 500 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!prompt.includes("signal: synthetic wake")) throw new Error(`original wake was lost: ${prompt}`);
+if (prompt.includes("watcher: FAILED")) throw new Error(`a correct read-only stand-down was reported as a failure: ${prompt}`);
+if (/after \d+ retries/.test(prompt)) throw new Error(`a path that never retried claimed retries: ${prompt}`);
+await new Promise((resolve) => setTimeout(resolve, 150));
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+if (rows.length !== 2) throw new Error(`a read-only stand-down must not launch another arm, got ${rows.length}: ${rows.join(" | ")}`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must stand down quietly when its successor arm declines for a lock it does not own"
+  [ -z "$out" ] || fail "OpenCode read-only-close test printed output: $out"
+  pass "OpenCode read-only successor close stands down without a failure wake or an extra arm"
+}
+
 test_opencode_hung_successor_falls_back_to_typed_wake() {
   local plugin repo home log out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -1360,6 +1557,7 @@ test_opencode_hung_successor_falls_back_to_typed_wake() {
   home="$TMP_ROOT/opencode-hung-successor-home"
   log="$TMP_ROOT/opencode-hung-successor.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1429,6 +1627,7 @@ test_opencode_unretired_successor_falls_back_without_retry() {
   log="$TMP_ROOT/opencode-unretired-successor.log"
   release="$TMP_ROOT/opencode-unretired-successor.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1506,6 +1705,7 @@ test_opencode_late_unretired_close_resumes_supervision() {
     release="$TMP_ROOT/opencode-late-$kind.release"
     stop="$TMP_ROOT/opencode-late-$kind.stop"
     mkdir -p "$repo/bin" "$home/state" "$home/config"
+    install_session_lock_cli "$repo"
     git init -q "$repo"
     : > "$repo/AGENTS.md"
     : > "$home/state/task.meta"
@@ -1601,6 +1801,7 @@ test_opencode_empty_close_retries_instead_of_disappearing() {
   log="$TMP_ROOT/opencode-empty-close.log"
   stop="$TMP_ROOT/opencode-empty-close.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1660,6 +1861,7 @@ test_opencode_established_empty_close_honors_retry_limit() {
   home="$TMP_ROOT/opencode-established-empty-close-home"
   log="$TMP_ROOT/opencode-established-empty-close.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1714,6 +1916,7 @@ test_opencode_actionable_close_rechecks_session_lock() {
   log="$TMP_ROOT/opencode-close-lock.log"
   release="$TMP_ROOT/opencode-close-lock.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1780,6 +1983,7 @@ test_opencode_watch_arm_coordinates_with_turnend_guard() {
   log="$TMP_ROOT/opencode-coordinate-arm.log"
   guard_log="$TMP_ROOT/opencode-coordinate-guard.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1853,6 +2057,7 @@ test_opencode_healthy_arm_output_does_not_suppress_guard() {
   log="$TMP_ROOT/opencode-external-healthy-arm.log"
   guard_log="$TMP_ROOT/opencode-external-healthy-guard.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_session_lock_cli "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -1926,6 +2131,7 @@ test_spawn_template_mentions_pi_watch_placeholder
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_read_only_successor_close_stands_down_quietly
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
@@ -1944,6 +2150,7 @@ test_opencode_arm_does_not_reuse_a_stale_read_only_refusal
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_pre_ready_actionable_close_preserves_its_successor
+test_opencode_read_only_successor_close_stands_down_quietly
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry
 test_opencode_late_unretired_close_resumes_supervision

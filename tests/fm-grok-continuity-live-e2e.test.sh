@@ -69,6 +69,8 @@ trap cleanup EXIT
 mkdir -p "$LAB"
 git clone -q "$ROOT" "$PROJECT"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
+cp "$ROOT/bin/fm-lock.sh" "$PROJECT/bin/fm-lock.sh"
+cp "$ROOT/bin/fm-session-lock-lib.sh" "$PROJECT/bin/fm-session-lock-lib.sh"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
 printf 'project=fixture\n' > "$HOME_DIR/state/grok-e2e.meta"
 
