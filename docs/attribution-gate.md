@@ -29,13 +29,27 @@ So the layers below are described by what they actually constrain, and the ones 
 
 ### 1. The landing gate - this is the boundary
 
-`bin/fm-pr-merge.sh` reads the PR's commit messages and its description through one `gh pr view --json body,commits` call and refuses the merge when any of them carries attribution.
+`bin/fm-pr-merge.sh` reads the branch's commit messages out of the task's local copy with git, reads the PR description through one `gh pr view --json body` call, and refuses the merge when either carries attribution.
 `bin/fm-merge-local.sh` does the same over every commit message a local-only fast-forward would put on the default branch.
 
 This is the boundary because firstmate runs it, over an artefact the worker has already finished producing, through a script the worker never invokes and cannot reach.
 No `--no-verify`, no deleted hook, and no instruction the worker declined changes its answer.
 There is no override flag.
 A read that fails refuses as unverified rather than passing, matching how every other gate in `bin/fm-pr-merge.sh` treats evidence it could not obtain.
+
+### Where each half is read, and why not both from the API
+
+The commit messages come from git, in the task's own local copy. Git is the authority for what a commit message says, the read costs no network call, and nothing but git can answer it wrongly.
+The ref it reads is chosen exactly as `bin/fm-assert-tests-kept.sh` chooses its compare side: the PR head when that is recorded and resolvable locally, and the local branch with a warning when it is not.
+That is deliberate rather than convenient - the merge already trusts that same resolution for its test verdict, so the attribution verdict is measured against the same commits and never a second opinion about which they are.
+
+The PR description has no local source, so it is the one API read, and it asks for the field as raw text rather than as JSON.
+On a real PR the answer is the description; a PR with no description answers with nothing, which carries no attribution and is therefore not a finding.
+A read that actually fails still exits non-zero and still refuses.
+
+The limit of that choice, stated rather than left implicit: this cannot distinguish "this PR has no description" from "the tool returned nothing". In production `gh` either errors, which refuses, or prints the field, which is scanned. The half that reaches the default branch - the commit messages - is not subject to that ambiguity at all, because git either has the commits or the merge has already been refused for not resolving them.
+
+A local copy that does not resolve is noted, not refused. `bin/fm-assert-tests-kept.sh` runs two gates later in the same command and refuses outright when it cannot resolve the task's worktree, so a merge whose local copy is missing cannot proceed whatever this gate says. Refusing twice for one cause would only make an unrelated worktree problem surface as an attribution failure.
 
 It runs before the kept-tests gate.
 That gate is the dominant cost of landing a PR, at roughly 20-35 minutes on firstmate itself, and a PR that will be refused for attribution should not spend that time first.
