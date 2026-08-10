@@ -171,10 +171,13 @@ The master is not inherited by secondmate homes: a home that dispatches its own 
 Until a repository holds the secret the feature is inert there: a waiver line cannot be verified, so the verifier refuses it loudly and the full suite runs, which is exactly the behaviour without this feature at all.
 `bin/fm-ci-waiver.sh sign <task-id> <sha> <owner/repo>` prints the publishable line, signed with that repository's derived key, and it refuses unless the task's own `state/<id>.meta` records `ci_skip=on` together with a `ci_skip_auth=` dispatch token the master reproduces for that task id.
 It names the repository explicitly rather than inferring one, because a signature has to select a key and a wrong guess would produce a line that silently never verifies.
+It also refuses a repository the task's own checkout does not push to: the verifier accepts a line on its signature alone and never checks the task named in it, so a signature issued for an unrelated repository would be a waiver handed to unrelated work; a remote that cannot be resolved to a GitHub slug is reported and allowed, exactly as before the check existed.
+`bin/fm-ci-waiver.sh waive <task-id>` is the routine form: it reads the commit and repository from the worker's own `ci-waiver needed for <sha> on <owner>/<repo>` request in `state/<id>.status`, signs through that identical check, and steers the line back with `bin/fm-send.sh`, so the exchange costs one command rather than a copy between three tools.
+The exchange itself cannot be removed, and that is a property of the verifier rather than a convention: a signature bound to anything known at dispatch would verify in any other PR the published line was pasted into.
 That pair is the whole authorization model, and both halves are load-bearing: a worker appends its status lines into the same `state/` directory, so it could append the flag line to its own record, and the token is an HMAC it cannot compute.
 The signature covers the commit as well as the task id, so it is bound to exactly one head commit and every further push needs a fresh one; publishing the line is harmless, since it reveals nothing about the secret.
 
-The only thing that writes that pair is `bin/fm-spawn.sh --ci-skip` (or `--all-testing-skip`) at dispatch, on the captain's machine; "Testing skips" below owns those flags, and `sign` refuses any task dispatched without one.
+The only thing that writes that pair is `bin/fm-spawn.sh --ci-skip` (or `--all-testing-skip`, or a `--skip-testing` that resolved to one of them) at dispatch, on the captain's machine; "Testing skips" below owns those flags, and `sign` refuses any task dispatched without one.
 
 In [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) the cheap `ci-waiver` job gates the expensive behaviour-test and macOS jobs, while `lint`, `invariants`, and the required `tests-complete` verdict always run, so a fully waived PR still reports checks and never reaches `bin/fm-pr-merge.sh`'s zero-checks refusal looking like CI that never ran.
 `lint` is ungated for the same reason as `invariants`: a minute of ShellCheck is not an expensive job, so there is nothing worth skipping, and a waived PR should still get static analysis rather than nothing looking at its shell at all.
@@ -193,14 +196,21 @@ When the checked-out base predates the waiver and carries no verifier at all, bo
 A repository that never publishes the secret leaves that `check` job permanently red for every PR the pipeline did not raise, which firstmate itself authorizes in two ordinary cases, so the remedy for the merge is firstmate-side rather than CI-side.
 `bin/fm-pr-merge.sh` excuses that one check by exact name when the task carries a signed testing skip or the project is registered as `direct-PR`, refuses every other failing or unfinished check unchanged, and discloses each such merge loudly; that script's header owns the full contract, including why a rename of the job fails towards refusing.
 
-## Testing skips (bin/fm-spawn.sh --local-skip / --ci-skip / --all-testing-skip)
+## Testing skips (bin/fm-spawn.sh --skip-testing / --local-skip / --ci-skip / --all-testing-skip)
 
 A ship task can be dispatched with testing switched off, but only by the captain and only mechanically: the skip is enforced by code and by a keyed signature, never by an instruction a worker can decline and never by a string a worker can type.
 They are a third axis, orthogonal to delivery mode and to `yolo`, and `yolo` never grants one.
-Pass the same flag to `bin/fm-brief.sh`, which writes the worker-facing half; `bin/fm-testing-skip-lib.sh` is the single owner of the flags, the accepted matrix, and every refusal, so the two scripts cannot drift.
 
-`--local-skip` switches off the local pipeline, `--ci-skip` waives CI's expensive jobs for the PR, and `--all-testing-skip` does both.
+**A skip is one action, at dispatch.** `bin/fm-spawn.sh` is the only script that takes a skip flag; `bin/fm-brief.sh` refuses one and names the dispatch instead.
+The dispatch mints the authorization AND writes the worker-facing half, by calling `bin/fm-brief.sh --apply-testing-skip` with the flag it just resolved, so there is no second invocation to keep in agreement.
+That apply runs on every ship spawn, flagged or not, so an unflagged dispatch of a brief that still carries skip text puts the ordinary instructions back, and a brief that has no such regions refuses the dispatch outright rather than launching a worker whose instructions and whose record disagree.
+The regions are delimited in the brief by `<!-- fm:... -->` markers whose definition-of-done marker records the skip it was written for; `bin/fm-brief.sh`'s header owns them, and an apply that would change nothing rewrites nothing.
+`bin/fm-testing-skip-lib.sh` remains the single owner of the flags, the accepted matrix, and every refusal.
+
+`--skip-testing` is the flag to reach for when the intent is simply "skip the testing": it resolves, once the project's delivery mode is known, to the most that mode can honour, states on stderr what it resolved to, and needs no knowledge of the matrix below.
+`--local-skip` switches off the local pipeline, `--ci-skip` waives CI's expensive jobs for the PR, and `--all-testing-skip` does both, for a deliberately narrower skip.
 Each is recorded in `state/<id>.meta` only when on, as `local_skip=on` and/or `ci_skip=on`, each paired with its own `local_skip_auth=`/`ci_skip_auth=` dispatch token, so an unflagged task's record is byte-identical to one from before the feature existed.
+The brief is prose and carries no token, so a brief that talks about a skip is not, and has never been, evidence that one was granted.
 
 A local skip is enforced rather than requested.
 `bin/fm-spawn.sh` writes a `no-mistakes` shim into the task's own temp root and puts that directory first on the worker's PATH, so a flagged worker cannot run the pipeline even if it tries.
@@ -227,8 +237,10 @@ Which flag a delivery mode can honour, refused loudly rather than silently ignor
 | `local-only` | none | no pipeline, no PR, no CI to waive. |
 | scout, secondmate | none | neither runs a local pipeline nor opens a PR. |
 
+`--skip-testing` is accepted wherever any of those are, since it resolves to one of them; on `local-only` it refuses rather than resolving to a no-op.
+Every refusal prints that table's accepted column, so the matrix is never something to look up mid-dispatch.
 Two skip flags on one command line also refuse, naming `--all-testing-skip`.
-The argument-only rules are checked before any filesystem or backend work, and the delivery-mode rules before any worktree or backend container exists, so a refusal never leaves an orphan window behind.
+The argument-only rules are checked before any filesystem or backend work, and the delivery-mode rules, the brief-apply, and the token minting before any worktree or backend container exists, so a refusal never leaves an orphan window behind.
 
 No skip flag relaxes a merge gate.
 `bin/fm-pr-merge.sh` still refuses a red, pending, unclassifiable, or zero-check PR under every flag, the kept-tests gate still runs, and the merge prints a loud waiver banner read from the task's own record on the captain's machine rather than from anything in the PR.

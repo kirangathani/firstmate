@@ -117,31 +117,85 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
-# Testing-skip briefs (bin/fm-spawn.sh owns the flags' meaning and the accepted
-# flag/delivery-mode matrix; this covers only the worker-facing half fm-brief.sh
-# writes). The point of each assertion is that the worker is told the skip is
-# deliberate and told exactly what to do instead, because an agent that reads a
-# missing pipeline as a fault will try to repair it.
-test_testing_skip_briefs() {
-  local home id brief out status
-  home="$TMP_ROOT/skip-home"
+# A testing skip is authorized at DISPATCH and nowhere else, so scaffolding takes
+# no skip flag at all. This is what removes the silent half-specified skip: there
+# is no longer a second invocation that could be given the flag on its own and
+# quietly produce a brief the dispatch never authorized.
+test_scaffold_refuses_every_testing_skip_flag() {
+  local home out status flag id i=0
+  home="$TMP_ROOT/skip-refuse-home"
+  write_registry "$home"
+  for flag in --local-skip --ci-skip --all-testing-skip --skip-testing; do
+    i=$((i + 1))
+    id="brief-skipflag-d$i"
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj "$flag" 2>&1); status=$?
+    [ "$status" -ne 0 ] || fail "scaffolding must refuse $flag"
+    assert_contains "$out" "is a bin/fm-spawn.sh flag" \
+      "$flag refusal did not name the one script that owns a testing skip"
+    assert_contains "$out" "bin/fm-spawn.sh $id" \
+      "$flag refusal did not print the dispatch to run instead"
+    assert_absent "$home/data/$id/brief.md" "a refused scaffold still wrote a brief"
+  done
+  pass "fm-brief.sh: scaffolding refuses every testing-skip flag and names the dispatch that owns it"
+}
+
+# apply_skip <home> <id> <mode> [<flag>]: the call bin/fm-spawn.sh makes.
+apply_skip() {
+  local home=$1 id=$2 mode=$3
+  shift 3
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --apply-testing-skip "$id" --mode "$mode" "$@" 2>&1
+}
+
+# scaffold_ship <home> <id> <project>: a real scaffolded ship brief.
+scaffold_ship() {
+  FM_HOME="$1" "$ROOT/bin/fm-brief.sh" "$2" "$3" >/dev/null 2>&1
+}
+
+# Every ship brief is born in its ordinary shape, with the three regions a
+# dispatch may rewrite delimited and labelled with the skip they were written
+# for. The label is what lets an apply tell "already correct" from "needs
+# rewriting", so a dispatch that changes nothing rewrites nothing.
+test_ship_brief_carries_labelled_skip_regions() {
+  local home brief
+  home="$TMP_ROOT/skip-regions-home"
+  write_registry "$home"
+  scaffold_ship "$home" brief-regions-e1 no-registry-proj
+  brief="$home/data/brief-regions-e1/brief.md"
+  assert_grep '<!-- fm:setup-steps -->' "$brief" "ship brief lost the setup-steps region"
+  assert_grep '<!-- /fm:setup-steps -->' "$brief" "ship brief lost the setup-steps region end"
+  assert_grep '<!-- fm:rule-1 -->' "$brief" "ship brief lost the rule-1 region"
+  assert_grep '<!-- /fm:rule-1 -->' "$brief" "ship brief lost the rule-1 region end"
+  assert_grep '<!-- fm:definition-of-done skip=none -->' "$brief" \
+    "a freshly scaffolded ship brief must record that it carries no testing skip"
+  assert_grep '<!-- /fm:definition-of-done -->' "$brief" "ship brief lost the definition-of-done region end"
+  pass "fm-brief.sh: a ship brief carries the three machine-owned regions, labelled with its skip"
+}
+
+# The worker-facing half itself. The point of each assertion is that the worker
+# is told the skip is deliberate and told exactly what to do instead, because an
+# agent that reads a missing pipeline as a fault will try to repair it.
+test_applied_testing_skip_briefs() {
+  local home brief out
+  home="$TMP_ROOT/skip-apply-home"
   write_registry "$home"
 
-  id="brief-localskip-c1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj --local-skip >/dev/null 2>&1
-  expect_code 0 $? "--local-skip brief should scaffold for a no-mistakes project"
-  brief="$home/data/$id/brief.md"
+  scaffold_ship "$home" brief-localskip-c1 no-registry-proj
+  brief="$home/data/brief-localskip-c1/brief.md"
+  out=$(apply_skip "$home" brief-localskip-c1 no-mistakes --local-skip); status=$?
+  expect_code 0 "$status" "applying --local-skip to a no-mistakes brief failed: $out"
   assert_grep "local testing skipped" "$brief" "--local-skip brief did not say testing is skipped"
   assert_grep "enforced, not requested" "$brief" "--local-skip brief did not say the skip is enforced"
   assert_grep "Do NOT run /no-mistakes" "$brief" "--local-skip brief still points at the pipeline"
   assert_no_grep "no-mistakes doctor" "$brief" "--local-skip brief kept the pipeline setup step"
   assert_no_grep "CI waiver handshake" "$brief" "--local-skip alone must not add the CI handshake"
   assert_no_grep "EOF" "$brief" "--local-skip brief leaked a heredoc marker"
+  assert_grep '<!-- fm:definition-of-done skip=local -->' "$brief" \
+    "the applied brief did not record which skip it now carries"
 
-  id="brief-ciskip-c2"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --ci-skip >/dev/null 2>&1
-  expect_code 0 $? "--ci-skip brief should scaffold for a direct-PR project"
-  brief="$home/data/$id/brief.md"
+  scaffold_ship "$home" brief-ciskip-c2 direct-proj
+  brief="$home/data/brief-ciskip-c2/brief.md"
+  out=$(apply_skip "$home" brief-ciskip-c2 direct-PR --ci-skip); status=$?
+  expect_code 0 "$status" "applying --ci-skip to a direct-PR brief failed: $out"
   assert_grep "CI waiver handshake" "$brief" "--ci-skip brief lost the waiver handshake"
   assert_grep "git rev-parse HEAD" "$brief" "handshake did not tell the worker how to read its head commit"
   assert_grep "blocked: ci-waiver needed for" "$brief" "handshake did not tell the worker how to ask for a signature"
@@ -151,35 +205,133 @@ test_testing_skip_briefs() {
   assert_no_grep "local testing skipped" "$brief" "--ci-skip must not claim the local pipeline was skipped"
   assert_no_grep "EOF" "$brief" "--ci-skip brief leaked a heredoc marker"
 
-  id="brief-allskip-c3"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj --all-testing-skip >/dev/null 2>&1
-  brief="$home/data/$id/brief.md"
+  scaffold_ship "$home" brief-allskip-c3 no-registry-proj
+  brief="$home/data/brief-allskip-c3/brief.md"
+  out=$(apply_skip "$home" brief-allskip-c3 no-mistakes --all-testing-skip); status=$?
+  expect_code 0 "$status" "applying --all-testing-skip failed: $out"
   assert_grep "local testing skipped" "$brief" "--all-testing-skip brief lost the local skip"
   assert_grep "CI waiver handshake" "$brief" "--all-testing-skip brief lost the CI handshake"
+  pass "fm-brief.sh: an applied testing skip renders the enforced skip and the waiver handshake"
+}
 
-  # The same refusals bin/fm-spawn.sh applies, so a brief can never exist for a
-  # combination the spawn will refuse to launch.
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-skip-bad-c4 local-proj --ci-skip 2>&1); status=$?
-  [ "$status" -ne 0 ] || fail "--ci-skip on a local-only project should refuse"
-  assert_contains "$out" "does not apply to a local-only project" "local-only refusal wording"
-  assert_absent "$home/data/brief-skip-bad-c4/brief.md" "a refused brief was still written"
+# An applied skip must be exactly reversible, because bin/fm-spawn.sh applies on
+# EVERY ship spawn: an unflagged dispatch of a brief that carries skip text has
+# to put the ordinary instructions back, and it must put back the same bytes the
+# scaffold wrote rather than an approximation of them.
+test_applying_and_removing_a_skip_round_trips() {
+  local home brief orig out
+  home="$TMP_ROOT/skip-roundtrip-home"
+  write_registry "$home"
+  scaffold_ship "$home" brief-roundtrip-e2 no-registry-proj
+  brief="$home/data/brief-roundtrip-e2/brief.md"
+  orig="$home/roundtrip-original"
+  cp "$brief" "$orig"
 
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-skip-bad-c5 no-registry-proj --ci-skip 2>&1); status=$?
-  [ "$status" -ne 0 ] || fail "--ci-skip alone on a no-mistakes project should refuse"
-  assert_contains "$out" "cannot be honoured for a no-mistakes project" "no-mistakes ci-skip refusal wording"
+  out=$(apply_skip "$home" brief-roundtrip-e2 no-mistakes --all-testing-skip)
+  assert_contains "$out" "testing skip none -> all" "the first apply did not report the transition it made"
+  out=$(apply_skip "$home" brief-roundtrip-e2 no-mistakes --all-testing-skip)
+  [ -z "$out" ] || fail "re-applying the same skip must rewrite nothing, got: $out"
 
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-skip-bad-c6 direct-proj --local-skip 2>&1); status=$?
-  [ "$status" -ne 0 ] || fail "--local-skip on a direct-PR project should refuse"
+  out=$(apply_skip "$home" brief-roundtrip-e2 no-mistakes)
+  assert_contains "$out" "testing skip all -> none" "removing the skip did not report the transition"
+  diff -u "$orig" "$brief" >/dev/null \
+    || fail "removing an applied skip did not restore the scaffolded brief byte for byte"
+  pass "fm-brief.sh: applying and removing a testing skip round-trips to the scaffolded bytes"
+}
+
+# The refusals. A brief that cannot be brought into agreement with its dispatch
+# must stop the dispatch, never launch a worker whose instructions and whose
+# durable record disagree.
+test_apply_refuses_what_it_cannot_write() {
+  local home brief out status
+  home="$TMP_ROOT/skip-apply-refuse-home"
+  write_registry "$home"
+
+  # A brief with no machine-owned regions at all: silent when nothing is asked
+  # of it, a refusal when a skip is.
+  mkdir -p "$home/data/brief-legacy-e3"
+  printf 'a brief written before this contract existed\n' > "$home/data/brief-legacy-e3/brief.md"
+  out=$(apply_skip "$home" brief-legacy-e3 no-mistakes); status=$?
+  expect_code 0 "$status" "an unflagged apply must leave a pre-contract brief alone: $out"
+  assert_contains "$out" "predates the machine-written testing-skip regions" \
+    "the no-op on a pre-contract brief was silent about what it did"
+  out=$(apply_skip "$home" brief-legacy-e3 no-mistakes --all-testing-skip); status=$?
+  [ "$status" -eq 0 ] && fail "a flagged apply must refuse a brief with no regions to write into"
+  assert_contains "$out" "has no machine-written testing-skip regions" \
+    "the refusal did not say why the brief could not be brought into agreement"
+
+  # Half a set of markers is a structure the scaffold never produces, so it is
+  # refused rather than partially rewritten.
+  scaffold_ship "$home" brief-halfmarked-e4 no-registry-proj
+  brief="$home/data/brief-halfmarked-e4/brief.md"
+  grep -v -- '<!-- /fm:rule-1 -->' "$brief" > "$brief.tmp" && mv "$brief.tmp" "$brief"
+  out=$(apply_skip "$home" brief-halfmarked-e4 no-mistakes --all-testing-skip); status=$?
+  [ "$status" -eq 0 ] && fail "a brief missing a region marker must refuse"
+  assert_contains "$out" "does not carry exactly one of each machine-written region marker" \
+    "the malformed-marker refusal did not name the problem"
+
+  # The same delivery-mode matrix bin/fm-spawn.sh checks, re-checked here so a
+  # disagreement between the two stops rather than writing half an answer. Every
+  # row of that matrix is exercised through THIS entry point, not just the one
+  # that happened to be convenient: a defence-in-depth check tested on one row is
+  # a check nobody has established holds on the others.
+  scaffold_ship "$home" brief-modemismatch-e5 direct-proj
+  out=$(apply_skip "$home" brief-modemismatch-e5 direct-PR --local-skip); status=$?
+  [ "$status" -eq 0 ] && fail "applying --local-skip on a direct-PR brief must refuse"
   assert_contains "$out" "already runs no local pipeline" "direct-PR local-skip refusal wording"
 
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-skip-bad-c7 no-registry-proj --scout --local-skip 2>&1); status=$?
-  [ "$status" -ne 0 ] || fail "a scout brief should refuse a skip flag"
-  assert_contains "$out" "applies only to a ship brief" "scout refusal wording"
+  out=$(apply_skip "$home" brief-modemismatch-e5 direct-PR --all-testing-skip); status=$?
+  [ "$status" -eq 0 ] && fail "applying --all-testing-skip on a direct-PR brief must refuse"
+  assert_contains "$out" "already runs no local pipeline" "direct-PR all-testing-skip refusal wording"
 
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-skip-bad-c8 no-registry-proj --local-skip --ci-skip 2>&1); status=$?
-  [ "$status" -ne 0 ] || fail "two skip flags at once should refuse"
+  scaffold_ship "$home" brief-modemismatch-e8 no-registry-proj
+  out=$(apply_skip "$home" brief-modemismatch-e8 no-mistakes --ci-skip); status=$?
+  [ "$status" -eq 0 ] && fail "applying --ci-skip alone on a no-mistakes brief must refuse"
+  assert_contains "$out" "cannot be honoured for a no-mistakes project" \
+    "no-mistakes ci-skip-alone refusal wording"
+
+  scaffold_ship "$home" brief-modemismatch-e9 local-proj
+  out=$(apply_skip "$home" brief-modemismatch-e9 local-only --ci-skip); status=$?
+  [ "$status" -eq 0 ] && fail "applying any skip on a local-only brief must refuse"
+  assert_contains "$out" "does not apply to a local-only project" "local-only refusal wording"
+
+  out=$(apply_skip "$home" brief-modemismatch-e9 local-only --skip-testing); status=$?
+  [ "$status" -eq 0 ] && fail "--skip-testing on a local-only brief must refuse"
+  assert_contains "$out" "nothing to skip on a local-only project" \
+    "local-only --skip-testing refusal wording"
+
+  out=$(apply_skip "$home" brief-modemismatch-e5 direct-PR --local-skip --ci-skip); status=$?
+  [ "$status" -eq 0 ] && fail "two skip flags at once must refuse"
   assert_contains "$out" "pass exactly one testing-skip flag" "two-flag refusal wording"
-  pass "fm-brief.sh: testing-skip briefs render the enforced skip and the waiver handshake, and refuse the rest"
+
+  out=$(apply_skip "$home" brief-absent-e6 no-mistakes --all-testing-skip); status=$?
+  [ "$status" -eq 0 ] && fail "applying to a brief that does not exist must refuse"
+  assert_contains "$out" "needs a regular brief file" "the missing-brief refusal did not say what it needed"
+  pass "fm-brief.sh: an apply refuses every brief it cannot bring into agreement with the dispatch"
+}
+
+# A brief is PROSE. It is not, and must never become, evidence that a skip was
+# authorized: the only authority is the keyed token bin/fm-spawn.sh writes into
+# state/<id>.meta. This is the property that keeps a worker - which can reach
+# both its own brief and its own status file - from writing itself a skip.
+test_applying_a_skip_grants_no_authority() {
+  local home
+  home="$TMP_ROOT/skip-noauth-home"
+  write_registry "$home"
+  mkdir -p "$home/state" "$home/config"
+  scaffold_ship "$home" brief-noauth-e7 no-registry-proj
+  apply_skip "$home" brief-noauth-e7 no-mistakes --all-testing-skip >/dev/null
+  assert_absent "$home/state/brief-noauth-e7.meta" \
+    "applying a skip to a brief wrote a durable task record"
+  assert_grep "CI waiver handshake" "$home/data/brief-noauth-e7/brief.md" \
+    "the applied brief lost the handshake this case depends on"
+  # Nothing anywhere under the home now carries an authorization, so
+  # bin/fm-ci-waiver.sh has nothing to find: the brief said "skip" and granted
+  # nothing at all.
+  if grep -rqE 'ci_skip=on|ci_skip_auth=|local_skip_auth=' "$home/state" "$home/config" 2>/dev/null; then
+    fail "applying a skip to a brief produced something that looks like an authorization"
+  fi
+  pass "fm-brief.sh: applying a skip writes prose and grants no authority"
 }
 
 test_ship_project_memory_wording() {
@@ -457,7 +609,12 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
-test_testing_skip_briefs
+test_scaffold_refuses_every_testing_skip_flag
+test_ship_brief_carries_labelled_skip_regions
+test_applied_testing_skip_briefs
+test_applying_and_removing_a_skip_round_trips
+test_apply_refuses_what_it_cannot_write
+test_applying_a_skip_grants_no_authority
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

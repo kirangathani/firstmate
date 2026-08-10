@@ -7,6 +7,8 @@
 #   fm-ci-waiver.sh init [--rotate]                generate and store the master key
 #   fm-ci-waiver.sh publish <owner/repo>           push that repo's derived key to its Actions secrets
 #   fm-ci-waiver.sh sign <task-id> <sha> <owner/repo>   print the publishable waiver line
+#   fm-ci-waiver.sh waive <task-id> [--print-only]  read the worker's own request,
+#                                                   sign it, and steer the line back
 #
 # THE SECRET
 # One MASTER key per firstmate home, stored at $FM_HOME/config/ci-waiver-secret
@@ -50,7 +52,21 @@
 # that satisfies both is: the worker commits, pushes its branch (pushing a
 # feature branch triggers no workflow), reports its head SHA, receives the line
 # from firstmate, and only then opens the PR with that line in the body.
-# bin/fm-brief.sh writes those instructions into a --ci-skip brief.
+# bin/fm-brief.sh writes those instructions into a CI-skipped brief.
+#
+# THIS EXCHANGE CANNOT BE MOVED EARLIER, and `waive` exists because of that.
+# Binding a signature to anything known at dispatch - the task id, the branch -
+# instead of the commit would break the only thing tying a waiver to its PR:
+# bin/fm-ci-waiver-verify.sh accepts a line SOLELY on the signature matching the
+# CURRENT head SHA, and never checks that the task named in it has anything to do
+# with the pull request carrying it. A published line bound to a task id alone
+# would therefore verify in any other PR in that repository it was pasted into,
+# and the line is published in a PR body. So the round trip is forced.
+# What is NOT forced is its cost to firstmate. `waive` collapses it to one
+# command per task: it reads the sha and repository from the worker's own
+# request line in state/<task-id>.status, signs through the identical authority
+# check `sign` uses, and steers the result back with bin/fm-send.sh, so nothing
+# is retyped or copied between three tools.
 #
 # Publishing the signature is harmless: it is bound to one commit and reveals
 # nothing about the secret.
@@ -102,6 +118,108 @@ read_secret_or_die() {
     echo "error: $SECRET_FILE is empty; re-run 'fm-ci-waiver.sh init --rotate'" >&2
     exit 1
   fi
+}
+
+# task_repo_slug <meta>: the owner/repo the task's own checkout pushes to, or
+# nothing (exit 1) when that cannot be determined. Only a GitHub remote is
+# resolved, because GitHub Actions is where a waiver is ever verified; anything
+# else is deliberately reported as unknown rather than parsed into a guess.
+task_repo_slug() {
+  local meta=$1 dir url slug
+  dir=$(grep -m1 '^worktree=' "$meta" | cut -d= -f2- || true)
+  if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+    dir=$(grep -m1 '^project=' "$meta" | cut -d= -f2- || true)
+  fi
+  [ -n "$dir" ] && [ -d "$dir" ] || return 1
+  command -v git >/dev/null 2>&1 || return 1
+  url=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
+  case "$url" in
+    *github.com[:/]*) : ;;
+    *) return 1 ;;
+  esac
+  slug=${url%.git}
+  slug=${slug##*github.com}
+  slug=${slug#:}
+  slug=${slug#/}
+  case "$slug" in
+    */*/*|*/) return 1 ;;
+    */*) printf '%s\n' "$slug" | tr '[:upper:]' '[:lower:]' ;;
+    *) return 1 ;;
+  esac
+}
+
+# sign_waiver <task-id> <sha> <owner/repo>: validate, check the dispatch
+# authorization, and print the one publishable line. THE authority check lives
+# here, and both `sign` and `waive` go through this single function, so no
+# convenience path can ever accumulate a weaker version of it.
+sign_waiver() {
+  local ID=$1 SHA=$2 REPO=$3 META AUTH REPO_KEY SIG TASK_REPO REPO_LOWER
+  fm_ci_waiver_valid_task_id "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+  [ -n "$REPO" ] || {
+    echo "error: sign requires the <owner/repo> the PR will be opened against" >&2
+    echo "error: each repository verifies against its own derived key, so a signature must name the repository it is for" >&2
+    exit 2
+  }
+  fm_ci_waiver_valid_repo "$REPO" || { echo "error: '$REPO' is not a valid <owner/repo>" >&2; exit 2; }
+  fm_ci_waiver_valid_sha "$SHA" || {
+    echo "error: '<sha>' must be a full 40-character lowercase commit id; an abbreviation cannot be signed because the verifier compares against GitHub's full head SHA" >&2
+    exit 2
+  }
+  META="$STATE/$ID.meta"
+  if [ ! -f "$META" ] || [ -L "$META" ]; then
+    echo "error: no durable record for task $ID at $META; refusing to sign" >&2
+    exit 1
+  fi
+  # The waiver names the repository whose key signs it, and the verifier there
+  # accepts a line SOLELY on the signature matching the head SHA - it never
+  # checks that the task named in the line has anything to do with the pull
+  # request carrying it. So a signature issued for a repository this task has
+  # nothing to do with would be a line that waives CI on someone else's PR.
+  # Refused whenever the task's own checkout says otherwise. A repository that
+  # cannot be resolved at all is reported and allowed, because that is exactly
+  # what this script did before the check existed: it closes the mismatch
+  # wherever the information exists and breaks no dispatch where it does not.
+  TASK_REPO=$(task_repo_slug "$META") || TASK_REPO=
+  REPO_LOWER=$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')
+  if [ -n "$TASK_REPO" ] && [ "$TASK_REPO" != "$REPO_LOWER" ]; then
+    echo "error: task $ID's own checkout pushes to $TASK_REPO, not $REPO; refusing to sign a waiver for a repository this task does not belong to" >&2
+    echo "error: a published waiver line waives CI on whatever PR carries it at that commit, so signing for another repository would hand out a waiver for work this dispatch never covered" >&2
+    exit 1
+  fi
+  # THE authority check, in two halves. Nothing else in this script grants
+  # authority, and there is no override flag: an unflagged task cannot be
+  # waived at all.
+  if ! grep -qx 'ci_skip=on' "$META"; then
+    echo "error: task $ID was not dispatched with --ci-skip or --all-testing-skip, so its CI cannot be waived" >&2
+    echo "error: the flag is set by the captain at dispatch (bin/fm-spawn.sh); re-dispatch the task with the flag rather than signing around this refusal" >&2
+    exit 1
+  fi
+  require_node || exit 1
+  read_secret_or_die
+  # Second half: the flag must carry the dispatch token bin/fm-spawn.sh minted
+  # for THIS task. The flag line alone is not enough, because a worker appends
+  # its own status lines into this same state directory and could append that
+  # line too; the token is an HMAC it cannot compute.
+  AUTH=$(grep -m1 '^ci_skip_auth=' "$META" | cut -d= -f2- || true)
+  if [ -z "$AUTH" ] || ! fm_ci_waiver_valid_sig "$AUTH" \
+    || ! fm_ci_waiver_dispatch_check "$ID" "$AUTH" < "$SECRET_FILE"; then
+    echo "error: task $ID records ci_skip=on but no valid dispatch authorization for it; refusing to sign" >&2
+    echo "error: that pairing means the flag line was not written by this home's own dispatch - re-dispatch the task with --ci-skip or --all-testing-skip instead of editing its record" >&2
+    exit 1
+  fi
+  # Signed with the key derived for THIS repository, which is the only key its
+  # CI holds. The dispatch check above deliberately used the master instead, so
+  # a stolen repository key cannot authorize a task the captain never flagged.
+  REPO_KEY=$(fm_ci_waiver_repo_key "$REPO" < "$SECRET_FILE") || {
+    echo "error: could not derive the repository key for $REPO" >&2
+    exit 1
+  }
+  SIG=$(printf '%s' "$REPO_KEY" | fm_ci_waiver_sign "$ID" "$SHA") || {
+    echo "error: could not compute the waiver signature" >&2
+    exit 1
+  }
+  fm_ci_waiver_valid_sig "$SIG" || { echo "error: signature computation produced an unusable value" >&2; exit 1; }
+  fm_ci_waiver_line "$ID" "$SHA" "$SIG"
 }
 
 cmd=$1
@@ -181,59 +299,52 @@ case "$cmd" in
     ;;
 
   sign)
+    sign_waiver "${1:-}" "${2:-}" "${3:-}"
+    ;;
+
+  waive)
     ID=${1:-}
-    SHA=${2:-}
-    REPO=${3:-}
+    shift 2>/dev/null || true
+    PRINT_ONLY=0
+    for a in "$@"; do
+      case "$a" in
+        --print-only) PRINT_ONLY=1 ;;
+        *) echo "error: unknown waive argument '$a'" >&2; exit 2 ;;
+      esac
+    done
     fm_ci_waiver_valid_task_id "$ID" || { echo "error: invalid task id" >&2; exit 2; }
-    [ -n "$REPO" ] || {
-      echo "error: sign requires the <owner/repo> the PR will be opened against" >&2
-      echo "error: each repository verifies against its own derived key, so a signature must name the repository it is for" >&2
-      exit 2
-    }
-    fm_ci_waiver_valid_repo "$REPO" || { echo "error: '$REPO' is not a valid <owner/repo>" >&2; exit 2; }
-    fm_ci_waiver_valid_sha "$SHA" || {
-      echo "error: '<sha>' must be a full 40-character lowercase commit id; an abbreviation cannot be signed because the verifier compares against GitHub's full head SHA" >&2
-      exit 2
-    }
-    META="$STATE/$ID.meta"
-    if [ ! -f "$META" ] || [ -L "$META" ]; then
-      echo "error: no durable record for task $ID at $META; refusing to sign" >&2
+    STATUS_FILE="$STATE/$ID.status"
+    if [ ! -f "$STATUS_FILE" ] || [ -L "$STATUS_FILE" ]; then
+      echo "error: no status file for task $ID at $STATUS_FILE, so there is no request to waive" >&2
       exit 1
     fi
-    # THE authority check, in two halves. Nothing else in this script grants
-    # authority, and there is no override flag: an unflagged task cannot be
-    # waived at all.
-    if ! grep -qx 'ci_skip=on' "$META"; then
-      echo "error: task $ID was not dispatched with --ci-skip or --all-testing-skip, so its CI cannot be waived" >&2
-      echo "error: the flag is set by the captain at dispatch (bin/fm-spawn.sh); re-dispatch the task with the flag rather than signing around this refusal" >&2
+    # The worker's own request line, in the exact form a CI-skipped brief tells
+    # it to write. Read rather than guessed, because the signature covers ONE
+    # commit and the repository selects the key it is signed with; the newest
+    # matching line wins, since a re-push makes every earlier one stale.
+    REQUEST=$(grep -oE 'ci-waiver needed for [0-9a-f]{40} on [A-Za-z0-9._/-]+' "$STATUS_FILE" | tail -n 1 || true)
+    if [ -z "$REQUEST" ]; then
+      echo "error: task $ID has not asked for a CI waiver: $STATUS_FILE carries no 'ci-waiver needed for <40-hex-sha> on <owner>/<repo>' line" >&2
+      echo "error: a waiver covers exactly one commit and is signed with one repository's key, so it is issued from the worker's own request rather than guessed; steer the worker to report its head commit and repository in that exact form." >&2
       exit 1
     fi
-    require_node || exit 1
-    read_secret_or_die
-    # Second half: the flag must carry the dispatch token bin/fm-spawn.sh minted
-    # for THIS task. The flag line alone is not enough, because a worker appends
-    # its own status lines into this same state directory and could append that
-    # line too; the token is an HMAC it cannot compute.
-    AUTH=$(grep -m1 '^ci_skip_auth=' "$META" | cut -d= -f2- || true)
-    if [ -z "$AUTH" ] || ! fm_ci_waiver_valid_sig "$AUTH" \
-      || ! fm_ci_waiver_dispatch_check "$ID" "$AUTH" < "$SECRET_FILE"; then
-      echo "error: task $ID records ci_skip=on but no valid dispatch authorization for it; refusing to sign" >&2
-      echo "error: that pairing means the flag line was not written by this home's own dispatch - re-dispatch the task with --ci-skip or --all-testing-skip instead of editing its record" >&2
+    read -r _ _ _ REQ_SHA _ REQ_REPO <<EOF
+$REQUEST
+EOF
+    LINE=$(sign_waiver "$ID" "$REQ_SHA" "$REQ_REPO") || exit 1
+    # Printed before any delivery attempt, so a send that fails still leaves the
+    # valid line in hand rather than losing it with the failure.
+    printf '%s\n' "$LINE"
+    if [ "$PRINT_ONLY" -eq 1 ]; then
+      echo "waiver for $ID covers $REQ_SHA on $REQ_REPO (not sent)"
+      exit 0
+    fi
+    if FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-send.sh" "$ID" "$LINE"; then
+      echo "waived $ID at $REQ_SHA on $REQ_REPO and sent the line to the worker"
+    else
+      echo "error: the waiver line above is valid but could not be delivered to $ID; steer it by hand" >&2
       exit 1
     fi
-    # Signed with the key derived for THIS repository, which is the only key its
-    # CI holds. The dispatch check above deliberately used the master instead, so
-    # a stolen repository key cannot authorize a task the captain never flagged.
-    REPO_KEY=$(fm_ci_waiver_repo_key "$REPO" < "$SECRET_FILE") || {
-      echo "error: could not derive the repository key for $REPO" >&2
-      exit 1
-    }
-    SIG=$(printf '%s' "$REPO_KEY" | fm_ci_waiver_sign "$ID" "$SHA") || {
-      echo "error: could not compute the waiver signature" >&2
-      exit 1
-    }
-    fm_ci_waiver_valid_sig "$SIG" || { echo "error: signature computation produced an unusable value" >&2; exit 1; }
-    fm_ci_waiver_line "$ID" "$SHA" "$SIG"
     ;;
 
   *)

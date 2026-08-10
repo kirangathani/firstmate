@@ -37,6 +37,14 @@
 #       issued for this one
 #   (r) sign refuses without a valid <owner/repo>, since a signature that did
 #       not name its repository could not select a key
+#   (s) sign refuses a repository the task's own checkout does not push to: the
+#       verifier accepts a line on its signature alone and never checks the task
+#       named in it, so a waiver signed for an unrelated repository would waive
+#       CI on unrelated work
+#   (t) waive issues exactly the line sign would, read from the newest request
+#       the worker made, so the forced round trip costs firstmate one command
+#   (u) waive grants nothing sign would not - above all to a worker writing the
+#       request line itself, for a task the captain never flagged
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -477,7 +485,129 @@ test_sign_refuses_without_a_repository
 test_sign_refuses_a_task_with_no_skip_flag
 test_sign_refuses_without_a_task_record
 test_sign_refuses_an_abbreviated_sha
+
+# --- waive: the handshake, reduced to one firstmate command -----------------
+#
+# The exchange itself cannot be removed. The verifier accepts a line SOLELY on
+# its signature matching the CURRENT head SHA and never checks the task named in
+# it, so a signature bound to anything known at dispatch - the task id, the
+# branch - would verify in any other PR the published line was pasted into. What
+# `waive` removes is the copying: it reads the sha and repository from the
+# worker's own request and signs through the identical authority check.
+
+# The worker's own request line, exactly as a CI-skipped brief tells it to write.
+write_waiver_request() {  # <home> <id> <sha> <owner/repo>
+  {
+    printf 'working: implementing\n'
+    printf 'blocked: ci-waiver needed for %s on %s\n' "$3" "$4"
+  } >> "$1/state/$2.status"
+}
+
+test_waive_issues_exactly_what_sign_would() {
+  local home out status signed
+  home=$(make_home waive-basic)
+  run_waiver "$home" init >/dev/null
+  write_waived_task "$home" waive-a1
+  write_waiver_request "$home" waive-a1 "$SHA_A" "$REPO"
+
+  out=$(run_waiver "$home" waive waive-a1 --print-only); status=$?
+  expect_code 0 "$status" "waive should issue a line for a genuinely dispatched task"$'\n'"$out"
+  signed=$(run_waiver "$home" sign waive-a1 "$SHA_A" "$REPO")
+  assert_contains "$out" "$signed" "waive did not produce the line sign produces for the same request"
+  assert_contains "$out" "covers $SHA_A on $REPO" "waive did not say what the line it issued covers"
+
+  # A re-push makes every earlier request stale, so the newest one wins.
+  write_waiver_request "$home" waive-a1 "$SHA_B" "$REPO"
+  out=$(run_waiver "$home" waive waive-a1 --print-only)
+  signed=$(run_waiver "$home" sign waive-a1 "$SHA_B" "$REPO")
+  assert_contains "$out" "$signed" "waive did not use the newest request after a re-push"
+  pass "waive: issues exactly the line sign would, for the newest request the worker made"
+}
+
+# The property that matters most: `waive` reads its inputs from a file the
+# WORKER writes, so it must grant nothing that sign would not. A worker that
+# appends a request line to its own status file for a task the captain never
+# flagged still gets nothing.
+test_waive_refuses_everything_sign_refuses() {
+  local home out status
+  home=$(make_home waive-refusals)
+  run_waiver "$home" init >/dev/null
+
+  # (1) A task the captain never flagged, asking for itself.
+  fm_write_meta "$home/state/waive-b1.meta" "kind=ship" "mode=direct-PR" "yolo=off"
+  write_waiver_request "$home" waive-b1 "$SHA_A" "$REPO"
+  out=$(run_waiver "$home" waive waive-b1 --print-only); status=$?
+  [ "$status" -ne 0 ] || fail "waive signed for a task that was never dispatched with a skip"
+  assert_contains "$out" "was not dispatched with --ci-skip" "waive did not name the missing authorization"
+
+  # (2) The same task after appending the flag line to its own record - the one
+  # line a worker can reach - with no dispatch token behind it.
+  write_self_flagged_task "$home" waive-b2
+  write_waiver_request "$home" waive-b2 "$SHA_A" "$REPO"
+  out=$(run_waiver "$home" waive waive-b2 --print-only); status=$?
+  [ "$status" -ne 0 ] || fail "waive signed for a self-flagged task"
+  assert_contains "$out" "no valid dispatch authorization" "waive did not reject the self-written flag"
+
+  # (3) A genuinely dispatched task that reported other things but never asked:
+  # nothing is guessed.
+  write_waived_task "$home" waive-b3
+  printf 'working: implementing\n' >> "$home/state/waive-b3.status"
+  out=$(run_waiver "$home" waive waive-b3 --print-only); status=$?
+  [ "$status" -ne 0 ] || fail "waive invented a request that was never made"
+  assert_contains "$out" "has not asked for a CI waiver" "waive did not say no request had been made"
+
+  # (4) A request whose commit is abbreviated is not a request: a waiver covers
+  # one full commit, and an abbreviation cannot be expanded here.
+  write_waived_task "$home" waive-b4
+  printf 'blocked: ci-waiver needed for 1111111 on %s\n' "$REPO" >> "$home/state/waive-b4.status"
+  out=$(run_waiver "$home" waive waive-b4 --print-only); status=$?
+  [ "$status" -ne 0 ] || fail "waive accepted an abbreviated commit id"
+  assert_contains "$out" "has not asked for a CI waiver" "waive read an abbreviated commit as a request"
+  pass "waive: grants nothing sign would not, including to a worker asking on its own behalf"
+}
+
+# A waiver line waives CI on whatever PR carries it at that commit, and the
+# verifier never checks the task id, so a signature for a repository the task
+# has nothing to do with is a waiver handed to unrelated work. The request is
+# written by the worker, so the repository in it is checked against the task's
+# own checkout rather than trusted.
+test_sign_refuses_a_repository_the_task_does_not_belong_to() {
+  local home out status wt
+  home=$(make_home sign-wrong-repo)
+  run_waiver "$home" init >/dev/null
+  wt="$home/wt"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  git -C "$wt" remote add origin https://github.com/acme/widgets.git
+  write_waived_task "$home" wrongrepo-a1
+  fm_write_meta "$home/state/wrongrepo-a1.meta" \
+    "kind=ship" "mode=direct-PR" "yolo=off" "worktree=$wt" \
+    "ci_skip=on" \
+    "ci_skip_auth=$(grep '^ci_skip_auth=' "$home/state/wrongrepo-a1.meta" | cut -d= -f2-)"
+
+  out=$(run_waiver "$home" sign wrongrepo-a1 "$SHA_A" "$OTHER_REPO"); status=$?
+  [ "$status" -ne 0 ] || fail "sign issued a waiver for a repository the task does not push to"
+  assert_contains "$out" "does not belong to" "the refusal did not name the mismatch"
+
+  # ...and the repository it DOES push to still signs, case-insensitively, since
+  # GitHub slugs are.
+  out=$(run_waiver "$home" sign wrongrepo-a1 "$SHA_A" ACME/Widgets); status=$?
+  expect_code 0 "$status" "sign refused the task's own repository"$'\n'"$out"
+  assert_contains "$out" "fm-ci-waiver: v1 wrongrepo-a1 $SHA_A" "sign did not issue the line for the right repository"
+
+  # The same check reached through waive, where the repository comes from a
+  # line the worker itself wrote.
+  write_waiver_request "$home" wrongrepo-a1 "$SHA_A" "$OTHER_REPO"
+  out=$(run_waiver "$home" waive wrongrepo-a1 --print-only); status=$?
+  [ "$status" -ne 0 ] || fail "waive signed for a repository the worker named but the task does not push to"
+  assert_contains "$out" "does not belong to" "waive did not apply the repository check"
+  pass "sign/waive: a waiver is refused for any repository the task's own checkout does not push to"
+}
+
 test_sign_refuses_a_self_flagged_task
+test_waive_issues_exactly_what_sign_would
+test_waive_refuses_everything_sign_refuses
+test_sign_refuses_a_repository_the_task_does_not_belong_to
 test_signature_verifies_for_its_own_commit
 test_forged_signature_runs_the_full_suite
 test_signature_does_not_travel_to_another_commit

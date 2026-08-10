@@ -7,8 +7,8 @@
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
-#                    [--local-skip|--ci-skip|--all-testing-skip]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#        fm-brief.sh --apply-testing-skip <task-id> --mode <delivery-mode> [<skip-flag>]
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -22,17 +22,27 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
-#   --local-skip, --ci-skip, and --all-testing-skip mirror the same flags on
-#   fm-brief.sh's sibling bin/fm-spawn.sh, which owns their meaning, their
-#   enforcement, and the accepted flag/delivery-mode matrix; pass a ship task the
-#   SAME flag here and there. This script writes only the worker-facing half: a
-#   --local-skip brief replaces the pipeline definition of done with push-and-PR
-#   (the shim on the worker's PATH is what actually stops the pipeline), and a
-#   --ci-skip brief adds the waiver handshake the worker must follow to obtain a
-#   commit-bound signature from firstmate. Passing the flag to only one of the two
-#   scripts is safe in both directions and never grants a skip: a brief without
-#   the spawn flag asks for a signature bin/fm-ci-waiver.sh will refuse, and a
-#   spawn without the brief flag leaves the worker running the ordinary path.
+#   SCAFFOLDING TAKES NO TESTING-SKIP FLAG. --local-skip, --ci-skip,
+#   --all-testing-skip, and --skip-testing all refuse here and name
+#   bin/fm-spawn.sh, which is the one place a testing skip is authorized: it
+#   mints the keyed authorization AND then rewrites this brief's own half by
+#   calling back into --apply-testing-skip below. So the captain names a skip
+#   once, at dispatch, and there is no second invocation to keep in agreement -
+#   nor any way to half-specify one and get an ordinary task instead.
+#   --apply-testing-skip rewrites, in place, ONLY the three regions of an
+#   existing ship brief whose text depends on the delivery mode and the skip:
+#   the branch/setup steps, rule 1, and the definition of done (with the CI
+#   waiver handshake when one applies). Those regions are delimited in the
+#   scaffold by <!-- fm:... --> markers, and the definition-of-done marker
+#   records which skip the brief was written for, so an apply that would change
+#   nothing rewrites nothing. A brief with no markers at all is left untouched
+#   when no skip is asked for and refuses when one is; a brief with partial or
+#   duplicated markers always refuses.
+#   This path carries no authority whatsoever: it writes worker-facing prose,
+#   never a token, a meta field, or a signature. A brief that talks about a skip
+#   has never been evidence that one was granted - bin/fm-ci-waiver.sh and
+#   bin/fm-pr-merge.sh read the keyed authorization in state/<task-id>.meta, and
+#   only bin/fm-spawn.sh can mint that.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
@@ -96,26 +106,49 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+APPLY_SKIP=0
+APPLY_MODE=
 fm_testing_skip_reset
 POS=()
+want_value=
 for a in "$@"; do
+  if [ -n "$want_value" ]; then
+    case "$want_value" in
+      mode) APPLY_MODE=$a ;;
+    esac
+    want_value=
+    continue
+  fi
   case "$a" in
+    --apply-testing-skip) APPLY_SKIP=1 ;;
+    --mode) want_value=mode ;;
+    --mode=*) APPLY_MODE=${a#--mode=} ;;
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
-    --local-skip|--ci-skip|--all-testing-skip) fm_testing_skip_note "$a" ;;
+    --local-skip|--ci-skip|--all-testing-skip|--skip-testing) fm_testing_skip_note "$a" ;;
     *) POS+=("$a") ;;
   esac
 done
-ID=${POS[0]}
+[ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+ID=${POS[0]:-}
+[ -n "$ID" ] || { echo "error: usage: fm-brief.sh <task-id> <repo-name> [...]" >&2; exit 1; }
 
-# Same argument-only refusals as bin/fm-spawn.sh, so a brief can never be
-# scaffolded for a combination that spawn will then refuse to launch.
+# A testing skip is authorized at DISPATCH and nowhere else. Scaffolding takes no
+# skip flag at all, so there is no second invocation to keep in agreement with
+# the first and no way to half-specify one: passing it here is a hard refusal
+# naming the one script that owns it, never a brief that quietly asks for a skip
+# the dispatch never granted.
+if [ "$APPLY_SKIP" -eq 0 ] && [ -n "$FM_TESTING_SKIP_FLAGS" ]; then
+  echo "error: '$FM_TESTING_SKIP_FLAGS' is a bin/fm-spawn.sh flag, not a bin/fm-brief.sh one: only a dispatch can authorize a testing skip." >&2
+  echo "error: scaffold this brief with no skip flag, then dispatch with 'bin/fm-spawn.sh $ID <project> $FM_TESTING_SKIP_FLAGS'; spawn mints the authorization and rewrites this brief's own half from the same flag." >&2
+  exit 1
+fi
+
+# Same argument-only refusals as bin/fm-spawn.sh, so a brief can never carry a
+# combination that spawn will then refuse to launch.
 fm_testing_skip_check_args "$KIND" brief || exit 1
-LOCAL_SKIP=$FM_TESTING_SKIP_LOCAL
-CI_SKIP=$FM_TESTING_SKIP_CI
-SKIP_FLAGS=$FM_TESTING_SKIP_FLAGS
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -128,8 +161,13 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
 fi
 
 BRIEF="$DATA/$ID/brief.md"
-[ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
-mkdir -p "$DATA/$ID"
+if [ "$APPLY_SKIP" -eq 0 ]; then
+  if [ -e "$BRIEF" ]; then
+    echo "error: $BRIEF already exists" >&2
+    exit 1
+  fi
+  mkdir -p "$DATA/$ID"
+fi
 
 shell_quote() {
   printf "'"
@@ -151,6 +189,274 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 FM_HOME_ENV="FM_HOME=$(shell_quote "$FM_HOME")"
 NM_INTENT_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-nm-intent.sh")"
 NM_DECISION_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-nm-decision.sh")"
+
+# --- the three machine-owned regions of a ship brief ------------------------
+#
+# SETUP_REGION, RULE_REGION, and DOD_REGION are exactly the text a ship brief
+# carries that is a FUNCTION of the delivery mode and the captain's testing
+# skip. Everything else a brief holds - the task text, the isolation assertion,
+# the status protocol, the project-memory section, any adjustment firstmate made
+# by hand - is written once at scaffold and is never touched again.
+#
+# They are rendered by one function because they are rewritten from two places:
+# the scaffold below, and bin/fm-spawn.sh through --apply-testing-skip when the
+# captain authorizes a skip at dispatch. Two renderings of the same three
+# regions would drift, and a brief whose definition of done disagreed with the
+# dispatch that launched it is the exact failure this arrangement removes.
+BRIEF_REGION_SETUP_BEGIN='<!-- fm:setup-steps -->'
+BRIEF_REGION_SETUP_END='<!-- /fm:setup-steps -->'
+BRIEF_REGION_RULE_BEGIN='<!-- fm:rule-1 -->'
+BRIEF_REGION_RULE_END='<!-- /fm:rule-1 -->'
+BRIEF_REGION_DOD_PREFIX='<!-- fm:definition-of-done'
+BRIEF_REGION_DOD_END='<!-- /fm:definition-of-done -->'
+
+# brief_skip_state <local on|off> <ci on|off>: the skip state recorded on the
+# definition-of-done marker, so a brief states which skip it was written for and
+# an apply can tell "already correct" from "needs rewriting" without guessing.
+brief_skip_state() {
+  if [ "${1}" = on ] && [ "${2}" = on ]; then printf 'all'
+  elif [ "${1}" = on ]; then printf 'local'
+  elif [ "${2}" = on ]; then printf 'ci'
+  else printf 'none'
+  fi
+}
+
+# render_ship_regions <mode> <local-skip on|off> <ci-skip on|off>
+# Sets SETUP_REGION, RULE_REGION, DOD_REGION.
+render_ship_regions() {
+  local mode=$1 local_skip=$2 ci_skip=$3
+  local pr_order ci_section setup2 rule1 dod
+
+  # The definition-of-done sentence and the waiver handshake must not each give
+  # their own PR order. The handshake is the only authority when it applies: the
+  # signature covers the head commit and CI must see it on the PR's FIRST run,
+  # so a worker that opened the PR on the DOD sentence's word would get a PR the
+  # waiver can never cover. A brief that states two orders is exactly the "the
+  # agent decides" failure the mechanical skip exists to remove, so the DOD
+  # sentence stops at push and defers to the handshake whenever one follows.
+  if [ "$ci_skip" = on ]; then
+    pr_order='push your branch, then follow the CI waiver handshake below for when and how to open the PR.'
+  else
+    # shellcheck disable=SC2016 # {url} and the backticks are literal brief text, not expansions.
+    pr_order='push your branch and open a PR with `gh-axi`, then append `done: PR {url}` to the status file and stop.'
+  fi
+
+  # The waiver handshake, appended to whichever definition of done applies. Its
+  # order is load-bearing: the signature covers the head commit, so it cannot
+  # exist before the final commit, and CI must see it on the PR's FIRST run
+  # because editing a PR body afterwards does not re-run the workflow. Pushing a
+  # feature branch triggers no workflow, so pushing before the PR costs nothing.
+  if [ "$ci_skip" = on ]; then
+    ci_section=$(cat <<EOF
+
+## CI waiver handshake - follow this order exactly
+CI's expensive jobs are waived for this task, but only by a signature you cannot produce and must not try to produce.
+It is computed from a secret only the captain's machine holds, and it covers your exact head commit, so it can only be issued after your final commit.
+1. Commit everything, then push your branch: \`git push -u origin fm/$ID\`. Pushing a branch runs no CI, so this step is free.
+2. Read your head commit: \`git rev-parse HEAD\`.
+3. Append \`blocked: ci-waiver needed for {full-40-char-sha} on {owner}/{repo}\` to the status file and stop. Firstmate replies with a single line.
+   Write that sentence exactly, with the full 40-character commit and the owner/repo: firstmate issues the waiver straight from this line, and a reworded or abbreviated one cannot be read.
+4. When that line arrives, append \`resolved: ci waiver received\`, then open the PR with \`gh-axi\` and put the line VERBATIM on its own line in the PR body.
+5. If you push again afterwards, the head commit changes and the old line no longer covers it. Repeat steps 2-4 for a fresh one before that push can be waived.
+Never invent, guess, edit, reformat, or reuse a line for another commit.
+A wrong or stale line is not a failure - CI simply runs in full - so there is nothing to be gained by improvising one.
+EOF
+)
+  else
+    ci_section=""
+  fi
+
+  case "$mode" in
+    direct-PR)
+      setup2=""
+      rule1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+      dod=$(cat <<EOF
+# Definition of done
+This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+The task is complete only when committed on your branch.
+When it is implemented and committed, $pr_order
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+$ci_section
+EOF
+)
+      ;;
+    local-only)
+      setup2=""
+      rule1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+      dod=$(cat <<EOF
+# Definition of done
+This project ships **local-only**: no remote, no PR, no pipeline.
+The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+EOF
+)
+      ;;
+    *)  # no-mistakes (default)
+      if [ "$local_skip" = on ]; then
+      # The pipeline is off, so the doctor/init setup step would only send the
+      # worker into the shim it is not meant to fight.
+      setup2=""
+      rule1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+      dod=$(cat <<EOF
+# Definition of done
+This task was dispatched with **local testing skipped**: the captain switched the local validation pipeline off for it.
+That skip is enforced, not requested - the \`no-mistakes\` on your PATH is a shim that explains the skip and exits without running anything.
+Nothing is broken. Do not look for another copy of it, do not install one, do not change your PATH, and do not touch the shared daemon.
+The task is complete only when committed on your branch.
+When it is implemented and committed, $pr_order
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+$ci_section
+EOF
+)
+      else
+      setup2="
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+      rule1='1. Never push to the default branch. Never merge a PR.'
+      dod=$(cat <<EOF
+# Definition of done
+The task is complete only when committed on your branch.
+When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+
+You drive no-mistakes by responding to its gates, not by implementing fixes.
+Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+
+Four firstmate-specific rules layer on top of that guidance:
+
+- ask-user findings are not yours to answer: escalate to firstmate (rule 6) and stop.
+  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
+- Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
+- **Start every run with the pinned intent, never a paraphrase.** \`--intent\` is required to start a run and the pipeline's final review scores the diff against it, so it must be the goal as actually stated, not your restatement of it. Take it from its one owner:
+  \`no-mistakes axi run --intent "\$($NM_INTENT_CMD $ID)"\`
+  That prints the \`# Task\` section of this brief verbatim. Use the identical command on every re-run in this task.
+- **Every \`--action fix\` needs substantive \`--instructions\`.** The gate agent that applies a fix is not you: it sees the finding text and the diff and nothing else, and it cannot read this brief or the project's AGENTS.md. So \`--instructions\` must carry the design reasoning behind the code the finding touches, the principle the fix must preserve, and what the fix must not break or reintroduce. A bare or one-phrase \`--instructions\` is refused before it runs; that refusal is the rule working, not a tool fault, so answer it rather than routing around it.
+
+# Gate decisions must survive to the end of the run
+A decision recorded at a no-mistakes gate constrains the step that raised it, but NOT the steps after it. A later step's auto-fix in the same run can revert a decision you already submitted, and the final review can then pass with zero findings because it scores against \`--intent\`, which was written before any decision existed. That is upstream no-mistakes issue #591 (open, third-party, v1.40.0), and it shipped a PR contradicting three explicit decisions. **\`checks-passed\` is NOT evidence that a decision survived** - in #591 it was emitted over the reverted state. Only the final diff is evidence.
+
+So, for every decision you submit at a gate:
+
+1. Record it the moment you submit it, not later from memory:
+   \`$NM_DECISION_CMD record $ID --finding <finding-id> --key <decision-key> --requires "<what the decision requires, in concrete checkable terms>" --step <step>\`
+2. Before reporting the PR ready, check each recorded decision against the FINAL diff yourself - read the diff, do not infer from the pipeline's verdict - and mark it:
+   \`$NM_DECISION_CMD verify $ID --finding <finding-id> --evidence "<the file:line or commit that proves it still holds>"\`
+3. If any recorded decision was reverted or contradicted, mark it and STOP:
+   \`$NM_DECISION_CMD reverted $ID --finding <finding-id> --evidence "<the reverting commit>"\`
+   Then append \`blocked: gate decision <key> reverted by <commit>\` and stop. Do NOT report done, and do not re-fix it yourself.
+4. \`$NM_DECISION_CMD check $ID\` must exit 0 before you report done. It refuses while any recorded decision is unverified or contradicted.
+
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run that final \`check\`, then append \`done: PR {url} checks green\` and stop. Your completion line must state explicitly that every recorded gate decision was verified against the final diff (or that there were none). You are finished.
+EOF
+)
+      fi
+      ;;
+  esac
+
+  SETUP_REGION="1. First action: create your branch: \`git checkout -b fm/$ID\`$setup2"
+  RULE_REGION="$rule1"
+  DOD_REGION="$dod"
+}
+
+# --apply-testing-skip: rewrite ONLY those three regions of an existing ship
+# brief, in place, from the delivery mode and the resolved skip flag its
+# dispatch was validated against. bin/fm-spawn.sh is the only caller.
+#
+# This is what makes the captain's flag a single action: spawn already mints the
+# authorization, so it also brings the brief the worker actually reads into
+# agreement with it, and there is no second invocation here to remember or to
+# get wrong. Nothing about the AUTHORIZATION passes through this path - it
+# writes worker-facing prose and no token, no meta field, and no signature -
+# which is why a brief carrying skip text has never been, and still is not,
+# evidence that a skip was granted.
+if [ "$APPLY_SKIP" -eq 1 ]; then
+  [ -n "$APPLY_MODE" ] || { echo "error: --apply-testing-skip requires --mode <delivery-mode>" >&2; exit 1; }
+  if [ ! -f "$BRIEF" ] || [ -L "$BRIEF" ]; then
+    echo "error: --apply-testing-skip needs a regular brief file at $BRIEF" >&2
+    exit 1
+  fi
+  # Defence in depth: spawn validated this pair already, so a refusal here means
+  # the two disagree, which must stop rather than write half an answer.
+  fm_testing_skip_check_mode "$APPLY_MODE" || exit 1
+  LOCAL_SKIP=$FM_TESTING_SKIP_LOCAL
+  CI_SKIP=$FM_TESTING_SKIP_CI
+  WANT_STATE=$(brief_skip_state "$LOCAL_SKIP" "$CI_SKIP")
+
+  count_fixed() { grep -cFx -- "$1" "$BRIEF" || true; }
+  n_sb=$(count_fixed "$BRIEF_REGION_SETUP_BEGIN")
+  n_se=$(count_fixed "$BRIEF_REGION_SETUP_END")
+  n_rb=$(count_fixed "$BRIEF_REGION_RULE_BEGIN")
+  n_re=$(count_fixed "$BRIEF_REGION_RULE_END")
+  n_de=$(count_fixed "$BRIEF_REGION_DOD_END")
+  n_db=$(grep -c "^$BRIEF_REGION_DOD_PREFIX " "$BRIEF" || true)
+  MARKER_TOTAL=$((n_sb + n_se + n_rb + n_re + n_db + n_de))
+
+  if [ "$MARKER_TOTAL" -eq 0 ]; then
+    # A brief scaffolded before this contract existed. With no skip asked for
+    # there is nothing to do and nothing is lost, so say so and continue; with a
+    # skip asked for there is no region to write it into, and launching a worker
+    # on ordinary instructions while its record says the testing was skipped is
+    # exactly the silent half-skip this design removes.
+    if [ "$WANT_STATE" = none ]; then
+      echo "note: $BRIEF predates the machine-written testing-skip regions; nothing to apply"
+      exit 0
+    fi
+    echo "error: $BRIEF has no machine-written testing-skip regions, so the worker's own instructions cannot be brought into agreement with this dispatch." >&2
+    echo "error: that brief was scaffolded before this contract (or written by hand); re-scaffold it with bin/fm-brief.sh and re-dispatch, rather than launching a worker whose instructions and whose record disagree." >&2
+    exit 1
+  fi
+  if [ "$n_sb" -ne 1 ] || [ "$n_se" -ne 1 ] || [ "$n_rb" -ne 1 ] \
+    || [ "$n_re" -ne 1 ] || [ "$n_db" -ne 1 ] || [ "$n_de" -ne 1 ]; then
+    echo "error: $BRIEF does not carry exactly one of each machine-written region marker (setup $n_sb/$n_se, rule $n_rb/$n_re, done $n_db/$n_de); refusing to rewrite a brief whose structure is not the scaffold's." >&2
+    exit 1
+  fi
+
+  HAVE_STATE=$(sed -n "s|^$BRIEF_REGION_DOD_PREFIX skip=\([a-z]*\) -->\$|\1|p" "$BRIEF")
+  if [ "$HAVE_STATE" = "$WANT_STATE" ]; then
+    # Byte-identical is not merely an optimization: an unchanged brief is never
+    # rewritten, so a respawn cannot silently revert an adjustment firstmate made
+    # by hand to a region it happens to own.
+    exit 0
+  fi
+
+  render_ship_regions "$APPLY_MODE" "$LOCAL_SKIP" "$CI_SKIP"
+  TMPD="$BRIEF.apply.$$"
+  mkdir -p "$TMPD"
+  trap 'rm -rf "$TMPD"' EXIT
+  printf '%s\n' "$SETUP_REGION" > "$TMPD/setup"
+  printf '%s\n' "$RULE_REGION" > "$TMPD/rule"
+  printf '%s\n' "$DOD_REGION" > "$TMPD/dod"
+  awk -v sb="$BRIEF_REGION_SETUP_BEGIN" -v se="$BRIEF_REGION_SETUP_END" \
+      -v rb="$BRIEF_REGION_RULE_BEGIN" -v re="$BRIEF_REGION_RULE_END" \
+      -v dp="$BRIEF_REGION_DOD_PREFIX" -v de="$BRIEF_REGION_DOD_END" \
+      -v state="$WANT_STATE" \
+      -v sf="$TMPD/setup" -v rf="$TMPD/rule" -v df="$TMPD/dod" '
+    function emit(f,   line) { while ((getline line < f) > 0) print line; close(f) }
+    skipping && $0 == endmark { print; skipping = 0; next }
+    skipping { next }
+    $0 == sb { print; emit(sf); endmark = se; skipping = 1; next }
+    $0 == rb { print; emit(rf); endmark = re; skipping = 1; next }
+    index($0, dp " ") == 1 { print dp " skip=" state " -->"; emit(df); endmark = de; skipping = 1; next }
+    { print }
+  ' "$BRIEF" > "$TMPD/out"
+  # A brief that lost its closing markers on the way out would leave the next
+  # apply unable to find its regions, so the result is re-checked before it
+  # replaces the original rather than after.
+  for m in "$BRIEF_REGION_SETUP_END" "$BRIEF_REGION_RULE_END" "$BRIEF_REGION_DOD_END"; do
+    grep -qFx -- "$m" "$TMPD/out" || {
+      echo "error: rewriting $BRIEF lost the '$m' marker; the original is unchanged" >&2
+      exit 1
+    }
+  done
+  # Renamed rather than written over the original, so an interruption mid-write
+  # can never leave the worker a truncated brief; the temp dir is a sibling, so
+  # the rename is atomic.
+  mv "$TMPD/out" "$BRIEF"
+  echo "applied: $BRIEF (mode=$APPLY_MODE, testing skip $HAVE_STATE -> $WANT_STATE)"
+  exit 0
+fi
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -321,137 +627,11 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
-# Same delivery-mode refusals as bin/fm-spawn.sh, whose header owns the matrix
-# and the reasoning behind each row.
-fm_testing_skip_check_mode "$MODE" || exit 1
-
-# The waiver handshake, appended to whichever definition of done applies. Its
-# order is load-bearing: the signature covers the head commit, so it cannot exist
-# before the final commit, and CI must see it on the PR's FIRST run because
-# editing a PR body afterwards does not re-run the workflow. Pushing a feature
-# branch triggers no workflow, so pushing before the PR costs nothing.
-# The definition-of-done sentence and the waiver handshake below must not each
-# give their own PR order. The handshake is the only authority when it applies:
-# the signature covers the head commit and CI must see it on the PR's FIRST run,
-# so a worker that opened the PR on the DOD sentence's word would get a PR the
-# waiver can never cover. A brief that states two orders is exactly the "the
-# agent decides" failure the mechanical skip exists to remove, so the DOD
-# sentence stops at push and defers to the handshake whenever one follows.
-if [ "$CI_SKIP" = on ]; then
-  PR_ORDER='push your branch, then follow the CI waiver handshake below for when and how to open the PR.'
-else
-  # shellcheck disable=SC2016 # {url} and the backticks are literal brief text, not expansions.
-  PR_ORDER='push your branch and open a PR with `gh-axi`, then append `done: PR {url}` to the status file and stop.'
-fi
-
-if [ "$CI_SKIP" = on ]; then
-CI_SKIP_SECTION=$(cat <<EOF
-
-## CI waiver handshake - follow this order exactly
-CI's expensive jobs are waived for this task, but only by a signature you cannot produce and must not try to produce.
-It is computed from a secret only the captain's machine holds, and it covers your exact head commit, so it can only be issued after your final commit.
-1. Commit everything, then push your branch: \`git push -u origin fm/$ID\`. Pushing a branch runs no CI, so this step is free.
-2. Read your head commit: \`git rev-parse HEAD\`.
-3. Append \`blocked: ci-waiver needed for {full-40-char-sha} on {owner}/{repo}\` to the status file and stop. Firstmate replies with a single line.
-   Name the repository as well as the commit: a waiver is signed with a key derived for one repository, so firstmate needs both to issue the right line.
-4. When that line arrives, append \`resolved: ci waiver received\`, then open the PR with \`gh-axi\` and put the line VERBATIM on its own line in the PR body.
-5. If you push again afterwards, the head commit changes and the old line no longer covers it. Repeat steps 2-4 for a fresh one before that push can be waived.
-Never invent, guess, edit, reformat, or reuse a line for another commit.
-A wrong or stale line is not a failure - CI simply runs in full - so there is nothing to be gained by improvising one.
-EOF
-)
-else
-CI_SKIP_SECTION=""
-fi
-
-case "$MODE" in
-  direct-PR)
-    SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    DOD=$(cat <<EOF
-# Definition of done
-This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, $PR_ORDER
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
-$CI_SKIP_SECTION
-EOF
-)
-    ;;
-  local-only)
-    SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    DOD=$(cat <<EOF
-# Definition of done
-This project ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
-EOF
-)
-    ;;
-  *)  # no-mistakes (default)
-    if [ "$LOCAL_SKIP" = on ]; then
-    # The pipeline is off, so the doctor/init setup step would only send the
-    # worker into the shim it is not meant to fight.
-    SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    DOD=$(cat <<EOF
-# Definition of done
-This task was dispatched with **local testing skipped**: the captain switched the local validation pipeline off for it.
-That skip is enforced, not requested - the \`no-mistakes\` on your PATH is a shim that explains the skip and exits without running anything.
-Nothing is broken. Do not look for another copy of it, do not install one, do not change your PATH, and do not touch the shared daemon.
-The task is complete only when committed on your branch.
-When it is implemented and committed, $PR_ORDER
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
-$CI_SKIP_SECTION
-EOF
-)
-    else
-    SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-    RULE1='1. Never push to the default branch. Never merge a PR.'
-    DOD=$(cat <<EOF
-# Definition of done
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
-
-You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
-
-Four firstmate-specific rules layer on top of that guidance:
-
-- ask-user findings are not yours to answer: escalate to firstmate (rule 6) and stop.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
-- **Start every run with the pinned intent, never a paraphrase.** \`--intent\` is required to start a run and the pipeline's final review scores the diff against it, so it must be the goal as actually stated, not your restatement of it. Take it from its one owner:
-  \`no-mistakes axi run --intent "\$($NM_INTENT_CMD $ID)"\`
-  That prints the \`# Task\` section of this brief verbatim. Use the identical command on every re-run in this task.
-- **Every \`--action fix\` needs substantive \`--instructions\`.** The gate agent that applies a fix is not you: it sees the finding text and the diff and nothing else, and it cannot read this brief or the project's AGENTS.md. So \`--instructions\` must carry the design reasoning behind the code the finding touches, the principle the fix must preserve, and what the fix must not break or reintroduce. A bare or one-phrase \`--instructions\` is refused before it runs; that refusal is the rule working, not a tool fault, so answer it rather than routing around it.
-
-# Gate decisions must survive to the end of the run
-A decision recorded at a no-mistakes gate constrains the step that raised it, but NOT the steps after it. A later step's auto-fix in the same run can revert a decision you already submitted, and the final review can then pass with zero findings because it scores against \`--intent\`, which was written before any decision existed. That is upstream no-mistakes issue #591 (open, third-party, v1.40.0), and it shipped a PR contradicting three explicit decisions. **\`checks-passed\` is NOT evidence that a decision survived** - in #591 it was emitted over the reverted state. Only the final diff is evidence.
-
-So, for every decision you submit at a gate:
-
-1. Record it the moment you submit it, not later from memory:
-   \`$NM_DECISION_CMD record $ID --finding <finding-id> --key <decision-key> --requires "<what the decision requires, in concrete checkable terms>" --step <step>\`
-2. Before reporting the PR ready, check each recorded decision against the FINAL diff yourself - read the diff, do not infer from the pipeline's verdict - and mark it:
-   \`$NM_DECISION_CMD verify $ID --finding <finding-id> --evidence "<the file:line or commit that proves it still holds>"\`
-3. If any recorded decision was reverted or contradicted, mark it and STOP:
-   \`$NM_DECISION_CMD reverted $ID --finding <finding-id> --evidence "<the reverting commit>"\`
-   Then append \`blocked: gate decision <key> reverted by <commit>\` and stop. Do NOT report done, and do not re-fix it yourself.
-4. \`$NM_DECISION_CMD check $ID\` must exit 0 before you report done. It refuses while any recorded decision is unverified or contradicted.
-
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run that final \`check\`, then append \`done: PR {url} checks green\` and stop. Your completion line must state explicitly that every recorded gate decision was verified against the final diff (or that there were none). You are finished.
-EOF
-)
-    fi
-    ;;
-esac
+# A scaffold never carries a testing skip: the flags are refused above, and
+# bin/fm-spawn.sh rewrites the three regions below at dispatch when the captain
+# authorizes one. So a brief is always born in its ordinary shape.
+render_ship_regions "$MODE" off off
+SKIP_STATE=$(brief_skip_state off off)
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -468,10 +648,14 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+$BRIEF_REGION_SETUP_BEGIN
+$SETUP_REGION
+$BRIEF_REGION_SETUP_END
 
 # Rules
-$RULE1
+$BRIEF_REGION_RULE_BEGIN
+$RULE_REGION
+$BRIEF_REGION_RULE_END
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
@@ -504,6 +688,8 @@ For anything the codebase already shows, prefer a pointer to the authoritative f
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
-$DOD
+$BRIEF_REGION_DOD_PREFIX skip=$SKIP_STATE -->
+$DOD_REGION
+$BRIEF_REGION_DOD_END
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE${SKIP_FLAGS:+, $SKIP_FLAGS}; replace {TASK})"
+echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
