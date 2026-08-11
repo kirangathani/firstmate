@@ -470,70 +470,19 @@ ATTESTATION_CHECK_NAME=$FM_ATTESTATION_CHECK_NAME
 # Empty means no authority, which is what makes it the exemption's own test.
 ATTESTATION_AUTHORITY=
 
-# Resolves ATTESTATION_AUTHORITY, and is called ONLY when that named check is
-# actually failing on this PR, so an ordinary green merge pays none of its cost
-# and prints none of its notes.
 # Whether that resolution has run at all, which is NOT the same question as
-# whether it granted anything. The zero-checks gate below re-asks one of the same
+# whether it granted anything. The zero-checks gate below re-asks one of its
 # sub-questions, and this is what stops it re-printing an identical diagnosis.
 ATTESTATION_RESOLVED=0
 
+# Resolves ATTESTATION_AUTHORITY, and is called ONLY when that named check is
+# actually failing on this PR, so an ordinary green merge pays none of its cost
+# and prints none of its notes.
 resolve_attestation_exemption() {
   ATTESTATION_RESOLVED=1
   ATTESTATION_AUTHORITY=$(
     fm_attestation_authority "$ID" "$META" "$CONFIG" "$FM_HOME" "$SCRIPT_DIR"
   ) || ATTESTATION_AUTHORITY=
-}
-
-# signed_ci_skip: 0 iff this task carries a captain-authorized CI skip that this
-# home's own key signs for this task id, resolved through the same owner the
-# attestation exemption above resolves through (bin/fm-attestation-lib.sh), never
-# a second copy of the check.
-#
-# Called ONLY from the zero-checks gate, on the same laziness rationale as
-# resolve_attestation_exemption: a merge whose PR reported checks never pays for
-# the signature check and never prints its notes.
-#
-# The diagnostics it emits for an unusable signature are byte-identical to the
-# ones the attestation resolution emits for the same task and the same field, so
-# they are suppressed when that path has already run rather than printed twice.
-# Suppressed only in that case: when the attestation check was not failing, this
-# is the only place that explains why an unsigned flag granted nothing.
-signed_ci_skip() {
-  if [ "$ATTESTATION_RESOLVED" -eq 1 ]; then
-    FM_ATTESTATION_QUIET=1 fm_signed_ci_skip "$ID" "$META" "$CONFIG/ci-waiver-secret"
-  else
-    fm_signed_ci_skip "$ID" "$META" "$CONFIG/ci-waiver-secret"
-  fi
-}
-
-# --- the zero-check CI-waiver disclosure (contract in this script's header) ----
-# Non-empty only once a signed CI skip has ACTUALLY been used to satisfy the
-# zero-checks refusal, so an ordinary merge prints nothing and a merge that took
-# the project's no-pr-ci marker instead prints its own note rather than this. It
-# holds the gate's own words for WHY the rollup counted as empty, so the two
-# cases that reach it - no checks at all, and nothing left after an exempted
-# check was discounted - are never disclosed as the same thing.
-CI_SKIP_ZERO_REASON=
-
-ci_skip_zero_check_banner() {  # <where>
-  [ -n "$CI_SKIP_ZERO_REASON" ] || return 0
-  {
-    echo "================================================================================"
-    echo "NO CI EVIDENCE ($1): nothing on this PR verified the branch."
-    echo "  task:            $ID"
-    echo "  rollup:          $CI_SKIP_ZERO_REASON."
-    echo "  authority:       a captain-authorized CI skip on this task, signed at dispatch"
-    echo "                   by this home's own key. The captain waived this PR's CI, so an"
-    echo "                   empty rollup is that waiver working rather than CI silently"
-    echo "                   failing to report - which is the one thing the zero-checks"
-    echo "                   refusal exists to catch."
-    echo "  still enforced:  the base's own test assertions (fm-assert-tests-kept.sh), re-run"
-    echo "                   in FULL for this merge, are its ONLY test evidence. A failing,"
-    echo "                   pending, or unclassifiable check would still have refused; this"
-    echo "                   grant covers an EMPTY rollup and nothing else."
-    echo "================================================================================"
-  } >&2
 }
 
 attestation_banner() {  # <where>
@@ -559,6 +508,57 @@ EOF_AUTH
     echo "                   unreadable check still refuses, and the base's own test"
     echo "                   assertions still gate this merge. Only the check named"
     echo "                   above was excused, matched by its exact name."
+    echo "================================================================================"
+  } >&2
+}
+
+# --- a signed CI skip over an empty rollup (contract in this script's header) --
+# signed_ci_skip: 0 iff this task carries a captain-authorized CI skip that this
+# home's own key signs for this task id, resolved through the same owner the
+# attestation exemption above resolves through (bin/fm-attestation-lib.sh),
+# never a second copy of the check.
+#
+# Called ONLY from the zero-checks gate, on the same laziness rationale as
+# resolve_attestation_exemption: a merge whose PR reported checks never pays for
+# the signature check and never prints its notes.
+#
+# The diagnostics it emits for an unusable signature are byte-identical to the
+# ones the attestation resolution emits for the same task and the same field, so
+# they are suppressed when that path has already run rather than printed twice.
+# Suppressed only in that case: when the attestation check was not failing, this
+# is the only place that explains why an unsigned flag granted nothing.
+signed_ci_skip() {
+  if [ "$ATTESTATION_RESOLVED" -eq 1 ]; then
+    FM_ATTESTATION_QUIET=1 fm_signed_ci_skip "$ID" "$META" "$CONFIG/ci-waiver-secret"
+  else
+    fm_signed_ci_skip "$ID" "$META" "$CONFIG/ci-waiver-secret"
+  fi
+}
+
+# Non-empty only once a signed CI skip has ACTUALLY been used to satisfy the
+# zero-checks refusal, so an ordinary merge prints nothing and a merge that took
+# the project's no-pr-ci marker instead prints its own note rather than this. It
+# holds the gate's own words for WHY the rollup counted as empty, so the two
+# cases that reach it - no checks at all, and nothing left after an exempted
+# check was discounted - are never disclosed as the same thing.
+CI_SKIP_ZERO_REASON=
+
+ci_skip_zero_check_banner() {  # <where>
+  [ -n "$CI_SKIP_ZERO_REASON" ] || return 0
+  {
+    echo "================================================================================"
+    echo "NO CI EVIDENCE ($1): nothing on this PR verified the branch."
+    echo "  task:            $ID"
+    echo "  rollup:          $CI_SKIP_ZERO_REASON."
+    echo "  authority:       a captain-authorized CI skip on this task, signed at dispatch"
+    echo "                   by this home's own key. The captain waived this PR's CI, so an"
+    echo "                   empty rollup is that waiver working rather than CI silently"
+    echo "                   failing to report - which is the one thing the zero-checks"
+    echo "                   refusal exists to catch."
+    echo "  still enforced:  the base's own test assertions (fm-assert-tests-kept.sh), re-run"
+    echo "                   in FULL for this merge, are its ONLY test evidence. A failing,"
+    echo "                   pending, or unclassifiable check would still have refused; this"
+    echo "                   grant covers an EMPTY rollup and nothing else."
     echo "================================================================================"
   } >&2
 }
