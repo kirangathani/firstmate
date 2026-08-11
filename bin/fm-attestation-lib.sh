@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # fm-attestation-lib.sh - the ONE owner of the no-mistakes attestation check's
-# name and of the two authorities that may excuse it.
+# name, of the two authorities that may excuse it, and of the signed-testing-skip
+# verdict those authorities are built from.
+#
+# That last one is here rather than in bin/fm-testing-skip-lib.sh because it is a
+# verdict, not a reading. That file answers "what does this task's record SAY",
+# which bin/fm-spawn.sh and bin/fm-brief.sh need with no crypto in sight; this one
+# answers "is what it says AUTHORITY", which needs the HMAC primitives and is only
+# ever asked at merge time. bin/fm-pr-merge.sh now asks it at two independent
+# gates - the attestation exemption below, and the zero-checks refusal - so it is
+# stated once here rather than open-coded at each.
 #
 # The policy itself - what that check is, why it fails on a PR the pipeline did
 # not raise, what the exemption does and does not grant, and why the name is
@@ -27,6 +36,19 @@
 #   stops the exemption applying, in the safe direction: the renamed check is no
 #   longer recognised, so it is no longer excused, so a failing one refuses the
 #   merge. A rename can only ever cost a merge, never grant one.
+#
+# fm_signed_ci_skip <task-id> <meta-file> <secret-file>
+# fm_signed_local_skip <task-id> <meta-file> <secret-file>
+#   0 iff the task's record carries that axis's skip flag AND a signature this
+#   home's own key reproduces for this task id. These two are the entry points
+#   every caller uses, and they exist so that no caller ever assembles the
+#   verification itself: pairing a meta field with the checker for its payload
+#   domain is a contract, and a caller that got the pair wrong would verify a
+#   ci_skip against the local-skip domain and answer confidently wrong.
+#   Both re-read the record through bin/fm-testing-skip-lib.sh, so they leave
+#   FM_TESTING_SKIP_LOCAL/FM_TESTING_SKIP_CI holding THAT file's flags; a caller
+#   that needs those globals for a different record must copy them out first, as
+#   bin/fm-flow-snapshot.sh's agent_json already does.
 #
 # fm_attestation_authority <task-id> <meta-file> <config-dir> <fm-home> <bin-dir>
 #   Prints the newline-delimited authority lines that excuse that one check for
@@ -69,13 +91,16 @@ fm_attestation_note() {  # <message>
   [ -n "${FM_ATTESTATION_QUIET:-}" ] || echo "$1" >&2
 }
 
-# fm_attestation_signed_skip: 0 iff this task's meta pairs a testing-skip flag
+# fm_signed_testing_skip: 0 iff this task's meta pairs a testing-skip flag
 # with a token this home's own secret reproduces for THIS task id. The pairing
 # is the whole point: the flag line alone is reachable by the worker, the token
 # is not. Every failure path here - no flag, no token, a malformed token, no
 # secret, no node - returns non-zero, so an unverifiable claim is never an
 # authorization.
-fm_attestation_signed_skip() {  # <task-id> <meta-file> <secret-file> <meta-field> <checker-fn> <label>
+#
+# Callers reach it through fm_signed_ci_skip / fm_signed_local_skip below, which
+# own the field/checker/label triple for each axis, never by passing their own.
+fm_signed_testing_skip() {  # <task-id> <meta-file> <secret-file> <meta-field> <checker-fn> <label>
   local id=$1 meta=$2 secret=$3 field=$4 checker=$5 label=$6 auth
   auth=$(grep -m1 "^$field=" "$meta" | cut -d= -f2- || true)
   if [ -z "$auth" ] || ! fm_ci_waiver_valid_sig "$auth"; then
@@ -98,6 +123,24 @@ fm_attestation_signed_skip() {  # <task-id> <meta-file> <secret-file> <meta-fiel
   return 0
 }
 
+# The two per-axis entry points (contract in this file's header). The flag check
+# and the signature check are deliberately inside the SAME function: a caller that
+# could ask for one without the other is a caller that can treat a bare flag line
+# as authority, which is the exact failure the tokens exist to prevent.
+fm_signed_ci_skip() {  # <task-id> <meta-file> <secret-file>
+  fm_testing_skip_read "$2"
+  [ "$FM_TESTING_SKIP_CI" = on ] || return 1
+  fm_signed_testing_skip "$1" "$2" "$3" \
+    ci_skip_auth fm_ci_waiver_dispatch_check "captain-authorized CI skip"
+}
+
+fm_signed_local_skip() {  # <task-id> <meta-file> <secret-file>
+  fm_testing_skip_read "$2"
+  [ "$FM_TESTING_SKIP_LOCAL" = on ] || return 1
+  fm_signed_testing_skip "$1" "$2" "$3" \
+    local_skip_auth fm_ci_waiver_dispatch_local_check "captain-authorized local-pipeline skip"
+}
+
 fm_attestation_authority() {  # <task-id> <meta-file> <config-dir> <fm-home> <bin-dir>
   local id=$1 meta=$2 config=$3 home=$4 bindir=$5
   local out='' secret mode yolo proj_path proj_name
@@ -105,17 +148,12 @@ fm_attestation_authority() {  # <task-id> <meta-file> <config-dir> <fm-home> <bi
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
 
   secret="$config/ci-waiver-secret"
-  fm_testing_skip_read "$meta"
 
-  if [ "$FM_TESTING_SKIP_LOCAL" = on ] \
-    && fm_attestation_signed_skip "$id" "$meta" "$secret" \
-         local_skip_auth fm_ci_waiver_dispatch_local_check "captain-authorized local-pipeline skip"; then
+  if fm_signed_local_skip "$id" "$meta" "$secret"; then
     out="${out}${out:+
 }a captain-authorized local-pipeline skip on this task, signed at dispatch by this home's own key"
   fi
-  if [ "$FM_TESTING_SKIP_CI" = on ] \
-    && fm_attestation_signed_skip "$id" "$meta" "$secret" \
-         ci_skip_auth fm_ci_waiver_dispatch_check "captain-authorized CI skip"; then
+  if fm_signed_ci_skip "$id" "$meta" "$secret"; then
     out="${out}${out:+
 }a captain-authorized CI skip on this task, signed at dispatch by this home's own key"
   fi
