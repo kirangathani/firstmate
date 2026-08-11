@@ -126,6 +126,9 @@
 #        pipeline and says nothing about whether the PR's CI ran
 #   (y4) a failing check still refuses under a signed ci_skip
 #   (y5) a pending check still refuses under a signed ci_skip
+#   (y6) both gates on one run: the same signed skip excuses the attestation
+#        check and then satisfies the rollup that discounting it left empty, and
+#        the disclosure says which of the two empty shapes that was
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -477,6 +480,30 @@ test_signed_ci_skip_does_not_excuse_a_pending_check() {
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "ciskip-pending: an unfinished PR merged under a signed CI waiver"
   pass "a signed CI waiver does not excuse a pending check"
+}
+
+# Both gates firing on one run: the same signed skip excuses the attestation
+# check AND satisfies the empty rollup that discounting it leaves behind. The
+# disclosure must say which of the two empty-rollup shapes this was, and the
+# shared signature check must not explain itself twice.
+test_signed_ci_skip_satisfies_an_exempted_only_rollup() {
+  local case_dir
+  case_dir=$(make_ci_skip_case ciskip-attest-only f000000000000000000000000000000000000016)
+  sign_ci_skip "$case_dir"
+  write_pr_checks "$case_dir" "$(attestation_failed_line)"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/125 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ciskip-attest-only: a signed CI waiver must satisfy the discounted-to-empty rollup too"
+
+  grep -qxF 'pr merge 125 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "ciskip-attest-only: the PR did not merge"
+  assert_grep 'ATTESTATION CHECK EXEMPTED' "$case_dir/stderr" \
+    "ciskip-attest-only: the attestation exemption was not disclosed"
+  assert_grep "rollup:          the PR's only check(s) were the exempted attestation check" \
+    "$case_dir/stderr" \
+    "ciskip-attest-only: the disclosure did not distinguish this from a rollup that was empty outright"
+  pass "a signed CI waiver satisfies a rollup left empty by discounting the exempted check"
 }
 
 test_records_pr_and_head_before_merging() {
@@ -2220,6 +2247,7 @@ test_unsigned_ci_skip_does_not_satisfy_zero_checks
 test_signed_local_skip_does_not_satisfy_zero_checks
 test_signed_ci_skip_does_not_excuse_a_failing_check
 test_signed_ci_skip_does_not_excuse_a_pending_check
+test_signed_ci_skip_satisfies_an_exempted_only_rollup
 
 # --- AI-attribution gate (contract in docs/attribution-gate.md) --------------
 #

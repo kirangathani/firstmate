@@ -510,16 +510,19 @@ signed_ci_skip() {
 # --- the zero-check CI-waiver disclosure (contract in this script's header) ----
 # Non-empty only once a signed CI skip has ACTUALLY been used to satisfy the
 # zero-checks refusal, so an ordinary merge prints nothing and a merge that took
-# the project's no-pr-ci marker instead prints its own note rather than this.
-CI_SKIP_ZERO_CHECK=0
+# the project's no-pr-ci marker instead prints its own note rather than this. It
+# holds the gate's own words for WHY the rollup counted as empty, so the two
+# cases that reach it - no checks at all, and nothing left after an exempted
+# check was discounted - are never disclosed as the same thing.
+CI_SKIP_ZERO_REASON=
 
 ci_skip_zero_check_banner() {  # <where>
-  [ "$CI_SKIP_ZERO_CHECK" -eq 1 ] || return 0
+  [ -n "$CI_SKIP_ZERO_REASON" ] || return 0
   {
     echo "================================================================================"
     echo "NO CI EVIDENCE ($1): nothing on this PR verified the branch."
     echo "  task:            $ID"
-    echo "  rollup:          empty - this PR reports no check that ran."
+    echo "  rollup:          $CI_SKIP_ZERO_REASON."
     echo "  authority:       a captain-authorized CI skip on this task, signed at dispatch"
     echo "                   by this home's own key. The captain waived this PR's CI, so an"
     echo "                   empty rollup is that waiver working rather than CI silently"
@@ -1030,7 +1033,7 @@ if [ "$checks_evidence" -eq 0 ]; then
   if [ -n "$PROJ_NAME" ] && [ -e "$NO_PR_CI_FILE" ]; then
     echo "note: $zero_reason; captain-approved marker $NO_PR_CI_FILE confirms $PROJ_NAME intentionally runs no PR CI; proceeding" >&2
   elif signed_ci_skip; then
-    CI_SKIP_ZERO_CHECK=1
+    CI_SKIP_ZERO_REASON=$zero_reason
     ci_skip_zero_check_banner "before the merge"
   else
     echo "error: $zero_reason; refusing to treat absent CI as green" >&2
