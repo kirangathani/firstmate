@@ -70,6 +70,9 @@
 #   - $FM_HOME/data/no-pr-ci/<project> is present: the project intentionally
 #     runs no PR CI, so a zero-check rollup passes the checks-green gate without
 #     any suite having run.
+# Those two are exactly the two conditions the zero-checks rule below can proceed
+# on, so the premise survives that rule having them: whenever the flag IS passed,
+# neither holds, and an empty rollup therefore still refuses the merge outright.
 # Every identifier the check does skip is reported by it as `assumed-covered:`
 # and echoed here as a note, so a merge log never shows a green over assertions
 # nothing re-ran. The class does not block: it is accounted for, not a finding.
