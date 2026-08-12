@@ -128,8 +128,24 @@ The token is `bin/fm-crew-state.sh --progress`, a fingerprint of the run's own s
 The frozen span is measured between OBSERVATIONS rather than from a start time, so a restart, a watcher outage or a sleeping machine cannot inflate it, and sampling can only ever under-report a freeze rather than manufacture one.
 
 Quiet on a healthy fleet by construction: a run that keeps advancing resets its own span however long it takes overall, a parked or finished run has no step to be frozen on, and a PR that has gone green and is only waiting on a merge decision reads as `done` rather than `working` and never reaches the sweep.
-The threshold defaults to three hours, chosen against the 61 most recent real runs on this machine, where the longest a single step legitimately occupied was 96 minutes (`test`), then 73 minutes (`review`) - 1.9x headroom over the worst observed step, against a freeze that ran for twenty hours.
+
+The threshold is the one number here that could make this alarm useless in either direction, so it was measured rather than guessed.
+Every `no-mistakes axi status --run <id>` for the 61 most recent runs on this machine was read on 2026-08-12 (v1.37.0, run ids taken from `~/.no-mistakes/logs`), and the longest a single step legitimately occupied was:
+
+```
+test       5759663 ms   96m    (next longest 68m)
+review     4401931 ms   73m
+lint       1151562 ms   19m
+document    414818 ms    7m
+rebase      174577 ms    3m
+```
+
+`ci` reaches far higher - 12.2 hours at the top of that sample - but that span is dominated by the monitor-until-merged phase, which reads as `done` here and never reaches the sweep.
+`bin/fm-nm-stall.sh` ships 1.9x the worst of those, and reports its effective value through `--threshold`.
+That is enough headroom that an ordinary slow run cannot cry wolf, while the twenty-hour freeze above would have surfaced before hour four; `FM_NM_STALL_SECS` overrides it per home.
+
 Because the answer to a frozen run is often a relay rather than a fix, a finding is silenced by `bin/fm-nm-stall.sh --ack <task-id>`, which records the frozen token in `state/<task-id>.nm-stall-ack`; the key is the step state itself, so the acknowledgement is scoped to the freeze it was made at and re-arms the moment that run advances and freezes again.
+It is deliberately not the `state/<task-id>.acted` record: that one is fingerprinted on the crew's own status log, which by construction gains no line while a validation runs.
 
 `tests/fm-nm-stall.test.sh` owns the predicate, pinning the token against two verbatim `axi status` captures of the incident run itself - one taken while it was still frozen, one taken after it advanced - plus the advancing, inside-threshold, unreadable, acknowledged and non-validating silent cases.
 `tests/fm-turnend-guard.test.sh` covers this surface's half: that a healthy watcher plus a frozen step still blocks and names both the task and the step, that a step inside the threshold neither blocks nor prints, and that an acknowledgement goes silent.

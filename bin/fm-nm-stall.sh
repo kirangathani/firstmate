@@ -65,14 +65,10 @@
 # successive sweeps instead of blocking one watcher cycle behind every task.
 # Under-sampling costs only accuracy in the conservative direction (above).
 #
-# THE THRESHOLD, FM_NM_STALL_SECS, defaults to three hours, chosen against real
-# step durations rather than a guess. Across the 61 most recent no-mistakes runs
-# on this machine (`no-mistakes axi status --run <id>` over ~/.no-mistakes/logs,
-# 2026-08-12), the longest a single step legitimately occupied was 96 minutes
-# (`test`), then 73 minutes (`review`), 19 minutes (`lint`) and 7 minutes
-# (`document`). Three hours is 1.9x the longest legitimate step observed, so an
-# ordinary slow run cannot cry wolf, while the twenty-hour freeze above would
-# have surfaced before hour four. Wrong-but-quiet is the failure being fixed;
+# THE THRESHOLD, FM_NM_STALL_SECS, is set below and reported by --threshold. It
+# is not a guess: it is a multiple of the longest a single step has been measured
+# legitimately taking, and docs/turnend-guard.md's fourth-block-reason section
+# owns that measurement. Wrong-but-quiet is the failure being fixed;
 # wrong-and-noisy is a real cost too, and data/learnings.md already records what
 # a guard that fires constantly becomes.
 #
@@ -133,6 +129,10 @@ if [ -r "$SCRIPT_DIR/fm-bounded-lib.sh" ]; then
   . "$SCRIPT_DIR/fm-bounded-lib.sh"
 fi
 
+# Three hours: 1.9x the longest single step measured across the 61 most recent
+# real runs on this machine (docs/turnend-guard.md owns that measurement), which
+# is enough headroom that an ordinary slow run cannot cry wolf, while the
+# twenty-hour freeze above would have surfaced before hour four.
 STALL_SECS=${FM_NM_STALL_SECS:-10800}
 case "$STALL_SECS" in ''|*[!0-9]*) STALL_SECS=10800 ;; esac
 READ_TIMEOUT=${FM_NM_STALL_READ_TIMEOUT:-20}
