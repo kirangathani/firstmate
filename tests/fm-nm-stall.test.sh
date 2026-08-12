@@ -16,15 +16,18 @@
 # could read, and the kinds that never validate at all.
 #
 # THE FIXTURES ARE THE REAL INCIDENT. tests/fixtures/nm-stall/ holds two
-# verbatim `no-mistakes axi status --run 01KZRQJJ2JX66ECFBTNPKPSKGH` captures of
-# ONE real run - task eln-drop-variables-w7, the run whose CI step sat frozen for
-# over twenty hours on `could not check CI: gh pr checks: exit status 1` while
-# its PR was green. `axi-status-ci-wedged.toon` was captured 2026-08-12 while it
-# was still frozen (`ci,running`, and its own active_steps row reading
-# `active_for 23h11m`); `axi-status-ci-advanced.toon` was captured about fifteen
-# minutes later, after the run finally advanced and passed. That pair is what a
-# frozen reading and an advanced reading of the same run actually look like, so
-# the token is pinned against real bytes rather than an idea of them.
+# verbatim captures of ONE real run - task eln-drop-variables-w7, the run whose
+# CI step sat frozen for over twenty hours on `could not check CI: gh pr checks:
+# exit status 1` while its PR was green. Both are the exact stdout of
+#   no-mistakes axi status --run 01KZRQJJ2JX66ECFBTNPKPSKGH
+# on no-mistakes v1.37.0 (78e4dcb) on 2026-08-12, with only the capture
+# harness's own trailing marker line removed.
+# `axi-status-ci-wedged.toon` was taken while the run was still frozen
+# (`ci,running`, and its own active_steps row reading `active_for 23h11m` beside
+# a `19s ago` last-activity); `axi-status-ci-advanced.toon` was taken about
+# fifteen minutes later, after it finally advanced and passed. That pair is what
+# a frozen reading and an advanced reading of one run actually look like, so the
+# token is pinned against real bytes rather than an idea of them.
 #
 # Hermetic: real throwaway git repos, a fake `no-mistakes` serving those captured
 # bytes, and a state/ dir under one temp root. No network, no real fleet, and no
