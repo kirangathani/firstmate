@@ -73,6 +73,8 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 # wedges the whole session, so it is bounded anyway. Expiry is REPORTED, never
 # treated as an all-clear.
 STALE_BASE_TIMEOUT=${FM_STALE_BASE_TIMEOUT:-10}
+# Same bound, same reason, for the stalled-validation records read below.
+NM_STALL_TIMEOUT=${FM_NM_STALL_TIMEOUT:-10}
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
@@ -180,7 +182,31 @@ fi
 # and still alarms.
 UNACTIONED=$(fm_ack_unactioned "$STATE" 2>/dev/null || true)
 
-[ "$blind" = 1 ] || [ -n "$STALE_BASE" ] || [ -n "$UNACTIONED" ] || exit 0
+# Fourth, independent block reason: a task whose no-mistakes pipeline step has
+# stopped advancing. bin/fm-nm-stall.sh owns the predicate, the threshold, the
+# durable record, the acknowledgement, and the wording; this only gives its
+# verdict a consequence.
+#
+# Reported here from the durable records ALONE - no no-mistakes call, no
+# subprocess per task, one small file read each - so the observation cost stays
+# on the watcher's own cadence and never on a turn end. It is bounded anyway,
+# for the reason the stale-base sweep is, and an expiry is reported rather than
+# read as an all-clear.
+NM_STALL=
+if [ -x "$SCRIPT_DIR/fm-nm-stall.sh" ]; then
+  nm_stall_rc=0
+  if command -v fm_bounded_available >/dev/null 2>&1 && fm_bounded_available; then
+    NM_STALL=$(fm_bounded_run "$NM_STALL_TIMEOUT" \
+      env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-nm-stall.sh" 2>/dev/null) || nm_stall_rc=$?
+  else
+    NM_STALL=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-nm-stall.sh" 2>/dev/null) || nm_stall_rc=$?
+  fi
+  if [ "$nm_stall_rc" -eq 124 ]; then
+    NM_STALL="NM STALL UNDETERMINABLE: the stalled-validation check did not finish within ${NM_STALL_TIMEOUT}s, so NO validation in flight has been checked for a step that stopped advancing"
+  fi
+fi
+
+[ "$blind" = 1 ] || [ -n "$STALE_BASE" ] || [ -n "$UNACTIONED" ] || [ -n "$NM_STALL" ] || exit 0
 
 rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 {
@@ -217,6 +243,13 @@ EOF
     printf '●  Do what each state owes, then record it: bin/fm-ack.sh <id> "<what you did>"\n'
     printf '●  A state waiting on the CAPTAIN is recorded once you have relayed it to them.\n'
     printf '●  Run bin/fm-monitor.sh for the full per-task sweep.\n'
+  fi
+  if [ -n "$NM_STALL" ]; then
+    { [ "$blind" = 1 ] || [ -n "$STALE_BASE" ] || [ -n "$UNACTIONED" ]; } && printf '●%s\n' "$rule"
+    printf '●  TURN WOULD END WITH A VALIDATION THAT HAS STOPPED ADVANCING\n'
+    printf '%s\n' "$NM_STALL" | while IFS= read -r stall_line; do
+      printf '●  %s\n' "$stall_line"
+    done
   fi
   printf '●%s\n' "$rule"
 } >&2

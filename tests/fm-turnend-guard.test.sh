@@ -936,6 +936,72 @@ test_hook_reports_a_stale_base_sweep_that_times_out() {
   pass "fm-turnend-guard: a stale-base sweep that times out reports instead of passing"
 }
 
+# --- reason 4: a validation that has stopped advancing ------------------------
+#
+# bin/fm-nm-stall.sh owns the predicate, the threshold, the durable record and
+# the acknowledgement; these cases pin only the consequence at this surface, and
+# the pairing that keeps it from becoming noise. The record is written directly
+# here because the observation itself belongs to the watcher's cadence, not to a
+# turn end - what the hook must do is read the durable record and refuse to end
+# the turn on it.
+
+# <dir> <id> <frozen-seconds> <step>: the record bin/fm-nm-stall.sh keeps, in its
+# own format, at a span the caller chooses.
+record_frozen_step() {
+  local dir=$1 id=$2 frozen=$3 step=$4 first
+  : > "$dir/state/$id.meta"
+  first=$(date +%s)
+  printf '%s\t%s\t0\t%s\trun=A;status=running;steps=%s:running:0\n' \
+    "$first" "$((first + frozen))" "$step" "$step" > "$dir/state/$id.nm-progress"
+}
+
+test_hook_blocks_on_a_validation_that_stopped_advancing() {
+  local dir out status threshold
+  dir=$(make_primary_dir "$TMP_ROOT/hook-nm-stall")
+  threshold=$(sed -n 's/^STALL_SECS=${FM_NM_STALL_SECS:-\([0-9]*\)}$/\1/p' "$dir/bin/fm-nm-stall.sh" | head -1)
+  record_frozen_step "$dir" task1 "$((threshold * 2))" ci
+  start_live_watcher "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  stop_live_watcher
+
+  expect_code 2 "$status" \
+    "supervision was healthy and a validation step had stopped advancing; the turn ended anyway"
+  assert_contains "$out" "TURN WOULD END WITH A VALIDATION THAT HAS STOPPED ADVANCING" \
+    "the block did not name its reason"
+  assert_contains "$out" "task1" "the block did not name the task"
+  assert_contains "$out" '"ci" step' "the block did not name the frozen step"
+  assert_not_contains "$out" "SUPERVISION IS OFF" \
+    "a healthy watcher was reported as down - reason 4 must not borrow reason 1's banner"
+  pass "fm-turnend-guard: a turn cannot end with a validation that has stopped advancing"
+}
+
+# The noise bound, and the acknowledgement that keeps this from blocking every
+# turn once firstmate has done what it can.
+test_hook_nm_stall_pairs_silence_with_the_block() {
+  local dir out status threshold
+  dir=$(make_primary_dir "$TMP_ROOT/hook-nm-stall-silent")
+  threshold=$(sed -n 's/^STALL_SECS=${FM_NM_STALL_SECS:-\([0-9]*\)}$/\1/p' "$dir/bin/fm-nm-stall.sh" | head -1)
+
+  record_frozen_step "$dir" task1 "$((threshold / 2))" ci
+  start_live_watcher "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "a step still inside the threshold blocked the turn"
+  [ -z "$out" ] || fail "a step inside the threshold printed: $out"
+
+  record_frozen_step "$dir" task1 "$((threshold * 2))" ci
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "precondition: a step past the threshold must block"
+
+  FM_HOME="$dir" bash "$dir/bin/fm-nm-stall.sh" --ack task1 >/dev/null \
+    || fail "could not acknowledge the stalled-validation finding"
+  out=$(run_hook "$dir" false); status=$?
+  stop_live_watcher
+
+  expect_code 0 "$status" "an acknowledged stalled validation must not block the next turn end"
+  [ -z "$out" ] || fail "hook produced output for an acknowledged finding: $out"
+  pass "fm-turnend-guard: a stalled validation blocks past the threshold and goes quiet once acknowledged"
+}
+
 # The scenario bin/ above is a full copy of the real bin/, which is right for
 # every other case here but MASKS one: an optional sibling that is simply not
 # there. A healthy turn must stay byte-silent, and an unconditional `.` of a
@@ -947,7 +1013,7 @@ test_hook_stays_silent_when_its_optional_siblings_are_absent() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-no-optional-siblings")
   : > "$dir/state/task1.meta"
-  rm -f "$dir/bin/fm-bounded-lib.sh" "$dir/bin/fm-stale-base.sh"
+  rm -f "$dir/bin/fm-bounded-lib.sh" "$dir/bin/fm-stale-base.sh" "$dir/bin/fm-nm-stall.sh"
   start_live_watcher "$dir"
   out=$(run_hook "$dir" false); status=$?
   stop_live_watcher
@@ -961,7 +1027,7 @@ test_hook_blocks_cleanly_when_its_optional_siblings_are_absent() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-no-siblings-unhealthy")
   : > "$dir/state/task1.meta"
-  rm -f "$dir/bin/fm-bounded-lib.sh" "$dir/bin/fm-stale-base.sh"
+  rm -f "$dir/bin/fm-bounded-lib.sh" "$dir/bin/fm-stale-base.sh" "$dir/bin/fm-nm-stall.sh"
   out=$(run_hook "$dir" false); status=$?
 
   expect_code 2 "$status" "the supervision reason must still block with the optional siblings absent"
@@ -1369,6 +1435,8 @@ test_hook_silent_when_every_sibling_contains_the_base
 test_hook_reports_both_reasons_together
 test_hook_stale_base_honours_the_acknowledgement
 test_hook_reports_a_stale_base_sweep_that_times_out
+test_hook_blocks_on_a_validation_that_stopped_advancing
+test_hook_nm_stall_pairs_silence_with_the_block
 test_hook_stays_silent_when_its_optional_siblings_are_absent
 test_hook_blocks_cleanly_when_its_optional_siblings_are_absent
 test_grok_adapter_forces_one_resume_when_unhealthy

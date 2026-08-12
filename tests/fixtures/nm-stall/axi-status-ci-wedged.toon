@@ -1,0 +1,19 @@
+run:
+  id: "01KZRQJJ2JX66ECFBTNPKPSKGH"
+  branch: fm/eln-drop-variables-w7
+  status: running
+  head: a316b52d
+  pr: "https://github.com/kirangathani/eln/pull/19"
+  findings: 3 info
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,12
+    rebase,completed,0,2596
+    review,completed,0,183573
+    test,completed,2,553153
+    document,completed,1,112959
+    lint,completed,0,26455
+    push,completed,0,3146
+    pr,completed,0,33751
+    ci,running,0,0
+  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+    ci,running,23h11m,"19s ago: log: warning: could not check CI: gh pr checks: exit status 1","",starting

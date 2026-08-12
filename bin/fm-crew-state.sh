@@ -67,6 +67,22 @@
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
+#
+# --progress adds ONE extra line after the canonical one, and only for a run this
+# reader is currently calling `working` off a FULL `axi status` record:
+#
+#   progress: <active-step><TAB><token>
+#
+# The token is a deterministic fingerprint of the run's own step table - the run
+# id, the top-level status, and every step's name, status and finding count. It
+# is the input bin/fm-nm-stall.sh compares across observations to tell a run that
+# is ADVANCING from one that has stopped advancing, so it deliberately excludes
+# `duration_ms` and every other column that ticks: a fingerprint that changed on
+# its own could never expose a frozen step. The column filter is an ALLOWLIST
+# read from the TOON header rather than a positional drop, so a future
+# no-mistakes that adds another ticking column is excluded by construction.
+# Nothing else about this reader's output or behaviour changes, and the line is
+# never emitted without the flag.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -83,8 +99,18 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-bounded-lib.sh
 . "$SCRIPT_DIR/fm-bounded-lib.sh"
 
+PROGRESS=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --progress) PROGRESS=1; shift ;;
+    --) shift; break ;;
+    -*) echo "usage: fm-crew-state.sh [--progress] <id>" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+
 ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+[ -n "$ID" ] || { echo "usage: fm-crew-state.sh [--progress] <id>" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -106,6 +132,11 @@ SEP=' · '
 # there is no run to report at all (a dead endpoint, a stale status log), since
 # it is the one hint that the recorded worktree may no longer hold this task's
 # unlanded work.
+# Set only on the --progress path, and only for a working run read from a full
+# `axi status` record (see nm_progress_record). Empty everywhere else, which is
+# what tells bin/fm-nm-stall.sh this verdict carries no measurable step progress.
+PROGRESS_LINE=""
+
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2" detail=${3:-}
   if [ -n "${WT_NOTE:-}" ]; then
@@ -113,6 +144,9 @@ emit() {  # <state> <source> [detail]
   fi
   [ -n "$detail" ] && line="$line${SEP}$detail"
   printf '%s\n' "$line"
+  if [ "$PROGRESS" = 1 ] && [ -n "$PROGRESS_LINE" ]; then
+    printf 'progress: %s\n' "$PROGRESS_LINE"
+  fi
   exit 0
 }
 
@@ -356,6 +390,72 @@ nm_ci_step_status() {
   row=$(trim "$row")
   rest=${row#*,}
   strip_quotes "$(trim "${rest%%,*}")"
+}
+
+# The --progress payload: "<active-step><TAB><token>", or nothing at all when
+# this run record carries no step table to measure. Read from $RUN_OUT, so it
+# costs no extra no-mistakes call on top of the one the run-step path already
+# made.
+#
+# The active step is the first row whose status is running or fixing - the step a
+# frozen run is frozen ON, which is what the alarm has to be able to name.
+#
+# WHY AN ALLOWLIST. Only columns the TOON header names `step`, `status` and
+# `findings` enter the token. Every other column is dropped by name, not by
+# position, because the point of the token is to change when and only when the
+# pipeline ADVANCES: `duration_ms` climbs on its own while a step sits still, so
+# including it would make a wedged step look like a moving one forever. A row
+# whose field count does not match the header ends the table rather than being
+# guessed at.
+#
+# A run with no steps table at all yields nothing, so it is reported as
+# unmeasurable rather than as a step frozen at an unknown name.
+nm_progress_record() {
+  printf '%s\n' "$RUN_OUT" | awk \
+    -v run="$(strip_quotes "$(nm_field id)")" \
+    -v st="$(strip_quotes "$(nm_field status)")" '
+    BEGIN { active = ""; steps = ""; n = 0; intab = 0; stepcol = 0; statuscol = 0 }
+    # Anchored, so the sibling active_steps[N]{...} table a live run also emits
+    # cannot be mistaken for this one. That table exists to be watched by a
+    # human and carries active_for and last_activity, both of which re-render on
+    # every read; nothing from it may reach a progress fingerprint.
+    !intab && /^[ \t]*steps\[[0-9]+\]\{[^}]*\}[ \t]*:/ {
+      hdr = $0
+      sub(/^[ \t]*steps\[[0-9]+\]\{/, "", hdr)
+      sub(/\}[ \t]*:.*$/, "", hdr)
+      n = split(hdr, f, ",")
+      for (i = 1; i <= n; i++) {
+        gsub(/[ \t"]/, "", f[i])
+        keep[i] = (f[i] == "step" || f[i] == "status" || f[i] == "findings")
+        if (f[i] == "step") stepcol = i
+        if (f[i] == "status") statuscol = i
+      }
+      intab = 1
+      next
+    }
+    intab {
+      line = $0
+      gsub(/^[ \t]+/, "", line)
+      gsub(/[ \t]+$/, "", line)
+      m = split(line, c, ",")
+      if (m != n || n == 0) { intab = 0; next }
+      rec = ""
+      for (i = 1; i <= m; i++) {
+        gsub(/^[ \t"]+/, "", c[i])
+        gsub(/[ \t"]+$/, "", c[i])
+        if (keep[i]) rec = rec (rec == "" ? "" : ":") c[i]
+      }
+      steps = steps (steps == "" ? "" : ",") rec
+      if (active == "" && stepcol > 0 && statuscol > 0 \
+        && (c[statuscol] == "running" || c[statuscol] == "fixing")) active = c[stepcol]
+      next
+    }
+    END {
+      if (steps == "") exit 0
+      printf "%s\t%s\n", (active == "" ? "-" : active), \
+        "run=" run ";status=" st ";steps=" steps
+    }
+  '
 }
 
 nm_effective_ci_step_status() {
@@ -757,6 +857,12 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
       ;;
   esac
+
+  # Computed here and nowhere else, so every existing caller pays nothing: only
+  # a --progress read of a working run off a full record has a token at all.
+  if [ "$PROGRESS" = 1 ] && [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" = full ]; then
+    PROGRESS_LINE=$(nm_progress_record)
+  fi
 
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
