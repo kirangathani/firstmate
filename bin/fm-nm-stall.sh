@@ -61,9 +61,9 @@
 #
 # COST CONTROL on the observe path. Each read is wall-clock bounded
 # (FM_NM_STALL_READ_TIMEOUT), and at most FM_NM_STALL_MAX_READS tasks are read
-# per sweep, least-recently-observed first, so a large fleet spreads across
-# successive sweeps instead of blocking one watcher cycle behind every task.
-# Under-sampling costs only accuracy in the conservative direction (above).
+# per sweep, rotating round-robin (see observe_sweep) so a large fleet spreads
+# across successive sweeps instead of blocking one watcher cycle behind every
+# task. Under-sampling costs only accuracy in the conservative direction (above).
 #
 # THE THRESHOLD, FM_NM_STALL_SECS, is set below and reported by --threshold. It
 # is not a guess: it is a multiple of the longest a single step has been measured
