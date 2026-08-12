@@ -97,7 +97,11 @@
 # frozen token in state/<id>.nm-stall-ack. The key is the token itself, so the
 # finding stays quiet while firstmate's answer is in flight and re-arms the
 # moment the run advances and freezes again - the same shape, and for the same
-# reason, as bin/fm-stale-base.sh's acknowledgement.
+# reason, as bin/fm-stale-base.sh's acknowledgement. Deliberately NOT
+# bin/fm-ack-lib.sh's record: that one is fingerprinted on the crew's own status
+# log, which by construction gains no line while a validation runs, so it could
+# neither be re-armed by a later freeze nor silenced without also muting every
+# unrelated state that task reports.
 #
 # Usage:
 #   fm-nm-stall.sh                     report from the durable records (cheap)
