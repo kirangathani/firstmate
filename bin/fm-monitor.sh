@@ -11,10 +11,14 @@
 # the same render contract bin/fm-drift-check.sh follows, and for the same
 # reason - a silent all-clear is indistinguishable from not having looked.
 #
-# ONE PREDICATE, TWO SURFACES. This script computes nothing itself. The verdict
-# per task comes from fm_ack_sweep in bin/fm-ack-lib.sh, the same classifier
-# bin/fm-guard.sh and bin/fm-turnend-guard.sh alarm from, so the sweep can never
-# report a task clean that the turn-end guard would block on.
+# NO PREDICATE OF ITS OWN. This script computes nothing itself; it renders what
+# the alarm surfaces alarm from, so the sweep can never report a task clean that
+# the turn-end guard would block on. Two predicates feed it, each owned
+# elsewhere: fm_ack_sweep in bin/fm-ack-lib.sh classifies whether firstmate has
+# acted on what each task reported, and bin/fm-nm-stall.sh reports any task whose
+# validation step has stopped advancing - a condition no reported state can
+# express, because a frozen validation reports nothing at all. Both are rendered
+# on every run, counts included.
 #
 # THE SIX CLASSES, all named on every render:
 #   unactioned  reported a state that owes firstmate an action, past the grace
@@ -55,8 +59,8 @@
 #   fm-monitor.sh --exempt <id> --reason <why>   sign a standing exemption
 #   fm-monitor.sh --unexempt <id>          drop an exemption
 #   fm-monitor.sh --list-exempt            show standing exemptions
-# Exit: 0 nothing needs firstmate's attention, 1 at least one unactioned report,
-#       2 bad usage or a refused exemption.
+# Exit: 0 nothing needs firstmate's attention, 1 at least one unactioned report
+#       or stalled validation, 2 bad usage or a refused exemption.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -288,12 +292,34 @@ if [ "$ONLY_ATTENTION" = 0 ] && [ -n "$ACCOUNTED" ]; then
   printf '%s' "$ACCOUNTED" | while IFS= read -r l; do printf 'MONITOR: %s\n' "$l"; done
 fi
 
+# The second predicate, rendered on every run for the same reason every class
+# above is: a stalled validation reports NOTHING - the worker is alive and busy
+# and its status log gains no line - so its absence from this render would be
+# indistinguishable from not having looked, while the turn-end guard blocked on
+# it. bin/fm-nm-stall.sh owns it, and reading its durable records costs no
+# no-mistakes call.
+N_STALLED=0
+if [ -x "$SCRIPT_DIR/fm-nm-stall.sh" ]; then
+  NM_STALL=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-nm-stall.sh" 2>/dev/null || true)
+  N_STALLED=$(printf '%s' "$NM_STALL" | grep -c '^NM STALL: ' || true)
+  case "$N_STALLED" in ''|*[!0-9]*) N_STALLED=0 ;; esac
+fi
+printf 'MONITOR VALIDATIONS: %s stalled (a step that has stopped advancing)\n' "$N_STALLED"
+if [ "$N_STALLED" -gt 0 ]; then
+  printf '%s\n' "$NM_STALL" | while IFS= read -r l; do
+    [ -n "$l" ] || continue
+    printf 'MONITOR: %s\n' "$l"
+  done
+fi
+
 if [ "$N_UNACTIONED" -gt 0 ]; then
   printf 'MONITOR REMEDY: do what each NEEDS ACTION state owes, then record it with bin/fm-ack.sh <id> "<what you did>".\n'
   printf 'MONITOR REMEDY: a state waiting on the CAPTAIN is recorded once you have relayed it to them.\n'
-  exit 1
 fi
 if [ "$TOTAL" -eq 0 ]; then
   printf 'MONITOR: no tasks under supervision in this home.\n'
+fi
+if [ "$N_UNACTIONED" -gt 0 ] || [ "$N_STALLED" -gt 0 ]; then
+  exit 1
 fi
 exit 0

@@ -532,6 +532,36 @@ test_sweep_and_alarm_agree() {
   pass "fm-monitor: the render and the alarm answer from one predicate and cannot disagree"
 }
 
+# The same agreement, for the one condition no reported state can express. A
+# frozen validation reports NOTHING - its worker is alive and busy and its status
+# log gains no line - so every class above calls that task quiet while the
+# turn-end guard blocks on it. A render that answered "have you gone over
+# everything" with silence there would be answering wrongly, so it names the
+# count on every run, zero included.
+test_sweep_names_a_stalled_validation_the_guard_blocks_on() {
+  local home id sweep status threshold frozen now
+  id=stalled-s1
+  home=$(make_home stalled "$id")
+  threshold=$(env -u FM_NM_STALL_SECS "$ROOT/bin/fm-nm-stall.sh" --threshold)
+  now=$(date +%s)
+  frozen=$((threshold * 2))
+
+  sweep=$(run_monitor "$home" 0) && status=0 || status=$?
+  expect_code 0 "$status" "precondition: a fleet with nothing frozen must sweep clean"
+  assert_contains "$sweep" "MONITOR VALIDATIONS: 0 stalled" \
+    "the render omitted the stalled-validation count when there were none - absent reads the same as unchecked"
+
+  printf '%s\t%s\t0\tci\trun=A;status=running;steps=ci:running:0\n' \
+    "$((now - frozen))" "$now" > "$home/state/$id.nm-progress"
+
+  sweep=$(run_monitor "$home" 0) && status=0 || status=$?
+  expect_code 1 "$status" "a sweep that found a stalled validation must not exit 0"
+  assert_contains "$sweep" "MONITOR VALIDATIONS: 1 stalled" "the render did not count the stalled validation"
+  assert_contains "$sweep" "$id" "the render did not name the task whose validation is frozen"
+  assert_contains "$sweep" '"ci" step' "the render did not name the frozen step"
+  pass "fm-monitor: a stalled validation is named and counted, never rendered as a quiet task"
+}
+
 # --- the per-task exemption --------------------------------------------------
 
 # The captain was explicit that a blanket on/off is not enough: he must be able
@@ -730,6 +760,7 @@ test_merge_local_acks
 test_a_wedged_current_state_read_still_alarms_and_still_returns
 test_sweep_accounts_for_every_task_and_every_class
 test_sweep_and_alarm_agree
+test_sweep_names_a_stalled_validation_the_guard_blocks_on
 test_signed_exemption_silences_one_task_only
 test_an_unsigned_record_is_not_an_exemption
 test_the_reason_is_bound_to_the_signature

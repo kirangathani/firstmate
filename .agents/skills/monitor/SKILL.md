@@ -22,9 +22,12 @@ This skill is the on-demand render of that same predicate, for when the captain 
    Do not hand-assemble this from `state/<id>.status` tails: an append-only status log's last line goes stale, which is exactly what the sweep's current-state confirm exists to correct.
    Do not substitute `bin/fm-ack.sh --list`, which shows only the alarming class and so cannot answer "did you go over everything".
 
+   The sweep also renders a stalled-validation count on every run, zero included, because a validation whose step has stopped advancing reports nothing at all and so falls in no reported-state class; `bin/fm-nm-stall.sh` owns that predicate and its acknowledgement.
+
 2. **Act on what it found, before reporting.**
    A `NEEDS ACTION` line is not a status to relay, it is work firstmate already owed.
    Do what each one owes now - trigger the validation, record and arm the PR, relay the decision or failure to the captain, steer the blocker - and only then record it with `bin/fm-ack.sh <id> "<what you did>"`.
+   A stalled validation is answered the same way and recorded with `bin/fm-nm-stall.sh --ack <id>`: read the named step, decide or relay, and never restart or abort the run on the finding alone.
    Relaying a decision or a failure to the captain IS the action for that task; record it once relayed.
    Never record an action that was not taken: the record silences that state until the worker's next report, so a false one reintroduces exactly the blind spot this exists to close.
 

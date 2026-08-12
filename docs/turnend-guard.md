@@ -103,6 +103,7 @@ Every standing exemption is announced at session start by `bin/fm-bootstrap.sh`,
 
 `bin/fm-monitor.sh` renders the same predicate for every supervised task on demand, and is what the captain's `/monitor` reaches.
 The alarm surface stays silent when clean; the render surface names every task and every class including zeros, because a silent all-clear cannot be told apart from not having looked.
+That render also carries the stalled-validation count from the fourth block reason below, on the same zeros-included rule and for a sharper version of the same reason: a frozen validation reports no state at all, so every class here would call that task quiet while the turn-end guard blocked on it.
 
 ## Fourth Block Reason: A Validation That Stopped Advancing
 
