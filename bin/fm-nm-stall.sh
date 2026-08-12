@@ -325,35 +325,60 @@ apply_observation() {  # <task-id> <now>
   return 0
 }
 
-# Refresh at most MAX_READS records, least-recently-observed first so every task
-# is reached across successive sweeps rather than the same few every time. A
-# task with no record yet sorts first, because it has never been observed.
+# Refresh at most MAX_READS tasks per sweep, ROUND-ROBIN over the sorted task
+# list from a durable cursor, so a fleet larger than the budget is covered across
+# successive sweeps instead of the same few tasks every time.
+#
+# The ordering must not be derived from the records themselves. Ordering by
+# least-recently-observed reads plausibly but starves exactly the task this alarm
+# is for: a task with no record - which is every task not running a validation at
+# all, and there are usually more of those - would sort first forever, so a fleet
+# with MAX_READS unmeasurable tasks would never once observe the validating one
+# and could never accumulate a frozen span for it. Round-robin has no such
+# preference and needs no per-task bookkeeping: one small cursor file records the
+# last id observed, and a cursor naming a task that has since been torn down just
+# means the next sweep starts from the top.
+#
+# With the shipped budget and cadence a ten-task fleet observes every task about
+# every twenty-five minutes, which is many samples inside the threshold; a sweep
+# only ever under-reports a freeze, never invents one.
 observe_sweep() {
-  local meta id t order='' row read_count=0
+  local meta id t cursor='' start=0 n=0 i=0 k=0 idx=0 read_count=0
+  local -a ids=()
   t=$(now)
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=${meta##*/}
     id=${id%.meta}
     task_is_in_domain "$meta" || continue
-    if read_record "$id"; then
-      order="${order}${REC_LAST}${TAB}${id}"$'\n'
-    else
-      order="${order}0${TAB}${id}"$'\n'
+    ids+=("$id")
+  done
+  n=${#ids[@]}
+  [ "$n" -gt 0 ] || return 0
+  # Sorted so the rotation is a stable order rather than whatever the glob gave.
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    ids[k]=$id
+    k=$((k + 1))
+  done <<< "$(printf '%s\n' "${ids[@]}" | sort)"
+
+  if [ -f "$STATE/.last-nm-stall-task" ]; then
+    IFS= read -r cursor < "$STATE/.last-nm-stall-task" 2>/dev/null || cursor=''
+  fi
+  for ((i = 0; i < n; i++)); do
+    if [ "${ids[$i]}" = "$cursor" ]; then
+      start=$(((i + 1) % n))
+      break
     fi
   done
-  [ -n "$order" ] || return 0
-  # The loop must stay in THIS shell (observe_task sets globals it consumes), so
-  # the sorted list is fed in by here-string rather than through a pipe.
-  while IFS= read -r row; do
-    # "<last-observed><TAB><id>"; only the id is wanted, the epoch was the sort key.
-    id=${row#*"$TAB"}
-    [ -n "$id" ] && [ "$id" != "$row" ] || continue
-    [ "$read_count" -lt "$MAX_READS" ] || break
+  for ((k = 0; k < n && read_count < MAX_READS; k++)); do
+    idx=$(((start + k) % n))
+    id=${ids[$idx]}
     read_count=$((read_count + 1))
     observe_task "$id"
     apply_observation "$id" "$t"
-  done <<< "$(printf '%s' "$order" | sort -n -k1,1)"
+    printf '%s\n' "$id" > "$STATE/.last-nm-stall-task" 2>/dev/null || true
+  done
 }
 
 # --- the findings -----------------------------------------------------------

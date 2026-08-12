@@ -67,7 +67,14 @@ new_home() {  # <slug> -> echoes home dir
   cat > "$h/crew-state-stub" <<'SH'
 #!/usr/bin/env bash
 set -u
-# One canned answer per task id, via STUB_<id> style env, else the shared one.
+# Invoked as `--progress <id>`, so the id is the last argument. STUB_ONLY_FOR
+# narrows the canned answer to one task, which is how a fleet of tasks nothing
+# can be measured on is modelled alongside one that is genuinely validating.
+id=${*: -1}
+if [ -n "${STUB_ONLY_FOR:-}" ] && [ "$id" != "$STUB_ONLY_FOR" ]; then
+  printf 'state: unknown · source: none · no run attributed\n'
+  exit 0
+fi
 printf 'state: %s · source: %s · detail\n' "${STUB_STATE:-working}" "${STUB_SOURCE:-run-step}"
 [ -n "${STUB_TOKEN:-}" ] && printf 'progress: %s\t%s\n' "${STUB_STEP:--}" "$STUB_TOKEN"
 exit 0
@@ -282,6 +289,49 @@ test_a_run_that_reaches_a_settled_verdict_drops_its_record() {
   pass "fm-nm-stall: a run that reaches a settled verdict drops its record"
 }
 
+# --- coverage under the per-sweep read budget -------------------------------
+
+# The budget exists so one watcher cycle cannot block behind a whole fleet, and
+# the rotation exists so the budget cannot silently exclude a task. Ordering
+# reads by least-recently-observed would look right and starve exactly the task
+# this alarm is for: every task NOT running a validation has no record at all,
+# there are usually more of those than the budget, and they would sort first
+# forever - so the one validating task would never be observed and could never
+# accumulate a frozen span.
+test_every_task_is_reached_despite_the_per_sweep_budget() {
+  local home out status i t
+  home=$(new_home rotation)
+  # Four tasks nothing can be measured on, and one that is genuinely validating.
+  # The measurable one sorts LAST, which is the starving case.
+  for i in 1 2 3 4; do add_task "$home" "aa-quiet-$i"; done
+  add_task "$home" zz-validating
+
+  export STUB_ONLY_FOR=zz-validating STUB_STEP=ci \
+    STUB_TOKEN="run=A;status=running;steps=ci:running:0"
+  t=1000
+  # A budget of one read per sweep: only the rotation can ever reach the fifth
+  # task, and five sweeps is one full turn of it.
+  for i in 1 2 3 4 5; do
+    FM_NM_STALL_MAX_READS=1 sweep "$home" "$t" --observe >/dev/null 2>&1
+    t=$((t + 60))
+  done
+  [ -e "$home/state/zz-validating.nm-progress" ] \
+    || fail "the validating task was never observed: the per-sweep budget excluded it entirely"
+
+  # And its span keeps growing across turns of the rotation, so the alarm can
+  # still fire under the budget rather than merely being recorded once.
+  for i in 1 2 3 4 5; do
+    FM_NM_STALL_MAX_READS=1 sweep "$home" $((t + PAST_THRESHOLD)) --observe >/dev/null 2>&1
+    t=$((t + 60))
+  done
+  out=$(FM_NM_STALL_MAX_READS=1 sweep "$home" $((t + PAST_THRESHOLD))); status=$?
+  unset STUB_ONLY_FOR STUB_STEP STUB_TOKEN
+  expect_code 1 "$status" "a frozen step under the per-sweep budget never reached the alarm"
+  assert_contains "$out" "zz-validating" "the alarm did not name the validating task"
+  assert_not_contains "$out" "aa-quiet" "a task with no run attributed was reported as frozen"
+  pass "fm-nm-stall: the per-sweep read budget rotates, so no task is excluded from the sweep"
+}
+
 # --- the token, against the real captured bytes -----------------------------
 
 # A repo checked out on the branch the captured run belongs to, so the reader's
@@ -419,6 +469,7 @@ test_acknowledging_a_finding_silences_it_and_a_later_freeze_re_arms
 test_surface_wakes_once_per_freeze
 test_kinds_that_never_validate_are_outside_the_sweep
 test_a_run_that_reaches_a_settled_verdict_drops_its_record
+test_every_task_is_reached_despite_the_per_sweep_budget
 test_the_real_frozen_capture_reports_working_and_names_its_step
 test_the_token_excludes_every_field_that_ticks_on_its_own
 test_the_real_advanced_capture_is_a_different_reading
