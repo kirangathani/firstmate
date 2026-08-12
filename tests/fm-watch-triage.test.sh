@@ -130,7 +130,33 @@ beacon_stamp() {  # <state>
   else stat -c %.9Y "$1/.last-watcher-beat" 2>/dev/null; fi
 }
 
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+# TERM, then a bounded window, then force - never an unbounded `wait`.
+#
+# A watcher can genuinely survive SIGTERM, and this harness kills one after every
+# case, so an unbounded wait here is a suite that hangs forever rather than a
+# test that fails. `trap 'exit 1' HUP INT TERM` is not a guarantee: a trap body
+# is RE-PARSED when the signal arrives (docs/flow-tui.md records the same bash
+# behaviour biting a trap body directly), so a signal landing while the shell is
+# mid-parse of a command substitution can make that body fail to parse -
+# "trap: line 2: unexpected EOF while looking for matching )" - and the exit
+# never runs. The watcher's poll loop expands several substitutions per cycle
+# and the tests below run it at FM_POLL=1, so that window is hit in practice:
+# observed 2026-08-12, one case left a watcher alive and the whole suite sat in
+# `wait` behind it until the process was killed by hand.
+#
+# tests/fm-watcher-lock.test.sh's reap_background_jobs already resolved this the
+# same way, with the same reasoning - "a cleanup that can hang is a second way to
+# leave the box worse than it found it" - so this is that pattern, not a new one.
+reap() {
+  local pid=$1 i=0
+  kill -TERM "$pid" 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
