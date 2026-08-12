@@ -242,8 +242,10 @@ Every refusal prints that table's accepted column, so the matrix is never someth
 Two skip flags on one command line also refuse, naming `--all-testing-skip`.
 The argument-only rules are checked before any filesystem or backend work, and the delivery-mode rules, the brief-apply, and the token minting before any worktree or backend container exists, so a refusal never leaves an orphan window behind.
 
-No skip flag relaxes a merge gate.
-`bin/fm-pr-merge.sh` still refuses a red, pending, unclassifiable, or zero-check PR under every flag, the kept-tests gate still runs, and the merge prints a loud waiver banner read from the task's own record on the captain's machine rather than from anything in the PR.
+No skip flag relaxes a test gate.
+`bin/fm-pr-merge.sh` still refuses a red, pending, or unclassifiable PR under every flag, and the kept-tests gate still runs under every flag - at full cost under `ci_skip=on`, since it is then the merge's only test evidence.
+A SIGNED `ci_skip` does satisfy one gate, the zero-checks refusal, because that refusal asks whether absent CI was a captain's decision and a signed CI waiver is that decision; a bare `ci_skip=on` line satisfies nothing, a `local_skip` never satisfies it at all, and `bin/fm-pr-merge.sh`'s header owns the contract.
+Every merge under a skip prints a loud waiver banner read from the task's own record on the captain's machine rather than from anything in the PR, and a merge that lands with no CI evidence at all prints a second banner saying so.
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 

@@ -113,6 +113,22 @@
 #        excused and refuses (the rename direction that costs a merge, never
 #        grants one)
 #   (x11) the excused name still equals the workflow job name that reports it
+#
+# A signed CI waiver over an empty rollup (contract in bin/fm-pr-merge.sh's
+# header): the zero-checks refusal asks whether absent CI was a captain's
+# decision, and a signed ci_skip is that decision at task scope. (z5) above is
+# the unchanged no-skip-at-all leg.
+#   (y1) a signed ci_skip merges a zero-check PR, and the log discloses that
+#        nothing verified the branch, twice
+#   (y2) an UNSIGNED ci_skip=on line satisfies nothing, since a worker can append
+#        that line to its own record
+#   (y3) a signed LOCAL skip satisfies nothing either: it waives the local
+#        pipeline and says nothing about whether the PR's CI ran
+#   (y4) a failing check still refuses under a signed ci_skip
+#   (y5) a pending check still refuses under a signed ci_skip
+#   (y6) both gates on one run: the same signed skip excuses the attestation
+#        check and then satisfies the rollup that discounting it left empty, and
+#        the disclosure says which of the two empty shapes that was
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -313,6 +329,181 @@ pass "X behaves"
 EOF
   git -C "$case_dir/wt" add -A
   git -C "$case_dir/wt" commit -qm "resolver takes K in both app.sh and test"
+}
+
+### a signed CI waiver over an empty rollup ###################################
+#
+# The zero-checks refusal asks exactly one question: was absent CI a captain's
+# DECISION, or is CI silently broken? A signed ci_skip is that decision at task
+# scope, where the no-pr-ci marker is the same decision at project scope, so it
+# answers it. Everything else must stay where it was, which is what most of
+# these cases pin.
+#
+# The "no skip at all" leg is (z5) above, unchanged by this rule.
+
+# make_ci_skip_case <name> <head-sha>: a task with a per-case signing key whose
+# PR reports NO checks at all. The project registry is deliberately left absent,
+# so the delivery mode resolves to no-mistakes and grants nothing: whatever these
+# cases merge on, it is the task's own skip rather than its project's mode.
+make_ci_skip_case() {
+  local name=$1 head=$2 case_dir
+  case_dir=$(make_case "$name")
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/gh-axi.log"
+  give_case_a_signing_key "$case_dir"
+  write_pr_checks "$case_dir"
+  printf '%s\n' "$case_dir"
+}
+
+# sign_ci_skip / sign_local_skip <case_dir>: the flag line plus a REAL token for
+# that axis, minted through the same library bin/fm-spawn.sh mints with.
+sign_ci_skip() {
+  local case_dir=$1
+  add_skip_flags "$case_dir" 'ci_skip=on' \
+    "ci_skip_auth=$(mint_dispatch_token "$case_dir" task-x1 ci)"
+}
+
+sign_local_skip() {
+  local case_dir=$1
+  add_skip_flags "$case_dir" 'local_skip=on' \
+    "local_skip_auth=$(mint_dispatch_token "$case_dir" task-x1 local)"
+}
+
+test_signed_ci_skip_satisfies_zero_checks() {
+  local case_dir
+  case_dir=$(make_ci_skip_case ciskip-zero-signed f000000000000000000000000000000000000011)
+  sign_ci_skip "$case_dir"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/120 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ciskip-zero-signed: a signed CI waiver must satisfy the zero-checks refusal"
+
+  grep -qxF 'pr merge 120 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "ciskip-zero-signed: the waived zero-check PR did not merge"
+  assert_no_grep 'refusing to treat absent CI as green' "$case_dir/stderr" \
+    "ciskip-zero-signed: the zero-checks refusal fired despite a signed CI waiver"
+  # Disclosure, on the same twice-over model as the other two banners: a reader
+  # of this log must be able to see that nothing verified the branch.
+  assert_grep 'NO CI EVIDENCE (before the merge)' "$case_dir/stderr" \
+    "ciskip-zero-signed: the merge did not disclose that it carries no CI evidence"
+  assert_grep 'NO CI EVIDENCE (MERGING NOW)' "$case_dir/stderr" \
+    "ciskip-zero-signed: the no-CI-evidence disclosure was not repeated at the merge"
+  pass "a signed CI waiver satisfies the zero-checks refusal, and the merge log says so"
+}
+
+# The forgery leg, and the reason the signature rather than the flag is the
+# authority: a worker appends its status lines into this same state directory,
+# so it can append `ci_skip=on` to its own record just as easily.
+test_unsigned_ci_skip_does_not_satisfy_zero_checks() {
+  local case_dir rc
+  case_dir=$(make_ci_skip_case ciskip-zero-unsigned f000000000000000000000000000000000000012)
+  add_skip_flags "$case_dir" 'ci_skip=on'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/121 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ciskip-zero-unsigned: a bare flag line must satisfy nothing"
+  assert_grep 'refusing to treat absent CI as green' "$case_dir/stderr" \
+    "ciskip-zero-unsigned: the zero-checks refusal did not fire on an unsigned flag"
+  assert_grep 'not merely a ci_skip=on line' "$case_dir/stderr" \
+    "ciskip-zero-unsigned: the refusal did not say the signature is what grants this"
+  assert_no_grep 'NO CI EVIDENCE' "$case_dir/stderr" \
+    "ciskip-zero-unsigned: a refused merge printed the proceed banner"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "ciskip-zero-unsigned: a zero-check PR merged on an unsigned flag line"
+  pass "an unsigned ci_skip=on line does not satisfy the zero-checks refusal"
+}
+
+# The deliberate scope limit. A local skip waives the LOCAL pipeline and carries
+# no claim about whether this PR's CI ran, so under it an empty rollup still
+# means what it means with no skip at all. It stays an attestation authority,
+# which is a different question.
+test_signed_local_skip_does_not_satisfy_zero_checks() {
+  local case_dir rc
+  case_dir=$(make_ci_skip_case localskip-zero-signed f000000000000000000000000000000000000013)
+  sign_local_skip "$case_dir"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/122 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "localskip-zero-signed: a local skip must not satisfy a CI question"
+  assert_grep 'refusing to treat absent CI as green' "$case_dir/stderr" \
+    "localskip-zero-signed: the zero-checks refusal did not fire under a signed local skip"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "localskip-zero-signed: a zero-check PR merged on a local-pipeline skip"
+  pass "a signed local skip does not satisfy the zero-checks refusal"
+}
+
+# What the grant does NOT reach: it covers an EMPTY rollup and nothing else, so
+# a PR that did report a check is judged exactly as it was before.
+test_signed_ci_skip_does_not_excuse_a_failing_check() {
+  local case_dir rc
+  case_dir=$(make_ci_skip_case ciskip-red f000000000000000000000000000000000000014)
+  sign_ci_skip "$case_dir"
+  write_pr_checks "$case_dir" $'CheckRun\tCOMPLETED\tFAILURE\t-\tinvariants'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/123 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ciskip-red: a signed CI waiver must not make a red PR mergeable"
+  assert_grep 'PR check is failing: invariants' "$case_dir/stderr" \
+    "ciskip-red: the failing check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "ciskip-red: a red PR merged under a signed CI waiver"
+  pass "a signed CI waiver does not excuse a failing check"
+}
+
+test_signed_ci_skip_does_not_excuse_a_pending_check() {
+  local case_dir rc
+  case_dir=$(make_ci_skip_case ciskip-pending f000000000000000000000000000000000000015)
+  sign_ci_skip "$case_dir"
+  write_pr_checks "$case_dir" $'CheckRun\tIN_PROGRESS\t-\t-\tbehaviour tests'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/124 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ciskip-pending: a signed CI waiver must not merge an unfinished PR"
+  assert_grep 'have not finished' "$case_dir/stderr" \
+    "ciskip-pending: the pending check was not refused distinctly from a red one"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "ciskip-pending: an unfinished PR merged under a signed CI waiver"
+  pass "a signed CI waiver does not excuse a pending check"
+}
+
+# Both gates firing on one run: the same signed skip excuses the attestation
+# check AND satisfies the empty rollup that discounting it leaves behind. The
+# disclosure must say which of the two empty-rollup shapes this was, and the
+# shared signature check must not explain itself twice.
+test_signed_ci_skip_satisfies_an_exempted_only_rollup() {
+  local case_dir
+  case_dir=$(make_ci_skip_case ciskip-attest-only f000000000000000000000000000000000000016)
+  sign_ci_skip "$case_dir"
+  write_pr_checks "$case_dir" "$(attestation_failed_line)"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/125 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ciskip-attest-only: a signed CI waiver must satisfy the discounted-to-empty rollup too"
+
+  grep -qxF 'pr merge 125 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "ciskip-attest-only: the PR did not merge"
+  assert_grep 'ATTESTATION CHECK EXEMPTED' "$case_dir/stderr" \
+    "ciskip-attest-only: the attestation exemption was not disclosed"
+  assert_grep "rollup:          the PR's only check(s) were the exempted attestation check" \
+    "$case_dir/stderr" \
+    "ciskip-attest-only: the disclosure did not distinguish this from a rollup that was empty outright"
+  pass "a signed CI waiver satisfies a rollup left empty by discounting the exempted check"
 }
 
 test_records_pr_and_head_before_merging() {
@@ -2051,6 +2242,12 @@ test_no_mistakes_project_without_a_skip_still_refuses
 test_exempted_check_alone_is_not_evidence_of_ci
 test_renamed_attestation_check_is_not_excused
 test_exempted_check_name_matches_the_workflow_job
+test_signed_ci_skip_satisfies_zero_checks
+test_unsigned_ci_skip_does_not_satisfy_zero_checks
+test_signed_local_skip_does_not_satisfy_zero_checks
+test_signed_ci_skip_does_not_excuse_a_failing_check
+test_signed_ci_skip_does_not_excuse_a_pending_check
+test_signed_ci_skip_satisfies_an_exempted_only_rollup
 
 # --- AI-attribution gate (contract in docs/attribution-gate.md) --------------
 #
