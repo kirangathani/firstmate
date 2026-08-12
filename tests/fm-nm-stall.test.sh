@@ -44,7 +44,7 @@ FIXTURES="$ROOT/tests/fixtures/nm-stall"
 # Every offset is derived from the shipped default at run time, never written
 # down, so widening or tightening the threshold cannot leave these cases passing
 # against a predicate that no longer fires where they say it does.
-DEFAULT_STALL_SECS=$(sed -n 's/^STALL_SECS=${FM_NM_STALL_SECS:-\([0-9]*\)}$/\1/p' "$STALL" | head -1)
+DEFAULT_STALL_SECS=$(env -u FM_NM_STALL_SECS "$STALL" --threshold)
 case "$DEFAULT_STALL_SECS" in
   ''|*[!0-9]*) fail "could not read the shipped stall threshold out of $STALL" ;;
 esac
@@ -271,7 +271,7 @@ test_a_run_that_reaches_a_settled_verdict_drops_its_record() {
 
   # The run finished, or parked at a gate: there is no step left to be frozen
   # on, and what it now owes is the unanswered-report alarm's to raise.
-  out=$(STUB_STATE=done STUB_SOURCE=run-step sweep "$home" $((1000 + PAST_THRESHOLD)) --observe)
+  out=$(STUB_STATE="done" STUB_SOURCE=run-step sweep "$home" $((1000 + PAST_THRESHOLD)) --observe)
   status=$?
   expect_code 0 "$status" "a finished run kept a stall finding alive"
   [ -z "$out" ] || fail "a finished run printed: $out"

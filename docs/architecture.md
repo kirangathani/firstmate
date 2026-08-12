@@ -79,6 +79,11 @@ Only `working` and `paused` clear a candidate; `unknown` is inconclusive rather 
 Cost stays proportionate because the cheap filter is pure file reads and the confirm subprocess runs only for a task already past grace and unacked, bounded per invocation and briefly cached in `state/.unactioned-<id>`.
 `bin/fm-send.sh` and `bin/fm-pr-check.sh` record the ack themselves, so the common actions need no separate discipline, while `bin/fm-ack.sh` covers relays to the captain that leave no other trace.
 The alarm has one surface, `bin/fm-guard.sh`, which is also the one that runs mid-turn on ordinary fleet commands rather than only at a turn boundary.
+
+A fourth banner covers a gap none of those three can see, because every one of them watches a worker or a wake: a no-mistakes step that has stopped advancing while the worker driving it is alive and busy.
+`bin/fm-crew-state.sh --progress` supplies a fingerprint of the run's own step table, taken from the `axi status` record that reader already fetched and filtered by an allowlist over the TOON header so that no self-incrementing column can reach it, and `bin/fm-nm-stall.sh` folds those observations into `state/<id>.nm-progress` and reports a fingerprint that has not changed across observations for longer than its threshold.
+The span is measured between observations rather than from a start time, so a restart or a watcher outage cannot inflate it and coarse sampling can only under-report a freeze.
+The watcher observes on its own cadence and wakes once per freeze, while both guards read the durable records alone and add no `no-mistakes` call to a turn end; the script header owns the predicate, the threshold and its justification, and the acknowledgement that re-arms when a run advances and freezes again.
 On every verified primary harness, tracked hook integration gives the primary session a push-based backstop: when work is in flight and no identity-matched watcher lock with a fresh beacon is live, direct Stop hooks block and passive turn-end hooks force one bounded follow-up.
 The guard covers the main primary and genuinely marked secondmate homes, exempts child crewmate/scout worktrees, is loop-safe per harness, and is documented in [turnend-guard.md](turnend-guard.md).
 

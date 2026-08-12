@@ -16,13 +16,15 @@
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
-# It blocks for THREE independent reasons, reported together in one banner so a
+# It blocks for FOUR independent reasons, reported together in one banner so a
 # permanently broken watcher cannot hide the others:
 #   1. in-flight work with no live watcher (the original blind-turn reason),
 #   2. an in-flight branch whose CI was measured against a base that has since
-#      moved (bin/fm-stale-base.sh, which owns that predicate and its remedy), and
+#      moved (bin/fm-stale-base.sh, which owns that predicate and its remedy),
 #   3. a direct report sitting in a state that owes firstmate an action, past the
-#      grace window, unacted on (bin/fm-ack-lib.sh, which owns that predicate).
+#      grace window, unacted on (bin/fm-ack-lib.sh, which owns that predicate), and
+#   4. a validation whose no-mistakes step has stopped advancing past the
+#      threshold (bin/fm-nm-stall.sh, which owns that predicate and its remedy).
 #
 # Why reason 3 is here and not only in bin/fm-guard.sh. That guard has raised
 # this exact finding since #35, and it exits 0 - it warns, then the turn ends

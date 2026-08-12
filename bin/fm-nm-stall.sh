@@ -106,6 +106,7 @@
 #                                      surfaced, one line each, and mark them
 #   fm-nm-stall.sh --ack <id> [<id>..] silence those findings at their step
 #   fm-nm-stall.sh --ack-all           silence every current finding
+#   fm-nm-stall.sh --threshold         print the effective threshold in seconds
 # Exit: 0 nothing to report, 1 at least one unacknowledged finding, 2 bad usage.
 set -u
 
@@ -142,6 +143,7 @@ usage() {
 usage: fm-nm-stall.sh [--observe|--surface]
        fm-nm-stall.sh --ack <task-id> [<task-id>...]
        fm-nm-stall.sh --ack-all
+       fm-nm-stall.sh --threshold
 EOF
 }
 
@@ -153,6 +155,10 @@ ACK_IDS=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --help|-h) usage; exit 0 ;;
+    # The effective threshold, so an operator asking "how long before this
+    # fires" and a boundary test sizing itself both read the one live value
+    # rather than a second copy that drifts from it.
+    --threshold) printf '%s\n' "$STALL_SECS"; exit 0 ;;
     --observe) OBSERVE=1; shift ;;
     --surface) OBSERVE=1; SURFACE=1; shift ;;
     --ack-all) MODE=ack-all; shift ;;

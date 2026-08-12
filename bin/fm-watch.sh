@@ -841,7 +841,12 @@ while :; do
   if [ "$(age_of "$STATE/.last-nm-stall")" -ge "$NM_STALL_INTERVAL" ]; then
     touch "$STATE/.last-nm-stall"
     if [ -x "$SCRIPT_DIR/fm-nm-stall.sh" ]; then
-      nm_stall_out=$("$SCRIPT_DIR/fm-nm-stall.sh" --surface 2>/dev/null || true)
+      # FM_HOME and the state dir are passed explicitly, as every other sibling
+      # this loop invokes is: both are plain shell variables here, so a child
+      # would otherwise resolve its own home from the repo root and sweep a
+      # different fleet's records.
+      nm_stall_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-nm-stall.sh" --surface 2>/dev/null || true)
       if [ -n "$nm_stall_out" ]; then
         # One reason line, because the daemon's wake grammar is line-oriented.
         reason="check: $(printf '%s' "$nm_stall_out" | tr '\n' ' ')"

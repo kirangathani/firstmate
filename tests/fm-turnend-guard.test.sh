@@ -958,7 +958,7 @@ record_frozen_step() {
 test_hook_blocks_on_a_validation_that_stopped_advancing() {
   local dir out status threshold
   dir=$(make_primary_dir "$TMP_ROOT/hook-nm-stall")
-  threshold=$(sed -n 's/^STALL_SECS=${FM_NM_STALL_SECS:-\([0-9]*\)}$/\1/p' "$dir/bin/fm-nm-stall.sh" | head -1)
+  threshold=$(env -u FM_NM_STALL_SECS "$dir/bin/fm-nm-stall.sh" --threshold)
   record_frozen_step "$dir" task1 "$((threshold * 2))" ci
   start_live_watcher "$dir"
   out=$(run_hook "$dir" false); status=$?
@@ -980,7 +980,7 @@ test_hook_blocks_on_a_validation_that_stopped_advancing() {
 test_hook_nm_stall_pairs_silence_with_the_block() {
   local dir out status threshold
   dir=$(make_primary_dir "$TMP_ROOT/hook-nm-stall-silent")
-  threshold=$(sed -n 's/^STALL_SECS=${FM_NM_STALL_SECS:-\([0-9]*\)}$/\1/p' "$dir/bin/fm-nm-stall.sh" | head -1)
+  threshold=$(env -u FM_NM_STALL_SECS "$dir/bin/fm-nm-stall.sh" --threshold)
 
   record_frozen_step "$dir" task1 "$((threshold / 2))" ci
   start_live_watcher "$dir"

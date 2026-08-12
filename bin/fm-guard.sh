@@ -22,6 +22,10 @@
 # A live watcher and an empty queue say nothing about whether the wakes already
 # delivered were handled, so this is the only place a dropped one surfaces; the
 # predicate and its silencers are owned by bin/fm-ack-lib.sh.
+# Then a fourth, independent alarm: a task whose no-mistakes step has stopped
+# advancing while its worker is still busy, which no liveness path can see. The
+# predicate, threshold, durable record and acknowledgement are owned by
+# bin/fm-nm-stall.sh; this reads its records and makes no no-mistakes call.
 # Always exits 0: the guard warns, it never blocks.
 set -u
 

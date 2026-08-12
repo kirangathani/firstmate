@@ -104,6 +104,36 @@ Every standing exemption is announced at session start by `bin/fm-bootstrap.sh`,
 `bin/fm-monitor.sh` renders the same predicate for every supervised task on demand, and is what the captain's `/monitor` reaches.
 The alarm surface stays silent when clean; the render surface names every task and every class including zeros, because a silent all-clear cannot be told apart from not having looked.
 
+## Fourth Block Reason: A Validation That Stopped Advancing
+
+Added 2026-08-12 and computed by `bin/fm-nm-stall.sh`, whose header owns the predicate, the token, the durable record, the threshold and its justification, the silent cases, the acknowledgement, and the wording.
+A task whose no-mistakes pipeline step has stopped changing for longer than the threshold blocks the turn.
+
+The incident it exists to prevent, 2026-08-11/12: task `eln-drop-variables-w7`'s CI step sat on `could not check CI: gh pr checks: exit status 1` for over twenty hours while its PR had been green the whole time.
+The gap was not detection quality but detection existing at all.
+Firstmate could detect a stopped WORKER; it had no notion of a stopped pipeline STEP, so `bin/fm-crew-state.sh` reported `working - source: run-step - validating (running)` on every single check, exactly as it would for a step two minutes old.
+The worker-liveness path could not help either: a worker blocked in a synchronous validation renders a busy pane for the whole run, so its pane is never stale.
+
+This reason is unlike the first three in one respect: it adds NEW detection rather than giving an existing warning a consequence, because there was no existing warning.
+The root cause is upstream and deliberately not ours to fix - no-mistakes' CI step shells out to `gh pr checks`, the command `bin/fm-pr-merge.sh`'s own header documents as unsuitable, since it conflates pending with failing and fails outright from the detached HEAD every task worktree is.
+Firstmate therefore needs its own detection, and the alarm detects only: it never restarts, aborts or steers a frozen run, because that decision stays with firstmate and the captain.
+
+The observation and the report are deliberately split across two paths:
+
+- Observe: `bin/fm-watch.sh`, on its own `FM_NM_STALL_INTERVAL` cadence, through `--surface`. That is the only path that pays for a current-state read, and the only one that can reach firstmate promptly - a validating fleet writes no status lines and shows no stale panes, so the heartbeat backs off and a turn end may be hours away, which is precisely how the incident ran overnight. It wakes once per freeze, not once per sweep.
+- Backstop: this guard, from the durable records ALONE. It makes no no-mistakes call and spawns no subprocess per task, so unlike the other three reasons it adds essentially nothing to a turn end. It is bounded by `FM_NM_STALL_TIMEOUT` anyway, for the same reason the stale-base sweep is, and an expiry is reported as "no validation in flight has been checked" rather than read as an all-clear.
+
+The signal is progress, never liveness and never total runtime.
+The token is `bin/fm-crew-state.sh --progress`, a fingerprint of the run's own step table taken from the `axi status` record that reader already fetched, filtered by an allowlist over the TOON header so that `duration_ms`, and the `active_for` and `last_activity` fields of the sibling `active_steps` table, cannot reach it - all three re-render on their own, and a fingerprint that moved by itself could never expose a frozen step.
+The frozen span is measured between OBSERVATIONS rather than from a start time, so a restart, a watcher outage or a sleeping machine cannot inflate it, and sampling can only ever under-report a freeze rather than manufacture one.
+
+Quiet on a healthy fleet by construction: a run that keeps advancing resets its own span however long it takes overall, a parked or finished run has no step to be frozen on, and a PR that has gone green and is only waiting on a merge decision reads as `done` rather than `working` and never reaches the sweep.
+The threshold defaults to three hours, chosen against the 61 most recent real runs on this machine, where the longest a single step legitimately occupied was 96 minutes (`test`), then 73 minutes (`review`) - 1.9x headroom over the worst observed step, against a freeze that ran for twenty hours.
+Because the answer to a frozen run is often a relay rather than a fix, a finding is silenced by `bin/fm-nm-stall.sh --ack <task-id>`, which records the frozen token in `state/<task-id>.nm-stall-ack`; the key is the step state itself, so the acknowledgement is scoped to the freeze it was made at and re-arms the moment that run advances and freezes again.
+
+`tests/fm-nm-stall.test.sh` owns the predicate, pinning the token against two verbatim `axi status` captures of the incident run itself - one taken while it was still frozen, one taken after it advanced - plus the advancing, inside-threshold, unreadable, acknowledged and non-validating silent cases.
+`tests/fm-turnend-guard.test.sh` covers this surface's half: that a healthy watcher plus a frozen step still blocks and names both the task and the step, that a step inside the threshold neither blocks nor prints, and that an acknowledgement goes silent.
+
 ## Harness Integrations
 
 All verified primary harnesses have a tracked integration:
