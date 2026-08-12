@@ -124,6 +124,11 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
+# Set only on the --progress path, and only for a working run read from a full
+# `axi status` record (see nm_progress_record). Empty everywhere else, which is
+# what tells bin/fm-nm-stall.sh this verdict carries no measurable step progress.
+PROGRESS_LINE=""
+
 # Emit the one canonical line and exit 0. Detail is optional.
 #
 # $WT_NOTE (set below, empty until then) is appended to EVERY verdict, not just
@@ -132,11 +137,6 @@ SEP=' · '
 # there is no run to report at all (a dead endpoint, a stale status log), since
 # it is the one hint that the recorded worktree may no longer hold this task's
 # unlanded work.
-# Set only on the --progress path, and only for a working run read from a full
-# `axi status` record (see nm_progress_record). Empty everywhere else, which is
-# what tells bin/fm-nm-stall.sh this verdict carries no measurable step progress.
-PROGRESS_LINE=""
-
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2" detail=${3:-}
   if [ -n "${WT_NOTE:-}" ]; then
