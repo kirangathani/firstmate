@@ -151,6 +151,13 @@
 #   - Only the captain approves an entry. There is no mechanical guarantee of
 #     this: nothing physically prevents another writer, and the required fields
 #     exist so a fabricated entry is visible rather than silent.
+#   - CI cannot read this record, and must not: it is private by design. An
+#     approval reaches the required `Base assertions re-verified` check as a
+#     captain-signed attestation carrying each entry's matching half and nothing
+#     else, so a finding is excused there exactly when it is excused here.
+#     bin/fm-supersession-attest.sh is how one is issued and
+#     bin/fm-supersession-attest-lib.sh owns its wire; neither changes anything
+#     in this grammar or in this gate.
 #
 # Unexecuted findings and per-project enablement: check 2 reports
 # `unexecuted: <file>::<name>` for a base assertion it could not execute at all
