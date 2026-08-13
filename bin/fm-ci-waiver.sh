@@ -120,34 +120,6 @@ read_secret_or_die() {
   fi
 }
 
-# task_repo_slug <meta>: the owner/repo the task's own checkout pushes to, or
-# nothing (exit 1) when that cannot be determined. Only a GitHub remote is
-# resolved, because GitHub Actions is where a waiver is ever verified; anything
-# else is deliberately reported as unknown rather than parsed into a guess.
-task_repo_slug() {
-  local meta=$1 dir url slug
-  dir=$(grep -m1 '^worktree=' "$meta" | cut -d= -f2- || true)
-  if [ -z "$dir" ] || [ ! -d "$dir" ]; then
-    dir=$(grep -m1 '^project=' "$meta" | cut -d= -f2- || true)
-  fi
-  [ -n "$dir" ] && [ -d "$dir" ] || return 1
-  command -v git >/dev/null 2>&1 || return 1
-  url=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
-  case "$url" in
-    *github.com[:/]*) : ;;
-    *) return 1 ;;
-  esac
-  slug=${url%.git}
-  slug=${slug##*github.com}
-  slug=${slug#:}
-  slug=${slug#/}
-  case "$slug" in
-    */*/*|*/) return 1 ;;
-    */*) printf '%s\n' "$slug" | tr '[:upper:]' '[:lower:]' ;;
-    *) return 1 ;;
-  esac
-}
-
 # sign_waiver <task-id> <sha> <owner/repo>: validate, check the dispatch
 # authorization, and print the one publishable line. THE authority check lives
 # here, and both `sign` and `waive` go through this single function, so no
@@ -179,7 +151,7 @@ sign_waiver() {
   # cannot be resolved at all is reported and allowed, because that is exactly
   # what this script did before the check existed: it closes the mismatch
   # wherever the information exists and breaks no dispatch where it does not.
-  TASK_REPO=$(task_repo_slug "$META") || TASK_REPO=
+  TASK_REPO=$(fm_ci_waiver_task_repo_slug "$META") || TASK_REPO=
   REPO_LOWER=$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')
   if [ -n "$TASK_REPO" ] && [ "$TASK_REPO" != "$REPO_LOWER" ]; then
     echo "error: task $ID's own checkout pushes to $TASK_REPO, not $REPO; refusing to sign a waiver for a repository this task does not belong to" >&2
