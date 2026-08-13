@@ -94,6 +94,8 @@ state/               volatile runtime signals; gitignored
   <id>.acted           written by bin/fm-ack.sh, bin/fm-send.sh, and bin/fm-pr-check.sh: firstmate acted on this task's reported state; silences the unactioned alarm until the crew's next status append (bin/fm-ack-lib.sh); removed by teardown
   <id>.stale-base-ack  written by bin/fm-stale-base.sh --ack: firstmate acted on this task's stale-base finding; keyed to the base commit, so a base that moves again re-alarms; removed by teardown
   <id>.monitor-exempt  captain-signed standing exemption from the monitoring alarm, written only by bin/fm-monitor.sh --exempt; the signature and stated reason are what make it authority, so an unsigned or hand-written record is NOT an exemption; announced at every session start while it stands; removed by teardown
+  <id>.nm-progress     last observed no-mistakes step fingerprint and the window it has gone unchanged, written by bin/fm-nm-stall.sh, whose header owns the format; removed by teardown
+  <id>.nm-stall-ack    written by bin/fm-nm-stall.sh --ack: firstmate acted on this task's stalled-validation finding; keyed to the frozen step, so a run that advances and freezes again re-alarms; removed by teardown
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; a tmux task also records tmux_window_pinned=1, the guarantee that its window name cannot drift from fm-<id>, which is what licenses the exact-label liveness reads (docs/tmux-backend.md "The exact-label check needs a pinned window name to be safe"); a captain-authorized testing skip also records local_skip=on and/or ci_skip=on, each with its own local_skip_auth=/ci_skip_auth= token (section 7); kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
@@ -360,7 +362,7 @@ Handle actionable wakes as follows:
 
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
-3. For `check:`, act on the named poll result, including merges and X-mode events.
+3. For `check:`, act on the named poll result, including merges, X-mode events, and a validation whose step has stopped advancing.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
 A high context reading in a peeked pane is not by itself actionable: the harness compacts and continues, and the worktree's files and commits persist.
@@ -382,6 +384,8 @@ Queued wakes must be drained before other action, stale liveness must be repaire
 An unactioned-direct-report warning is answered by doing what the reported state owes, then recording it with `bin/fm-ack.sh <id> "<what you did>"` when the action leaves no other trace, above all a relay to the captain; `bin/fm-ack-lib.sh` owns the predicate, owed states, grace, and silencers.
 That same predicate blocks a turn end, so a reported state cannot survive a turn unanswered; only a captain-signed per-task exemption stops it, and every standing exemption is announced at session start.
 When the captain invokes `/monitor`, or asks whether every task has been gone over, load the `monitor` skill for the forced per-task sweep and the exemption verbs.
+A stalled-validation warning reports a task whose no-mistakes step has stopped advancing while its worker is still busy, which no liveness path can see; `bin/fm-nm-stall.sh` owns the predicate, the threshold, and the durable record, and it blocks a turn end the same way.
+Read the named step before deciding anything, never restart or abort a run on this alarm alone, and record what you did with `bin/fm-nm-stall.sh --ack <id>` so it stops repeating and re-arms by itself if that run freezes again.
 The spawn assertion and generated ship brief must both enforce that project work starts in an isolated disposable worktree, never the primary checkout.
 Harness-aware turn-end guards are structural backstops, not permission to omit the live cycle.
 

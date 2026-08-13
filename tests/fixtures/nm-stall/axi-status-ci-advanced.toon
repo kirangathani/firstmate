@@ -1,0 +1,18 @@
+run:
+  id: "01KZRQJJ2JX66ECFBTNPKPSKGH"
+  branch: fm/eln-drop-variables-w7
+  status: completed
+  head: a316b52d
+  pr: "https://github.com/kirangathani/eln/pull/19"
+  findings: 3 info
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,12
+    rebase,completed,0,2596
+    review,completed,0,183573
+    test,completed,2,553153
+    document,completed,1,112959
+    lint,completed,0,26455
+    push,completed,0,3146
+    pr,completed,0,33751
+    ci,completed,0,26938113
+outcome: passed

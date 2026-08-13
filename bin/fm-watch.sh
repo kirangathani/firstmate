@@ -107,6 +107,7 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+NM_STALL_INTERVAL=${FM_NM_STALL_INTERVAL:-600}  # seconds between stalled-validation sweeps
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -750,6 +751,12 @@ printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
+# Seeded only when absent, exactly like the heartbeat schedule above: the
+# cadence has to live in the file rather than in this process, because wake()
+# exits and a busy fleet restarts this watcher constantly. A brand-new home
+# defers its first stalled-validation sweep by one interval; every later restart
+# inherits the schedule already on disk.
+[ -e "$STATE/.last-nm-stall" ] || touch "$STATE/.last-nm-stall"
 
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
@@ -820,6 +827,33 @@ while :; do
       wake "$reason"
     fi
     touch "$STATE/.last-check"
+  fi
+
+  # Slow stalled-validation sweep: has a validating task's no-mistakes step
+  # stopped advancing. This needs its own cadence because NOTHING else in this
+  # loop ever looks at a healthily-validating task - it writes no status lines,
+  # and a worker blocked in a synchronous validation renders a busy pane, so its
+  # pane is never stale. That is exactly how one task's CI step sat frozen for
+  # twenty hours while every reading said `working`.
+  # bin/fm-nm-stall.sh owns the predicate, the threshold, the durable record and
+  # the wording. `--surface` follows the *.check.sh contract: it prints a line
+  # only when firstmate should wake, and nothing at all otherwise.
+  if [ "$(age_of "$STATE/.last-nm-stall")" -ge "$NM_STALL_INTERVAL" ]; then
+    touch "$STATE/.last-nm-stall"
+    if [ -x "$SCRIPT_DIR/fm-nm-stall.sh" ]; then
+      # FM_HOME and the state dir are passed explicitly, as every other sibling
+      # this loop invokes is: both are plain shell variables here, so a child
+      # would otherwise resolve its own home from the repo root and sweep a
+      # different fleet's records.
+      nm_stall_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-nm-stall.sh" --surface 2>/dev/null || true)
+      if [ -n "$nm_stall_out" ]; then
+        # One reason line, because the daemon's wake grammar is line-oriented.
+        reason="check: $(printf '%s' "$nm_stall_out" | tr '\n' ' ')"
+        fm_wake_append check nm-stall "$reason" || exit 1
+        wake "$reason"
+      fi
+    fi
   fi
 
   # On the first changed signal, linger one grace period and re-scan before

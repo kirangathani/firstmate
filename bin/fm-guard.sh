@@ -22,6 +22,10 @@
 # A live watcher and an empty queue say nothing about whether the wakes already
 # delivered were handled, so this is the only place a dropped one surfaces; the
 # predicate and its silencers are owned by bin/fm-ack-lib.sh.
+# Then a fourth, independent alarm: a task whose no-mistakes step has stopped
+# advancing while its worker is still busy, which no liveness path can see. The
+# predicate, threshold, durable record and acknowledgement are owned by
+# bin/fm-nm-stall.sh; this reads its records and makes no no-mistakes call.
 # Always exits 0: the guard warns, it never blocks.
 set -u
 
@@ -247,6 +251,31 @@ EOF
     printf '●  %s\n' "$CONTINUE_LINE"
     printf '●%s\n' "$urule"
   } >&2
+fi
+
+# A stalled validation is a FOURTH, independent alarm: a live watcher, an empty
+# queue and an answered fleet all say nothing about whether a task's pipeline is
+# still advancing. bin/fm-nm-stall.sh owns the predicate, the threshold, the
+# durable record and the acknowledgement; this is only its warning surface, and
+# it reads those records without making a single no-mistakes call, so a
+# read-only session leaves nothing behind either.
+if [ -x "$SCRIPT_DIR/fm-nm-stall.sh" ]; then
+  nm_stall=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-nm-stall.sh" 2>/dev/null || true)
+  if [ -n "$nm_stall" ]; then
+    srule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+    {
+      printf '●%s\n' "$srule"
+      printf '●  STALLED VALIDATION - A PIPELINE STEP HAS STOPPED ADVANCING\n'
+      printf '%s\n' "$nm_stall" | while IFS= read -r stall_line; do
+        printf '●  %s\n' "$stall_line"
+      done
+      if [ "$READ_ONLY" -eq 1 ]; then
+        printf '●  This read-only session should report it, not act on it.\n'
+      fi
+      printf '●  %s\n' "$CONTINUE_LINE"
+      printf '●%s\n' "$srule"
+    } >&2
+  fi
 fi
 
 # Queued wakes are an independent hazard; warn whenever they are pending, even if
