@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // fm-flow-tui.mjs - the fleet pipeline view's renderer.
 //
-// Reads an fm-flow-snapshot.v1 document on stdin and draws one horizontal row
-// per agent. docs/flow-tui.md owns the wire format and the design reasoning;
-// this header owns the flags.
+// Reads an fm-flow-snapshot.v2 document on stdin and draws one row per LIVE
+// worker: a full pipeline row for an agent carrying `pipeline:true`, and a
+// compact identity-and-state row for one carrying `pipeline:false`. docs/flow-tui.md
+// owns the wire format and the design reasoning; this header owns the flags.
 //
 // Usage:
 //   bin/fm-flow.sh                                    (the captain-facing entry point)
@@ -107,11 +108,22 @@ const W = 9;
 const CIW = 13;
 const MW = 9;
 const NCELLS = STEPS.length + 2;
-// One agent block: the head, the three box rows, the timer row, the facts row,
-// and one blank. visibleRows() below derives everything from this number, so a
-// row added to agentBlock has to be added here in the same edit or the frame
-// runs past the bottom of the terminal.
-const BLOCK = 7;
+// One PIPELINE block: the head, the three box rows, the timer row, the facts
+// row, and one blank. One COMPACT block: the head, the state row, and one
+// blank. scrollWindow() below derives the frame from these two numbers, so a
+// row added to either builder has to be added here in the same edit or the
+// frame runs past the bottom of the terminal.
+export const BLOCK = 7;
+export const COMPACT_BLOCK = 3;
+
+// Whether this agent has a no-mistakes pipeline to draw. The snapshot STATES
+// it rather than leaving it to be inferred from the kind string, so a kind this
+// renderer has never heard of still lands on the right side of the question.
+// A record with the field missing keeps its boxes, because the failure that
+// direction is a scout drawn too richly, and the other direction is a ship task
+// silently stripped of the pipeline the view exists to show.
+export const hasPipeline = (agent) => agent?.pipeline !== false;
+export const blockRows = (agent) => (hasPipeline(agent) ? BLOCK : COMPACT_BLOCK);
 
 // --- display-state model ----------------------------------------------------
 //
@@ -647,31 +659,124 @@ function shortProject(p) {
   return parts[parts.length - 1] ?? "";
 }
 
-// How many agent blocks fit, and the exact frame that follows from that.
+// --- workers with no pipeline ------------------------------------------------
 //
-// The window, the header and the rows have to be derived from ONE number or
-// they disagree, and a disagreement here is not cosmetic: an over-tall frame
-// scrolls the terminal, every absolute cursor address in the repaint below
-// then points one row too high, and last frame's durations survive under the
-// header with no boxes above them. That was the orphaned timing row.
-// A block is BLOCK lines: 6 of content plus one blank. `chrome` is the header,
-// the two rules, the key hint, and the flash line when one is showing, so the
-// whole frame is exactly chrome + visible * BLOCK lines.
-export function visibleRows(rows, chrome) {
-  return Math.max(1, Math.floor((rows - chrome) / BLOCK));
+// A scout and a secondmate are live workers, and a live worker is drawn. The
+// shipped view filtered them out of the body and reported them as a dim count,
+// so a captain watching a running scout read `0 agents` with `no agents in
+// flight` under it and took the view for broken. It was not: it was telling the
+// truth about a set it had defined too narrowly.
+//
+// What it must NOT do in fixing that is invent a journey. There is no
+// no-mistakes run behind a scout, so there are no steps, and nine permanently
+// empty boxes would be a worse lie than the omission was. The row is therefore
+// compact: who it is, what kind of worker it is, where its window is, and what
+// state it is in.
+//
+// The state is READ, never derived here. bin/fm-crew-state.sh already owns
+// reconciling a crew's current state out of its run step, its pane, and its
+// append-only status log, and the collector calls it; a second reading in the
+// renderer would be a second answer to a question the fleet has one owner for.
+const CREW_STATE_PAINT = new Map([
+  ["working", green],
+  ["done", green],
+  ["parked", yellow],
+  ["blocked", yellow],
+  ["paused", dim],
+  ["failed", red],
+  ["unknown", magenta],
+]);
+
+// Firstmate's own house word for each kind, because the row is read by the
+// captain. AGENTS.md section 9 keeps `scout` and `second mate` as house
+// vocabulary that needs no translation; anything else is passed through as the
+// snapshot spelled it rather than being guessed at.
+const KIND_LABEL = new Map([
+  ["scout", "scout"],
+  ["secondmate", "second mate"],
+]);
+export const kindLabel = (kind) => KIND_LABEL.get(kind) ?? String(kind ?? "worker");
+
+export function compactState(agent) {
+  const s = agent?.state;
+  if (!s || s.ok === false) {
+    return { word: "state not read", paint: magenta, detail: s?.reason ?? "" };
+  }
+  const value = s.value || "unknown";
+  // A quiet second mate is HEALTHY, and AGENTS.md section 8 says so outright:
+  // its idle endpoint is the normal condition and parent supervision relies on
+  // its routed status rather than on its pane being busy. bin/fm-crew-state.sh
+  // encodes the same rule by skipping the pane busy-check for kind=secondmate,
+  // so a secondmate with no outstanding status event has no state source at all
+  // and reads `unknown` BY CONSTRUCTION - the ordinary idle case, not a fault,
+  // and it must not be painted like one.
+  //
+  // The detail goes with it. `no current-state source available` is the reason
+  // that read is unknown, and printing it beside the word `idle` reads as the
+  // explanation for an alarm that is not there.
+  if (agent.kind === "secondmate" && value === "unknown") {
+    return { word: "idle", paint: dim, detail: "" };
+  }
+  return {
+    word: value,
+    paint: CREW_STATE_PAINT.get(value) ?? magenta,
+    detail: s.detail ?? "",
+  };
+}
+
+// Two content rows, matching the pipeline block's own head-then-facts shape so
+// the two read as one view rather than as two. Everything between them - the
+// boxes - is exactly what this worker does not have.
+function compactBlock(agent, n, selected, openHint) {
+  const marker = selected ? greenBold("▸") : " ";
+  const name = selected
+    ? `${ESC}7m Agent ${n}  ${agent.id} ${R}`
+    : `${cyan(`Agent ${n}`)}  ${white(agent.id)}`;
+  const notes = [];
+  // Only reachable under the collector's --include-dead; the live view holds
+  // these back. Drawn the same way the pipeline block draws it, so the captain
+  // learns one signal rather than two.
+  if (agent.endpoint_alive === false) notes.push(magenta("worker gone"));
+  const head =
+    `${marker} ${name}  ${blue(kindLabel(agent.kind))}  ${dim(shortProject(agent.project))}` +
+    (notes.length ? `  ${notes.join("  ")}` : "") +
+    (selected ? `  ${dim(openHint || DEFAULT_OPEN_HINT)}` : "");
+
+  // The facts row, in the pipeline block's facts position. Its segments are
+  // ordered by what has to survive a narrow terminal: the state word first,
+  // because it is the row's whole point, then the evidence behind it, then the
+  // window - which the captain reconciles against the panes in front of them,
+  // and which clip() shortens visibly rather than dropping in silence.
+  const st = compactState(agent);
+  const bits = [st.paint(st.word)];
+  if (st.detail) bits.push(dim(st.detail));
+  if (agent.window) bits.push(dim(agent.window));
+  return [head, "  " + bits.join(`  ${dim("·")}  `)];
 }
 
 // The header, the two rules, the key hints, and the flash line when one is up.
-// One owner, because visibleRows() and the caller that keeps `top` between
+// One owner, because scrollWindow() and the caller that keeps `top` between
 // frames must agree to the row about how much room the agents get.
 export const chromeRows = (flash) => 4 + (flash ? 1 : 0);
 
-// Where the window starts, given where it started LAST frame.
+// Which agent blocks are on screen, and where the window starts given where it
+// started LAST frame.
 //
-// The rule the captain asked for: up and down move the SELECTOR between agent
-// rows, and the window moves only when the selector would otherwise leave it -
-// already on the top row and pressing up, already on the bottom row and
-// pressing down. Anywhere in between the window stands still.
+// This is one function rather than a height and a top, because the two cannot
+// be solved apart any more. Blocks are no longer all BLOCK rows tall - a worker
+// with no pipeline is COMPACT_BLOCK - so how MANY fit depends on WHICH is
+// first, and dividing the available rows by a single constant would answer for
+// a frame that is not being drawn. That disagreement is not cosmetic: an
+// over-tall frame scrolls the terminal, every absolute cursor address in the
+// repaint below then points one row too high, and last frame's durations
+// survive under the header with no boxes above them. That was the orphaned
+// timing row.
+//
+// The scroll rule the captain asked for is unchanged, and the three clauses
+// below are it in order: up and down move the SELECTOR between agent rows, and
+// the window moves only when the selector would otherwise leave it - already on
+// the top row and pressing up, already on the bottom row and pressing down.
+// Anywhere in between the window stands still.
 //
 // That rule needs `top` to persist across frames, and it did not. The viewer
 // passed no top at all, so every frame recomputed one from `sel` alone against
@@ -679,12 +784,33 @@ export const chromeRows = (flash) => 4 + (flash ? 1 : 0);
 // forever: scrolling back up then dragged the whole window with it even though
 // the selector had rows above it to move through. Holding `top` between frames
 // is the fix; this function is where it is held to the rule.
-export function resolveTop(top, sel, visible, count) {
-  const maxTop = Math.max(0, count - visible);
-  let t = Number.isFinite(top) ? Math.max(0, Math.min(Math.floor(top), maxTop)) : 0;
-  if (sel < t) t = sel;
-  else if (sel >= t + visible) t = sel - visible + 1;
-  return Math.max(0, Math.min(t, maxTop));
+export function scrollWindow(heights, avail, top, sel) {
+  const n = heights.length;
+  if (n === 0) return { top: 0, count: 0 };
+  const room = Math.max(1, Math.floor(avail));
+  // A terminal too short for even one block still gets one whole block, and
+  // render()'s own slice takes the overflow: half a block is not information,
+  // and a frame with no agent in it at all is worse than one that is cut.
+  const countFrom = (first) => {
+    let used = 0;
+    let k = 0;
+    for (let i = first; i < n; i++) {
+      if (used + heights[i] > room) break;
+      used += heights[i];
+      k++;
+    }
+    return Math.max(1, k);
+  };
+
+  const s = Math.max(0, Math.min(Math.floor(sel) || 0, n - 1));
+  let t = Number.isFinite(top) ? Math.max(0, Math.min(Math.floor(top), n - 1)) : 0;
+  if (s < t) t = s;
+  // Never strand the window past the point where the whole remainder fits: a
+  // fleet that shrank under it must not leave blank rows at the bottom with
+  // agents scrolled off the top.
+  while (t > 0 && t - 1 + countFrom(t - 1) >= n) t--;
+  while (s >= t + countFrom(t) && t < n - 1) t++;
+  return { top: t, count: countFrom(t) };
 }
 
 // A status header that does not fit is worse than a shorter one: clipping cuts
@@ -733,45 +859,60 @@ export function render(snap, opts) {
   // or giving them a row would put a finished worker on screen beside live
   // ones. Saying how many were held back is what keeps the omission honest.
   const hidden = (snap.omitted ?? []).length;
-  // Live workers this view has no row for, because they run no pipeline. The
-  // captain reconciles this list against the windows in front of them, so the
-  // difference is stated rather than left to be discovered.
-  const elsewhere = (snap.out_of_scope ?? []).length;
+  // Every live worker is an agent and every agent is drawn, so `N agents` needs
+  // no companion count to be honest. What it does need is not to be read as N
+  // PIPELINES: the workers without one are named so the two numbers can be told
+  // apart at a glance rather than by counting boxes down the frame.
+  const flat = agents.filter((a) => !hasPipeline(a)).length;
+  // Whether any stage box is on screen at all. The stage-window segment below
+  // describes cells that are being DRAWN, so a fleet of scouts alone must not
+  // carry `stages 1-6 of 9`: there are no stages in that frame to be showing a
+  // window of, and a header naming one is the same class of untruth as the
+  // count this view was reported for.
+  const wide = agents.some(hasPipeline);
   out.push(headerLine([
     { s: white("fleet pipeline"), pri: 0 },
     { s: dim(`${agents.length} agents`), pri: 3 },
     { s: needs ? yellow(`${needs} ready to merge`) : dim("0 ready to merge"), pri: needs ? 1 : 4 },
     { s: broken ? magenta(`${broken} unreadable`) : dim("0 unreadable"), pri: broken ? 1 : 5 },
     { s: hidden ? dim(`${hidden} hidden, worker gone`) : "", pri: 3 },
-    { s: elsewhere ? dim(`${elsewhere} running no pipeline`) : "", pri: 3 },
-    { s: lay.count < NCELLS ? yellow(`stages ${lay.first + 1}-${lay.first + lay.count} of ${NCELLS}`) : "", pri: 1 },
+    { s: flat ? dim(`${flat} without a pipeline`) : "", pri: 3 },
+    { s: wide && lay.count < NCELLS ? yellow(`stages ${lay.first + 1}-${lay.first + lay.count} of ${NCELLS}`) : "", pri: 1 },
     { s: dim(`updated ${ageSec}s ago`), pri: 2 },
     // Belongs beside the age, not in the key hints: an age that keeps climbing
     // while nothing on screen changes needs its reason on the same line.
     { s: note ? magenta(note) : "", pri: 1 },
   ], cols));
 
-  const ruleW = Math.max(1, Math.min(cols, agents.length ? lay.width : 40));
+  // The rule spans the pipeline only when a pipeline is on screen. A fleet of
+  // scouts alone draws nothing that wide, and a rule reaching past every row
+  // beneath it implies content that is not there.
+  const ruleW = Math.max(1, Math.min(cols, agents.length ? (wide ? lay.width : 60) : 40));
   const rule = dim("─".repeat(ruleW));
   out.push(rule);
 
+  // Reached only when NOTHING is live. Every live worker is an agent now,
+  // whatever kind it is, so this line can no longer print over a running scout.
   if (agents.length === 0) {
     out.push(dim("  no agents in flight"));
     out.push(rule);
     return out.map((l) => clip(l, cols));
   }
 
-  const visible = visibleRows(rows, chromeRows(flash));
-  const top = resolveTop(topIn, sel, visible, agents.length);
-  const shown = agents.slice(top, top + visible);
+  const win = scrollWindow(agents.map(blockRows), rows - chromeRows(flash), topIn, sel);
+  const shown = agents.slice(win.top, win.top + win.count);
   shown.forEach((a, i) => {
-    out.push(...agentBlock(a, top + i + 1, top + i === sel, cell, anim, lay, openHint));
+    const n = win.top + i;
+    const selected = n === sel;
+    out.push(...(hasPipeline(a)
+      ? agentBlock(a, n + 1, selected, cell, anim, lay, openHint)
+      : compactBlock(a, n + 1, selected, openHint)));
     out.push("");
   });
 
   out.push(rule);
-  const more = agents.length - (top + shown.length);
-  const scroll = (top > 0 ? `^${top} above  ` : "") + (more > 0 ? `v${more} below  ` : "");
+  const more = agents.length - (win.top + shown.length);
+  const scroll = (win.top > 0 ? `^${win.top} above  ` : "") + (more > 0 ? `v${more} below  ` : "");
   // The drill-in's way BACK is stated here, beside the key that goes in. It
   // rides the key line rather than the selected row because - unlike enter,
   // whose effect depends on whether this terminal is already a tmux client -
@@ -842,8 +983,8 @@ function parseSnapshot(raw) {
   } catch {
     return { error: "not valid JSON" };
   }
-  if (snap?.schema !== "fm-flow-snapshot.v1") {
-    return { error: `expected schema fm-flow-snapshot.v1, got ${snap?.schema ?? "none"}` };
+  if (snap?.schema !== "fm-flow-snapshot.v2") {
+    return { error: `expected schema fm-flow-snapshot.v2, got ${snap?.schema ?? "none"}` };
   }
   return { snap };
 }
@@ -1064,7 +1205,9 @@ function watch(snap0, cols0, rows0, opts) {
     }
     if (flash && Date.now() > flashUntil) flash = "";
     // Held here, not inside render(), so it survives from frame to frame.
-    top = resolveTop(top, sel, visibleRows(h(), chromeRows(flash)), (snap.agents ?? []).length);
+    top = scrollWindow(
+      (snap.agents ?? []).map(blockRows), h() - chromeRows(flash), top, sel,
+    ).top;
     const next = render(snap, {
       rows: h(),
       cols: w(),

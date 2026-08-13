@@ -149,12 +149,50 @@ cat > "$FAKEBIN/gh" <<SH
 #!/usr/bin/env bash
 cat "$TMP_ROOT/ci-rollup.json"
 SH
-chmod +x "$FAKEBIN/no-mistakes" "$FAKEBIN/gh"
+# A worker with no pipeline carries a state read through the REAL
+# bin/fm-crew-state.sh, so that reader's own pane primitives have to resolve.
+# This is the same fake tmux tests/fm-crew-state.test.sh drives it with: an
+# endpoint that exists, an agent process behind it, and a busy banner under
+# FM_FAKE_BUSY.
+cat > "$FAKEBIN/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  display-message)
+    for arg in "$@"; do
+      if [ "$arg" = '#{pane_current_command}' ]; then
+        printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-claude}"
+        exit 0
+      fi
+    done
+    printf '%%1\n' ;;
+  list-panes)
+    _t=""; _p=""
+    for _a in "$@"; do [ "$_p" = "-t" ] && _t="$_a"; _p="$_a"; done
+    printf '%s\n' "${_t##*:}" ;;
+  capture-pane)
+    if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
+    else printf 'all quiet\n> \n'; fi ;;
+esac
+exit 0
+SH
+chmod +x "$FAKEBIN/no-mistakes" "$FAKEBIN/gh" "$FAKEBIN/tmux"
 
 # --- fixture fleet document -------------------------------------------------
+#
+# The live home behind it. bin/fm-crew-state.sh reads each worker's own
+# state/<id>.meta and refuses to read a worktree that is not there, so the two
+# non-ship workers get real records over real directories rather than a canned
+# verdict: what this file asserts is then the reader's actual bytes.
+LIVE_HOME="$TMP_ROOT/home-live"
+mkdir -p "$LIVE_HOME/state" "$TMP_ROOT/wt/scout" "$TMP_ROOT/wt/sm"
+printf 'window=fm:5\nworktree=%s\nproject=%s\nkind=scout\nharness=claude\n' \
+  "$TMP_ROOT/wt/scout" "$PROJECT" > "$LIVE_HOME/state/some-scout-x1.meta"
+printf 'window=fm:6\nworktree=%s\nproject=%s\nkind=secondmate\nharness=claude\n' \
+  "$TMP_ROOT/wt/sm" "$PROJECT" > "$LIVE_HOME/state/idle-sm-z2.meta"
 
 make_fleet() {  # <file>
-  jq -n --arg p "$PROJECT" '{tasks:[
+  jq -n --arg p "$PROJECT" --arg h "$LIVE_HOME" --arg w "$TMP_ROOT/wt" '{tasks:[
     {id:"eager-dispatch-e2",kind:"ship",mode:"no-mistakes",project:$p,
      paths:{worktree:{path:"/wt/1"}},endpoint:{target:"fm:1",exists:true},
      pr:{url:"https://github.com/kirangathani/firstmate/pull/25"}},
@@ -168,7 +206,15 @@ make_fleet() {  # <file>
      paths:{worktree:{path:"/wt/4"}},endpoint:{target:"fm:4",exists:true},
      pr:{url:null}},
     {id:"some-scout-x1",kind:"scout",mode:"local-only",project:$p,
-     paths:{worktree:{path:"/wt/5"}},endpoint:{target:"fm:5",exists:true},
+     paths:{worktree:{path:($w+"/scout")},
+            meta:{path:($h+"/state/some-scout-x1.meta"),present:true}},
+     endpoint:{target:"fm:5",exists:true},pr:{url:null}},
+    {id:"idle-sm-z2",kind:"secondmate",mode:"",project:$p,
+     paths:{worktree:{path:($w+"/sm")},
+            meta:{path:($h+"/state/idle-sm-z2.meta"),present:true}},
+     endpoint:{target:"fm:6",exists:true},pr:{url:null}},
+    {id:"gone-scout-d4",kind:"scout",mode:"local-only",project:$p,
+     paths:{worktree:{path:"/wt/7"}},endpoint:{target:"fm:7",exists:false},
      pr:{url:null}}
   ]}' > "$1"
 }
@@ -176,6 +222,8 @@ make_fleet "$TMP_ROOT/fleet.json"
 
 run_snapshot() {  # <extra args...>
   PATH="$FAKEBIN:$PATH" \
+  FM_HOME="${FM_HOME:-$LIVE_HOME}" \
+  FM_FAKE_BUSY=1 \
   FM_FLOW_SNAPSHOT_DB="$NM_DB" \
   FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/fleet.json" \
   FM_FLOW_SNAPSHOT_NOW_EPOCH=10000 \
@@ -190,10 +238,10 @@ expect_code 0 $? "snapshot exits clean"
 # --- schema -----------------------------------------------------------------
 
 got=$(jq -r '.schema' "$OUT")
-[ "$got" = "fm-flow-snapshot.v1" ] || fail "wrong schema id: $got"
-pass "emits the fm-flow-snapshot.v1 schema id"
+[ "$got" = "fm-flow-snapshot.v2" ] || fail "wrong schema id: $got"
+pass "emits the fm-flow-snapshot.v2 schema id"
 
-# --- an agent is a task with a LIVE worker behind it -------------------------
+# --- an agent is a task with a LIVE worker behind it, of ANY kind ------------
 #
 # `state/<id>.meta` outlives the window it names: firstmate stands a finished
 # worker down by killing the window, and the record stays for recovery to read.
@@ -201,31 +249,86 @@ pass "emits the fm-flow-snapshot.v1 schema id"
 # running - the captain's second run showed 14 agents against two live windows.
 # A task whose recorded endpoint no longer resolves is named in `omitted` and
 # drawn nowhere.
+#
+# Liveness is the WHOLE membership test, and it was not always: the shipped
+# collector additionally required kind=ship, so a live scout was filtered into
+# a count the renderer drew as one dim word. Both directions are pinned here,
+# because a change that only draws the live worker and forgets the dead one
+# puts a finished worker back on screen beside running ones.
 got=$(jq -r '[.agents[].id] | sort | join(",")' "$OUT")
-[ "$got" = "arm-lock-gate-q4,eager-dispatch-e2,no-run-yet-n1" ] \
+[ "$got" = "arm-lock-gate-q4,eager-dispatch-e2,idle-sm-z2,no-run-yet-n1,some-scout-x1" ] \
   || fail "unexpected agent set: $got"
-pass "ships with a live endpoint become agents; scouts and dead endpoints do not"
+pass "every task with a live endpoint is an agent, whatever its kind"
 
 got=$(jq -r '[.omitted[].id] | sort | join(",")' "$OUT")
-[ "$got" = "stale-runner-s9" ] || fail "unexpected omitted set: $got"
+[ "$got" = "gone-scout-d4,stale-runner-s9" ] || fail "unexpected omitted set: $got"
 got=$(jq -r '.omitted[] | select(.id=="stale-runner-s9") | .reason' "$OUT")
 assert_contains "$got" "no longer exists" "the omission gave no reason"
+# The dead SCOUT is the direction the shipped collector dropped entirely: it was
+# in neither the agent list, nor `omitted`, nor `out_of_scope`.
+got=$(jq -r '.omitted[] | select(.id=="gone-scout-d4") | .kind' "$OUT")
+[ "$got" = "scout" ] || fail "a held-back non-ship record lost its kind: $got"
 pass "a task whose recorded endpoint is gone is named in omitted, not drawn as an agent"
 
-# Live workers this view has no row for are stated too, so the captain can
-# reconcile the list against the windows in front of them.
-got=$(jq -r '[.out_of_scope[].id] | sort | join(",")' "$OUT")
-[ "$got" = "some-scout-x1" ] || fail "unexpected out_of_scope set: $got"
-pass "a live worker with no pipeline is named rather than silently absent"
+# `out_of_scope` was the field naming live workers the view refused to draw.
+# The view draws them, so the field is gone rather than left empty: an empty
+# array would mean the opposite of what it used to.
+got=$(jq -r 'has("out_of_scope")' "$OUT")
+[ "$got" = "false" ] || fail "out_of_scope survived into v2"
+pass "out_of_scope is removed rather than emitted empty"
 
 # The record is still readable on request - the point is that it is not drawn
 # beside running workers by default.
 got=$(run_snapshot --no-ci --include-dead | jq -r '[.agents[].id] | sort | join(",")')
-[ "$got" = "arm-lock-gate-q4,eager-dispatch-e2,no-run-yet-n1,stale-runner-s9" ] \
-  || fail "--include-dead did not restore the dead record: $got"
+[ "$got" = "arm-lock-gate-q4,eager-dispatch-e2,gone-scout-d4,idle-sm-z2,no-run-yet-n1,some-scout-x1,stale-runner-s9" ] \
+  || fail "--include-dead did not restore the dead records: $got"
 got=$(run_snapshot --no-ci --include-dead | jq -r '.omitted | length')
 [ "$got" = 0 ] || fail "--include-dead still omitted $got task(s)"
 pass "--include-dead puts the gone-worker records back for diagnosis"
+
+# --- a worker with no pipeline carries a state, and no pipeline --------------
+#
+# Being drawn is what liveness earns; what kind decides is only what the row
+# CARRIES. Nine permanently empty boxes over a scout would be an invented
+# journey, so the collector states `pipeline:false` and emits no steps, no run
+# and no checks for it.
+got=$(jq -r '[.agents[] | "\(.id):\(.pipeline)"] | sort | join(" ")' "$OUT")
+[ "$got" = "arm-lock-gate-q4:true eager-dispatch-e2:true idle-sm-z2:false no-run-yet-n1:true some-scout-x1:false" ] \
+  || fail "pipeline flags wrong: $got"
+pass "pipeline is stated per agent rather than left to be inferred from the kind"
+
+got=$(jq -r '.agents[] | select(.id=="some-scout-x1")
+  | "\(.steps|length)/\(.active_steps|length)/\(.run.present)/\(.ci.checks|length)"' "$OUT")
+[ "$got" = "0/0/false/0" ] || fail "a worker with no pipeline was given one: $got"
+# collection.ok stays TRUE: nothing failed to read. A false there is what the
+# renderer draws as `unreadable`, and a scout is not unreadable, it is pipeline-
+# less. The two are different claims.
+got=$(jq -r '.agents[] | select(.id=="some-scout-x1") | .collection.ok' "$OUT")
+[ "$got" = "true" ] || fail "a pipeline-less worker was reported as an unreadable one"
+pass "no run, no steps and no checks for a worker that has none of them"
+
+# Ordered pipeline-first, so the wire order is the draw order and the renderer
+# needs no sort of its own.
+got=$(jq -r '[.agents[].pipeline] | join(",")' "$OUT")
+[ "$got" = "true,true,true,false,false" ] || fail "agents not ordered pipeline-first: $got"
+pass "pipeline agents are emitted before the compact ones"
+
+# The state is READ, through bin/fm-crew-state.sh - the fleet's own owner of a
+# crew's current state - and not derived here. These are that reader's real
+# bytes over real records: the scout's pane is busy, so it reports working from
+# the pane; the second mate's is skipped by that reader on purpose (AGENTS.md
+# section 8: a quiet second mate is healthy), so it reports unknown with no
+# source, which the renderer draws as idle rather than as a fault.
+got=$(jq -r '.agents[] | select(.id=="some-scout-x1")
+  | "\(.state.ok)/\(.state.value)/\(.state.source)/\(.state.detail)"' "$OUT")
+[ "$got" = "true/working/pane/harness busy" ] || fail "scout state not read through the owner: $got"
+got=$(jq -r '.agents[] | select(.id=="idle-sm-z2")
+  | "\(.state.ok)/\(.state.value)/\(.state.source)"' "$OUT")
+[ "$got" = "true/unknown/none" ] || fail "second mate state not read through the owner: $got"
+# A pipeline agent pays none of that cost and carries no state at all.
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .state' "$OUT")
+[ "$got" = "null" ] || fail "a pipeline agent was given a state reading: $got"
+pass "a compact agent's state comes from bin/fm-crew-state.sh, split into its own fields"
 
 # --- the defect this script exists to fix -----------------------------------
 #
@@ -374,14 +477,24 @@ HOME_DIR="$TMP_ROOT/home"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data"
 printf 'x\n' > "$HOME_DIR/state/some.meta"
 printf 'y\n' > "$HOME_DIR/data/backlog.md"
-hash_tree() {
-  { find "$HOME_DIR" -type f -exec cksum {} \; ; cksum "$NM_DB"; } | LC_ALL=C sort
+hash_tree() {  # <dir>
+  { find "$1" -type f -exec cksum {} \; ; cksum "$NM_DB"; } | LC_ALL=C sort
 }
-before=$(hash_tree)
+before=$(hash_tree "$HOME_DIR")
 FM_HOME="$HOME_DIR" run_snapshot >/dev/null 2>&1
-after=$(hash_tree)
+after=$(hash_tree "$HOME_DIR")
 [ "$before" = "$after" ] || fail "snapshot mutated state, data, or the no-mistakes database"
 pass "leaves state, data, and the no-mistakes database byte-identical"
+
+# Measured again over the home the COMPACT path reads, because that path calls
+# a whole second script - bin/fm-crew-state.sh - per pipeline-less worker, and
+# the read-only contract has to hold across it. The reader is documented
+# side-effect free; this is what makes that a boundary rather than a claim.
+before=$(hash_tree "$LIVE_HOME")
+run_snapshot --no-ci >/dev/null 2>&1
+after=$(hash_tree "$LIVE_HOME")
+[ "$before" = "$after" ] || fail "reading a pipeline-less worker's state mutated the home it read"
+pass "reading a compact worker's current state writes nothing"
 
 # --- refusing to invent an empty fleet --------------------------------------
 #

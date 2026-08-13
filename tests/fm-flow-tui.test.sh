@@ -30,7 +30,7 @@ pass "renderer passes node --check"
 
 snap() {  # <agents-json>
   jq -n --argjson agents "$1" '{
-    schema:"fm-flow-snapshot.v1",
+    schema:"fm-flow-snapshot.v2",
     generated:"2026-08-08T16:00:00Z",
     generated_epoch:1786000000,
     fm_home:"/home/x/firstmate",
@@ -178,7 +178,12 @@ assert_contains "$out" "not valid JSON" "no explanation for invalid input"
 
 out=$(printf '{"schema":"something.else"}' | node "$TUI" 2>&1); rc=$?
 expect_code 1 $rc "wrong schema must exit 1"
-assert_contains "$out" "fm-flow-snapshot.v1" "the expected schema was not named"
+assert_contains "$out" "fm-flow-snapshot.v2" "the expected schema was not named"
+# v1 defined `agents` as the live SHIP tasks only, so a v1 document fed to this
+# renderer would put pipeline boxes over workers that have none. The refusal is
+# what makes the two ship together or not at all.
+out=$(printf '{"schema":"fm-flow-snapshot.v1","agents":[]}' | node "$TUI" 2>&1); rc=$?
+expect_code 1 $rc "a v1 document must be refused, not rendered"
 pass "refuses input that is not a snapshot it understands"
 
 # --- the frame fits the terminal it is drawn on -----------------------------
@@ -354,16 +359,22 @@ pass "a line too wide for the terminal ends in an ellipsis rather than mid-word"
 # selector to the bottom row and drags the window along on the way back up.
 
 cat >"$TMP_ROOT/scroll.mjs" <<'JS'
-const { resolveTop } = await import(process.argv[2]);
+const { scrollWindow, BLOCK, COMPACT_BLOCK } = await import(process.argv[2]);
 let bad = 0;
 const eq = (got, want, what) => {
   if (got !== want) { console.error(`${what}: got ${got}, want ${want}`); bad++; }
 };
-// 6 agents, 2 visible. Walk down to the end and back up, one key at a time,
-// carrying `top` exactly as the viewer does.
-const VIS = 2, N = 6;
+// 6 agents, all pipeline blocks, with room for exactly 2. Walk down to the end
+// and back up, one key at a time, carrying `top` exactly as the viewer does.
+const N = 6;
+const H = Array(N).fill(BLOCK);
+const ROOM = 2 * BLOCK;
 let top = 0;
-const step = (sel, wantTop, what) => { top = resolveTop(top, sel, VIS, N); eq(top, wantTop, what); };
+const step = (sel, wantTop, what) => {
+  const w = scrollWindow(H, ROOM, top, sel);
+  top = w.top;
+  eq(top, wantTop, what);
+};
 step(0, 0, "start");
 step(1, 0, "down to the bottom row: window still");
 step(2, 1, "down past the bottom row: window scrolls one");
@@ -372,12 +383,25 @@ step(2, 2, "up FROM the bottom row: window must NOT move");
 step(1, 1, "up from the top row: window scrolls one");
 step(0, 0, "up from the top row again: window scrolls one");
 // Jumps land the selector at an edge rather than centring it.
-top = 0; eq(resolveTop(top, 5, VIS, N), 4, "jump to last");
-top = 4; eq(resolveTop(top, 0, VIS, N), 0, "jump to first");
+eq(scrollWindow(H, ROOM, 0, 5).top, 4, "jump to last");
+eq(scrollWindow(H, ROOM, 4, 0).top, 0, "jump to first");
 // A shrinking fleet must not leave the window pointing past the end.
-eq(resolveTop(4, 1, VIS, 3), 1, "fleet shrank under the window");
+eq(scrollWindow(H.slice(0, 3), ROOM, 4, 1).top, 1, "fleet shrank under the window");
 // More room than agents: there is nowhere to scroll to.
-eq(resolveTop(0, 2, 9, 3), 0, "window taller than the fleet");
+eq(scrollWindow(H.slice(0, 3), 9 * BLOCK, 0, 2).top, 0, "window taller than the fleet");
+
+// Blocks are two heights now, so the COUNT depends on which block is first.
+// Dividing the room by one constant would answer for a frame not being drawn.
+const MIX = [BLOCK, COMPACT_BLOCK, COMPACT_BLOCK, BLOCK];
+eq(scrollWindow(MIX, BLOCK + COMPACT_BLOCK + COMPACT_BLOCK, 0, 0).count, 3,
+   "a pipeline block plus two compact ones fit where two pipeline blocks would not");
+eq(scrollWindow(MIX, 2 * BLOCK, 0, 0).count, 3,
+   "room for two pipeline blocks holds three when two of them are compact");
+// A terminal with room for less than one whole block still gets one whole
+// block; render()'s own slice takes the overflow. Half a block is not
+// information, and an empty body is the failure this view was reported for.
+eq(scrollWindow(H, 1, 0, 0).count, 1, "too short for one block still draws one");
+eq(scrollWindow([], 40, 0, 0).count, 0, "an empty fleet has no window");
 process.exit(bad ? 1 : 0);
 JS
 node "$TMP_ROOT/scroll.mjs" "$TUI" || fail "the scroll rule moved the window off an edge"
@@ -388,16 +412,157 @@ pass "the window moves only when the selector would otherwise leave it"
 # The collector holds them back; the renderer must not quietly absorb the
 # difference. They are stated, and they are not in the agent count.
 
-omitted='{"omitted":[{"id":"gone-1","window":"fm:9","reason":"recorded window no longer exists"},
-                     {"id":"gone-2","window":"fm:8","reason":"recorded window no longer exists"}],
-          "out_of_scope":[{"id":"scout-1","kind":"scout","window":"fm:7"}]}'
+omitted='{"omitted":[{"id":"gone-1","kind":"ship","window":"fm:9","reason":"recorded window no longer exists"},
+                     {"id":"gone-2","kind":"scout","window":"fm:8","reason":"recorded window no longer exists"}]}'
 DOC2=$(snap "[$(agent_with live2 "$(steps_all running)")]" | jq ". * $omitted")
 out=$(render "$DOC2" | sed 's/\x1b\[[0-9;]*m//g')
 assert_contains "$out" "1 agents" "the held-back records were counted as agents"
 assert_contains "$out" "2 hidden" "the held-back records were not stated"
-assert_contains "$out" "1 running no pipeline" "a live worker with no row was not stated"
-assert_not_contains "$out" "gone-1" "a held-back record was drawn as an agent"
+assert_not_contains "$out" "gone-1" "a held-back ship record was drawn as an agent"
+assert_not_contains "$out" "gone-2" "a held-back scout record was drawn as an agent"
 pass "held-back records are stated in the header and never drawn or counted"
+
+# --- every live worker is drawn, whatever kind it is -------------------------
+#
+# The defect this section exists for. The view drew only ship tasks and rendered
+# every other live worker as a single dim count, so a captain watching a running
+# scout saw `0 agents` and `1 running no pipeline` over `no agents in flight`
+# and read the view as faulty. Both directions are asserted here: a live
+# non-ship worker IS in the body, and a record with no worker behind it is NOT -
+# a fix that only draws the live one puts a finished worker back on screen.
+
+compact() {  # <id> <kind> <state-json>
+  jq -n --arg id "$1" --arg kind "$2" --argjson state "$3" '{
+    id:$id, branch:("fm/"+$id), project:"/p/firstmate", worktree:"/wt",
+    window:("fm:"+$id), kind:$kind, mode:"local-only",
+    pipeline:false, state:$state,
+    endpoint_alive:true, agent_alive:"alive",
+    skips:{local:false,ci:false},
+    pr:{url:null,number:null},
+    collection:{ok:true,reason:"this worker runs no pipeline",at:"t",epoch:1786000000},
+    run:{present:false,id:"",status:"",db_updated_epoch:0,db_age_seconds:null},
+    steps:[], active_steps:[],
+    ci:{collection:{ok:false,reason:"this worker opens no PR"},checks:[],
+        total:0,passed:0,failed:0,pending:0,skipped:0,excused:0}
+  }'
+}
+crew_state() {  # <value> <source> <detail>
+  jq -n --arg v "$1" --arg s "$2" --arg d "$3" \
+    '{ok:true, value:$v, source:$s, detail:$d, reason:""}'
+}
+
+SCOUT=$(compact "nm-ci-duplication-of-effort" scout "$(crew_state working pane 'harness busy')")
+MATE=$(compact "infra-sm" secondmate "$(crew_state unknown none 'no current-state source available')")
+MIXED=$(snap "[$(agent_with ship1 "$(steps_all running)"),$SCOUT,$MATE]")
+out=$(render "$MIXED" | sed 's/\x1b\[[0-9;]*m//g')
+
+assert_contains "$out" "nm-ci-duplication-of-effort" "a live scout was not drawn in the body"
+assert_contains "$out" "infra-sm" "a live second mate was not drawn in the body"
+assert_contains "$out" "3 agents" "the agent count did not include every drawn live worker"
+assert_not_contains "$out" "no agents in flight" "a fleet with live workers claimed to be empty"
+assert_not_contains "$out" "running no pipeline" "live workers are drawn now, not counted away"
+pass "a live scout and a live second mate are drawn rows, not a count"
+
+# `no agents in flight` may print only when NOTHING is live. A fleet of scouts
+# alone is not an empty fleet.
+out=$(render "$(snap "[$SCOUT]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_not_contains "$out" "no agents in flight" "a fleet of pipeline-less workers read as empty"
+assert_contains "$out" "1 agents" "a pipeline-less worker was not counted"
+out=$(render "$(snap '[]')" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$out" "no agents in flight" "a genuinely empty fleet did not say so"
+pass "the empty-fleet line prints only when nothing at all is live"
+
+# The stage-window segment describes cells being DRAWN. A fleet of scouts alone
+# draws none, so claiming to be showing a window of them is the same class of
+# untruth as the count this whole section exists for.
+out=$(printf '%s' "$(snap "[$SCOUT]")" | node "$TUI" --cols 80 --rows 24 --tick 0 |
+  sed 's/\x1b\[[0-9;]*m//g')
+assert_not_contains "$out" "of 9" "a frame with no stage boxes named a stage window"
+out=$(printf '%s' "$MIXED" | node "$TUI" --cols 80 --rows 40 --tick 0 |
+  sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$out" "of 9" "a narrowed frame that does draw stages stopped naming its window"
+pass "the stage window is named only when stage boxes are on screen"
+
+# The original concern, kept honest: a worker with no pipeline must not be given
+# pipeline boxes. The stage labels and the box borders are the observable.
+out=$(render "$(snap "[$SCOUT]")" | sed 's/\x1b\[[0-9;]*m//g')
+for label in intent rebase review docs lint "push+PR" "GITHUB CI" pre-merge; do
+  assert_not_contains "$out" "$label" "a worker with no pipeline was drawn a '$label' box"
+done
+printf '%s\n' "$out" | grep -qE '[┌└+][─-]{3,}' &&
+  fail "a worker with no pipeline was drawn box borders"
+pass "a worker with no pipeline gets no pipeline step boxes"
+
+# What the compact row does carry: its kind, its window, and the state read
+# through bin/fm-crew-state.sh by the collector.
+assert_contains "$out" "scout" "the compact row did not say what kind of worker it is"
+assert_contains "$out" "fm:nm-ci-duplication-of-effort" "the compact row did not name the window"
+assert_contains "$out" "working" "the compact row did not carry the reported state"
+assert_contains "$out" "harness busy" "the compact row dropped the evidence behind the state"
+pass "a compact row carries the id, kind, window and reported state"
+
+# A read that failed says so, and never falls back to something it does not know.
+UNREAD=$(compact "quiet-scout" scout '{"ok":false,"value":"","source":"","detail":"","reason":"current-state read failed or timed out"}')
+out=$(render "$(snap "[$UNREAD]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$out" "state not read" "an unread state was not stated as unread"
+pass "a state that could not be read is stated rather than guessed"
+
+# --- a quiet second mate is healthy, and is not painted as a fault -----------
+#
+# AGENTS.md section 8: a second mate's idle endpoint is healthy. bin/fm-crew-state.sh
+# encodes the same rule by skipping the pane busy-check for kind=secondmate, so a
+# quiet one reads `unknown` BY CONSTRUCTION. `unknown` is magenta everywhere else
+# in this view, which is right where it means nobody could find out and wrong
+# here where it means there is nothing to report.
+
+out=$(render "$(snap "[$MATE]")")
+plain=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$plain" "idle" "a quiet second mate was not drawn as idle"
+assert_not_contains "$plain" "unknown" "a quiet second mate was drawn as an unknown state"
+assert_not_contains "$plain" "no current-state source available" \
+  "a quiet second mate carried the reason for an alarm that is not there"
+# The colour is the assertion, not the word: red, magenta and yellow are this
+# view's alarm slots and none of them may appear on a healthy idle row.
+for alarm in $'\x1b[91m' $'\x1b[95m' $'\x1b[93m'; do
+  case $out in
+    *"$alarm"*) fail "a quiet second mate's row used an alarm colour" ;;
+  esac
+done
+assert_contains "$out" $'\x1b[2m''idle' "the idle state was not drawn in the neutral slot"
+pass "an idling second mate renders neutrally, never as a fault"
+
+# Its OTHER states are real and keep their own colour: only `unknown` is the
+# by-construction one, and softening the rest would hide a second mate that is
+# genuinely stuck.
+BLOCKED_MATE=$(compact "infra-sm" secondmate "$(crew_state blocked status-log 'blocked: needs a credential')")
+out=$(render "$(snap "[$BLOCKED_MATE]")")
+assert_contains "$out" $'\x1b[93m''blocked' "a blocked second mate was softened into the idle slot"
+pass "a second mate that reports a real state keeps that state's own colour"
+
+# --- a mixed fleet still fits the terminal it is drawn on --------------------
+#
+# Two block heights means the row budget is no longer one constant times a
+# count. An over-tall frame scrolls the terminal and desynchronises every
+# absolute cursor address in the repaint, which is the defect the single-height
+# sweep above was written for; it has to hold across the mix too.
+
+MIXFLEET=$(jq -n --argjson ship "$(agent_with ship-a "$(steps_all completed)")" \
+                 --argjson scout "$SCOUT" --argjson mate "$MATE" \
+  '[$ship,$ship,$scout,$mate,$ship,$scout,$mate,$ship]')
+for cols in 40 60 80 100 130 200; do
+  for rows in 6 8 10 14 24 45; do
+    printf '%s' "$(snap "$MIXFLEET")" | node "$TUI" --cols "$cols" --rows "$rows" --tick 0 |
+      sed 's/\x1b\[[0-9;]*m//g' |
+      awk -v c="$cols" -v r="$rows" '
+        { if (length($0) > c) wide++ }
+        END { if (wide > 0) printf "%d line(s) wider than %d cols\n", wide, c
+              if (NR > r) printf "%d lines in a %d row frame\n", NR, r }
+      ' > "$TMP_ROOT/mixfit.$cols.$rows"
+    [ -s "$TMP_ROOT/mixfit.$cols.$rows" ] &&
+      fail "mixed frame at ${cols}x${rows}: $(cat "$TMP_ROOT/mixfit.$cols.$rows")"
+  done
+done
+pass "a fleet of both block heights never overflows the terminal in either direction"
 
 # --- what enter does is stated on the selected row, whatever cell is on -------
 #

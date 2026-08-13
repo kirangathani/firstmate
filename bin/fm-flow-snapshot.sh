@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# fm-flow-snapshot.sh - read-only per-agent no-mistakes pipeline snapshot.
+# fm-flow-snapshot.sh - read-only per-agent fleet snapshot.
 #
 # Output contract: `--json` prints one object with schema
-# `fm-flow-snapshot.v1`. docs/flow-tui.md owns that wire format, the run
+# `fm-flow-snapshot.v2`. docs/flow-tui.md owns that wire format, the run
 # resolution reasoning, and the verification evidence; this header owns the
 # flags, environment knobs, and exit codes.
 #
@@ -15,15 +15,22 @@
 # fleet state, and adds two things that view does not carry: the named pipeline
 # step each agent is on, and its GitHub check rollup.
 #
-# An agent in this document is a task with a LIVE worker behind it. A
-# `state/<id>.meta` outlives the window it names - firstmate stands finished
-# workers down by killing the window, and the record is what recovery reads
-# afterwards - so enumerating the records alone put finished workers on screen
-# beside running ones with nothing to tell them apart. Every task is therefore
-# checked against its recorded endpoint, through the same
-# `fm_backend_target_exists` the rest of the fleet resolves liveness with, and
-# one that no longer resolves moves to `omitted` instead of `agents`: named,
-# counted, and not drawn. --include-dead puts them back for diagnosis.
+# An agent in this document is a task with a LIVE worker behind it - EVERY live
+# worker, whatever its kind. A `state/<id>.meta` outlives the window it names -
+# firstmate stands finished workers down by killing the window, and the record
+# is what recovery reads afterwards - so enumerating the records alone put
+# finished workers on screen beside running ones with nothing to tell them
+# apart. Every task is therefore checked against its recorded endpoint, through
+# the same `fm_backend_target_exists` the rest of the fleet resolves liveness
+# with, and one that no longer resolves moves to `omitted` instead of `agents`:
+# named, counted, and not drawn. --include-dead puts them back for diagnosis.
+#
+# Liveness is the only membership test. Kind decides only what each agent
+# CARRIES: `pipeline:true` agents carry a no-mistakes run, its steps, and its
+# GitHub checks, and `pipeline:false` agents - a scout, a secondmate - carry a
+# `state` object read through bin/fm-crew-state.sh, the fleet's own owner of a
+# crew's current state, instead. Emitting them in that order, pipeline agents
+# first, makes the wire order the draw order.
 #
 # Cleaning up the leftover records is a SEPARATE question, and not this
 # command's: the record is durable state other tools depend on, and this one is
@@ -48,6 +55,10 @@
 #   FM_FLOW_SNAPSHOT_NM_TIMEOUT   seconds bounding one `no-mistakes axi status`
 #                                 (default 10, matching fm-nm-flow.sh's budget)
 #   FM_FLOW_SNAPSHOT_GH_TIMEOUT   seconds bounding one `gh pr view` (default 20)
+#   FM_FLOW_SNAPSHOT_STATE_TIMEOUT  seconds bounding one bin/fm-crew-state.sh
+#                                 read for a non-pipeline agent (default 15,
+#                                 above that reader's own 10s no-mistakes bound
+#                                 so its answer arrives rather than being cut)
 #   FM_FLOW_SNAPSHOT_DB           override the no-mistakes state database path
 #                                 (default $HOME/.no-mistakes/state.sqlite).
 #                                 Tests point this at a fixture database.
@@ -69,6 +80,7 @@ CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 NM_TIMEOUT=${FM_FLOW_SNAPSHOT_NM_TIMEOUT:-10}
 GH_TIMEOUT=${FM_FLOW_SNAPSHOT_GH_TIMEOUT:-20}
+STATE_TIMEOUT=${FM_FLOW_SNAPSHOT_STATE_TIMEOUT:-15}
 NM_DB=${FM_FLOW_SNAPSHOT_DB:-$HOME/.no-mistakes/state.sqlite}
 
 WANT_CI=1
@@ -76,7 +88,7 @@ ONLY_TASK=
 INCLUDE_DEAD=0
 
 usage() {
-  sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,72p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -321,17 +333,19 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
       }'
 }
 
-agent_json() {  # <task-json>
-  local task=$1 id kind mode project worktree window branch endpoint_alive agent_alive pr_url
-  local idx run_id run_status run_updated axi rc steps actives ci meta skip_local skip_ci
-
-  id=$(printf '%s' "$task" | jq -r '.id')
-  kind=$(printf '%s' "$task" | jq -r '.kind // ""')
-  mode=$(printf '%s' "$task" | jq -r '.mode // ""')
-  project=$(printf '%s' "$task" | jq -r '.project // ""')
-  worktree=$(printf '%s' "$task" | jq -r '.paths.worktree.path // ""')
-  window=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
-  endpoint_alive=$(printf '%s' "$task" | jq -r 'if .endpoint.exists then "true" else "false" end')
+# The fields every agent carries whether or not it has a pipeline, resolved
+# once so the two builders below cannot drift apart in how they read the fleet
+# document. Sets the FM_ROW_* globals rather than echoing, because several of
+# them are needed as separate jq arguments.
+row_common() {  # <task-json>
+  local task=$1
+  FM_ROW_ID=$(printf '%s' "$task" | jq -r '.id')
+  FM_ROW_KIND=$(printf '%s' "$task" | jq -r '.kind // ""')
+  FM_ROW_MODE=$(printf '%s' "$task" | jq -r '.mode // ""')
+  FM_ROW_PROJECT=$(printf '%s' "$task" | jq -r '.project // ""')
+  FM_ROW_WORKTREE=$(printf '%s' "$task" | jq -r '.paths.worktree.path // ""')
+  FM_ROW_WINDOW=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
+  FM_ROW_ENDPOINT_ALIVE=$(printf '%s' "$task" | jq -r 'if .endpoint.exists then "true" else "false" end')
   # `endpoint.exists` only says a pane is there. The deeper probe asks what is
   # RUNNING in it, which distinguishes a torn-down worker from a live one for
   # about 15ms. fm-fleet-snapshot.sh runs it for secondmates only, so it is
@@ -341,13 +355,37 @@ agent_json() {  # <task-json>
   # a stuck claude is still claude. It upgrades "a pane exists" to "an agent
   # process exists" and nothing further, which is why the renderer treats
   # `unknown` as unknown rather than as alive.
-  agent_alive=$(printf '%s' "$task" | jq -r '.endpoint.agent_alive // "not_checked"')
-  if [ "$agent_alive" = "not_checked" ] && [ "$endpoint_alive" = true ] && [ -n "$window" ]; then
+  FM_ROW_AGENT_ALIVE=$(printf '%s' "$task" | jq -r '.endpoint.agent_alive // "not_checked"')
+  if [ "$FM_ROW_AGENT_ALIVE" = "not_checked" ] \
+     && [ "$FM_ROW_ENDPOINT_ALIVE" = true ] && [ -n "$FM_ROW_WINDOW" ]; then
     local backend
     backend=$(printf '%s' "$task" | jq -r '.backend // "tmux"')
-    agent_alive=$(fm_backend_agent_alive "$backend" "$window" 2>/dev/null || printf 'unknown')
+    FM_ROW_AGENT_ALIVE=$(fm_backend_agent_alive "$backend" "$FM_ROW_WINDOW" 2>/dev/null || printf 'unknown')
   fi
-  pr_url=$(printf '%s' "$task" | jq -r '.pr.url // ""')
+  FM_ROW_PR_URL=$(printf '%s' "$task" | jq -r '.pr.url // ""')
+  # The path comes from the fleet document when it carries one, because
+  # bin/fm-fleet-snapshot.sh is this view's owner of fleet state and already
+  # resolved it; the standard construction is the fallback for a fleet document
+  # that predates the field.
+  FM_ROW_META=$(printf '%s' "$task" | jq -r '.paths.meta.path // ""')
+  [ -n "$FM_ROW_META" ] || FM_ROW_META="$STATE_DIR/$FM_ROW_ID.meta"
+}
+
+agent_json() {  # <task-json>
+  local task=$1 id kind mode project worktree window branch endpoint_alive agent_alive pr_url
+  local idx run_id run_status run_updated axi rc steps actives ci meta skip_local skip_ci
+
+  row_common "$task"
+  id=$FM_ROW_ID
+  kind=$FM_ROW_KIND
+  mode=$FM_ROW_MODE
+  project=$FM_ROW_PROJECT
+  worktree=$FM_ROW_WORKTREE
+  window=$FM_ROW_WINDOW
+  endpoint_alive=$FM_ROW_ENDPOINT_ALIVE
+  agent_alive=$FM_ROW_AGENT_ALIVE
+  pr_url=$FM_ROW_PR_URL
+  meta=$FM_ROW_META
   branch="fm/$id"
 
   # The captain's testing skips, read from the task's OWN record and nothing
@@ -356,17 +394,10 @@ agent_json() {  # <task-json>
   # one reader of what it wrote, so this view and the merge gate's waiver
   # banner cannot disagree about which stages a task never runs.
   #
-  # The path comes from the fleet document when it carries one, because
-  # bin/fm-fleet-snapshot.sh is this view's owner of fleet state and already
-  # resolved it; the standard construction is the fallback for a fleet document
-  # that predates the field.
-  #
   # Copied out of the library's globals immediately, because the attestation
   # resolution below reads the same flags for its own purposes and leaves those
   # globals holding ITS answer. Reading them again after that call would work
   # today only because it happens to be handed the same record.
-  meta=$(printf '%s' "$task" | jq -r '.paths.meta.path // ""')
-  [ -n "$meta" ] || meta="$STATE_DIR/$id.meta"
   fm_testing_skip_read "$meta"
   skip_local=false
   skip_ci=false
@@ -438,6 +469,8 @@ agent_json() {  # <task-json>
     '{
       id:$id, branch:$branch, project:$project, worktree:$worktree,
       window:$window, kind:$kind, mode:$mode,
+      pipeline:true,
+      state:null,
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
       skips:{local:$skip_local, ci:$skip_ci},
@@ -452,6 +485,96 @@ agent_json() {  # <task-json>
       steps:$steps,
       active_steps:$actives,
       ci:$ci
+    }'
+}
+
+# A live worker that runs no no-mistakes pipeline: a scout, a secondmate.
+#
+# It gets an agent record like any other live worker, because being drawn is
+# what liveness earns - the view once filtered these out entirely and reported
+# `0 agents` beside a demonstrably running scout, which reads as a fault in the
+# view rather than as the healthy fleet it was. What it does NOT get is a run,
+# steps, or checks: there is no pipeline behind it, and nine permanently empty
+# boxes would be an invented journey. `pipeline:false` is the field that says
+# so, stated rather than left for the renderer to infer from the kind string.
+#
+# Its one substantive fact is the state, and that is READ rather than derived.
+# bin/fm-crew-state.sh already owns reconciling a crew's current state out of
+# its run step, its pane and its append-only status log, so a second reading
+# here would be a second answer to a question the fleet already has one owner
+# for. A read that fails or times out reports ok:false; it never falls back to
+# the status log's last line, which is a wake EVENT and not a current state.
+crew_state_json() {  # <task-id>
+  local id=$1 line rest
+  # FM_HOME and FM_ROOT_OVERRIDE are passed because this script defaults them
+  # internally and an internal default is not in the environment. Anything the
+  # CALLER set - FM_STATE_OVERRIDE above all - is already exported and inherits
+  # on its own, so re-passing it would be a second copy that could disagree.
+  line=$(
+    run_bounded "$STATE_TIMEOUT" env \
+      FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
+      "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null | head -1
+  ) || line=
+  case "$line" in
+    "state: "*) ;;
+    *)
+      jq -n --arg r "${line:-current-state read failed or timed out}" \
+        '{ok:false, value:"", source:"", detail:"", reason:$r}'
+      return ;;
+  esac
+  # `state: <v> · source: <s> · <detail>`, whose separator and field order are
+  # bin/fm-crew-state.sh's own contract. The detail is everything after the
+  # second separator and may contain further separators of its own, so it is
+  # taken as the remainder rather than as a third field.
+  rest=${line#state: }
+  local value=${rest%% · *}
+  rest=${rest#"$value"}
+  rest=${rest# · }
+  local source=${rest%% · *}
+  source=${source#source: }
+  local detail=${rest#*" · "}
+  [ "$detail" != "$rest" ] || detail=
+  jq -n --arg v "$value" --arg s "$source" --arg d "$detail" \
+    '{ok:true, value:$v, source:$s, detail:$d, reason:""}'
+}
+
+compact_json() {  # <task-json>
+  local task=$1 state
+
+  row_common "$task"
+  state=$(crew_state_json "$FM_ROW_ID")
+
+  jq -n \
+    --arg id "$FM_ROW_ID" \
+    --arg branch "fm/$FM_ROW_ID" \
+    --arg project "$FM_ROW_PROJECT" \
+    --arg worktree "$FM_ROW_WORKTREE" \
+    --arg window "$FM_ROW_WINDOW" \
+    --arg kind "$FM_ROW_KIND" \
+    --arg mode "$FM_ROW_MODE" \
+    --arg agent_alive "$FM_ROW_AGENT_ALIVE" \
+    --arg pr_url "$FM_ROW_PR_URL" \
+    --arg now_iso "$NOW_ISO" \
+    --argjson now_epoch "$NOW_EPOCH" \
+    --argjson endpoint_alive "$FM_ROW_ENDPOINT_ALIVE" \
+    --argjson state "$state" \
+    --argjson ci "$CI_EMPTY" \
+    '{
+      id:$id, branch:$branch, project:$project, worktree:$worktree,
+      window:$window, kind:$kind, mode:$mode,
+      pipeline:false,
+      state:$state,
+      endpoint_alive:$endpoint_alive,
+      agent_alive:$agent_alive,
+      skips:{local:false, ci:false},
+      pr:{url:(if $pr_url == "" then null else $pr_url end), number:null},
+      collection:{ok:true, reason:"this worker runs no pipeline",
+                  at:$now_iso, epoch:$now_epoch},
+      run:{present:false, id:"", status:"",
+           db_updated_epoch:0, db_age_seconds:null},
+      steps:[],
+      active_steps:[],
+      ci:($ci | .collection.reason = "this worker opens no PR")
     }'
 }
 
@@ -477,36 +600,30 @@ fi
 
 SCOPED=$(printf '%s' "$FLEET" | jq -c --arg only "$ONLY_TASK" '
   [ .tasks[] | select($only == "" or .id == $only) ]')
-SHIP=$(printf '%s' "$SCOPED" | jq -c '[ .[] | select(.kind == "ship") ]')
-
-# A live worker this view does not draw. The view is the no-mistakes PIPELINE
-# view and only a ship task has a pipeline, so a scout or a secondmate would be
-# nine permanently empty boxes. Naming them is still owed: the captain reconciles
-# this list against the windows in front of them, and a live worker that is
-# simply absent from it with no explanation is the same failure as a dead one
-# that is present.
-OUT_OF_SCOPE=$(printf '%s' "$SCOPED" | jq -c '[
-  .[]
-  | select(.kind != "ship")
-  | select(.endpoint.exists == true)
-  | {id, kind, window:(.endpoint.target // null)}
-]')
-
+# Membership is liveness and nothing else. Kind decides what an agent carries,
+# never whether it is on screen: a scout and a secondmate run no pipeline, so
+# they carry a state reading instead of a run, and they are drawn compactly
+# rather than under boxes they do not have.
+#
 # `endpoint.exists` is bin/fm-fleet-snapshot.sh's own reading of
 # fm_backend_target_exists, the fleet's single owner of "does this recorded
 # endpoint still resolve". It is consumed here rather than re-derived, so the
 # view can never disagree with the rest of firstmate about which workers are
 # running. null means no endpoint was ever recorded, which is not a live worker
 # either, and is a different reason worth naming.
+#
+# The live set is emitted pipeline-agents-first so the wire order is the draw
+# order and the renderer needs no sort of its own.
+ORDER='([ .[] | select(.kind == "ship") ] + [ .[] | select(.kind != "ship") ])[]'
 if [ "$INCLUDE_DEAD" = 1 ]; then
-  TASKS=$(printf '%s' "$SHIP" | jq -c '.[]')
+  TASKS=$(printf '%s' "$SCOPED" | jq -c "$ORDER")
   OMITTED='[]'
 else
-  TASKS=$(printf '%s' "$SHIP" | jq -c '.[] | select(.endpoint.exists == true)')
-  OMITTED=$(printf '%s' "$SHIP" | jq -c '[
+  TASKS=$(printf '%s' "$SCOPED" | jq -c "[ .[] | select(.endpoint.exists == true) ] | $ORDER")
+  OMITTED=$(printf '%s' "$SCOPED" | jq -c '[
     .[]
     | select(.endpoint.exists != true)
-    | {id, window:(.endpoint.target // null),
+    | {id, kind:(.kind // ""), window:(.endpoint.target // null),
        reason:(if .endpoint.exists == false
                then "recorded window no longer exists"
                else "no endpoint recorded" end)}
@@ -521,7 +638,11 @@ while IFS= read -r task; do
   [ -n "$task" ] || continue
   [ "$FIRST" = 1 ] || printf ',' >> "$AGENTS_FILE"
   FIRST=0
-  agent_json "$task" | jq -c '.' >> "$AGENTS_FILE"
+  if [ "$(printf '%s' "$task" | jq -r '.kind // ""')" = ship ]; then
+    agent_json "$task" | jq -c '.' >> "$AGENTS_FILE"
+  else
+    compact_json "$task" | jq -c '.' >> "$AGENTS_FILE"
+  fi
 done <<EOF
 $TASKS
 EOF
@@ -536,14 +657,12 @@ jq -n \
   --argjson generated_epoch "$NOW_EPOCH" \
   --arg fm_home "$FM_HOME" \
   --argjson omitted "$OMITTED" \
-  --argjson out_of_scope "$OUT_OF_SCOPE" \
   --slurpfile agents "$AGENTS_FILE" \
   '{
-    schema:"fm-flow-snapshot.v1",
+    schema:"fm-flow-snapshot.v2",
     generated:$generated,
     generated_epoch:$generated_epoch,
     fm_home:$fm_home,
     agents:($agents[0] // []),
-    omitted:$omitted,
-    out_of_scope:$out_of_scope
+    omitted:$omitted
   }'
