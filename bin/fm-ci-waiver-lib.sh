@@ -258,6 +258,41 @@ fm_ci_waiver_valid_repo() {
   return 0
 }
 
+# fm_ci_waiver_task_repo_slug <meta>: the owner/repo the task's own checkout
+# pushes to, or nothing (exit 1) when that cannot be determined. Only a GitHub
+# remote is resolved, because GitHub Actions is where anything signed here is
+# ever verified; anything else is deliberately reported as unknown rather than
+# parsed into a guess.
+#
+# It lives here rather than in either signer because BOTH of them refuse to sign
+# for a repository the task does not belong to, for the same reason
+# (bin/fm-ci-waiver.sh's sign_waiver states it), and a refusal that reads one way
+# in one signer and another way in the other is a refusal an operator cannot
+# reason about.
+fm_ci_waiver_task_repo_slug() {
+  local meta=$1 dir url slug
+  dir=$(grep -m1 '^worktree=' "$meta" | cut -d= -f2- || true)
+  if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+    dir=$(grep -m1 '^project=' "$meta" | cut -d= -f2- || true)
+  fi
+  [ -n "$dir" ] && [ -d "$dir" ] || return 1
+  command -v git >/dev/null 2>&1 || return 1
+  url=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
+  case "$url" in
+    *github.com[:/]*) : ;;
+    *) return 1 ;;
+  esac
+  slug=${url%.git}
+  slug=${slug##*github.com}
+  slug=${slug#:}
+  slug=${slug#/}
+  case "$slug" in
+    */*/*|*/) return 1 ;;
+    */*) printf '%s\n' "$slug" | tr '[:upper:]' '[:lower:]' ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_ci_waiver_secret_readable <path>: 0 iff <path> is a usable secret file - a
 # non-empty regular file that is not a symlink pointing somewhere else.
 #
