@@ -48,7 +48,7 @@ cp "$FLOW" "$mirror/fm-flow.sh"
 cat >"$mirror/fm-flow-snapshot.sh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$FAKE_SNAPSHOT_LOG"
-printf '{"schema":"fm-flow-snapshot.v1","generated_epoch":1,"agents":[]}\n'
+printf '{"schema":"fm-flow-snapshot.v2","generated_epoch":1,"agents":[]}\n'
 EOF
 cat >"$mirror/fm-flow-tui.mjs" <<'EOF'
 #!/usr/bin/env bash
@@ -65,7 +65,7 @@ export FAKE_TUI_STDIN="$TMP_ROOT/tui.stdin"
 "$mirror/fm-flow.sh" --no-ci --task alpha-1 >/dev/null 2>&1 ||
   fail "the entry point failed on a healthy collector"
 
-assert_grep "fm-flow-snapshot.v1" "$FAKE_TUI_STDIN" "the first frame was not fed in on stdin"
+assert_grep "fm-flow-snapshot.v2" "$FAKE_TUI_STDIN" "the first frame was not fed in on stdin"
 assert_grep "--watch" "$FAKE_TUI_ARGV" "the viewer was not started in watch mode"
 
 refresh=$(grep -A1 -- '--refresh-cmd' "$FAKE_TUI_ARGV" | tail -1)
@@ -208,7 +208,7 @@ fi
 : >"$FAKE_TUI_ARGV"
 cat >"$mirror/fm-flow-snapshot.sh" <<'EOF'
 #!/usr/bin/env bash
-printf '{"schema":"fm-flow-snapshot.v1","generated_epoch":1,"agents":[]}\n'
+printf '{"schema":"fm-flow-snapshot.v2","generated_epoch":1,"agents":[]}\n'
 EOF
 chmod +x "$mirror/fm-flow-snapshot.sh"
 
