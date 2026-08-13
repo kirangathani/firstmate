@@ -333,7 +333,11 @@ case "$cmd" in
     fi
     # Editing a body triggers no workflow, and the re-verification is designed
     # to be re-run in place; its verifier reads the body live for that reason.
-    echo "next: re-run the base re-verification so it reads the new body:"
+    # ALL jobs, never --failed: the job that reads the body is the one that
+    # already succeeded, so re-running only the failed one would re-read a
+    # verdict taken before this line existed.
+    echo "next: re-run ALL jobs of the base re-verification (not --failed, which would"
+    echo "      reuse the attestation verdict taken before this line existed):"
     echo "  gh run rerun \$(gh run list --repo $PR_REPO_SLUG --workflow 'Base re-verification' --branch <the PR's branch> --limit 1 --json databaseId -q '.[0].databaseId')"
     ;;
 
