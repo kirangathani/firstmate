@@ -170,7 +170,7 @@ EOF
 }
 
 test_the_three_outcomes_render_as_three_distinct_first_lines() {
-  local d out verified nothing could superseded
+  local d out verified nothing could
   # Stated as one assertion in its own right, because the contract is not
   # "each outcome has a sentence" but "no two of them are the same string".
   d=$(shim_dir distinct-verified)
@@ -198,7 +198,41 @@ EOF
   out=$OUT
   could=$(printf '%s\n' "$out" | head -1)
 
-  d=$(shim_dir distinct-superseded)
+  [ "$verified" != "$nothing" ] || fail "verified and nothing-to-verify rendered the same first line: $verified"
+  [ "$verified" != "$could" ] || fail "verified and could-not-verify rendered the same first line: $verified"
+  [ "$nothing" != "$could" ] || fail "nothing-to-verify and could-not-verify rendered the same first line: $nothing"
+  pass "verified, nothing-to-verify and could-not-verify are three distinct rendered outcomes"
+}
+
+test_the_superseded_outcome_renders_as_its_own_first_line() {
+  local d out verified nothing could superseded
+  # The fourth outcome joins the same contract as its own assertion rather than
+  # by rewriting the one above: an authorized override must not be readable as
+  # a run that held, as a run with nothing to do, or as one that could not
+  # decide.
+  d=$(shim_dir fourth-verified)
+  make_owner "$d" 0 <<EOF
+$(summary_line 0 0 0 0 0 40 0 2)
+EOF
+  run_shim "$d" --worktree .
+  verified=$(printf '%s\n' "$OUT" | head -1)
+
+  d=$(shim_dir fourth-nothing)
+  make_owner "$d" 0 <<EOF
+$(summary_line 0 0 0 0 0 40 0 0)
+EOF
+  run_shim "$d" --worktree .
+  nothing=$(printf '%s\n' "$OUT" | head -1)
+
+  d=$(shim_dir fourth-could-not)
+  make_owner "$d" 1 <<EOF
+unexecuted: tests/a.test.sh::x
+$(summary_line 0 0 1 0 0 40 0 0)
+EOF
+  run_shim "$d" --worktree .
+  could=$(printf '%s\n' "$OUT" | head -1)
+
+  d=$(shim_dir fourth-superseded)
   make_owner "$d" 1 <<EOF
 failing: tests/a.test.sh::x
 $(summary_line 0 1 0 0 0 40 0 2)
@@ -207,13 +241,12 @@ EOF
   out=$OUT
   superseded=$(printf '%s\n' "$out" | head -1)
 
-  [ "$verified" != "$nothing" ] || fail "verified and nothing-to-verify rendered the same first line: $verified"
-  [ "$verified" != "$could" ] || fail "verified and could-not-verify rendered the same first line: $verified"
-  [ "$nothing" != "$could" ] || fail "nothing-to-verify and could-not-verify rendered the same first line: $nothing"
+  assert_contains "$out" 'reverify: superseded' \
+    "the fourth outcome must name itself on the first line like the other three"
   [ "$verified" != "$superseded" ] || fail "verified and superseded rendered the same first line: $verified"
   [ "$nothing" != "$superseded" ] || fail "nothing-to-verify and superseded rendered the same first line: $nothing"
   [ "$could" != "$superseded" ] || fail "could-not-verify and superseded rendered the same first line: $could"
-  pass "verified, nothing-to-verify, could-not-verify and superseded are four distinct rendered outcomes"
+  pass "superseded is a fourth rendered outcome, distinct from the other three"
 }
 
 # --- the captain's approvals ------------------------------------------------
@@ -952,6 +985,7 @@ test_the_workflow_provisions_what_the_base_test_files_need() {
 test_executed_files_above_zero_reads_as_verified
 test_zero_executed_files_reads_as_nothing_to_verify_not_as_verified
 test_the_three_outcomes_render_as_three_distinct_first_lines
+test_the_superseded_outcome_renders_as_its_own_first_line
 test_findings_covered_by_the_captains_approvals_read_as_superseded
 test_a_finding_no_approval_covers_still_blocks
 test_an_approval_excuses_only_the_class_it_names
