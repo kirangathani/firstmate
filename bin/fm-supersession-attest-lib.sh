@@ -112,6 +112,7 @@ FM_SUPERSESSION_LINE_PREFIX='fm-supersession:'
 # The Actions secret name a repository holds this attestation's key under.
 # Stated here rather than only in the workflow so the publisher and the
 # workflow cannot drift into two different names.
+# shellcheck disable=SC2034  # read by the publisher and the verifier that source this file
 FM_SUPERSESSION_SECRET_NAME='FM_SUPERSESSION_SECRET'
 
 # base64url without padding, so the token is one whitespace-free field that

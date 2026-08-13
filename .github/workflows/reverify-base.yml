@@ -27,10 +27,29 @@
 # either publishes a verdict or FAILS; none of them can go green having checked
 # nothing.
 #
+# THE CAPTAIN'S APPROVALS reach this check the only way they can: as a signed
+# line in the PR body, verified in a job of its own. A branch may deliberately
+# supersede behaviour the base asserts, and bin/fm-pr-merge.sh honours that from
+# a private record - which a GitHub runner cannot read, so this check would
+# otherwise report the same findings and stay red with nothing the branch could
+# push to fix it. bin/fm-supersession-verify.sh decides what the captain signed;
+# bin/fm-reverify-base.sh decides what that excuses. A finding no approval
+# covers still blocks.
+#
+# WHY THAT VERIFICATION IS ITS OWN JOB, checked out at the BASE. This job runs
+# the branch's own scripts by construction - that is what re-verification means
+# - so a secret in ITS environment would be a secret every PR could read. The
+# verifying job runs the BASE's copy of the verifier and nothing of the PR's,
+# exactly as .github/workflows/ci.yml's waiver job does, and hands this job only
+# its non-secret verdict. Neither closes the broader path where a PR edits this
+# workflow file; that is inherent to pull_request events and is mitigated by
+# branch protection.
+#
 # NEITHER SCRIPT'S WORK IS RE-SPELLED HERE. bin/fm-assert-tests-kept.sh is the
 # single owner of which of the base's test files still need running,
-# bin/fm-reverify-base.sh renders its verdict, and bin/fm-reverify-premise.sh
-# establishes the premise the skip rests on. This file wires them together and
+# bin/fm-reverify-base.sh renders its verdict, bin/fm-reverify-premise.sh
+# establishes the premise the skip rests on, and bin/fm-supersession-verify.sh
+# establishes what the captain approved. This file wires them together and
 # decides nothing.
 name: Base re-verification
 
@@ -43,11 +62,64 @@ permissions:
   # The premise is this head's own behaviour-suite result, read from its check
   # runs. Nothing here writes.
   checks: read
+  # The captain's attestation is read from the PR body at job time, never from
+  # the event payload: an approval always arrives as an edit to an open PR, and
+  # editing a body triggers no workflow, so the body a re-run replays predates
+  # it (bin/fm-supersession-verify.sh owns that reasoning).
+  pull-requests: read
 
 jobs:
+  supersession:
+    # Cheap (a checkout, one API read and at most one HMAC) and always exits 0,
+    # whatever the verdict, so the required job below is never skipped by a
+    # failed dependency. A PR with no attestation - almost every PR - passes
+    # through it silently.
+    name: Supersession attestation
+    runs-on: ubuntu-latest
+    outputs:
+      superseded: ${{ steps.verify.outputs.superseded }}
+      entries: ${{ steps.verify.outputs.entries }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The BASE's verifier and libraries, never the PR's. A pull_request
+          # build otherwise runs PR-authored code, which would let a PR replace
+          # the script that decides whether its own findings may be excused -
+          # and it holds the secret.
+          ref: ${{ github.event.pull_request.base.sha }}
+      - name: Verify the captain's supersession attestation
+        id: verify
+        env:
+          FM_SUPERSESSION_SECRET: ${{ secrets.FM_SUPERSESSION_SECRET }}
+          FM_SUPERSESSION_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          FM_SUPERSESSION_REPO: ${{ github.repository }}
+          FM_SUPERSESSION_PR: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # A base that predates this check carries no verifier at all, so this
+          # reports nothing-approved rather than exiting 127 and failing the
+          # job. That is the fail-closed verdict, not a workaround: a base with
+          # no verifier can honour no approval, so "everything blocks" is
+          # correct. It self-heals, because every base from this change onwards
+          # has the verifier.
+          if [ ! -x bin/fm-supersession-verify.sh ]; then
+            echo "::warning::the base branch carries no supersession verifier, so no captain approval can be honoured here; every base-assertion finding blocks"
+            echo "superseded=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bin/fm-supersession-verify.sh
+
   reverify-base:
     name: Base assertions re-verified
     runs-on: ubuntu-latest
+    needs: supersession
+    # A required check that is skipped never reports, and branch protection then
+    # waits on it forever. `always()` is what keeps the dependency above from
+    # being able to cause that: this job runs and reports even if that job
+    # failed outright, in which case it simply receives no approvals and every
+    # finding blocks, exactly as before this check existed.
+    if: always()
     # Two waits in series: up to ~25 minutes for this head's behaviour suite to
     # conclude (the premise), then the re-verification itself. Its worst case is
     # a PR that rewrites many of the base's test files, since each is run twice -
@@ -127,6 +199,11 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Empty unless the job above verified the captain's signature over
+          # this exact head. Through env rather than interpolated into the
+          # command, matching ci.yml's rule for every value that comes off the
+          # event payload.
+          FM_SUPERSESSION_ENTRIES: ${{ needs.supersession.outputs.entries }}
         run: |
           set -eu
           bin/fm-reverify-base.sh \

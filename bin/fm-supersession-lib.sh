@@ -90,11 +90,15 @@ fm_supersession_entry_covers() {
     return 1
   fi
   case "$sel" in
-    id) [ "$value" = "$ident" ] ;;
-    # shellcheck disable=SC2053  # unquoted glob match is the documented `ids:` batch mechanism
-    ids) [[ "$ident" == $value ]] ;;
+    id) [ "$value" = "$ident" ]; return $? ;;
+    ids) ;;
     *) return 1 ;;
   esac
+  # The batch form's value is a GLOB matched against the identifier, so the
+  # pattern side is deliberately unquoted; that is the documented `ids:`
+  # mechanism rather than an oversight.
+  # shellcheck disable=SC2053
+  [[ "$ident" == $value ]]
 }
 
 # fm_supersession_entries_extract <record-file> <project>
