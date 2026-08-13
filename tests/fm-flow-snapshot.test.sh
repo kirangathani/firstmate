@@ -268,7 +268,7 @@ assert_contains "$got" "no longer exists" "the omission gave no reason"
 # in neither the agent list, nor `omitted`, nor `out_of_scope`.
 got=$(jq -r '.omitted[] | select(.id=="gone-scout-d4") | .kind' "$OUT")
 [ "$got" = "scout" ] || fail "a held-back non-ship record lost its kind: $got"
-pass "a record whose endpoint is gone is omitted, whatever its kind, and never drawn"
+pass "a task whose recorded endpoint is gone is named in omitted, not drawn as an agent"
 
 # `out_of_scope` was the field naming live workers the view refused to draw.
 # The view draws them, so the field is gone rather than left empty: an empty

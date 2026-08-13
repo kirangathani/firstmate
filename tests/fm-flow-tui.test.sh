@@ -184,7 +184,7 @@ assert_contains "$out" "fm-flow-snapshot.v2" "the expected schema was not named"
 # what makes the two ship together or not at all.
 out=$(printf '{"schema":"fm-flow-snapshot.v1","agents":[]}' | node "$TUI" 2>&1); rc=$?
 expect_code 1 $rc "a v1 document must be refused, not rendered"
-pass "refuses input that is not a snapshot it understands, the superseded schema included"
+pass "refuses input that is not a snapshot it understands"
 
 # --- the frame fits the terminal it is drawn on -----------------------------
 #
@@ -405,7 +405,7 @@ eq(scrollWindow([], 40, 0, 0).count, 0, "an empty fleet has no window");
 process.exit(bad ? 1 : 0);
 JS
 node "$TMP_ROOT/scroll.mjs" "$TUI" || fail "the scroll rule moved the window off an edge"
-pass "the window moves only when the selector would otherwise leave it, at either block height"
+pass "the window moves only when the selector would otherwise leave it"
 
 # --- records with no worker are not agents -----------------------------------
 #
