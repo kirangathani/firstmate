@@ -1,6 +1,6 @@
 # The fleet pipeline view
 
-A captain-facing instrument that renders every agent's no-mistakes pipeline as one horizontal row per agent.
+A captain-facing instrument that renders every live worker as one row: a full horizontal no-mistakes pipeline for a ship task, and a compact identity-and-state row for a worker that runs no pipeline.
 It is not part of the supervision loop: the captain runs it as a plain command, and firstmate never opens it.
 
 `bin/fm-nm-flow.sh` remains the single-task detail view, unchanged; the fleet view now has a key that drills into it rather than leaving the captain to know its name.
@@ -91,7 +91,7 @@ The window scrolls only when the selector is already on the top row and goes up,
 
 That rule needs the window position to persist between frames, and it did not: the viewer passed no `top` at all, so every frame recomputed one from the selection alone against a default of zero.
 The effect is that the selector is pinned to the bottom row of the window once the fleet is longer than the window, and scrolling back up drags the window with it row for row.
-`resolveTop()` now owns the rule and the viewer holds its result between frames.
+`scrollWindow()` now owns the rule and the viewer holds its `top` between frames.
 
 ## Resolving which pipeline run belongs to which agent
 
@@ -195,9 +195,59 @@ The record is durable state that other tools read, this collector is read-only b
 The leftover records are worth fixing in the teardown path that creates them; that is separate work and does not block the view from telling the truth today.
 
 Nothing is dropped silently.
-A task whose endpoint no longer resolves moves to `omitted`, with its window and the reason, and the header states the count.
-A live worker this view has no row for - a scout or a secondmate, neither of which runs a pipeline - is listed in `out_of_scope` and counted in the header too, because the captain reconciles this list against the windows in front of them and a live worker that is simply absent is the same failure as a dead one that is present.
+A task whose endpoint no longer resolves moves to `omitted`, with its kind, its window, and the reason, and the header states the count.
 `--include-dead` puts the held-back records back, as ordinary agents carrying `endpoint_alive: false`, which the renderer marks `worker gone`.
+
+## Liveness decides who is drawn; kind decides only what they carry
+
+Liveness is the whole membership test, and it was not always.
+The first version took the agent list to be the SHIP tasks with a live worker, and filtered every other live worker - a scout, a secondmate - into an `out_of_scope` list the renderer drew as a single dim count.
+On the captain's run that produced a header reading `0 agents` and `1 running no pipeline` with `no agents in flight` beneath it, while a scout was demonstrably alive in a window in front of him.
+The view read as broken.
+It was not: it was telling the truth about a set it had defined too narrowly, and a view whose body is empty while workers are running is indistinguishable from one that has failed.
+
+The original reasoning behind the filter was sound and is preserved.
+Only a ship task has a no-mistakes pipeline, so drawing a scout under the nine stage boxes would be nine permanently empty boxes - an invented journey, which is a worse lie than the omission was.
+The mistake was concluding from that that the worker should not be drawn at all.
+
+So kind decides the SHAPE of the row and nothing else:
+
+| | drawn as | carries |
+|---|---|---|
+| `pipeline: true` | the full nine-cell pipeline block, seven rows | the run, its steps, its GitHub checks, its testing skips |
+| `pipeline: false` | a compact block, three rows: head, state, blank | the worker's kind, its window, and one `state` object |
+
+`pipeline` is a field the snapshot STATES rather than a kind string the renderer matches on, so a kind this renderer has never heard of still lands on the right side of the question.
+A record with the field missing keeps its boxes: the failure in that direction is a scout drawn too richly, and in the other it is a ship task silently stripped of the pipeline the view exists to show.
+
+Because every live worker is now an agent, `N agents` counts every drawn row without a companion count to reconcile, and `no agents in flight` prints only when nothing at all is live.
+The header still names how many of them run no pipeline, so `N agents` cannot be misread as N pipelines.
+
+### The compact row's state is read, never derived
+
+`bin/fm-crew-state.sh` already owns reconciling a crew's current state out of its run step, its pane, and its append-only status log, and that reconciliation is not trivial - `state/<id>.status` is a wake-EVENT log whose last line goes stale the moment a crew resumes.
+The collector therefore calls that reader and passes its answer through as `state`, verbatim, split into its stated fields.
+A second reading in this view would be a second answer to a question the fleet has one owner for, and the two would eventually disagree about the same worker.
+
+A read that fails or times out reports `state.ok: false`, and the row says `state not read`.
+It never falls back to the status log's last line.
+
+### A quiet second mate is healthy, and must not be painted as a fault
+
+`AGENTS.md` section 8 is explicit: a secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than on its pane being busy.
+`bin/fm-crew-state.sh` encodes the same rule by skipping the pane busy-check for `kind=secondmate`, so a secondmate with no outstanding status event has no state source at all and reads `unknown` **by construction**.
+
+`unknown` is magenta everywhere else in this view, which is correct where it means nobody could find out and wrong here where it means there is nothing to report.
+So a secondmate reading `unknown` renders the word `idle` in dim, and its detail is dropped with it: `no current-state source available` is the reason that read is unknown, and printing it beside `idle` reads as the explanation for an alarm that is not there.
+Every other state a secondmate can report - `blocked`, `failed`, `parked` - keeps its own colour, because those come from its status log and are real.
+
+### Blocks are two heights, so the window is solved once
+
+A compact block is three rows and a pipeline block is seven, so how many blocks fit depends on which one is first.
+Dividing the available rows by a single constant would answer for a frame that is not being drawn, and that disagreement is not cosmetic: an over-tall frame scrolls the terminal and desynchronises every absolute cursor address in the repaint.
+
+`scrollWindow(heights, avail, top, sel)` therefore returns the window start and the block count together, greedily fitting heights from `top` in the same shape `layout()` already uses for the horizontal cell window.
+The captain's scroll rule is unchanged and is the three clauses in that function: pull back to the selector when it is above the window, never strand the window past the point where the whole remainder fits, and advance only while the selector would otherwise fall off the bottom.
 
 ## A skip-flagged task is drawn as the journey it actually takes
 
@@ -266,12 +316,17 @@ Two mechanics make it work:
 
 ## Wire format
 
-Schema id `fm-flow-snapshot.v1`, emitted by `bin/fm-flow-snapshot.sh --json`.
+Schema id `fm-flow-snapshot.v2`, emitted by `bin/fm-flow-snapshot.sh --json`.
 Exact fields, flags, and environment knobs are owned by that script's header and `--help`; this section owns the shape and the guarantees.
+
+The bump from `v1` is a genuine break in both directions, which is why it is a bump rather than an additive change.
+`agents` changed meaning - it was the live SHIP tasks and is now every live worker - so a `v1` consumer reading a `v2` document would draw pipeline boxes for workers that have none.
+`out_of_scope` is gone: it existed to name the live workers `agents` excluded, and `agents` now excludes none, so an empty array left in place would be a field whose emptiness meant the opposite of what it used to.
+`bin/fm-flow-tui.mjs` refuses any other schema id outright, so the two ship together or neither runs.
 
 ```json
 {
-  "schema": "fm-flow-snapshot.v1",
+  "schema": "fm-flow-snapshot.v2",
   "generated": "2026-08-08T16:30:00Z",
   "generated_epoch": 1786000000,
   "fm_home": "/home/kiran/projects/gits/firstmate",
@@ -284,6 +339,8 @@ Exact fields, flags, and environment knobs are owned by that script's header and
       "window": "firstmate:fm-fm-eager-dispatch-e2",
       "kind": "ship",
       "mode": "no-mistakes",
+      "pipeline": true,
+      "state": null,
       "endpoint_alive": true,
       "skips": { "local": false, "ci": false },
       "pr": { "url": "https://github.com/kirangathani/firstmate/pull/25", "number": 25 },
@@ -324,24 +381,49 @@ Exact fields, flags, and environment knobs are owned by that script's header and
           "firstmate is registered as a direct-PR project, whose PRs are raised without the pipeline by design"
         ]
       }
+    },
+    {
+      "id": "nm-ci-duplication-of-effort",
+      "branch": "fm/nm-ci-duplication-of-effort",
+      "project": "/home/kiran/projects/gits/firstmate",
+      "worktree": "/home/kiran/.treehouse/firstmate-16c429/5/firstmate",
+      "window": "firstmate:fm-nm-ci-duplication-of-effort",
+      "kind": "scout",
+      "mode": "local-only",
+      "pipeline": false,
+      "state": {
+        "ok": true, "value": "working", "source": "pane",
+        "detail": "harness busy", "reason": ""
+      },
+      "endpoint_alive": true,
+      "skips": { "local": false, "ci": false },
+      "pr": { "url": null, "number": null },
+      "collection": { "ok": true, "reason": "this worker runs no pipeline", "at": "2026-08-08T16:30:00Z", "epoch": 1786000000 },
+      "run": { "present": false, "id": "", "status": "", "db_updated_epoch": 0, "db_age_seconds": null },
+      "steps": [],
+      "active_steps": [],
+      "ci": { "collection": { "ok": false, "reason": "this worker opens no PR" }, "checks": [], "total": 0 }
     }
   ],
   "omitted": [
     {
       "id": "fm-arm-lock-gate-q4",
+      "kind": "ship",
       "window": "firstmate:fm-fm-arm-lock-gate-q4",
       "reason": "recorded window no longer exists"
     }
-  ],
-  "out_of_scope": [
-    { "id": "nm-ci-duplication-of-effort", "kind": "scout", "window": "firstmate:fm-nm-ci-duplication-of-effort" }
   ]
 }
 ```
 
 Guarantees the renderer is entitled to rely on:
 
-- `steps` carries all nine no-mistakes steps in pipeline order whenever `collection.ok` is true, using the tool's own step names.
+- `agents` is every task whose recorded endpoint resolved at collection time, whatever its kind, ordered `pipeline: true` first so the wire order is the draw order.
+- `pipeline` is always present and always a boolean.
+  When it is false the agent carries `state` and empty `steps`, `active_steps` and `ci.checks`; when it is true it carries `state: null` and the pipeline fields below.
+- `state` is `bin/fm-crew-state.sh`'s answer, split into its own stated fields and otherwise passed through verbatim.
+  `state.ok` false means that read failed or timed out, with `state.reason` saying which; it never falls back to the status log's last line, which is a wake event and not a current state.
+- `steps` carries all nine no-mistakes steps in pipeline order whenever `collection.ok` is true AND `pipeline` is true, using the tool's own step names.
   Folding `push` and `pr` into one box is a rendering decision and is not done here.
 - Step `status` strings are passed through verbatim, never mapped.
   Mapping a status onto one of the five display states is the renderer's job and is asserted exhaustively in its own tests, so a status this script has never seen still reaches the renderer intact rather than being flattened here.
@@ -351,8 +433,7 @@ Guarantees the renderer is entitled to rely on:
 - `ci.collection` is separate from the agent's `collection`, because a GitHub read can fail while the local read succeeds.
 - `run.present` false means no pipeline run exists for that branch, which is the ordinary state of a task that has not yet started validating.
 - Every entry of `agents` has a recorded endpoint that resolved at collection time, unless `--include-dead` was passed.
-  `omitted` names every task held back for that reason, and `out_of_scope` names every live worker this view has no row for.
-  Both are always present, empty when there is nothing to report.
+  `omitted` names every task held back for that reason, of any kind, and is always present and empty when there is nothing to report.
 - `ci.passed`, `ci.failed`, `ci.pending`, `ci.skipped` and `ci.excused` partition `ci.checks`, and their sum is always `ci.total`.
 - `skips` reports the captain's testing skips as the task's own `state/<id>.meta` records them, read through `bin/fm-testing-skip-lib.sh`.
   It is a report of what the record says, never an authorization: the flag line alone is reachable by a worker, and the signature beside it is what grants anything.
