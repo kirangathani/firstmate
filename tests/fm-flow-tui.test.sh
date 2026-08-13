@@ -472,6 +472,17 @@ out=$(render "$(snap '[]')" | sed 's/\x1b\[[0-9;]*m//g')
 assert_contains "$out" "no agents in flight" "a genuinely empty fleet did not say so"
 pass "the empty-fleet line prints only when nothing at all is live"
 
+# The stage-window segment describes cells being DRAWN. A fleet of scouts alone
+# draws none, so claiming to be showing a window of them is the same class of
+# untruth as the count this whole section exists for.
+out=$(printf '%s' "$(snap "[$SCOUT]")" | node "$TUI" --cols 80 --rows 24 --tick 0 |
+  sed 's/\x1b\[[0-9;]*m//g')
+assert_not_contains "$out" "of 9" "a frame with no stage boxes named a stage window"
+out=$(printf '%s' "$MIXED" | node "$TUI" --cols 80 --rows 40 --tick 0 |
+  sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$out" "of 9" "a narrowed frame that does draw stages stopped naming its window"
+pass "the stage window is named only when stage boxes are on screen"
+
 # The original concern, kept honest: a worker with no pipeline must not be given
 # pipeline boxes. The stage labels and the box borders are the observable.
 out=$(render "$(snap "[$SCOUT]")" | sed 's/\x1b\[[0-9;]*m//g')

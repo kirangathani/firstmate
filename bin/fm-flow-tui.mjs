@@ -864,6 +864,12 @@ export function render(snap, opts) {
   // PIPELINES: the workers without one are named so the two numbers can be told
   // apart at a glance rather than by counting boxes down the frame.
   const flat = agents.filter((a) => !hasPipeline(a)).length;
+  // Whether any stage box is on screen at all. The stage-window segment below
+  // describes cells that are being DRAWN, so a fleet of scouts alone must not
+  // carry `stages 1-6 of 9`: there are no stages in that frame to be showing a
+  // window of, and a header naming one is the same class of untruth as the
+  // count this view was reported for.
+  const wide = agents.some(hasPipeline);
   out.push(headerLine([
     { s: white("fleet pipeline"), pri: 0 },
     { s: dim(`${agents.length} agents`), pri: 3 },
@@ -871,7 +877,7 @@ export function render(snap, opts) {
     { s: broken ? magenta(`${broken} unreadable`) : dim("0 unreadable"), pri: broken ? 1 : 5 },
     { s: hidden ? dim(`${hidden} hidden, worker gone`) : "", pri: 3 },
     { s: flat ? dim(`${flat} without a pipeline`) : "", pri: 3 },
-    { s: lay.count < NCELLS ? yellow(`stages ${lay.first + 1}-${lay.first + lay.count} of ${NCELLS}`) : "", pri: 1 },
+    { s: wide && lay.count < NCELLS ? yellow(`stages ${lay.first + 1}-${lay.first + lay.count} of ${NCELLS}`) : "", pri: 1 },
     { s: dim(`updated ${ageSec}s ago`), pri: 2 },
     // Belongs beside the age, not in the key hints: an age that keeps climbing
     // while nothing on screen changes needs its reason on the same line.
@@ -881,7 +887,6 @@ export function render(snap, opts) {
   // The rule spans the pipeline only when a pipeline is on screen. A fleet of
   // scouts alone draws nothing that wide, and a rule reaching past every row
   // beneath it implies content that is not there.
-  const wide = agents.some(hasPipeline);
   const ruleW = Math.max(1, Math.min(cols, agents.length ? (wide ? lay.width : 60) : 40));
   const rule = dim("─".repeat(ruleW));
   out.push(rule);
