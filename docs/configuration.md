@@ -160,7 +160,7 @@ A single shared secret would instead have handed over every repository at once a
 The dispatch token keeps using the master, so a stolen repository key cannot mint one either.
 
 The master is this home's captain-held signing key, and CI waivers were its first use rather than its only one.
-The per-task monitoring exemption (`bin/fm-monitor.sh --exempt`) signs under its own payload domain with the same master, for the same reason: without a key there is a string to type or a line to append that grants the authorization, and with one there is not.
+The per-task monitoring exemption (`bin/fm-monitor.sh --exempt`) and the supersession attestation ("The supersession attestation secret" below) both sign under their own payload domains with the same master, for the same reason: without a key there is a string to type or a line to append that grants the authorization, and with one there is not.
 `bin/fm-ci-waiver-lib.sh` owns every domain, and each is separated so a token minted for one can never be replayed as the other.
 A home with no master can therefore neither waive CI nor exempt a task from monitoring; both refuse rather than falling back to an unsigned marker.
 
@@ -195,6 +195,28 @@ When the checked-out base predates the waiver and carries no verifier at all, bo
 
 A repository that never publishes the secret leaves that `check` job permanently red for every PR the pipeline did not raise, which firstmate itself authorizes in two ordinary cases, so the remedy for the merge is firstmate-side rather than CI-side.
 `bin/fm-pr-merge.sh` excuses that one check by exact name when the task carries a signed testing skip or the project is registered as `direct-PR`, refuses every other failing or unfinished check unchanged, and discloses each such merge loudly; that script's header owns the full contract, including why a rename of the job fails towards refusing.
+
+## The supersession attestation secret (FM_SUPERSESSION_SECRET)
+
+A captain-approved test-assertion supersession lives in `data/supersessions/<project>.md`, which is captain-private and gitignored, so `bin/fm-pr-merge.sh` can honour it and CI cannot see it at all.
+That asymmetry made the required `Base assertions re-verified` check unpassable for an approved override: it re-runs the same base assertions on a runner, reports the same findings, and stays red with nothing the branch can push to fix it, because the branch is not what is wrong.
+This section owns the secret's configuration and provisioning; `bin/fm-supersession-attest-lib.sh` owns the signed payload, the entry token, and the published line's grammar, `bin/fm-supersession-verify.sh` owns the verdict rules, and `bin/fm-supersession-attest.sh` owns the signing and publishing commands.
+
+The signing key is the same master at `config/ci-waiver-secret`, so a home that has run `bin/fm-ci-waiver.sh init` needs no second key.
+What each repository receives is a key derived for that repository AND for this purpose alone, `HMAC(master, "fm-supersession-repo.v1", <owner/repo>)`, published as the Actions repository secret `FM_SUPERSESSION_SECRET` by `bin/fm-supersession-attest.sh publish <owner/repo>`.
+It is deliberately not that repository's `FM_CI_WAIVER_SECRET`: the waiver key skips a PR's entire test suite while this one only excuses findings the captain has already approved by name, so two keys mean a theft of this one cannot escalate into that one.
+
+Until a repository holds the secret the feature is inert there, in the safe direction: an attestation cannot be verified, so the verifier refuses it loudly and every base-assertion finding blocks, which is exactly the behaviour without this feature at all.
+Enrol a repository once with `publish`; there is nothing else to configure, and a repository may hold either secret, both, or neither.
+
+`bin/fm-supersession-attest.sh attest <task-id>` is the routine form: it reads the PR's current head commit from GitHub, signs that project's approvals for it, appends the one line to the PR body, and prints the command that re-runs the check.
+The authority is the approval record plus the master key, and no dispatch flag gates it, because a supersession can only be decided after the gate has reported which assertion the branch supersedes; that script's header owns the full reasoning, including why a worker can produce neither half.
+What the line publishes is each approved entry's matching half - its identifier or glob and the finding class it excuses - and never the captain's stated reason or the approval date, which stay in the private record.
+
+In [`.github/workflows/reverify-base.yml`](../.github/workflows/reverify-base.yml) the verification is the required job's FIRST step, run from a separate checkout of the base ref, exactly as `ci.yml`'s `ci-waiver` job runs the base's verifier and for the same reason.
+That job runs the branch's own scripts by construction, so two properties keep the secret out of their reach: the verifier is the base's copy, and it runs before any step that executes the branch's scripts, while a step's `env:` reaches only that step.
+It is a step rather than a second job because a required job that `needs:` another is skipped when that one fails, and a skipped required check never reports at all; keeping it in one job removes that hazard instead of repairing it with a job-level condition.
+The step reads the PR body live from the API rather than from the event payload, because an approval always arrives as an edit to an open PR and a re-run replays the payload the PR had before it.
 
 ## Testing skips (bin/fm-spawn.sh --skip-testing / --local-skip / --ci-skip / --all-testing-skip)
 

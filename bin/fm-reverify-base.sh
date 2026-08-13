@@ -26,7 +26,7 @@
 # sets of changes. Merging the moved base forward and re-verifying remains the
 # complete answer; this is the fast, cheap first read, never its replacement.
 #
-# THREE OUTCOMES, NEVER TWO. A check that renders "nothing was left to run" the
+# FOUR OUTCOMES, NEVER TWO. A check that renders "nothing was left to run" the
 # same way as "everything ran and held" turns a never-evaluated result into a
 # pass, so the first stdout line is always exactly one of:
 #   reverify: verified          the base's assertions were RE-RUN against this
@@ -38,6 +38,12 @@
 #                               verified-green suite already ran, so no
 #                               assertion was left for this check to re-run
 #                               (executed-files = 0, no findings). Exit 0.
+#   reverify: superseded        the base's assertions did NOT all hold, and
+#                               every finding is one the CAPTAIN has approved
+#                               the branch superseding - never a pass over
+#                               those assertions, an authorized override of
+#                               them. Exit 0. See "The captain's approvals"
+#                               below.
 #   reverify: not-verified      the base's assertions did NOT hold: an
 #                               identifier the base had is missing from the
 #                               branch, or one of its assertions failed against
@@ -46,6 +52,28 @@
 #                               a required check that goes green when it could
 #                               not run is the exact false green this whole gate
 #                               family exists to eliminate.
+#
+# THE CAPTAIN'S APPROVALS. A branch may deliberately supersede behaviour the
+# base asserts, and that is a product decision only the captain makes. At merge
+# time bin/fm-pr-merge.sh reads the approval from a private record and excuses
+# exactly the identifiers it names. This check runs on a GitHub runner that
+# cannot see that record, so without a way to carry the approval here it would
+# report the same findings and stay red forever, with nothing the branch could
+# push to fix it - the approval, not the branch, being what CI cannot read.
+#   - FM_SUPERSESSION_ENTRIES carries the approvals, as the canonical entry
+#     lines bin/fm-supersession-lib.sh owns. It is set ONLY from the verified
+#     output of bin/fm-supersession-verify.sh, which is what checks the
+#     captain's signature; this script trusts the caller for that and checks
+#     everything else, so an unsigned approval never reaches it.
+#   - Each finding is tested through the same matcher the merge gate uses, so an
+#     identifier is excused here exactly when it is excused there.
+#   - A finding NO entry covers still blocks, in its own class, exactly as
+#     today. The excuse is never blanket.
+#   - Every excused finding is printed as `superseded: <ident> (<class>)`, so a
+#     green check never hides which assertions were overridden.
+#   - Entries that cannot be read are could-not-verify, never "no approvals":
+#     the difference between "nothing was approved" and "the approval is
+#     unreadable" is exactly the difference this file exists to keep.
 #
 # EVERY WAY IT CAN FAIL TO EVALUATE IS could-not-verify, never a pass:
 #   - the owner refused outright (its exit 2: bad usage, missing worktree,
@@ -78,6 +106,8 @@
 #   - `reverify: <outcome>` always, as the FIRST line.
 #   - `reverify-detail: <sentence>` always, as the second: the outcome in words,
 #     including the counts it was decided from.
+#   - `superseded: <file>::<name> (<class>)` per finding a captain-approved
+#     entry excused, after the detail and before the owner's own output.
 #   - the owner's own stdout verbatim after that, so every finding stays visible
 #     in the same log. The owner's stderr is not captured and reaches the
 #     caller's stderr untouched.
@@ -129,6 +159,8 @@ cleanup() { rm -rf -- "$TMP_DIR"; }
 trap cleanup EXIT
 
 OUT="$TMP_DIR/out"
+EXCUSED_OUT="$TMP_DIR/superseded"
+: > "$EXCUSED_OUT"
 RC=0
 "$OWNER" "$@" > "$OUT" || RC=$?
 
@@ -150,6 +182,9 @@ verdict() {  # <outcome> <sentence>
   local outcome=$1 sentence=$2
   printf 'reverify: %s\n' "$outcome"
   printf 'reverify-detail: %s\n' "$sentence"
+  # Before the owner's own output, so what was OVERRIDDEN is read next to the
+  # outcome rather than found among the findings it explains.
+  cat "$EXCUSED_OUT"
   cat "$OUT"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
@@ -158,7 +193,7 @@ verdict() {  # <outcome> <sentence>
     } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
   fi
   case "$outcome" in
-    verified|nothing-to-verify) exit 0 ;;
+    verified|nothing-to-verify|superseded) exit 0 ;;
     *) exit 1 ;;
   esac
 }
@@ -218,15 +253,101 @@ if [ "$RC" -eq 1 ] && [ "$FINDINGS" -eq 0 ]; then
     "the base-assertion check exited 1 while its own summary reports no blocking finding; the two disagree, so neither can be trusted"
 fi
 
+# --- the captain's approvals (header contract) --------------------------------
+# Applied AFTER the two consistency checks above, which are about whether the
+# owner's own two statements agree and must be judged on everything it reported,
+# and BEFORE any verdict, which is decided on what is left UNEXCUSED.
+EXCUSED=0
+if [ -n "${FM_SUPERSESSION_ENTRIES-}" ] && [ "$FINDINGS" -ne 0 ]; then
+  MATCHER="$SCRIPT_DIR/fm-supersession-lib.sh"
+  if [ ! -f "$MATCHER" ]; then
+    verdict could-not-verify \
+      "captain-approved supersessions were supplied but the matcher $MATCHER is missing, so which findings they cover cannot be decided; refusing rather than excusing none or all of them"
+  fi
+  # shellcheck source=bin/fm-supersession-lib.sh
+  # shellcheck disable=SC1090,SC1091
+  . "$MATCHER" || verdict could-not-verify \
+    "captain-approved supersessions were supplied but $MATCHER could not be read, so which findings they cover cannot be decided"
+
+  ENTRIES="$TMP_DIR/entries"
+  printf '%s\n' "$FM_SUPERSESSION_ENTRIES" | grep -v '^[[:space:]]*$' > "$ENTRIES" || true
+  while IFS= read -r entry_line || [ -n "$entry_line" ]; do
+    [ -n "$entry_line" ] || continue
+    fm_supersession_entry_line_valid "$entry_line" && continue
+    verdict could-not-verify \
+      "a supplied captain-approved supersession entry is not one this fleet's matcher can read, so what was approved cannot be established; refusing rather than acting on a partial reading of it"
+  done < "$ENTRIES"
+  if [ ! -s "$ENTRIES" ]; then
+    verdict could-not-verify \
+      "captain-approved supersessions were supplied but hold no entry at all, so what was approved cannot be established"
+  fi
+
+  # Every finding line is reclassified as excused or still-counted. The counts
+  # are then REPLACED by the unexcused ones, so every verdict below is decided
+  # on what the captain has not approved.
+  u_missing=0
+  u_failing=0
+  u_unexec=0
+  u_unstable=0
+  parsed=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      'missing: '*) finding_class=missing ; ident=${line#missing: } ;;
+      'failing: '*) finding_class=failing ; ident=${line#failing: } ;;
+      'unexecuted: '*) finding_class=unexecuted ; ident=${line#unexecuted: } ;;
+      'unstable: '*) finding_class=unstable ; ident=${line#unstable: } ;;
+      *) continue ;;
+    esac
+    parsed=$((parsed + 1))
+    if fm_supersession_covered "$ENTRIES" "$ident" "$finding_class"; then
+      EXCUSED=$((EXCUSED + 1))
+      printf 'superseded: %s (%s)\n' "$ident" "$finding_class" >> "$EXCUSED_OUT"
+      continue
+    fi
+    case "$finding_class" in
+      missing) u_missing=$((u_missing + 1)) ;;
+      failing) u_failing=$((u_failing + 1)) ;;
+      unexecuted) u_unexec=$((u_unexec + 1)) ;;
+      unstable) u_unstable=$((u_unstable + 1)) ;;
+    esac
+  done < "$OUT"
+  # The summary counts and the finding lines are two statements about the same
+  # run, and the excusal is applied per LINE. If the lines do not account for
+  # every counted finding, a finding could be excused by a line that is not
+  # there, so neither reading can be trusted.
+  if [ "$parsed" -ne "$FINDINGS" ]; then
+    : > "$EXCUSED_OUT"
+    verdict could-not-verify \
+      "the base-assertion check's summary counts $FINDINGS blocking finding(s) but its output holds $parsed finding line(s), so a captain-approved supersession cannot be applied to them one by one"
+  fi
+  MISSING=$u_missing
+  FAILING=$u_failing
+  UNEXEC=$u_unexec
+  UNSTABLE=$u_unstable
+  FINDINGS=$((MISSING + FAILING + UNEXEC + UNSTABLE))
+fi
+
 # A genuine regression outranks an unverifiable one: it is the actionable
 # statement, and the sentence still names the unverifiable half.
+# Named in every sentence below once anything was excused, so a reader can never
+# take a count as "this is all the check found".
+EXCUSED_NOTE=
+if [ "$EXCUSED" -ne 0 ]; then
+  EXCUSED_NOTE=" ($EXCUSED further finding(s) are covered by captain-approved supersessions and are not counted here)"
+fi
+
 if [ "$((MISSING + FAILING))" -ne 0 ]; then
   verdict not-verified \
-    "the base's assertions do not hold against this branch: $MISSING identifier(s) the base has are missing from it and $FAILING of the base's assertion(s) failed against its code (also unverifiable: unexecuted=$UNEXEC unstable=$UNSTABLE)"
+    "the base's assertions do not hold against this branch: $MISSING identifier(s) the base has are missing from it and $FAILING of the base's assertion(s) failed against its code (also unverifiable: unexecuted=$UNEXEC unstable=$UNSTABLE)$EXCUSED_NOTE"
 fi
 if [ "$((UNEXEC + UNSTABLE))" -ne 0 ]; then
   verdict could-not-verify \
-    "$UNEXEC of the base's assertion(s) could not be executed here at all and $UNSTABLE could not be compared because the base's own test named them differently on two runs; neither is a pass"
+    "$UNEXEC of the base's assertion(s) could not be executed here at all and $UNSTABLE could not be compared because the base's own test named them differently on two runs; neither is a pass$EXCUSED_NOTE"
+fi
+
+if [ "$EXCUSED" -ne 0 ]; then
+  verdict superseded \
+    "the base's assertions do not all hold against this branch, and every one of the $EXCUSED finding(s) is covered by a captain-approved supersession carried by a signature verified for this exact commit (named above); nothing else was left unexplained, $EXECUTED base test file(s) were re-run, and the approvals' stated reasons stay in the fleet's private record"
 fi
 
 if [ "$EXECUTED" -eq 0 ]; then

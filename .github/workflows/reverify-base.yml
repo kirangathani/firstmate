@@ -27,10 +27,44 @@
 # either publishes a verdict or FAILS; none of them can go green having checked
 # nothing.
 #
+# THE CAPTAIN'S APPROVALS reach this check the only way they can: as a signed
+# line in the PR body, verified in a job of its own. A branch may deliberately
+# supersede behaviour the base asserts, and bin/fm-pr-merge.sh honours that from
+# a private record - which a GitHub runner cannot read, so this check would
+# otherwise report the same findings and stay red with nothing the branch could
+# push to fix it. bin/fm-supersession-verify.sh decides what the captain signed;
+# bin/fm-reverify-base.sh decides what that excuses. A finding no approval
+# covers still blocks.
+#
+# WHY THE VERIFICATION IS THE FIRST STEP, RUN FROM THE BASE'S OWN CHECKOUT. This
+# job runs the branch's own scripts by construction - that is what
+# re-verification means - so the secret must never be readable by them. Two
+# properties keep it out of their reach, and both are asserted by
+# tests/fm-reverify-base.test.sh:
+#   - the verifier is the BASE's copy, checked out separately, never the PR's,
+#     exactly as .github/workflows/ci.yml's waiver job does. A PR cannot replace
+#     the script that decides whether its own findings may be excused.
+#   - it runs BEFORE any step that executes the branch's own scripts, and a
+#     step's `env:` reaches only that step. Nothing PR-authored has run when the
+#     secret is in the environment, so nothing has been able to put itself on
+#     PATH or in the way of it.
+# Neither closes the broader path where a PR edits this workflow file; that is
+# inherent to pull_request events and is mitigated by branch protection.
+#
+# WHY IT IS A STEP AND NOT A SECOND JOB. A second job would have to hand its
+# verdict over through `needs:`, and a required job that `needs:` another is
+# SKIPPED when that one fails - a required check that never reports leaves
+# branch protection waiting on it forever. The condition that repairs that
+# (`if: !cancelled()`) is a job-level condition, and this job deliberately has
+# none: every condition here is on a step, so the job always runs and always
+# reports. Keeping the verification in this job removes the hazard rather than
+# patching it.
+#
 # NEITHER SCRIPT'S WORK IS RE-SPELLED HERE. bin/fm-assert-tests-kept.sh is the
 # single owner of which of the base's test files still need running,
-# bin/fm-reverify-base.sh renders its verdict, and bin/fm-reverify-premise.sh
-# establishes the premise the skip rests on. This file wires them together and
+# bin/fm-reverify-base.sh renders its verdict, bin/fm-reverify-premise.sh
+# establishes the premise the skip rests on, and bin/fm-supersession-verify.sh
+# establishes what the captain approved. This file wires them together and
 # decides nothing.
 name: Base re-verification
 
@@ -43,6 +77,11 @@ permissions:
   # The premise is this head's own behaviour-suite result, read from its check
   # runs. Nothing here writes.
   checks: read
+  # The captain's attestation is read from the PR body at job time, never from
+  # the event payload: an approval always arrives as an edit to an open PR, and
+  # editing a body triggers no workflow, so the body a re-run replays predates
+  # it (bin/fm-supersession-verify.sh owns that reasoning).
+  pull-requests: read
 
 jobs:
   reverify-base:
@@ -64,6 +103,45 @@ jobs:
           # different question and answer it green every time.
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+
+      # The BASE's copy of the attestation verifier and its libraries, in a
+      # directory of its own. A pull_request build otherwise runs PR-authored
+      # code, which would let a PR replace the script that decides whether its
+      # own findings may be excused - while it holds the secret.
+      - name: Check out the base's own copy of the attestation verifier
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .fm-base
+
+      # FIRST, before any step that runs the branch's own scripts: see the
+      # header. A PR with no attestation - almost every PR - passes through this
+      # silently.
+      - name: Verify the captain's supersession attestation
+        id: supersession
+        env:
+          FM_SUPERSESSION_SECRET: ${{ secrets.FM_SUPERSESSION_SECRET }}
+          FM_SUPERSESSION_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          FM_SUPERSESSION_REPO: ${{ github.repository }}
+          FM_SUPERSESSION_PR: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # A base that predates this check carries no verifier at all, so this
+          # reports nothing-approved rather than exiting 127 and failing the
+          # job. That is the fail-closed verdict, not a workaround: a base with
+          # no verifier can honour no approval, so "everything blocks" is
+          # correct. It self-heals, because every base from this change onwards
+          # has the verifier.
+          if [ ! -x .fm-base/bin/fm-supersession-verify.sh ]; then
+            echo "::warning::the base branch carries no supersession verifier, so no captain approval can be honoured here; every base-assertion finding blocks"
+            echo "superseded=false" >> "$GITHUB_OUTPUT"
+          else
+            .fm-base/bin/fm-supersession-verify.sh
+          fi
+          # Removed once read, so the base's tree is never in the worktree the
+          # re-verification below measures.
+          rm -rf .fm-base
 
       - name: Establish the premise the cheap path rests on
         id: premise
@@ -127,6 +205,11 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Empty unless the job above verified the captain's signature over
+          # this exact head. Through env rather than interpolated into the
+          # command, matching ci.yml's rule for every value that comes off the
+          # event payload.
+          FM_SUPERSESSION_ENTRIES: ${{ steps.supersession.outputs.entries }}
         run: |
           set -eu
           bin/fm-reverify-base.sh \
