@@ -496,6 +496,9 @@ Measured 2026-08-08 on this host, no-mistakes v1.37.0.
 | run-index query against `state.sqlite` | under 10ms | local, fast cadence |
 | `gh pr view --json statusCheckRollup` | 500 to 630ms | network, slow cadence |
 | `bin/fm-fleet-snapshot.sh --json`, one-task home | 664ms | slow cadence |
+| `bin/fm-crew-state.sh <id>`, once per pipeline-less worker | local, bounded by `FM_FLOW_SNAPSHOT_STATE_TIMEOUT` | local, fast cadence |
+
+The state read is paid only by workers that have no pipeline, and a pipeline agent pays none of it: a ship task's row is already the run it is on, so a second reconciliation would buy nothing.
 
 The local reads are roughly two orders of magnitude cheaper than the 10s worst-case timeout `bin/fm-nm-flow.sh` budgets for them, so the two-cadence split exists to spare GitHub rather than to spare the daemon.
 
