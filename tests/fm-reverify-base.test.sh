@@ -843,71 +843,57 @@ test_the_workflow_refetches_the_base_at_job_time() {
 }
 
 test_the_workflow_runs_on_every_pull_request_and_is_never_skipped() {
-  local code cond
+  local code
   # A required check that is skipped never reports, and branch protection then
-  # waits on it forever. Every ordinary condition here is therefore on a STEP.
-  # The ONE job-level condition allowed is `!cancelled()`, which is the opposite
-  # of a skip: it is what makes a job with a `needs:` still run and still report
-  # when that dependency FAILED. Anything else - including a bare `always()`,
-  # which also runs a job when the whole run was cancelled and leaves a spurious
-  # red required check behind a superseded run - can only cost a verdict.
+  # waits on it forever. The job therefore carries no job-level condition at all:
+  # every condition here is on a STEP, so the job always runs and always reports.
   code=$(workflow_code)
   assert_contains "$code" 'pull_request:' \
     "the workflow must run on pull requests, which is where the check is required"
-  while IFS= read -r cond; do
-    [ -n "$cond" ] || continue
-    # shellcheck disable=SC2016 # a GitHub expression, quoted literally on purpose
-    [ "$cond" = 'if: ${{ !cancelled() }}' ] && continue
-    fail "a job carries the job-level condition '$cond', which can skip it or run it on a cancelled run; only 'if: \${{ !cancelled() }}' is allowed here"
-  done < <(printf '%s\n' "$code" | grep -E '^    if:' | sed 's/^ *//')
+  if printf '%s\n' "$code" | grep -qE '^    if:'; then
+    fail "the job carries a job-level 'if:', which can skip it and leave a required check pending forever"
+  fi
   pass "the job runs on every pull request and carries no condition that could skip it"
 }
 
-test_the_required_job_still_reports_when_its_dependency_fails() {
-  local code job_block
-  # The dependency added for the captain's approvals is the hazard this asserts
-  # away: a job that `needs:` another is SKIPPED when that one fails, and a
-  # skipped required check never reports at all, so branch protection waits on
-  # it forever. `always()` is what makes the dependency safe.
+test_the_required_check_depends_on_no_other_job() {
+  local code
+  # The hazard this asserts away, rather than repairs: a job that `needs:`
+  # another is SKIPPED when that one fails, and a skipped required check never
+  # reports at all. The attestation is verified in a step of this job instead,
+  # so there is no dependency that could ever skip it.
   code=$(workflow_code)
-  job_block=$(printf '%s\n' "$code" | awk '
-    /^  reverify-base:/ { inblock = 1; next }
-    inblock && /^  [a-z0-9_-]+:/ { inblock = 0 }
-    inblock { print }
-  ')
-  [ -n "$job_block" ] || fail "the workflow carries no reverify-base job to check"
-  if printf '%s\n' "$job_block" | grep -qE '^    needs:'; then
-    assert_contains "$job_block" '!cancelled()' \
-      "a required job that depends on another must run even when that one fails, or a failed dependency leaves the check pending forever"
+  if printf '%s\n' "$code" | grep -qE '^    needs:'; then
+    fail "the required job depends on another job, which is skipped - and stops reporting - whenever that one fails"
   fi
-  pass "the required job reports its verdict even when the job it depends on fails"
+  pass "the required check depends on no other job, so nothing can skip it"
 }
 
-test_the_signing_secret_never_reaches_the_job_that_runs_the_branchs_code() {
-  local code verify_job reverify_job
-  # The re-verification job runs the BRANCH's own scripts - that is what
-  # re-verification means - so a secret in its environment would be a secret
-  # every PR could read and exfiltrate. The verifying job runs the BASE's copy
-  # instead, and hands over only its non-secret verdict.
+test_the_signing_secret_is_never_readable_by_the_branchs_own_scripts() {
+  local code secret_line branch_line base_checkout
+  # This job runs the branch's own scripts by construction - that is what
+  # re-verification means - so the secret is kept out of their reach two ways,
+  # and BOTH are asserted here because either alone is not enough. It runs the
+  # BASE's copy of the verifier, so a PR cannot replace the script that holds
+  # the secret; and it runs BEFORE any step that executes the branch's scripts,
+  # since a step's env reaches only that step but PATH and the filesystem are
+  # shared, so a PR-authored step running first could lie in wait for it.
   code=$(workflow_code)
-  verify_job=$(printf '%s\n' "$code" | awk '
-    /^  supersession:/ { inblock = 1; next }
-    inblock && /^  [a-z0-9_-]+:/ { inblock = 0 }
-    inblock { print }
-  ')
-  reverify_job=$(printf '%s\n' "$code" | awk '
-    /^  reverify-base:/ { inblock = 1; next }
-    inblock && /^  [a-z0-9_-]+:/ { inblock = 0 }
-    inblock { print }
-  ')
-  [ -n "$verify_job" ] || fail "the workflow carries no attestation-verifying job"
-  assert_contains "$verify_job" 'secrets.FM_SUPERSESSION_SECRET' \
-    "the verifying job must hold the secret its verification needs"
-  assert_contains "$verify_job" 'pull_request.base.sha' \
-    "the verifying job must check out the BASE, so a PR cannot replace the verifier that holds the secret"
-  assert_not_contains "$reverify_job" 'secrets.' \
-    "the job that runs the branch's own scripts must hold no secret at all"
-  pass "the attestation's secret is held only by a job checked out at the base, never beside the branch's code"
+  assert_contains "$code" '.fm-base/bin/fm-supersession-verify.sh' \
+    "the secret-holding step must run the BASE's copy of the verifier"
+  base_checkout=$(printf '%s\n' "$code" | grep -A3 'path: .fm-base' || true)
+  printf '%s\n' "$code" | grep -B3 'path: .fm-base' | grep -q 'pull_request.base.sha' \
+    || fail "the verifier's own checkout must name the base commit, not the PR's: ${base_checkout:-no checkout found}"
+
+  secret_line=$(printf '%s\n' "$code" | grep -n 'secrets.FM_SUPERSESSION_SECRET' | head -1 | cut -d: -f1)
+  [ -n "$secret_line" ] || fail "no step holds the attestation secret at all"
+  # The first step that runs a script out of the BRANCH's own tree. `.fm-base/`
+  # paths are the base's copy and deliberately do not match.
+  branch_line=$(printf '%s\n' "$code" | grep -nE '^[[:space:]]+bin/fm-[a-z-]+\.sh' | head -1 | cut -d: -f1)
+  [ -n "$branch_line" ] || fail "the workflow runs none of the branch's own scripts, so this case is measuring nothing"
+  [ "$secret_line" -lt "$branch_line" ] \
+    || fail "the secret (line $secret_line) is held after the branch's own scripts have already run (line $branch_line)"
+  pass "the attestation's secret is read only by the base's own verifier, before any of the branch's scripts run"
 }
 
 test_the_workflow_passes_only_the_verified_entries_to_the_verdict() {
@@ -916,8 +902,8 @@ test_the_workflow_passes_only_the_verified_entries_to_the_verdict() {
   # body or any other value the PR itself controls.
   code=$(workflow_code)
   # shellcheck disable=SC2016 # a GitHub expression, quoted literally on purpose
-  assert_contains "$code" 'FM_SUPERSESSION_ENTRIES: ${{ needs.supersession.outputs.entries }}' \
-    "the verdict step must take its approvals from the verifying job's output alone"
+  assert_contains "$code" 'FM_SUPERSESSION_ENTRIES: ${{ steps.supersession.outputs.entries }}' \
+    "the verdict step must take its approvals from the signature check's own output alone"
   assert_contains "$code" 'pull-requests: read' \
     "the workflow must be able to read the PR body, where an attestation added after the fact lives"
   pass "the verdict step is handed only the entries the signature check verified"
@@ -1018,8 +1004,8 @@ test_the_workflow_does_not_reimplement_the_test_file_selection
 test_the_workflow_measures_the_pr_head_not_the_merge_ref
 test_the_workflow_refetches_the_base_at_job_time
 test_the_workflow_runs_on_every_pull_request_and_is_never_skipped
-test_the_required_job_still_reports_when_its_dependency_fails
-test_the_signing_secret_never_reaches_the_job_that_runs_the_branchs_code
+test_the_required_check_depends_on_no_other_job
+test_the_signing_secret_is_never_readable_by_the_branchs_own_scripts
 test_the_workflow_passes_only_the_verified_entries_to_the_verdict
 test_the_workflow_blocks_rather_than_passing_when_its_premise_fails
 test_the_workflow_reads_the_check_names_ci_actually_publishes

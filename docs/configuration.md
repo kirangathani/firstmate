@@ -213,9 +213,10 @@ Enrol a repository once with `publish`; there is nothing else to configure, and 
 The authority is the approval record plus the master key, and no dispatch flag gates it, because a supersession can only be decided after the gate has reported which assertion the branch supersedes; that script's header owns the full reasoning, including why a worker can produce neither half.
 What the line publishes is each approved entry's matching half - its identifier or glob and the finding class it excuses - and never the captain's stated reason or the approval date, which stay in the private record.
 
-In [`.github/workflows/reverify-base.yml`](../.github/workflows/reverify-base.yml) a cheap `supersession` job holds the secret and checks out the base ref, exactly as `ci.yml`'s `ci-waiver` job does and for the same reason; the re-verification job runs the branch's own scripts by construction, so it holds no secret and receives only the verified entries.
-That job reads the PR body live from the API rather than from the event payload, because an approval always arrives as an edit to an open PR and a re-run replays the payload the PR had before it.
-The required job takes `if: ${{ !cancelled() }}` alongside its `needs:`, so a failed verifying job leaves it reporting with no approvals rather than skipped and pending forever, and a cancelled run leaves no spurious red check behind.
+In [`.github/workflows/reverify-base.yml`](../.github/workflows/reverify-base.yml) the verification is the required job's FIRST step, run from a separate checkout of the base ref, exactly as `ci.yml`'s `ci-waiver` job runs the base's verifier and for the same reason.
+That job runs the branch's own scripts by construction, so two properties keep the secret out of their reach: the verifier is the base's copy, and it runs before any step that executes the branch's scripts, while a step's `env:` reaches only that step.
+It is a step rather than a second job because a required job that `needs:` another is skipped when that one fails, and a skipped required check never reports at all; keeping it in one job removes that hazard instead of repairing it with a job-level condition.
+The step reads the PR body live from the API rather than from the event payload, because an approval always arrives as an edit to an open PR and a re-run replays the payload the PR had before it.
 
 ## Testing skips (bin/fm-spawn.sh --skip-testing / --local-skip / --ci-skip / --all-testing-skip)
 
