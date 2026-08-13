@@ -61,6 +61,15 @@
 # and the token's alphabet excludes the dot - so no two different (sha, token)
 # pairs can produce the same field.
 #
+# WHAT IT DOES NOT ANSWER, stated because a narrower guarantee that reads as a
+# broader one is the failure this gate family exists to prevent: an attestation
+# is a snapshot of the approvals as they stood when it was signed. A captain who
+# REVOKES an entry afterwards does not invalidate a line already published for
+# that same commit, and the check can go on excusing what the record no longer
+# approves until the head moves. Nothing merges on that, which is why the
+# snapshot is acceptable: bin/fm-pr-merge.sh reads the LIVE record at merge time
+# and refuses the revoked finding there. The check reports; the record decides.
+#
 # Published line grammar, one line anywhere in the PR body:
 #
 #     fm-supersession: v1 <task-id> <commit-sha> <entries-token> <hmac-sha256-hex>
