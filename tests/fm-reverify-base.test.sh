@@ -846,16 +846,19 @@ test_the_workflow_runs_on_every_pull_request_and_is_never_skipped() {
   local code cond
   # A required check that is skipped never reports, and branch protection then
   # waits on it forever. Every ordinary condition here is therefore on a STEP.
-  # The ONE job-level condition allowed is `always()`, which is the opposite of
-  # a skip: it is what makes a job with a `needs:` still run and still report
-  # when that dependency failed. Anything else can skip a job.
+  # The ONE job-level condition allowed is `!cancelled()`, which is the opposite
+  # of a skip: it is what makes a job with a `needs:` still run and still report
+  # when that dependency FAILED. Anything else - including a bare `always()`,
+  # which also runs a job when the whole run was cancelled and leaves a spurious
+  # red required check behind a superseded run - can only cost a verdict.
   code=$(workflow_code)
   assert_contains "$code" 'pull_request:' \
     "the workflow must run on pull requests, which is where the check is required"
   while IFS= read -r cond; do
     [ -n "$cond" ] || continue
-    [ "$cond" = "if: always()" ] && continue
-    fail "a job carries the job-level condition '$cond', which can skip it and leave a required check pending forever"
+    # shellcheck disable=SC2016 # a GitHub expression, quoted literally on purpose
+    [ "$cond" = 'if: ${{ !cancelled() }}' ] && continue
+    fail "a job carries the job-level condition '$cond', which can skip it or run it on a cancelled run; only 'if: \${{ !cancelled() }}' is allowed here"
   done < <(printf '%s\n' "$code" | grep -E '^    if:' | sed 's/^ *//')
   pass "the job runs on every pull request and carries no condition that could skip it"
 }
@@ -874,7 +877,7 @@ test_the_required_job_still_reports_when_its_dependency_fails() {
   ')
   [ -n "$job_block" ] || fail "the workflow carries no reverify-base job to check"
   if printf '%s\n' "$job_block" | grep -qE '^    needs:'; then
-    assert_contains "$job_block" 'if: always()' \
+    assert_contains "$job_block" '!cancelled()' \
       "a required job that depends on another must run even when that one fails, or a failed dependency leaves the check pending forever"
   fi
   pass "the required job reports its verdict even when the job it depends on fails"

@@ -215,7 +215,7 @@ What the line publishes is each approved entry's matching half - its identifier 
 
 In [`.github/workflows/reverify-base.yml`](../.github/workflows/reverify-base.yml) a cheap `supersession` job holds the secret and checks out the base ref, exactly as `ci.yml`'s `ci-waiver` job does and for the same reason; the re-verification job runs the branch's own scripts by construction, so it holds no secret and receives only the verified entries.
 That job reads the PR body live from the API rather than from the event payload, because an approval always arrives as an edit to an open PR and a re-run replays the payload the PR had before it.
-The required job takes `if: always()` alongside its `needs:`, so a failed verifying job leaves it reporting with no approvals rather than skipped and pending forever.
+The required job takes `if: ${{ !cancelled() }}` alongside its `needs:`, so a failed verifying job leaves it reporting with no approvals rather than skipped and pending forever, and a cancelled run leaves no spurious red check behind.
 
 ## Testing skips (bin/fm-spawn.sh --skip-testing / --local-skip / --ci-skip / --all-testing-skip)
 

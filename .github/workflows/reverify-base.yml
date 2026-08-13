@@ -115,11 +115,16 @@ jobs:
     runs-on: ubuntu-latest
     needs: supersession
     # A required check that is skipped never reports, and branch protection then
-    # waits on it forever. `always()` is what keeps the dependency above from
-    # being able to cause that: this job runs and reports even if that job
-    # failed outright, in which case it simply receives no approvals and every
+    # waits on it forever. `!cancelled()` is what keeps the dependency above
+    # from being able to cause that: this job runs and reports even if that job
+    # FAILED outright, in which case it simply receives no approvals and every
     # finding blocks, exactly as before this check existed.
-    if: always()
+    #
+    # NOT `always()`, deliberately, for the reason
+    # .github/workflows/no-mistakes-required.yml's `check` job states in full:
+    # `always()` also runs a job when the whole run was CANCELLED, which would
+    # leave a spurious red required check behind a superseded run.
+    if: ${{ !cancelled() }}
     # Two waits in series: up to ~25 minutes for this head's behaviour suite to
     # conclude (the premise), then the re-verification itself. Its worst case is
     # a PR that rewrites many of the base's test files, since each is run twice -
