@@ -214,7 +214,7 @@ So kind decides the SHAPE of the row and nothing else:
 
 | | drawn as | carries |
 |---|---|---|
-| `pipeline: true` | the full nine-cell pipeline block, seven rows | the run, its steps, its GitHub checks, its testing skips |
+| `pipeline: true` | the full nine-cell pipeline block, eight rows | the run, its steps, its GitHub checks, its testing skips |
 | `pipeline: false` | a compact block, three rows: head, state, blank | the worker's kind, its window, and one `state` object |
 
 `pipeline` is a field the snapshot STATES rather than a kind string the renderer matches on, so a kind this renderer has never heard of still lands on the right side of the question.
@@ -314,6 +314,19 @@ Two mechanics make it work:
 - `--detail` traps `INT` and reports the return itself, so the footer flashes the outcome rather than an interrupt.
   That trap is a function call, not an inline string: a trap body is re-parsed when the signal arrives, so an apostrophe in it has to survive two rounds of quoting, and the first cut of this flashed `unexpected EOF while looking for matching '` at the captain instead of the outcome (observed 2026-08-09, in a live terminal).
 
+## The timer is two rows, because two states had a word and no time
+
+A finished step has always printed its duration.
+The two states the captain sits and watches printed only a word: `running`, and `6 find` or `parked`.
+Those are exactly the states where the missing number - how long it has been that way - is what decides whether to keep waiting or go and look.
+
+Neither time fits beside its word in a nine-column cell, so the timer is two rows: the word on the first, its elapsed on the second, in the same `dur()` shape the finished steps print, so the whole column reads as one clock rather than three.
+The second row is drawn unconditionally and left blank where a cell has no time, so the frame height does not depend on which states happen to be on screen; `BLOCK` is therefore 8 rather than 7, and `scrollWindow()` reads that constant.
+
+The two elapsed values come from different places, and neither is computed in the viewer.
+A parked step's is its own `duration_ms`, which the tool freezes when the step produced its findings.
+A running step's `duration_ms` is `0` until it ends, so its elapsed is `active_ms` - the collector's parse of the tool's own `active_for` - and a running step the run states no elapsed for shows nothing.
+
 ## Wire format
 
 Schema id `fm-flow-snapshot.v2`, emitted by `bin/fm-flow-snapshot.sh --json`.
@@ -362,6 +375,7 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
           "step": "ci",
           "status": "running",
           "active_for": "18h32m",
+          "active_ms": 66720000,
           "last_activity": "37s ago: log: warning: could not check CI",
           "round": "starting"
         }
@@ -425,6 +439,9 @@ Guarantees the renderer is entitled to rely on:
   `state.ok` false means that read failed or timed out, with `state.reason` saying which; it never falls back to the status log's last line, which is a wake event and not a current state.
 - `steps` carries all nine no-mistakes steps in pipeline order whenever `collection.ok` is true AND `pipeline` is true, using the tool's own step names.
   Folding `push` and `pr` into one box is a rendering decision and is not done here.
+- `active_ms` is `active_for` parsed to milliseconds, and it is the only elapsed a RUNNING step has: that step's `steps[]` `duration_ms` stays `0` until it ends.
+  The parse happens here because the renderer performs no outside reads and may not invent a time of its own, and it is a number rather than the tool's own string so the viewer can print a live step through the same `dur()` a finished step already prints.
+  A shape the parser does not recognise emits `null`, and the viewer then says nothing rather than guessing.
 - Step `status` strings are passed through verbatim, never mapped.
   Mapping a status onto one of the five display states is the renderer's job and is asserted exhaustively in its own tests, so a status this script has never seen still reaches the renderer intact rather than being flattened here.
 - `collection.ok` false means the read failed or timed out.

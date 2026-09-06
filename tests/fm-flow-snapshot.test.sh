@@ -378,6 +378,17 @@ got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .active_steps[0].las
 assert_contains "$got" "gh pr checks: exit status 1" "active_steps last_activity truncated at an embedded comma"
 pass "parses quoted active_steps fields containing commas"
 
+# A RUNNING step's steps[] duration_ms is 0 until it ends - the fixture above
+# carries `ci,running,0,0` - so the humanised active_for is the only elapsed the
+# tool states for it. It is parsed to milliseconds HERE, on the collector side
+# of the seam, because the renderer performs no outside reads and may not invent
+# a time of its own.
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .active_steps[0].active_for' "$OUT")
+[ "$got" = "18h32m" ] || fail "active_for lost: $got"
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .active_steps[0].active_ms' "$OUT")
+[ "$got" = 66720000 ] || fail "18h32m did not parse to milliseconds: $got"
+pass "a running step's elapsed reaches the wire as milliseconds"
+
 # --- failure renders as unknown, never as pending ---------------------------
 #
 # A read that failed and a step that has not started are different claims. If a

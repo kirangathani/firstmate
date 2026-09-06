@@ -180,6 +180,31 @@ steps_json() {  # <axi-status-output>
 
 active_steps_json() {  # <axi-status-output>
   printf '%s\n' "$1" | awk '
+    # A RUNNING step publishes no duration: its steps[] duration_ms stays 0
+    # until the step ends, and the only elapsed the tool states for it is this
+    # humanised `active_for` ("23h11m", "2m59s"). It is parsed back to
+    # milliseconds here, on the collector side of the seam, so the renderer can
+    # print a live step through the same dur() every finished step already uses
+    # instead of inventing a second time format on screen. A shape this parser
+    # does not recognise yields null and the cell simply stays blank, which is
+    # the honest answer rather than a guessed one.
+    function active_ms(v,   total, seen, tok, num, unit, rest) {
+      rest = v; total = 0; seen = 0
+      while (match(rest, /[0-9]+(\.[0-9]+)?(ms|[dhms])/)) {
+        tok = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        if (tok ~ /ms$/) { num = substr(tok, 1, length(tok) - 2) + 0; unit = "ms" }
+        else { num = substr(tok, 1, length(tok) - 1) + 0; unit = substr(tok, length(tok)) }
+        if (unit == "ms") total += num
+        else if (unit == "s") total += num * 1000
+        else if (unit == "m") total += num * 60000
+        else if (unit == "h") total += num * 3600000
+        else if (unit == "d") total += num * 86400000
+        seen = 1
+      }
+      if (!seen) return "null"
+      return sprintf("%d", total)
+    }
     /^  active_steps\[[0-9]+\]\{/ { in_a = 1; next }
     in_a {
       if ($0 !~ /^    [a-z]/) { in_a = 0; next }
@@ -198,8 +223,8 @@ active_steps_json() {  # <axi-status-output>
       f[++n] = cur
       if (n < 6) next
       gsub(/\\/, "\\\\", f[4]); gsub(/"/, "\\\"", f[4])
-      printf "%s{\"step\":\"%s\",\"status\":\"%s\",\"active_for\":\"%s\",\"last_activity\":\"%s\",\"agent_pid\":\"%s\",\"round\":\"%s\"}",
-        (emitted++ ? "," : ""), f[1], f[2], f[3], f[4], f[5], f[6]
+      printf "%s{\"step\":\"%s\",\"status\":\"%s\",\"active_for\":\"%s\",\"active_ms\":%s,\"last_activity\":\"%s\",\"agent_pid\":\"%s\",\"round\":\"%s\"}",
+        (emitted++ ? "," : ""), f[1], f[2], f[3], active_ms(f[3]), f[4], f[5], f[6]
     }
   ' | awk 'BEGIN { printf "[" } { printf "%s", $0 } END { printf "]\n" }'
 }
