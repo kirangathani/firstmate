@@ -532,6 +532,26 @@ The five rendering and input defects fixed on 2026-08-09 were each reproduced in
 The harness was a sandbox tmux session of live worker windows plus deliberately stale `state/<id>.meta` records, with the viewer run in a second session so its pane could be captured with `tmux capture-pane` and driven with `tmux send-keys`.
 Two facts came out of that run rather than out of reading the code, and both are recorded where they bite: tmux refuses a client whose terminal descriptor was opened through `/dev/tty`, and `switch-client` without an explicit client moves whichever client is attached to the invoking pane's session.
 
+### The two-row timer, 2026-09-06
+
+Verified against this host's live fleet with `bin/fm-flow-snapshot.sh --json --no-ci` collected twice, each document rendered at 150 columns through the shipped viewer and the changed one in turn.
+
+The running case, on task `eln-ui-validation-v8` whose `review` step was `fixing`:
+
+| | first collection | second collection, 104 seconds later |
+|---|---|---|
+| shipped | `running`, nothing under it | `running`, nothing under it |
+| changed | `running` / `41m54s` | `running` / `43m38s` |
+
+The wire carried `active_for` `41m54s` then `43m38s`, parsed to `active_ms` 2514000 then 2618000, so the elapsed advances by re-collection rather than by a clock in the viewer.
+
+The parked case, on the same run's `review` step at the earlier moment `no-mistakes axi status --run 01M1V6CNSV6A7HNBCSN2FWAEMB` recorded it - `review,fix_review,6,1085436`:
+
+| | cell |
+|---|---|
+| shipped | `6 find`, nothing under it |
+| changed | `6 find` / `18m05s` |
+
 ### The three honesty defects, 2026-08-09
 
 **The permanent red.**
