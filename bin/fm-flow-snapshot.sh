@@ -188,8 +188,12 @@ active_steps_json() {  # <axi-status-output>
     # instead of inventing a second time format on screen. A shape this parser
     # does not recognise yields null and the cell simply stays blank, which is
     # the honest answer rather than a guessed one.
-    function active_ms(v,   total, seen, tok, num, unit, rest) {
-      rest = v; total = 0; seen = 0
+    function active_ms(v,   total, tok, num, unit, rest) {
+      # The value is validated END TO END before a single token is summed, so a
+      # string carrying a unit this parser does not know ("2w3d") yields null
+      # rather than the materially understated time a partial parse would give.
+      if (v !~ /^([0-9]+(\.[0-9]+)?(ms|[dhms]))+$/) return "null"
+      rest = v; total = 0
       while (match(rest, /[0-9]+(\.[0-9]+)?(ms|[dhms])/)) {
         tok = substr(rest, RSTART, RLENGTH)
         rest = substr(rest, RSTART + RLENGTH)
@@ -200,9 +204,7 @@ active_steps_json() {  # <axi-status-output>
         else if (unit == "m") total += num * 60000
         else if (unit == "h") total += num * 3600000
         else if (unit == "d") total += num * 86400000
-        seen = 1
       }
-      if (!seen) return "null"
       return sprintf("%d", total)
     }
     /^  active_steps\[[0-9]+\]\{/ { in_a = 1; next }

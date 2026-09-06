@@ -327,6 +327,10 @@ The two elapsed values come from different places, and neither is computed in th
 A parked step's is its own `duration_ms`, which the tool freezes when the step produced its findings.
 A running step's `duration_ms` is `0` until it ends, so its elapsed is `active_ms` - the collector's parse of the tool's own `active_for` - and a running step the run states no elapsed for shows nothing.
 
+The GITHUB CI cell counts on the same second row and off the same `active_ms`, read through the one function that owns that lookup so the two cannot drift.
+It is the pipeline's longest wait, so it is the cell the captain watches most.
+It counts only while CI is actually running AND the fleet still believes the worker is alive: the other verdicts - not read, nothing ran, failed, and the green one waiting on the captain's word - are not counting, and an elapsed under a state that is not counting would be the same lie the five check classes exist to prevent.
+
 ## Wire format
 
 Schema id `fm-flow-snapshot.v2`, emitted by `bin/fm-flow-snapshot.sh --json`.

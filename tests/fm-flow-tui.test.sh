@@ -864,13 +864,18 @@ const agent = {
   }],
 };
 
-const frame = render({ ...base, agents: [agent] }, { rows: ROWS, cols: COLS, sel: 0, cell: -1 })
-  .map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
-const head = frame.findIndex((l) => l.includes(agent.id));
-const cellsOf = (row) =>
-  CELL_WIDTHS.map((w, i) => (frame[row] ?? "").slice(offsets[i], offsets[i] + w).trim());
-const words = cellsOf(head + 4);
-const times = cellsOf(head + 5);
+// head, top, mid, bot, word, time. The word row and the time row are read
+// through the same layout arithmetic, so a width change moves both together.
+const rowsFor = (a) => {
+  const frame = render({ ...base, agents: [a] }, { rows: ROWS, cols: COLS, sel: 0, cell: -1 })
+    .map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  const head = frame.findIndex((l) => l.includes(a.id));
+  const cellsOf = (row) =>
+    CELL_WIDTHS.map((w, i) => (frame[row] ?? "").slice(offsets[i], offsets[i] + w).trim());
+  return { words: cellsOf(head + 4), times: cellsOf(head + 5) };
+};
+
+const { words, times } = rowsFor(agent);
 const at = (key) => STEPS.findIndex((s) => s.key === key);
 
 // The word line is unchanged: the elapsed is added BESIDE what the captain
@@ -892,12 +897,48 @@ if (times[at("intent")] !== "") say(`a finished step repeated its duration: "${t
 if (times[at("document")] !== "") say(`a pending step invented an elapsed: "${times[at("document")]}"`);
 
 // A live step whose run states no elapsed says nothing rather than guessing.
-const noElapsed = { ...agent, active_steps: [] };
-const blank = render({ ...base, agents: [noElapsed] }, { rows: ROWS, cols: COLS, sel: 0, cell: -1 })
-  .map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
-const bhead = blank.findIndex((l) => l.includes(agent.id));
-const brow = (blank[bhead + 5] ?? "").slice(offsets[at("test")], offsets[at("test")] + CELL_WIDTHS[at("test")]).trim();
+const brow = rowsFor({ ...agent, active_steps: [] }).times[at("test")];
 if (brow !== "") say(`a live step with no stated elapsed invented one: "${brow}"`);
+
+// The GITHUB CI cell is the pipeline's LONGEST wait, so it counts up exactly
+// like the step boxes beside it, off the same active row keyed `ci`.
+const CI_MS = 66720000;   // "18h32m", as the collector parsed it off active_for
+const CI = CELL_WIDTHS.length - 2;
+const ciAgent = (over) => ({
+  ...agent,
+  pr: { url: "https://github.com/kirangathani/firstmate/pull/51", number: 51 },
+  ci: {
+    collection: { ok: true, reason: "" }, checks: [],
+    total: 11, passed: 3, failed: 0, pending: 8, skipped: 0, excused: 0,
+  },
+  active_steps: [{
+    step: "ci", status: "running", active_for: "18h32m", active_ms: CI_MS,
+    last_activity: "", agent_pid: "", round: "starting",
+  }],
+  ...over,
+});
+
+const running = rowsFor(ciAgent({}));
+if (running.words[CI] !== "3/11 running") say(`CI lost its word: "${running.words[CI]}"`);
+if (running.times[CI] !== dur(CI_MS)) {
+  say(`running CI shows "${running.times[CI]}" under its word, want "${dur(CI_MS)}"`);
+}
+
+// A CI stage that is NOT running is not counting, and an elapsed under a state
+// that is not counting is the same lie the check classes exist to prevent.
+const parked = rowsFor(ciAgent({
+  ci: {
+    collection: { ok: true, reason: "" }, checks: [],
+    total: 11, passed: 11, failed: 0, pending: 0, skipped: 0, excused: 0,
+  },
+}));
+if (parked.words[CI] !== "11/11 your word") say(`CI lost its word: "${parked.words[CI]}"`);
+if (parked.times[CI] !== "") say(`a CI stage that is not running invented an elapsed: "${parked.times[CI]}"`);
+
+// Nor does a cell drawn `unknown` because the fleet no longer believes its
+// worker is alive: it looks live, but nothing is counting behind it.
+const dead = rowsFor(ciAgent({ endpoint_alive: false })).times[CI];
+if (dead !== "") say(`a CI cell whose worker is gone kept counting: "${dead}"`);
 
 process.exit(bad ? 1 : 0);
 JS

@@ -554,12 +554,20 @@ function ciBox(agent, anim) {
     }
     case "running": {
       const state = liveIsCredible(agent) ? "live" : "unknown";
+      // CI is the pipeline's longest wait, so it counts up exactly like the
+      // step boxes beside it, through the same one owner of the active row so
+      // the two cannot drift. Only the credibly live case gets a second line: a
+      // cell drawn `unknown` because its worker is gone is not counting, and an
+      // elapsed under a state that is not counting would be a lie.
+      const timer2 = state === "live" ? dur(activeMs(agent, { key: "ci" })) : "";
       const b = box("GITHUB CI", state, CIW, {
         dashed: true,
         timer: `${passed}/${total} running`,
+        timer2,
         anim,
       });
-      return { ...b, timer: (PAINT[state] ?? dim)(b.timer) };
+      const paint = PAINT[state] ?? dim;
+      return { ...b, timer: paint(b.timer), timer2: timer2 ? paint(b.timer2) : b.timer2 };
     }
     case "nothing-ran": {
       const b = box("GITHUB CI", "unknown", CIW, { dashed: true, timer: "nothing ran" });
@@ -647,7 +655,7 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
       top.push(gap); mid.push(arrow); bot.push(gap); tim.push(gap); tim2.push(gap);
     }
     top.push(c.top); mid.push(c.mid); bot.push(c.bot);
-    tim.push(c.timer); tim2.push(c.timer2 ?? " ".repeat(visLen(c.timer)));
+    tim.push(c.timer); tim2.push(c.timer2);
   });
 
   const onHead = selected && cell < 0;
