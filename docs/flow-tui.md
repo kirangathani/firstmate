@@ -214,7 +214,7 @@ So kind decides the SHAPE of the row and nothing else:
 
 | | drawn as | carries |
 |---|---|---|
-| `pipeline: true` | the full nine-cell pipeline block, seven rows | the run, its steps, its GitHub checks, its testing skips |
+| `pipeline: true` | the full nine-cell pipeline block, eight rows | the run, its steps, its GitHub checks, its testing skips |
 | `pipeline: false` | a compact block, three rows: head, state, blank | the worker's kind, its window, and one `state` object |
 
 `pipeline` is a field the snapshot STATES rather than a kind string the renderer matches on, so a kind this renderer has never heard of still lands on the right side of the question.
@@ -243,7 +243,7 @@ Every other state a secondmate can report - `blocked`, `failed`, `parked` - keep
 
 ### Blocks are two heights, so the window is solved once
 
-A compact block is three rows and a pipeline block is seven, so how many blocks fit depends on which one is first.
+A compact block is three rows and a pipeline block is eight, so how many blocks fit depends on which one is first.
 Dividing the available rows by a single constant would answer for a frame that is not being drawn, and that disagreement is not cosmetic: an over-tall frame scrolls the terminal and desynchronises every absolute cursor address in the repaint.
 
 `scrollWindow(heights, avail, top, sel)` therefore returns the window start and the block count together, greedily fitting heights from `top` in the same shape `layout()` already uses for the horizontal cell window.
@@ -314,6 +314,23 @@ Two mechanics make it work:
 - `--detail` traps `INT` and reports the return itself, so the footer flashes the outcome rather than an interrupt.
   That trap is a function call, not an inline string: a trap body is re-parsed when the signal arrives, so an apostrophe in it has to survive two rounds of quoting, and the first cut of this flashed `unexpected EOF while looking for matching '` at the captain instead of the outcome (observed 2026-08-09, in a live terminal).
 
+## The timer is two rows, because two states had a word and no time
+
+A finished step has always printed its duration.
+The two states the captain sits and watches printed only a word: `running`, and `6 find` or `parked`.
+Those are exactly the states where the missing number - how long it has been that way - is what decides whether to keep waiting or go and look.
+
+Neither time fits beside its word in a nine-column cell, so the timer is two rows: the word on the first, its elapsed on the second, in the same `dur()` shape the finished steps print, so the whole column reads as one clock rather than three.
+The second row is drawn unconditionally and left blank where a cell has no time, so the frame height does not depend on which states happen to be on screen; `BLOCK` is therefore 8 rather than 7, and `scrollWindow()` reads that constant.
+
+The two elapsed values come from different places, and neither is computed in the viewer.
+A parked step's is its own `duration_ms`, which the tool freezes when the step produced its findings.
+A running step's `duration_ms` is `0` until it ends, so its elapsed is `active_ms` - the collector's parse of the tool's own `active_for` - and a running step the run states no elapsed for shows nothing.
+
+The GITHUB CI cell counts on the same second row and off the same `active_ms`, read through the one function that owns that lookup so the two cannot drift.
+It is the pipeline's longest wait, so it is the cell the captain watches most.
+It counts only while CI is actually running AND the fleet still believes the worker is alive: the other verdicts - not read, nothing ran, failed, and the green one waiting on the captain's word - are not counting, and an elapsed under a state that is not counting would be the same lie the five check classes exist to prevent.
+
 ## Wire format
 
 Schema id `fm-flow-snapshot.v2`, emitted by `bin/fm-flow-snapshot.sh --json`.
@@ -362,6 +379,7 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
           "step": "ci",
           "status": "running",
           "active_for": "18h32m",
+          "active_ms": 66720000,
           "last_activity": "37s ago: log: warning: could not check CI",
           "round": "starting"
         }
@@ -425,6 +443,9 @@ Guarantees the renderer is entitled to rely on:
   `state.ok` false means that read failed or timed out, with `state.reason` saying which; it never falls back to the status log's last line, which is a wake event and not a current state.
 - `steps` carries all nine no-mistakes steps in pipeline order whenever `collection.ok` is true AND `pipeline` is true, using the tool's own step names.
   Folding `push` and `pr` into one box is a rendering decision and is not done here.
+- `active_ms` is `active_for` parsed to milliseconds, and it is the only elapsed a RUNNING step has: that step's `steps[]` `duration_ms` stays `0` until it ends.
+  The parse happens here because the renderer performs no outside reads and may not invent a time of its own, and it is a number rather than the tool's own string so the viewer can print a live step through the same `dur()` a finished step already prints.
+  A shape the parser does not recognise emits `null`, and the viewer then says nothing rather than guessing.
 - Step `status` strings are passed through verbatim, never mapped.
   Mapping a status onto one of the five display states is the renderer's job and is asserted exhaustively in its own tests, so a status this script has never seen still reaches the renderer intact rather than being flattened here.
 - `collection.ok` false means the read failed or timed out.
@@ -514,6 +535,26 @@ The no-mistakes version-update banner is written to stderr, so stdout parsing do
 The five rendering and input defects fixed on 2026-08-09 were each reproduced in a real terminal before being changed, and the fixed behaviour reproduced the same way afterwards, driving the actual viewer rather than asserting a helper.
 The harness was a sandbox tmux session of live worker windows plus deliberately stale `state/<id>.meta` records, with the viewer run in a second session so its pane could be captured with `tmux capture-pane` and driven with `tmux send-keys`.
 Two facts came out of that run rather than out of reading the code, and both are recorded where they bite: tmux refuses a client whose terminal descriptor was opened through `/dev/tty`, and `switch-client` without an explicit client moves whichever client is attached to the invoking pane's session.
+
+### The two-row timer, 2026-09-06
+
+Verified against this host's live fleet with `bin/fm-flow-snapshot.sh --json --no-ci` collected twice, each document rendered at 150 columns through the shipped viewer and the changed one in turn.
+
+The running case, on task `eln-ui-validation-v8` whose `review` step was `fixing`:
+
+| | first collection | second collection, 104 seconds later |
+|---|---|---|
+| shipped | `running`, nothing under it | `running`, nothing under it |
+| changed | `running` / `41m54s` | `running` / `43m38s` |
+
+The wire carried `active_for` `41m54s` then `43m38s`, parsed to `active_ms` 2514000 then 2618000, so the elapsed advances by re-collection rather than by a clock in the viewer.
+
+The parked case, on the same run's `review` step at the earlier moment `no-mistakes axi status --run 01M1V6CNSV6A7HNBCSN2FWAEMB` recorded it - `review,fix_review,6,1085436`:
+
+| | cell |
+|---|---|
+| shipped | `6 find`, nothing under it |
+| changed | `6 find` / `18m05s` |
 
 ### The three honesty defects, 2026-08-09
 

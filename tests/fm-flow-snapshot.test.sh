@@ -51,8 +51,9 @@ run:
     push,completed,0,2411
     pr,completed,0,36162
     ci,running,0,0
-  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+  active_steps[2]{step,status,active_for,last_activity,agent_pid,round}:
     ci,running,18h32m,"37s ago: log: warning: could not check CI: gh pr checks: exit status 1","",starting
+    review,running,2w3d,"","",starting
 TOON
 
 cat > "$TMP_ROOT/axi-failed.txt" <<'TOON'
@@ -377,6 +378,27 @@ pass "preserves step durations and finding counts"
 got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .active_steps[0].last_activity' "$OUT")
 assert_contains "$got" "gh pr checks: exit status 1" "active_steps last_activity truncated at an embedded comma"
 pass "parses quoted active_steps fields containing commas"
+
+# A RUNNING step's steps[] duration_ms is 0 until it ends - the fixture above
+# carries `ci,running,0,0` - so the humanised active_for is the only elapsed the
+# tool states for it. It is parsed to milliseconds HERE, on the collector side
+# of the seam, because the renderer performs no outside reads and may not invent
+# a time of its own.
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .active_steps[0].active_for' "$OUT")
+[ "$got" = "18h32m" ] || fail "active_for lost: $got"
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .active_steps[0].active_ms' "$OUT")
+[ "$got" = 66720000 ] || fail "18h32m did not parse to milliseconds: $got"
+pass "a running step's elapsed reaches the wire as milliseconds"
+
+# The parse is validated END TO END, so a value carrying a unit it does not know
+# emits null and the viewer says nothing. Summing only the tokens it recognised
+# would report the fixture's `2w3d` as three days - a materially understated
+# time, and a guessed time on this view is worse than no time at all.
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .active_steps[1].active_for' "$OUT")
+[ "$got" = "2w3d" ] || fail "the unparseable active_for was not passed through verbatim: $got"
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .active_steps[1].active_ms' "$OUT")
+[ "$got" = "null" ] || fail "an unrecognised active_for shape parsed to a number: $got"
+pass "an active_for shape the parser does not recognise reaches the wire as null"
 
 # --- failure renders as unknown, never as pending ---------------------------
 #

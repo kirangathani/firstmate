@@ -108,12 +108,19 @@ const W = 9;
 const CIW = 13;
 const MW = 9;
 const NCELLS = STEPS.length + 2;
-// One PIPELINE block: the head, the three box rows, the timer row, the facts
-// row, and one blank. One COMPACT block: the head, the state row, and one
+// One PIPELINE block: the head, the three box rows, the TWO timer rows, the
+// facts row, and one blank. One COMPACT block: the head, the state row, and one
 // blank. scrollWindow() below derives the frame from these two numbers, so a
 // row added to either builder has to be added here in the same edit or the
 // frame runs past the bottom of the terminal.
-export const BLOCK = 7;
+//
+// The timer is two rows because the two states the captain actually watches -
+// a step that is running, and one parked on its findings - each have a word to
+// say AND a time to say it for, and neither fits beside the other in a
+// nine-column cell. The second row is drawn unconditionally, blank where a cell
+// has no time, so the frame height does not depend on which states happen to be
+// on screen.
+export const BLOCK = 8;
 export const COMPACT_BLOCK = 3;
 
 // Whether this agent has a no-mistakes pipeline to draw. The snapshot STATES
@@ -312,7 +319,7 @@ function perimeter(w) {
 // ONE renderer for step boxes, the CI container, and pre-merge, so they cannot
 // drift apart in how they signal the same thing.
 function box(label, state, width, opts = {}) {
-  const { dashed = false, badge = false, timer = "", anim = 0 } = opts;
+  const { dashed = false, badge = false, timer = "", timer2 = "", anim = 0 } = opts;
   const base = PAINT[state] ?? dim;
   const [tl, tr, bl, br, hz, vt] = dashed
     ? ["+", "+", "+", "+", "-", ":"]
@@ -335,7 +342,10 @@ function box(label, state, width, opts = {}) {
   const row = (r) =>
     grid[r].map((ch, c) => (hi.get(`${r},${c}`) ?? base)(ch)).join("");
 
-  return { top: row(0), mid: row(1), bot: row(2), timer: pad(timer, width + 2) };
+  return {
+    top: row(0), mid: row(1), bot: row(2),
+    timer: pad(timer, width + 2), timer2: pad(timer2, width + 2),
+  };
 }
 
 // --- horizontal layout ------------------------------------------------------
@@ -440,6 +450,17 @@ function skipOverride(agent, spec) {
   return null;
 }
 
+// How long a LIVE step has been running, in milliseconds, or null when the run
+// does not state it. The collector owns this read - a running step's steps[]
+// duration_ms is 0 until it ends, so the tool's own active_steps row is the
+// only elapsed there is - and this renderer only picks the row that belongs to
+// the box being drawn. A folded box takes whichever of its halves is active.
+function activeMs(agent, spec) {
+  const keys = spec.folds ?? [spec.key];
+  const hit = (agent.active_steps ?? []).find((a) => keys.includes(a?.step));
+  return typeof hit?.active_ms === "number" ? hit.active_ms : null;
+}
+
 function stepBox(agent, spec, anim) {
   // The skip is checked BEFORE the unreadable case, because it does not depend
   // on the pipeline read at all: it comes from the task's own record, and under
@@ -466,8 +487,22 @@ function stepBox(agent, spec, anim) {
   else if (state === "skipped") timer = "skipped";
   else if (state === "unknown") timer = st ? "stale" : "?";
 
-  const b = box(spec.label, state, W, { timer, anim });
-  return { ...b, timer: timer ? (PAINT[state] ?? dim)(b.timer) : b.timer };
+  // The second line says how long the word above it has been true. It is drawn
+  // only for the two states that used to carry no time at all: a step that is
+  // running, and one parked on the findings it produced. A finished step states
+  // its own duration on the first line already, and a pending or skipped one has
+  // no elapsed to state.
+  let timer2 = "";
+  if (state === "live") timer2 = dur(activeMs(agent, spec));
+  else if (state === "waiting") timer2 = st?.duration_ms ? dur(st.duration_ms) : "";
+
+  const b = box(spec.label, state, W, { timer, timer2, anim });
+  const paint = PAINT[state] ?? dim;
+  return {
+    ...b,
+    timer: timer ? paint(b.timer) : b.timer,
+    timer2: timer2 ? paint(b.timer2) : b.timer2,
+  };
 }
 
 // CI green does NOT mean ready to merge: the pre-merge gate only runs when a
@@ -519,12 +554,20 @@ function ciBox(agent, anim) {
     }
     case "running": {
       const state = liveIsCredible(agent) ? "live" : "unknown";
+      // CI is the pipeline's longest wait, so it counts up exactly like the
+      // step boxes beside it, through the same one owner of the active row so
+      // the two cannot drift. Only the credibly live case gets a second line: a
+      // cell drawn `unknown` because its worker is gone is not counting, and an
+      // elapsed under a state that is not counting would be a lie.
+      const timer2 = state === "live" ? dur(activeMs(agent, { key: "ci" })) : "";
       const b = box("GITHUB CI", state, CIW, {
         dashed: true,
         timer: `${passed}/${total} running`,
+        timer2,
         anim,
       });
-      return { ...b, timer: (PAINT[state] ?? dim)(b.timer) };
+      const paint = PAINT[state] ?? dim;
+      return { ...b, timer: paint(b.timer), timer2: timer2 ? paint(b.timer2) : b.timer2 };
     }
     case "nothing-ran": {
       const b = box("GITHUB CI", "unknown", CIW, { dashed: true, timer: "nothing ran" });
@@ -596,17 +639,23 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   if (selected && cell >= 0 && cell < cells.length) {
     const c = cells[cell];
     const mark = (s) => `${ESC}7m${s.replace(ANSI, "")}${R}`;
-    cells[cell] = { top: mark(c.top), mid: mark(c.mid), bot: mark(c.bot), timer: c.timer };
+    cells[cell] = {
+      top: mark(c.top), mid: mark(c.mid), bot: mark(c.bot),
+      timer: c.timer, timer2: c.timer2,
+    };
   }
 
   const shown = cells.slice(lay.first, lay.first + lay.count);
   const arrowGlyph = "─".repeat(Math.max(0, lay.gap - 1)) + "→";
   const arrow = dim(arrowGlyph);
   const gap = " ".repeat(lay.gap);
-  const top = [], mid = [], bot = [], tim = [];
+  const top = [], mid = [], bot = [], tim = [], tim2 = [];
   shown.forEach((c, i) => {
-    if (i > 0) { top.push(gap); mid.push(arrow); bot.push(gap); tim.push(gap); }
-    top.push(c.top); mid.push(c.mid); bot.push(c.bot); tim.push(c.timer);
+    if (i > 0) {
+      top.push(gap); mid.push(arrow); bot.push(gap); tim.push(gap); tim2.push(gap);
+    }
+    top.push(c.top); mid.push(c.mid); bot.push(c.bot);
+    tim.push(c.timer); tim2.push(c.timer2);
   });
 
   const onHead = selected && cell < 0;
@@ -649,6 +698,7 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
     "  " + mid.join(""),
     "  " + bot.join(""),
     "  " + tim.join(""),
+    "  " + tim2.join(""),
     "  " + facts,
   ];
 }

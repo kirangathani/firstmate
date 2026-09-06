@@ -814,6 +814,138 @@ assert_not_contains "$ciout" "local pipeline" "a CI-only skip claimed the local 
 # only about the sentence naming them.
 pass "the skip is disclosed in plain words, naming exactly which halves were skipped"
 
+# --- the two states that were on screen with no time ------------------------
+#
+# A finished step has always shown its duration. The two states the captain
+# actually sits and watches - a step that is RUNNING, and one PARKED on the
+# findings it produced - said only what they were and never how long it had
+# been true, which is the one number that tells him whether to wait or to go
+# and look. Each now carries its elapsed on a second line directly under its
+# own word, in the same dur() shape a finished step prints, so the three read
+# as one column rather than as three different clocks.
+#
+# The rows are addressed by the renderer's OWN layout arithmetic, so a change
+# to a cell width or the arrow gutter moves this assertion with it.
+
+cat >"$TMP_ROOT/elapsed.mjs" <<'JS'
+const { render, layout, CELL_WIDTHS, STEPS, dur } = await import(process.argv[2]);
+const base = JSON.parse(process.argv[3]);
+const COLS = 200, ROWS = 60;
+let bad = 0;
+const say = (m) => { console.error(m); bad++; };
+
+const lay = layout(COLS, 0);
+const offsets = [];
+{
+  let x = 2;  // agentBlock indents every box row by two columns
+  for (const w of CELL_WIDTHS) { offsets.push(x); x += w + lay.gap; }
+}
+
+const RUNNING_MS = 179000;   // "2m59s", as the collector parsed it off active_for
+const PARKED_MS = 1085436;   // the review step's own duration when its findings landed
+
+const agent = {
+  ...base.agents[0],
+  steps: STEPS.map((s) => {
+    if (s.key === "review") {
+      return { step: "review", status: "fix_review", findings: 6, duration_ms: PARKED_MS };
+    }
+    if (s.key === "test") {
+      return { step: "test", status: "running", findings: 0, duration_ms: 0 };
+    }
+    if (s.key === "intent") {
+      return { step: "intent", status: "completed", findings: 0, duration_ms: 22 };
+    }
+    return { step: s.key, status: "pending", findings: 0, duration_ms: 0 };
+  }),
+  active_steps: [{
+    step: "test", status: "running", active_for: "2m59s", active_ms: RUNNING_MS,
+    last_activity: "", agent_pid: "", round: "1",
+  }],
+};
+
+// head, top, mid, bot, word, time. The word row and the time row are read
+// through the same layout arithmetic, so a width change moves both together.
+const rowsFor = (a) => {
+  const frame = render({ ...base, agents: [a] }, { rows: ROWS, cols: COLS, sel: 0, cell: -1 })
+    .map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  const head = frame.findIndex((l) => l.includes(a.id));
+  const cellsOf = (row) =>
+    CELL_WIDTHS.map((w, i) => (frame[row] ?? "").slice(offsets[i], offsets[i] + w).trim());
+  return { words: cellsOf(head + 4), times: cellsOf(head + 5) };
+};
+
+const { words, times } = rowsFor(agent);
+const at = (key) => STEPS.findIndex((s) => s.key === key);
+
+// The word line is unchanged: the elapsed is added BESIDE what the captain
+// already reads, never in place of it.
+if (words[at("test")] !== "running") say(`live step lost its word: "${words[at("test")]}"`);
+if (words[at("review")] !== "6 find") say(`parked step lost its findings: "${words[at("review")]}"`);
+
+if (times[at("test")] !== dur(RUNNING_MS)) {
+  say(`live step shows "${times[at("test")]}" under running, want "${dur(RUNNING_MS)}"`);
+}
+if (times[at("review")] !== dur(PARKED_MS)) {
+  say(`parked step shows "${times[at("review")]}" under its findings, want "${dur(PARKED_MS)}"`);
+}
+
+// A finished step states its duration on the first line already, and a step
+// that has not started has no elapsed at all. Repeating or inventing one there
+// would make the second line mean two different things.
+if (times[at("intent")] !== "") say(`a finished step repeated its duration: "${times[at("intent")]}"`);
+if (times[at("document")] !== "") say(`a pending step invented an elapsed: "${times[at("document")]}"`);
+
+// A live step whose run states no elapsed says nothing rather than guessing.
+const brow = rowsFor({ ...agent, active_steps: [] }).times[at("test")];
+if (brow !== "") say(`a live step with no stated elapsed invented one: "${brow}"`);
+
+// The GITHUB CI cell is the pipeline's LONGEST wait, so it counts up exactly
+// like the step boxes beside it, off the same active row keyed `ci`.
+const CI_MS = 66720000;   // "18h32m", as the collector parsed it off active_for
+const CI = CELL_WIDTHS.length - 2;
+const ciAgent = (over) => ({
+  ...agent,
+  pr: { url: "https://github.com/kirangathani/firstmate/pull/51", number: 51 },
+  ci: {
+    collection: { ok: true, reason: "" }, checks: [],
+    total: 11, passed: 3, failed: 0, pending: 8, skipped: 0, excused: 0,
+  },
+  active_steps: [{
+    step: "ci", status: "running", active_for: "18h32m", active_ms: CI_MS,
+    last_activity: "", agent_pid: "", round: "starting",
+  }],
+  ...over,
+});
+
+const running = rowsFor(ciAgent({}));
+if (running.words[CI] !== "3/11 running") say(`CI lost its word: "${running.words[CI]}"`);
+if (running.times[CI] !== dur(CI_MS)) {
+  say(`running CI shows "${running.times[CI]}" under its word, want "${dur(CI_MS)}"`);
+}
+
+// A CI stage that is NOT running is not counting, and an elapsed under a state
+// that is not counting is the same lie the check classes exist to prevent.
+const parked = rowsFor(ciAgent({
+  ci: {
+    collection: { ok: true, reason: "" }, checks: [],
+    total: 11, passed: 11, failed: 0, pending: 0, skipped: 0, excused: 0,
+  },
+}));
+if (parked.words[CI] !== "11/11 your word") say(`CI lost its word: "${parked.words[CI]}"`);
+if (parked.times[CI] !== "") say(`a CI stage that is not running invented an elapsed: "${parked.times[CI]}"`);
+
+// Nor does a cell drawn `unknown` because the fleet no longer believes its
+// worker is alive: it looks live, but nothing is counting behind it.
+const dead = rowsFor(ciAgent({ endpoint_alive: false })).times[CI];
+if (dead !== "") say(`a CI cell whose worker is gone kept counting: "${dead}"`);
+
+process.exit(bad ? 1 : 0);
+JS
+node "$TMP_ROOT/elapsed.mjs" "$TUI" "$(snap "[$(agent_with el0 '[]' '{}')]")" ||
+  fail "the running and parked states did not carry their elapsed"
+pass "a running step and a parked one each state how long they have been so"
+
 # The disclosure shares its line with the tally, and the captain's rule is that
 # a count is never dropped to make room. With the sentence in front the pair ran
 # 124 columns and a 120-column terminal cut the tally mid-class, so the counts
