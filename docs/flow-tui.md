@@ -243,7 +243,7 @@ Every other state a secondmate can report - `blocked`, `failed`, `parked` - keep
 
 ### Blocks are two heights, so the window is solved once
 
-A compact block is three rows and a pipeline block is seven, so how many blocks fit depends on which one is first.
+A compact block is three rows and a pipeline block is eight, so how many blocks fit depends on which one is first.
 Dividing the available rows by a single constant would answer for a frame that is not being drawn, and that disagreement is not cosmetic: an over-tall frame scrolls the terminal and desynchronises every absolute cursor address in the repaint.
 
 `scrollWindow(heights, avail, top, sel)` therefore returns the window start and the block count together, greedily fitting heights from `top` in the same shape `layout()` already uses for the horizontal cell window.
