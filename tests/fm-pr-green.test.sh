@@ -359,9 +359,13 @@ test_the_attestation_check_follows_the_shared_authority() {
   expect_code 0 "$rc" "green-attestation: a direct-PR project's PR must not be red for that check alone (stderr: $(cat "$case_dir/stderr2"))"
   assert_grep 'PR check excused' "$case_dir/stderr2" \
     "green-attestation: the excusal was not disclosed"
-  [ "$out" = "green: $PR_URL $GREEN_SHA 1 checks" ] \
-    || fail "green-attestation: an excused check must not count as evidence, got: $out"
-  pass "fm-pr-green.sh: the one excusable check follows the shared authority, and never counts as evidence"
+  # The count is what proves the excused check was not counted as evidence; the
+  # trailing clause is what carries the reason into the worker's done line and
+  # firstmate's confirmation, so a green with one excused red is auditable
+  # rather than bare.
+  [ "$out" = "green: $PR_URL $GREEN_SHA 1 checks (1 check excused: PR must be raised via no-mistakes - project is registered as a direct-PR project, whose PRs are raised without the pipeline by design)" ] \
+    || fail "green-attestation: an excused check must not count as evidence and the green line must name why, got: $out"
+  pass "fm-pr-green.sh: the one excusable check follows the shared authority, never counts as evidence, and names why it was excused"
 }
 
 # An excused check is an authorized red, not proof anything ran, so a rollup

@@ -28,7 +28,19 @@
 # indicator that library's header records being fixed for the pipeline view on
 # 2026-08-09). An excused check is still not EVIDENCE that anything ran, so it
 # is subtracted before asking whether this PR reported any checks at all,
-# exactly as the merge gate subtracts it.
+# exactly as the merge gate subtracts it. When it excuses, the green line names
+# the check and the authority, so the worker's done report and firstmate's
+# confirmation both carry the reason rather than a bare green.
+#
+# BOTH AUTHORITIES LIVE IN THE TASK'S OWN RECORD under FM_HOME, so this command
+# is only as right as the home it was pointed at. A worker runs it from its task
+# worktree, where FM_HOME defaults to that worktree and state/ does not exist, and
+# in that reading nothing can be excused - not because nothing excuses it, but
+# because the answer was never read. That is called out by name rather than
+# reported as a verdict: an absent record prints the home error and the exact
+# re-run to make. Observed twice on 2026-09-08 (PRs 71 and 73, both direct-PR,
+# both merged from the captain's home without complaint) as a healthy PR
+# reporting a machinery alarm.
 #
 # INFRASTRUCTURE IS A DISTINCT OUTCOME from a real red, on the captain's
 # standing rule of 2026-09-07: a timed-out review is an alarm, never a re-run.
@@ -53,12 +65,18 @@
 #      FM_PR_INFRA_SECONDS (default 10) of starting - a job that died before it
 #      could say anything.
 # RULE 3 HAS A KNOWN FALSE POSITIVE and it is disclosed rather than hidden: a
-# gate job that deliberately refuses fast looks identical from outside. This
-# repo has one - `PR must be raised via no-mistakes` fails in ~2 seconds writing
-# no output (observed 2026-09-07 on PR 66) - so every rule-3 finding carries
-# "may instead be a gate that refused fast" in its printed reason. Nothing is
-# lost by the ambiguity: both outcomes are non-green, both stop the worker, and
-# the reason names the doubt for whoever reads it.
+# gate job that deliberately refuses fast looks identical from outside, so every
+# rule-3 finding carries "may instead be a gate that refused fast" in its printed
+# reason. Nothing is lost by the ambiguity: both outcomes are non-green, both
+# stop the worker, and the reason names the doubt for whoever reads it.
+# THE ONE SUCH GATE THIS REPO HAS IS EXCLUDED BY NAME rather than left to the
+# doubt: `PR must be raised via no-mistakes` fails in ~2 seconds writing no
+# output (observed 2026-09-07 on PR 66), and reaching rule 3 at all means it was
+# NOT excused, so it is a gate that refused and is reported as the plain red it
+# is. Its "wrote nothing" shape is told apart from dead machinery by the
+# excusal and by that name, never by how long it took, because the machinery
+# remedy - report it and stop, never re-run - is the wrong instruction for a
+# gate whose refusal is a real verdict about the branch.
 # Rules 2 and 3 live in THIS script rather than the shared table because they
 # need data the rollup does not carry, and because the merge gate has no use for
 # the distinction: it refuses on either. They can only ever move a check from
@@ -87,6 +105,8 @@
 #   recorded it. With no URL the task's recorded pr= is used, which is
 #   firstmate's case after bin/fm-pr-check.sh has run.
 # Exit 0 prints one line on stdout:  green: <url> <sha> <n> checks
+#   With the one excusable check excused it carries the reason too:
+#   green: <url> <sha> <n> checks (1 check excused: <name> - <authority>)
 # Exit 1 names every failing, infrastructure, unfinished, or unreadable check on
 #   stderr. An infrastructure line is printed as
 #   `infrastructure: <check name> - <reason>`.
@@ -181,12 +201,30 @@ ATTESTATION_CHECK_NAME=$(fm_attestation_check_name)
 fm_pr_rollup_classify "$FM_PR_ROLLUP_TSV" "$ATTESTATION_CHECK_NAME"
 
 checks_exempted=0
+# The authority's own first line, kept so the green report can say WHY it is
+# green with one excused check rather than leaving the worker's done line and
+# firstmate's confirmation to assert a bare green nobody can audit.
+excused_because=
 if [ "$FM_PR_ROLLUP_EXEMPT_FAILING" -gt 0 ]; then
   if authority=$(fm_attestation_authority "$ID" "$STATE/$ID.meta" \
       "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_HOME" "$SCRIPT_DIR"); then
     checks_exempted=$FM_PR_ROLLUP_EXEMPT_FAILING
-    echo "note: PR check excused: $ATTESTATION_CHECK_NAME ($(printf '%s' "$authority" | head -1))" >&2
+    excused_because=$(printf '%s' "$authority" | head -1)
+    echo "note: PR check excused: $ATTESTATION_CHECK_NAME ($excused_because)" >&2
   else
+    # BOTH authorities are read out of the task's own record under FM_HOME, so
+    # an absent record is not "nothing excuses this check" - it is "this run is
+    # not looking at the home that holds the answer", and the two must never be
+    # reported as the same thing. A worker runs this from its task worktree,
+    # where $FM_HOME defaults to that worktree and state/ does not exist at all,
+    # so without this the excusal silently could not apply and a healthy
+    # direct-PR PR reported an alarm. Observed twice on 2026-09-08, on PRs 71
+    # and 73, both of which bin/fm-pr-merge.sh merged without complaint from the
+    # captain's own home.
+    if [ ! -f "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+      echo "error: no local record for $ID at $STATE/$ID.meta, so the two authorities that may excuse '$ATTESTATION_CHECK_NAME' could not be read at all" >&2
+      echo "error: that is a wrong-home reading, not a verdict - re-run it against the home that dispatched this task: FM_HOME=<firstmate home> $0 $ID $URL" >&2
+    fi
     # Fed back into the ordinary failing list rather than reported here, so it
     # goes through the one reporting and counting path below like any other red
     # and cannot be counted without being named. One entry per occurrence,
@@ -261,7 +299,17 @@ while IFS= read -r name; do
   infra_lines=$infra_lines"infrastructure: $name - it reported that it timed out, was cancelled, went stale, or failed to start"$'\n'
 done < <(fm_pr_rollup_each "$FM_PR_ROLLUP_INFRA_NAMES")
 while IFS= read -r name; do
-  reason=$(infra_reason "$name")
+  # The attestation check never takes an enrichment reason. It is the one gate
+  # in this repo known to refuse in seconds writing nothing, which is rule 3's
+  # disclosed false positive; reaching here means it was NOT excused, so it is a
+  # gate that refused, and calling it dead machinery would raise an alarm whose
+  # remedy ("report this and stop") is wrong for it. Distinguished by the
+  # excusal and by name, never by how long it took.
+  if [ "$name" = "$ATTESTATION_CHECK_NAME" ]; then
+    reason=
+  else
+    reason=$(infra_reason "$name")
+  fi
   if [ -n "$reason" ]; then
     infra_count=$((infra_count + 1))
     infra_lines=$infra_lines"infrastructure: $name - $reason"$'\n'
@@ -312,4 +360,10 @@ if [ "$checks_evidence" -eq 0 ]; then
   exit 1
 fi
 
-printf 'green: %s %s %s checks\n' "$URL" "$HEAD_BEFORE" "$checks_evidence"
+if [ "$checks_exempted" -gt 0 ]; then
+  printf 'green: %s %s %s checks (%s check excused: %s - %s)\n' \
+    "$URL" "$HEAD_BEFORE" "$checks_evidence" "$checks_exempted" \
+    "$ATTESTATION_CHECK_NAME" "$excused_because"
+else
+  printf 'green: %s %s %s checks\n' "$URL" "$HEAD_BEFORE" "$checks_evidence"
+fi
