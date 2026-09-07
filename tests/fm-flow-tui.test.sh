@@ -17,6 +17,20 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TUI="$ROOT/bin/fm-flow-tui.mjs"
+# How many cells the row has, read from the renderer's own layout rather than
+# written down here: a cell added to STEPS changes what a narrowed frame must
+# say it is showing, and a number copied into this file would go on asserting
+# the old row.
+NCELLS=$(node --input-type=module -e \
+  'const m = await import(process.argv[1]); process.stdout.write(String(m.CELL_WIDTHS.length))' \
+  "$TUI")
+# Which box the push+PR stage is, counting from the left. The connector label
+# below is read as the field just after it, so this comes from the renderer's
+# own step list rather than from a position that a step inserted anywhere to its
+# left or right would quietly move.
+PRBOX=$(node --input-type=module -e \
+  'const m = await import(process.argv[1]); process.stdout.write(String(m.STEPS.findIndex((s) => s.key === "pr") + 1))' \
+  "$TUI")
 TMP_ROOT=$(fm_test_tmproot fm-flow-tui)
 mkdir -p "$TMP_ROOT"
 
@@ -239,10 +253,10 @@ pass "every stage box drawn at 80 columns is drawn whole"
 # When a stage cannot fit it is dropped from the window, and the header says so
 # rather than letting the captain believe they are seeing every one.
 assert_contains "$narrow" "stages 1-" "a narrowed view did not state which stages it is showing"
-assert_contains "$narrow" "of 10" "a narrowed view did not state how many stages exist"
+assert_contains "$narrow" "of $NCELLS" "a narrowed view did not state how many stages exist"
 wide=$(printf '%s' "$BIG" | node "$TUI" --cols 200 --rows 24 --tick 0 | sed 's/\x1b\[[0-9;]*m//g')
 assert_contains "$wide" "pre-merge" "the last stage is missing at a width that fits every stage"
-assert_not_contains "$wide" "of 10" "a full-width view claimed to be showing a subset"
+assert_not_contains "$wide" "of $NCELLS" "a full-width view claimed to be showing a subset"
 pass "a narrowed view names its stage window and a full one does not"
 
 # --- the visible window and the rows on screen agree ------------------------
@@ -477,10 +491,10 @@ pass "the empty-fleet line prints only when nothing at all is live"
 # untruth as the count this whole section exists for.
 out=$(printf '%s' "$(snap "[$SCOUT]")" | node "$TUI" --cols 80 --rows 24 --tick 0 |
   sed 's/\x1b\[[0-9;]*m//g')
-assert_not_contains "$out" "of 10" "a frame with no stage boxes named a stage window"
+assert_not_contains "$out" "of $NCELLS" "a frame with no stage boxes named a stage window"
 out=$(printf '%s' "$MIXED" | node "$TUI" --cols 80 --rows 40 --tick 0 |
   sed 's/\x1b\[[0-9;]*m//g')
-assert_contains "$out" "of 10" "a narrowed frame that does draw stages stopped naming its window"
+assert_contains "$out" "of $NCELLS" "a narrowed frame that does draw stages stopped naming its window"
 pass "the stage window is named only when stage boxes are on screen"
 
 # The original concern, kept honest: a worker with no pipeline must not be given
@@ -1128,6 +1142,34 @@ labels() {  # <agents-json> [cols]
   node "$TMP_ROOT/labels.mjs" "$TUI" "$(snap "$1")" "${2:-200}"
 }
 
+# The expected label row, written by naming only the cells that carry a label
+# and letting the rest of the row come from the renderer's own cell count
+# ($NCELLS above). A row spelled out as literal empty strings asserts the WIDTH
+# of the row as well as its contents, so a cell added to STEPS broke every one
+# of these on a fact they were never about.
+label_row() {  # <index>:<value>... -> the JSON array for that axis
+  local spec out
+  out=$(jq -cn --argjson n "$NCELLS" '[range($n) | ""]')
+  for spec in "$@"; do
+    out=$(printf '%s' "$out" |
+      jq -c --argjson i "${spec%%:*}" --arg v "${spec#*:}" '.[$i] = $v')
+  done
+  printf '%s' "$out"
+}
+# The two rows together, in the shape labels.mjs prints them. Specs before `--`
+# are the model row, specs after it the effort row; either side may be empty.
+label_rows() {  # <model-spec...> -- <effort-spec...>
+  local a seen=0
+  local -a model=() effort=()
+  for a in "$@"; do
+    if [ "$a" = -- ]; then seen=1; continue; fi
+    if [ "$seen" = 0 ]; then model+=("$a"); else effort+=("$a"); fi
+  done
+  printf '{"model":%s,"effort":%s}' \
+    "$(label_row ${model[@]+"${model[@]}"})" \
+    "$(label_row ${effort[@]+"${effort[@]}"})"
+}
+
 STEP_BUILD='[{"step":"building","status":"running","findings":0,"duration_ms":0}]'
 ACT_BUILD='[{"step":"building","status":"running","active_ms":90000}]'
 
@@ -1136,7 +1178,7 @@ BUILDING=$(model_agent building-a1 \
   '{"harness":"claude","model":"claude-fable-5-1","effort":"xhigh"}' \
   "$STEP_BUILD" "$ACT_BUILD")
 out=$(labels "[$BUILDING]")
-[ "$out" = '{"model":["fable 5.1","","","","","","","","",""],"effort":["xhigh","","","","","","","","",""]}' ] ||
+[ "$out" = "$(label_rows 0:'fable 5.1' -- 0:xhigh)" ] ||
   fail "the building cell did not carry the worker's own model and effort:
 $out"
 pass "the building cell names the model the worker itself runs on"
@@ -1152,7 +1194,7 @@ REVIEW=$(model_agent review-b2 \
              {step:"review",status:"running",findings:0,duration_ms:0}]')" \
   '[{"step":"review","status":"running","active_ms":600000,"model":"claude-opus-5","effort":"high"}]')
 out=$(labels "[$REVIEW]")
-[ "$out" = '{"model":["","","","opus 5","","","","","",""],"effort":["","","","high","","","","","",""]}' ] ||
+[ "$out" = "$(label_rows 3:'opus 5' -- 3:high)" ] ||
   fail "a running review step did not carry the model the run launched for it:
 $out"
 pass "a pipeline step names the model the run launched for that step, not the worker's"
@@ -1162,7 +1204,7 @@ pass "a pipeline step names the model the run launched for that step, not the wo
 UNKNOWN=$(model_agent unknown-c3 '{"harness":"claude","model":null,"effort":null}' \
   "$STEP_BUILD" "$ACT_BUILD")
 out=$(labels "[$UNKNOWN]")
-[ "$out" = '{"model":["-","","","","","","","","",""],"effort":["-","","","","","","","","",""]}' ] ||
+[ "$out" = "$(label_rows 0:- -- 0:-)" ] ||
   fail "an agent with nothing recorded did not render both axes as dashes:
 $out"
 pass "an axis with no machine record behind it renders as a dash"
@@ -1173,7 +1215,7 @@ pass "an axis with no machine record behind it renders as a dash"
 DONE=$(model_agent done-d4 '{"harness":"claude","model":"claude-opus-5","effort":"high"}' \
   "$(steps_all completed | jq '[{step:"building",status:"completed",findings:0,duration_ms:60000}] + .')" '[]')
 out=$(labels "[$DONE]")
-[ "$out" = '{"model":["","","","","","","","","",""],"effort":["","","","","","","","","",""]}' ] ||
+[ "$out" = "$(label_rows -- )" ] ||
   fail "a row with no active cell drew a label anyway:
 $out"
 pass "a cell that is not the active one carries no model label"
@@ -1217,13 +1259,15 @@ pr_connector_label() {  # <snapshot-json> [render args...]
   local doc=$1; shift
   printf '%s' "$doc" | node "$TUI" --cols "${1:-200}" --rows 60 --tick 0 |
     sed 's/\x1b\[[0-9;]*m//g' |
-    awk '/push\+PR/ {
+    awk -v prbox="$PRBOX" '/push\+PR/ {
       getline
       # The box row splits into whitespace-separated cells, so the label under
-      # the eighth arrow is the field after the eighth box. Reading it this way
-      # rather than by column number means a width change moves the assertion
-      # with the renderer instead of leaving it reading empty space.
-      print $(NF - 2)
+      # the arrow leaving push+PR is the field just after that box. Reading it
+      # this way rather than by column number means a width change moves the
+      # assertion with the renderer instead of leaving it reading empty space,
+      # and counting from push+PR rather than from the end of the row means a
+      # cell added after it does not move the assertion onto a box.
+      print $(prbox + 1)
       exit
     }'
 }
@@ -1265,6 +1309,41 @@ esac
 timers=$(printf '%s' "$out" | awk '/push\+PR/ { getline; getline; print; exit }')
 assert_contains "$timers" "skipped" "a direct-PR row drew no stage as skipped"
 pass "a direct-PR row draws its pipeline stages as skipped and names the mode that authorised it"
+
+# A direct-PR task's building phase ENDS at its PR, and what the worker does
+# afterwards is a MARKER under the push+PR box, not a stage of its own. Before
+# this, `building` had no end on that path at all - the captain saw
+# `building running 3h54m` beside a PR that had been open for hours - and the
+# row said nothing about the review work still going on.
+#
+# The row keeps exactly the stages the pipeline has. A column for the aftermath
+# would have said it grew one it does not.
+REWORKING=$(agent_with dp3 \
+  '[{"step":"building","status":"completed","findings":0,"duration_ms":600000}]' \
+  '{"mode":"direct-PR","pr":{"url":"https://github.com/o/r/pull/31","number":31},
+    "rework":{"active_ms":7400000}}')
+out=$(render "$(snap "[$REWORKING]")" | sed 's/\x1b\[[0-9;]*m//g')
+# The building phase and the push+PR box sit on the same timer line, so it is
+# read CELL BY CELL: a check against the whole row would see the other cell's
+# word and pass or fail for the wrong reason.
+timers=$(printf '%s' "$out" | awk '/building/ { getline; getline; print; exit }')
+build_cell=$(printf '%s' "$timers" | awk '{ print $1 }')
+assert_contains "$build_cell" "10m" "a finished building phase did not state its duration"
+assert_not_contains "$build_cell" "running" "building was still running with the PR open"
+# The marker rides the SECOND timer line, under the push+PR box.
+marker=$(printf '%s' "$out" | awk '/building/ { getline; getline; getline; print; exit }')
+assert_contains "$marker" "rework" "post-PR work left no marker under push+PR"
+assert_contains "$marker" "2h" "the rework marker did not state how long it has been going"
+pass "a direct-PR row ends building at its PR and marks the work after it under push+PR"
+
+# The row still has exactly the stages it had: the aftermath earned a marker,
+# not a column.
+STAGE_COUNT=$(node --input-type=module -e \
+  'const m = await import(process.argv[1]); process.stdout.write(String(m.STEPS.length))' \
+  "$TUI")
+[ "$STAGE_COUNT" = 8 ] ||
+  fail "the stage row grew or lost a cell: $STAGE_COUNT stages, want 8"
+pass "the post-PR marker adds no stage to the row"
 
 # The flag is a SEPARATE axis and is named by the flag the captain passed,
 # taken from the record rather than inferred from the missing run.
