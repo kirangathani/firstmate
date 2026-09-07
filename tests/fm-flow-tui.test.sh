@@ -17,6 +17,13 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TUI="$ROOT/bin/fm-flow-tui.mjs"
+# How many cells the row has, read from the renderer's own layout rather than
+# written down here: a cell added to STEPS changes what a narrowed frame must
+# say it is showing, and a number copied into this file would go on asserting
+# the old row.
+NCELLS=$(node --input-type=module -e \
+  'const m = await import(process.argv[1]); process.stdout.write(String(m.CELL_WIDTHS.length))' \
+  "$TUI")
 TMP_ROOT=$(fm_test_tmproot fm-flow-tui)
 mkdir -p "$TMP_ROOT"
 
@@ -239,10 +246,10 @@ pass "every stage box drawn at 80 columns is drawn whole"
 # When a stage cannot fit it is dropped from the window, and the header says so
 # rather than letting the captain believe they are seeing every one.
 assert_contains "$narrow" "stages 1-" "a narrowed view did not state which stages it is showing"
-assert_contains "$narrow" "of 10" "a narrowed view did not state how many stages exist"
+assert_contains "$narrow" "of $NCELLS" "a narrowed view did not state how many stages exist"
 wide=$(printf '%s' "$BIG" | node "$TUI" --cols 200 --rows 24 --tick 0 | sed 's/\x1b\[[0-9;]*m//g')
 assert_contains "$wide" "pre-merge" "the last stage is missing at a width that fits every stage"
-assert_not_contains "$wide" "of 10" "a full-width view claimed to be showing a subset"
+assert_not_contains "$wide" "of $NCELLS" "a full-width view claimed to be showing a subset"
 pass "a narrowed view names its stage window and a full one does not"
 
 # --- the visible window and the rows on screen agree ------------------------
@@ -477,10 +484,10 @@ pass "the empty-fleet line prints only when nothing at all is live"
 # untruth as the count this whole section exists for.
 out=$(printf '%s' "$(snap "[$SCOUT]")" | node "$TUI" --cols 80 --rows 24 --tick 0 |
   sed 's/\x1b\[[0-9;]*m//g')
-assert_not_contains "$out" "of 10" "a frame with no stage boxes named a stage window"
+assert_not_contains "$out" "of $NCELLS" "a frame with no stage boxes named a stage window"
 out=$(printf '%s' "$MIXED" | node "$TUI" --cols 80 --rows 40 --tick 0 |
   sed 's/\x1b\[[0-9;]*m//g')
-assert_contains "$out" "of 10" "a narrowed frame that does draw stages stopped naming its window"
+assert_contains "$out" "of $NCELLS" "a narrowed frame that does draw stages stopped naming its window"
 pass "the stage window is named only when stage boxes are on screen"
 
 # The original concern, kept honest: a worker with no pipeline must not be given
@@ -1265,6 +1272,28 @@ esac
 timers=$(printf '%s' "$out" | awk '/push\+PR/ { getline; getline; print; exit }')
 assert_contains "$timers" "skipped" "a direct-PR row drew no stage as skipped"
 pass "a direct-PR row draws its pipeline stages as skipped and names the mode that authorised it"
+
+# A direct-PR task's building phase ENDS at its PR, and what the worker does
+# afterwards is its own cell. Before this, `building` had no end on that path at
+# all - the captain saw `building running 3h54m` beside a PR that had been open
+# for hours - and the row said nothing about the review work still going on.
+#
+# Neither phase is the pipeline's, so neither may be painted skipped by the
+# delivery mode that skips every stage between them.
+REWORKING=$(agent_with dp3 \
+  '[{"step":"building","status":"completed","findings":0,"duration_ms":600000},
+    {"step":"rework","status":"running","findings":0,"duration_ms":0}]' \
+  '{"mode":"direct-PR","pr":{"url":"https://github.com/o/r/pull/31","number":31},
+    "active_steps":[{"step":"rework","status":"running","active_for":"",
+                     "active_ms":7400000,"last_activity":"","agent_pid":"","round":""}]}')
+out=$(render "$(snap "[$REWORKING]")" | sed 's/\x1b\[[0-9;]*m//g')
+timers=$(printf '%s' "$out" | awk '/building/ { getline; getline; print; exit }')
+assert_contains "$timers" "10m" "a finished building phase did not state its duration"
+assert_not_contains "$timers" "running" "building was still running with the PR open"
+timers=$(printf '%s' "$out" | awk '/rework/ { getline; getline; print; exit }')
+assert_contains "$timers" "running" "post-PR work was not drawn as running rework"
+assert_not_contains "$timers" "skipped" "the delivery mode painted the worker's own rework phase skipped"
+pass "a direct-PR row ends building at its PR and draws the work after it as rework"
 
 # The flag is a SEPARATE axis and is named by the flag the captain passed,
 # taken from the record rather than inferred from the missing run.

@@ -591,6 +591,31 @@ spawned_at() {  # <task-id> <meta-path> -> epoch seconds, or empty
   printf '%s' "$best"
 }
 
+# When this task's PR was recorded, which is the moment its BUILDING phase ended
+# for a task that never enters the pipeline at all.
+#
+# A `direct-PR` project has no no-mistakes run, so `run_created` is 0 for every
+# one of them and the building step used to have no end at all: the captain saw
+# `building running 3h54m` beside a PR that had been open for hours. The end is
+# the PR, and this is where the record of it is.
+#
+# bin/fm-pr-check.sh REWRITES state/<id>.meta whole when it records the PR, so
+# once that file names a `pr=` its modification time is when the PR was recorded.
+# That is the same rewrite spawned_at() above works around to find the START, so
+# the two readings are two halves of one fact about the same file rather than
+# two independent guesses.
+#
+# It is the record's time, not GitHub's `createdAt`: GitHub's is exact but is
+# only read on the CI-bearing cadence, and a building cell that ended at one
+# time on the slow refresh and at another on the fast one would move on screen
+# for no reason the captain could see. Nothing is invented - a meta with no
+# recorded PR yields nothing, and the building phase then stays open.
+pr_recorded_at() {  # <meta-path> -> epoch seconds, or empty
+  [ -e "$1" ] || return 0
+  grep -q '^pr=' "$1" 2>/dev/null || return 0
+  stat -c %Y "$1" 2>/dev/null || true
+}
+
 # The fields every agent carries whether or not it has a pipeline, resolved
 # once so the two builders below cannot drift apart in how they read the fleet
 # document. Sets the FM_ROW_* globals rather than echoing, because several of
@@ -763,10 +788,23 @@ agent_json() {  # <task-json>
   if [ -n "$built_at" ] && [ "${run_created:-0}" -gt 0 ] && [ "$built_at" -gt "$run_created" ]; then
     built_at=
   fi
+  # A task with no pipeline run of its own ends its building phase at the PR.
+  # Every `direct-PR` task is in that position permanently, and a no-mistakes
+  # task is in it only before its run exists, where there is no PR yet either.
+  local build_end=${run_created:-0}
+  local pr_at=''
+  if [ "${run_created:-0}" -le 0 ]; then
+    pr_at=$(pr_recorded_at "$meta")
+    if [ -n "$pr_at" ] && [ -n "$built_at" ] && [ "$pr_at" -gt "$built_at" ]; then
+      build_end=$pr_at
+    else
+      pr_at=
+    fi
+  fi
   if [ -z "$built_at" ]; then
     build_step='{"step":"building","status":"unknown","findings":0,"duration_ms":0}'
-  elif [ "${run_created:-0}" -gt 0 ]; then
-    local ms=$(( (run_created - built_at) * 1000 ))
+  elif [ "$build_end" -gt 0 ]; then
+    local ms=$(( (build_end - built_at) * 1000 ))
     build_step="{\"step\":\"building\",\"status\":\"completed\",\"findings\":0,\"duration_ms\":$ms}"
   else
     build_step='{"step":"building","status":"running","findings":0,"duration_ms":0}'
@@ -774,6 +812,21 @@ agent_json() {  # <task-json>
     # step is not one of its own, so the field is empty and active_ms - the only
     # value the renderer reads - is computed from the two epochs directly.
     build_active="{\"step\":\"building\",\"status\":\"running\",\"active_for\":\"\",\"active_ms\":$(( (NOW_EPOCH - built_at) * 1000 )),\"last_activity\":\"\",\"agent_pid\":\"\",\"round\":\"\"}"
+  fi
+
+  # What the worker is doing AFTER its PR is open, which is not building and is
+  # not the pipeline either: it is answering review, and on a `direct-PR`
+  # project it is the whole of the rest of the task's life. Ending building at
+  # the PR without this would draw a live worker as a row of finished boxes.
+  #
+  # It is claimed only on the evidence for it: a recorded PR, no pipeline run to
+  # own the work instead, and a worker still there. A gone worker leaves the
+  # cell pending rather than counting time against nobody.
+  local rework_step='{"step":"rework","status":"pending","findings":0,"duration_ms":0}'
+  local rework_active=''
+  if [ -n "$pr_at" ] && [ "$endpoint_alive" = true ]; then
+    rework_step='{"step":"rework","status":"running","findings":0,"duration_ms":0}'
+    rework_active="{\"step\":\"rework\",\"status\":\"running\",\"active_for\":\"\",\"active_ms\":$(( (NOW_EPOCH - pr_at) * 1000 )),\"last_activity\":\"\",\"agent_pid\":\"\",\"round\":\"\"}"
   fi
 
   # Which model is pushing each ACTIVE pipeline step through, attributed from
@@ -785,9 +838,13 @@ agent_json() {  # <task-json>
   # building is the WORKER's own step, so its model is the worker's own record
   # and never a transcript. The renderer reads it from `worker` directly.
   if [ "$collect_ok" = true ]; then
-    steps=$(printf '%s' "$steps" | jq -c --argjson b "$build_step" '[$b] + .')
+    steps=$(printf '%s' "$steps" \
+      | jq -c --argjson b "$build_step" --argjson r "$rework_step" '[$b] + . + [$r]')
     if [ -n "$build_active" ]; then
       actives=$(printf '%s' "$actives" | jq -c --argjson b "$build_active" '[$b] + .')
+    fi
+    if [ -n "$rework_active" ]; then
+      actives=$(printf '%s' "$actives" | jq -c --argjson r "$rework_active" '. + [$r]')
     fi
   else
     actives='[]'

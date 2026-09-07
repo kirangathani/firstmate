@@ -109,6 +109,12 @@ export const STEPS = [
   { key: "document", label: "docs" },
   { key: "lint", label: "lint" },
   { key: "pr", label: "push+PR", folds: ["push", "pr"] },
+  // What the worker does AFTER its PR is open, which is neither building nor
+  // the pipeline: answering review. It closes the row for a `direct-PR` task,
+  // whose whole life after the PR used to be drawn as a building step that
+  // never ended - the captain saw `building running 3h54m` beside a PR that had
+  // been open for hours.
+  { key: "rework", label: "rework" },
 ];
 const W = 9;
 const CIW = 13;
@@ -308,7 +314,7 @@ export const workerLabel = (agent) =>
 // inferred from the other: the worker and the gate agents are separate agents
 // and routinely run on different models.
 export function stepModel(agent, spec) {
-  if (spec.key === "building") return agent?.worker ?? null;
+  if (spec.key === "building" || spec.key === "rework") return agent?.worker ?? null;
   const keys = spec.folds ?? [spec.key];
   return (agent?.active_steps ?? []).find((a) => keys.includes(a?.step)) ?? null;
 }
@@ -470,7 +476,10 @@ const INDENT = 2;
 // columns on the same frame. The widest ordinary spacing is already five, so at
 // full width nothing moves at all.
 const PR_LABEL_W = 5;
-const PR_CONNECTOR = STEPS.length;
+// The gutter LEAVING push+PR, which is the one the PR number rides. Derived
+// from where that step actually sits rather than from the end of the row, so a
+// step added after it does not silently move the label onto another connector.
+const PR_CONNECTOR = STEPS.findIndex((s) => s.key === "pr") + 1;
 // The width of the gutter drawn BEFORE cell `i`. Exported for the same reason
 // CELL_WIDTHS is: a test addressing a cell by arithmetic has to use the
 // renderer's own spacing rather than a number copied out of one frame.
@@ -550,6 +559,9 @@ function stepFor(agent, spec) {
 // nothing to it. Read from the task's own state/<id>.meta by the collector, so
 // this never guesses from a status log, a brief, or the absence of a run.
 function skipOverride(agent, spec) {
+  // rework is the WORKER's own phase, like building: no delivery mode and no
+  // testing skip removes it, so neither may paint it.
+  if (spec.key === "rework") return null;
   if (!skipsOf(agent).local && !isDirectPR(agent)) return null;
   if (LOCAL_SKIP_STAGES.has(spec.key)) return { state: "skipped", timer: "skipped" };
   if (spec.key === "pr") {

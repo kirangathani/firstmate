@@ -455,12 +455,16 @@ Guarantees the renderer is entitled to rely on:
   When it is false the agent carries `state` and empty `steps`, `active_steps` and `ci.checks`; when it is true it carries `state: null` and the pipeline fields below.
 - `state` is `bin/fm-crew-state.sh`'s answer, split into its own stated fields and otherwise passed through verbatim.
   `state.ok` false means that read failed or timed out, with `state.reason` saying which; it never falls back to the status log's last line, which is a wake event and not a current state.
-- `steps` carries all nine no-mistakes steps in pipeline order whenever `collection.ok` is true AND `pipeline` is true, using the tool's own step names, preceded by the synthetic `building` step described below.
+- `steps` carries all nine no-mistakes steps in pipeline order whenever `collection.ok` is true AND `pipeline` is true, using the tool's own step names, preceded by the synthetic `building` step and followed by the synthetic `rework` step described below.
   Folding `push` and `pr` into one box is a rendering decision and is not done here.
-- `building` is the worker's own implementation phase and is the only step this collector states rather than reads: the tool has no record of the time before its own run existed.
-  Its start is the earliest of the modification time of `state/<id>.meta` and the birth time of `state/<id>.status`, and its end is the run's own `created_at` from the run index.
-  It reports `completed` with that interval once a run exists, `running` with an `active_steps` entry while none does, and `unknown` when no record yields a start - never `pending`, which would claim the worker has not begun.
+- `building` and `rework` are the WORKER's own phases and are the only steps this collector states rather than reads: the tool has no record of the time before its own run existed, nor of the time after a PR it never opened.
+- `building`'s start is the earliest of the modification time of `state/<id>.meta` and the birth time of `state/<id>.status`.
+  Its end is the run's own `created_at` from the run index, or - when there is no run - the moment the PR was recorded, described under "A task with no run still ends its building phase" below.
+  It reports `completed` with that interval once either end exists, `running` with an `active_steps` entry while neither does, and `unknown` when no record yields a start - never `pending`, which would claim the worker has not begun.
   Its `active_for` is empty because that string is the tool's own humanising of a step it owns; `active_ms`, which is the only elapsed the renderer reads, is computed from the two epochs directly.
+- `rework` is the work after the PR is open, and it is `running` only on the evidence for it: a PR recorded in that task's own record, no pipeline run to own the work instead, and an endpoint that still resolves.
+  Anything short of that leaves it `pending`, because a gone worker counts time against nobody.
+  Its elapsed runs from the recorded PR against the same clock every other elapsed on the document uses.
 - `active_ms` is `active_for` parsed to milliseconds, and it is the only elapsed a RUNNING step has: that step's `steps[]` `duration_ms` stays `0` until it ends.
   The parse happens here because the renderer performs no outside reads and may not invent a time of its own, and it is a number rather than the tool's own string so the viewer can print a live step through the same `dur()` a finished step already prints.
   A shape the parser does not recognise emits `null`, and the viewer then says nothing rather than guessing.
@@ -544,10 +548,25 @@ The start needs two files because neither alone survives the task's life: `bin/f
 The earliest of the two is the answer, and a start later than the run it is supposed to precede is treated as no start at all - the cell reports unknown rather than presenting a negative interval as a plausible short one.
 
 No testing skip removes it.
-Under `local_skip` there is never a run to end the phase, so it simply keeps counting, which is true: the worker still implements the change by hand.
-Drawing it as skipped would say the work itself did not happen.
+Under `local_skip` the worker still implements the change by hand, and drawing the phase as skipped would say the work itself did not happen.
 
-Ten cells at full spacing need 161 columns, and the tightened arrow gutter fits all ten into 125.
+### A task with no run still ends its building phase
+
+A `direct-PR` project never enters the pipeline at all, so `run_created` is `0` for every one of its tasks permanently and the end above never arrives.
+The captain saw the consequence on 2026-09-07: `building running 3h54m` on a task whose PR had been open for hours, with every pipeline cell drawn skipped beside it.
+
+The PR is the end of that phase, and `state/<id>.meta` is where the record of it is: `bin/fm-pr-check.sh` rewrites that file whole when it records `pr=`, so once the file names one, its modification time is when the PR was recorded.
+That is the same rewrite the start reading above works around, so the two are two halves of one fact about one file rather than two independent guesses.
+
+It is the record's time rather than GitHub's own `createdAt`.
+GitHub's is exact, but it is only read on the CI-bearing cadence, and a building cell that ended at one time on the slow refresh and at another on the fast one would move on screen for no reason the captain could see.
+A record naming no PR yields nothing and the phase stays open, so nothing is invented.
+
+What happens after that PR is `rework`: answering review, which on a `direct-PR` project is the whole of the rest of the task's life.
+Ending `building` at the PR without it would draw a live worker as a row of finished boxes.
+Like `building`, no delivery mode and no testing skip paints it - it is the worker's own phase, not a pipeline stage - and its model is the worker's own from the record dispatch wrote.
+
+Eleven cells at full spacing need 177 columns, and the tightened arrow gutter fits all eleven into 141.
 
 ### Five check classes, because three folded two facts away
 
