@@ -1247,3 +1247,50 @@ for cols in 200 130; do
 done
 pass "the PR number survives every arrow spacing the frame is drawn at"
 
+# --- a direct-PR project draws the journey its delivery mode actually takes ---
+#
+# `direct-PR` means the project never enters the pipeline: the worker pushes
+# and opens the PR itself. That is a delivery-mode consequence read from the
+# task's own record, not a captain-authorised testing skip, and the title says
+# which of the two it is.
+
+DIRECT=$(agent_with dp1 '[]' \
+  '{"mode":"direct-PR","pr":{"url":"https://github.com/o/r/pull/29","number":29}}')
+out=$(render "$(snap "[$DIRECT]")" | sed 's/\x1b\[[0-9;]*m//g')
+head=$(printf '%s' "$out" | grep -F 'Agent 1  dp1')
+assert_contains "$head" "direct-PR" "the direct-PR row does not name what authorised its short journey"
+case "$head" in
+  *--local-skip*|*--ci-skip*) fail "a delivery-mode skip was reported as a testing-skip flag: $head" ;;
+esac
+timers=$(printf '%s' "$out" | awk '/push\+PR/ { getline; getline; print; exit }')
+assert_contains "$timers" "skipped" "a direct-PR row drew no stage as skipped"
+pass "a direct-PR row draws its pipeline stages as skipped and names the mode that authorised it"
+
+# The flag is a SEPARATE axis and is named by the flag the captain passed,
+# taken from the record rather than inferred from the missing run.
+BOTH=$(agent_with dp2 '[]' \
+  '{"mode":"direct-PR","skips":{"local":false,"ci":true},"pr":{"url":"https://github.com/o/r/pull/30","number":30}}')
+head=$(render "$(snap "[$BOTH]")" | sed 's/\x1b\[[0-9;]*m//g' | grep -F 'Agent 1  dp2')
+assert_contains "$head" "direct-PR --ci-skip" \
+  "a direct-PR task carrying a testing skip did not name both authorities"
+pass "a testing skip beside the delivery mode is named by its own flag"
+
+# The legend appears exactly when a skipped cell is on screen, and never
+# otherwise: a legend for a colour nothing is wearing is noise.
+hdr=$(render "$(snap "[$DIRECT]")" | sed 's/\x1b\[[0-9;]*m//g' | head -1)
+assert_contains "$hdr" "skipped" "the skipped legend is missing while skipped cells are drawn"
+hdr=$(render "$(snap "[$(agent_with ok1 "$(steps_all completed)")]")" |
+  sed 's/\x1b\[[0-9;]*m//g' | head -1)
+case "$hdr" in
+  *skipped*) fail "the skipped legend appeared with no skipped cell on screen: $hdr" ;;
+esac
+pass "the skipped legend is shown when a skipped cell is drawn, and only then"
+
+# The colour is the one already reserved for a skipped stage, not a new one, so
+# the legend and the cells cannot drift apart.
+coloured=$(render "$(snap "[$DIRECT]")" | head -1)
+case "$coloured" in
+  *$'\x1b'"[94mskipped"*) ;;
+  *) fail "the skipped legend is not drawn in the skipped stage's own colour" ;;
+esac
+pass "the legend wears the same colour as the cells it names"

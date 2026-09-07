@@ -212,6 +212,36 @@ const PAINT = {
 // merge's only test evidence.
 export const LOCAL_SKIP_STAGES = new Set(["intent", "rebase", "review", "test", "document", "lint"]);
 
+// A `direct-PR` PROJECT never enters the pipeline at all: its delivery mode
+// says the worker pushes and opens the PR itself. That removes exactly the
+// stages local_skip removes, for a different reason - a delivery-mode
+// consequence, not a captain-authorised testing skip - so the two share the
+// drawing and are named apart in the title.
+// The mode is READ from the task's own record: bin/fm-fleet-snapshot.sh takes
+// `mode=` out of state/<id>.meta and the collector carries it through. It is
+// never inferred from an absent run, because an absent run is also what a
+// wedged worker and a pipeline that has not started yet look like.
+export const isDirectPR = (agent) => agent?.mode === "direct-PR";
+
+// What authorised the short journey this row draws, named in the title so the
+// skipped cells are never a mystery. The delivery mode comes first because it
+// is the reason the stages are gone; a testing skip is a separate axis and is
+// named by the FLAG the captain actually passed, from the record, so the
+// captain can match what is on screen against what they signed.
+export function skipAuthority(agent) {
+  const parts = [];
+  if (isDirectPR(agent)) parts.push("direct-PR");
+  const s = skipsOf(agent);
+  if (s.local) parts.push("--local-skip");
+  if (s.ci) parts.push("--ci-skip");
+  return parts.join(" ");
+}
+
+// Whether this agent draws any stage cell as skipped, which is what the
+// header's `skipped` legend is shown for.
+export const drawsSkippedStages = (agent) =>
+  (isDirectPR(agent) || skipsOf(agent).local) &&
+  STEPS.some((spec) => LOCAL_SKIP_STAGES.has(spec.key));
 
 export function skipsOf(agent) {
   return { local: agent?.skips?.local === true, ci: agent?.skips?.ci === true };
@@ -520,7 +550,7 @@ function stepFor(agent, spec) {
 // nothing to it. Read from the task's own state/<id>.meta by the collector, so
 // this never guesses from a status log, a brief, or the absence of a run.
 function skipOverride(agent, spec) {
-  if (!skipsOf(agent).local) return null;
+  if (!skipsOf(agent).local && !isDirectPR(agent)) return null;
   if (LOCAL_SKIP_STAGES.has(spec.key)) return { state: "skipped", timer: "skipped" };
   if (spec.key === "pr") {
     // The pipeline did not push or open this PR, but somebody did: the brief
@@ -787,7 +817,9 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   const name = onHead
     ? `${ESC}7m Agent ${n}  ${agent.id} ${R}`
     : `${cyan(`Agent ${n}`)}  ${white(agent.id)}`;
+  const authority = skipAuthority(agent);
   const notes = [];
+  if (authority) notes.push(blue(authority));
   if (agent.collection?.ok === false) notes.push(magenta(`unreadable: ${agent.collection.reason}`));
   else if (agent.endpoint_alive === false) notes.push(magenta("worker gone"));
   // The hint rides the SELECTED agent whatever cell is highlighted, because
@@ -1061,6 +1093,10 @@ export function render(snap, opts) {
     { s: hidden ? dim(`${hidden} hidden, worker gone`) : "", pri: 3 },
     { s: flat ? dim(`${flat} without a pipeline`) : "", pri: 3 },
     { s: wide && lay.count < NCELLS ? yellow(`stages ${lay.first + 1}-${lay.first + lay.count} of ${NCELLS}`) : "", pri: 1 },
+    // The legend for the one colour a reader cannot decode from the word
+    // alone. It appears exactly when a skipped cell is on screen, and never
+    // otherwise, so it names something the captain can actually see.
+    { s: agents.some(drawsSkippedStages) ? blue("skipped") : "", pri: 2 },
     { s: dim(`updated ${ageSec}s ago`), pri: 2 },
     // Belongs beside the age, not in the key hints: an age that keeps climbing
     // while nothing on screen changes needs its reason on the same line.

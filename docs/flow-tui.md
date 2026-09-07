@@ -640,6 +640,20 @@ That one gutter is never narrower than five columns, whatever spacing the rest o
 Five holds `#9999`; a wider number is clipped rather than allowed to widen the gutter, because a gutter whose width came from a value would put two agents' cells in different columns on the same frame.
 The widest ordinary spacing is already five, so at full width nothing moves.
 
+## A direct-PR project draws the journey it actually takes
+
+`direct-PR` is a delivery mode, not a testing skip: the project's workers push and open the PR themselves and no validation pipeline ever runs.
+So every stage that mode removes is drawn as `skipped`, in the same blue a captain-authorised local skip already uses, and the title names `direct-PR` as what authorised it.
+A testing skip is a separate axis and is named beside it by the flag the captain actually passed - `--local-skip`, `--ci-skip` - read from the task's own record.
+
+The mode is read from `state/<id>.meta` and carried on the wire, never inferred from an absent run: a wedged worker and a pipeline that has not started yet also have no run.
+
+`push+PR` is NOT drawn as skipped under this mode, for the same reason it is not under a local skip: the push and the PR did happen, by hand, and the CI cell one step to its right is showing that PR's real checks.
+It reads `by hand` instead.
+`pre-merge` is never skipped under any mode or flag, because `bin/fm-pr-merge.sh` runs the base's own assertions regardless.
+
+The header carries a blue `skipped` legend exactly when a skipped cell is on screen, and never otherwise.
+
 ## Cost
 
 Measured 2026-08-08 on this host, no-mistakes v1.37.0.

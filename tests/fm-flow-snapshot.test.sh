@@ -1072,3 +1072,16 @@ assert_not_contains "$reason" "A new version" \
   "the version banner was reported as the reason on the stderr path"
 pass "a failure that writes only to stderr still says why, and the banner is not the why"
 
+# --- the delivery mode reaches the wire --------------------------------------
+#
+# The view draws a direct-PR project's stages as skipped, and it must read that
+# from the task's own record rather than infer it from an absent run: an absent
+# run is also what a wedged worker and a pipeline that has not started yet look
+# like. bin/fm-fleet-snapshot.sh takes `mode=` out of state/<id>.meta and this
+# collector carries it through unchanged, including the empty string for a task
+# whose record names no mode at all.
+
+got=$(jq -r '.agents[] | "\(.id):\(.mode)"' "$ATTOUT" | sort | tr '\n' ' ')
+[ "$got" = "gated-b2:no-mistakes shipped-a1:direct-PR " ] ||
+  fail "the recorded delivery mode did not reach the wire: $got"
+pass "each agent carries the delivery mode its own record names"
