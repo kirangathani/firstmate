@@ -29,7 +29,18 @@ mkdir -p "$TMP_ROOT"
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v sqlite3 >/dev/null 2>&1 || { echo "skip: sqlite3 not found"; exit 0; }
 
-PROJECT=/home/kiran/projects/gits/firstmate
+# A real directory, created here rather than a path that happens to exist on one
+# machine. The collector now runs `no-mistakes axi status --run` from the task's
+# own project - that command resolves the repository from its working directory -
+# so a fixture project that does not exist is a fixture whose run cannot be read
+# at all. This used to be a hardcoded absolute path, which existed on the author's
+# machine and on no CI runner, and every assertion about a step reaching the wire
+# failed there and nowhere else.
+PROJECT="$TMP_ROOT/project"
+mkdir -p "$PROJECT"
+# Physically resolved, because the cwd probe below compares against `pwd -P` and
+# a temp root reached through a symlink would otherwise never match.
+PROJECT=$(cd "$PROJECT" && pwd -P)
 
 # --- captured fixtures ------------------------------------------------------
 
@@ -370,12 +381,18 @@ pass "passes unfamiliar step statuses through unmapped"
 
 got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .steps | length' "$OUT")
 [ "$got" = 10 ] || fail "expected 10 steps, got $got"
-# The tool's own nine, with the worker's building phase in front of them: the
-# row covers the whole of a task's life, not just the part the pipeline owns.
-got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | [.steps[].step] | join(",")' "$OUT")
-[ "$got" = "building,intent,rebase,review,test,document,lint,push,pr,ci" ] ||
-  fail "step order wrong: $got"
-pass "carries the building phase and all nine pipeline steps in order"
+# The tool's own nine, in its own order, unchanged - that is what this assertion
+# has always been for and its name stays exactly as it was.
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2")
+  | [.steps[] | select(.step != "building") | .step] | join(",")' "$OUT")
+[ "$got" = "intent,rebase,review,test,document,lint,push,pr,ci" ] || fail "step order wrong: $got"
+pass "carries all nine steps in pipeline order"
+
+# The worker's building phase sits in front of them, so the row covers the whole
+# of a task's life rather than only the part the pipeline owns.
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .steps[0].step' "$OUT")
+[ "$got" = "building" ] || fail "building is not the first step of the row: $got"
+pass "the building phase leads the row, in front of the pipeline's own steps"
 
 got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .steps[] | select(.step=="lint") | .duration_ms' "$OUT")
 [ "$got" = 1127597 ] || fail "duration lost: $got"
