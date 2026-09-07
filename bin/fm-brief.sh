@@ -345,6 +345,13 @@ A decision you submit at a gate changes what this branch is supposed to be, but 
 3. \`$NM_DECISION_CMD rerun-check $ID\` must exit 0 before you report done. It refuses while any decision was recorded during the run that is still the most recent one, which is exactly the case where nothing has yet scored the branch against the decided goal.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run that \`rerun-check\`, then append \`done: PR {url} checks green\` and stop. You are finished.
+
+# The pipeline's review is worth telling the PR about
+The moment the pipeline's \`pr\` step has opened the PR, append \`review-attest needed for {full-40-char-sha} on {owner}/{repo}\` to the status file, with the PR's head commit and the owner/repo, and carry straight on driving the run - this is a note to firstmate, not a stop.
+Firstmate replies by publishing a signed line into the PR body recording that this pipeline already reviewed that exact commit, so the project's own AI review job can stand down instead of reviewing the same diff again.
+Write that sentence exactly, with the full 40-character commit and the owner/repo: firstmate issues the attestation straight from this line, and a reworded or abbreviated one cannot be read.
+Ask as early as you can, because a review job that has already started reads the body as it was when it started.
+The line covers one commit, so if anything pushes to the branch afterwards - including the pipeline's own later steps - ask again for the new head; an uncovered commit is simply reviewed in full, which is the safe outcome and nothing to work around.
 EOF
 )
       fi
