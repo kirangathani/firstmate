@@ -36,9 +36,10 @@ classify() {
     # shellcheck source=bin/fm-pr-lib.sh
     . "$ROOT/bin/fm-pr-lib.sh"
     fm_pr_rollup_classify "$tsv" "$exempt"
-    printf 'total=%s failing=%s pending=%s unknown=%s exempt=%s\n' \
-      "$FM_PR_ROLLUP_TOTAL" "$FM_PR_ROLLUP_FAILING" "$FM_PR_ROLLUP_PENDING" \
-      "$FM_PR_ROLLUP_UNKNOWN" "$FM_PR_ROLLUP_EXEMPT_FAILING"
+    printf 'total=%s failing=%s infra=%s pending=%s unknown=%s exempt=%s\n' \
+      "$FM_PR_ROLLUP_TOTAL" "$FM_PR_ROLLUP_FAILING" "$FM_PR_ROLLUP_INFRA" \
+      "$FM_PR_ROLLUP_PENDING" "$FM_PR_ROLLUP_UNKNOWN" "$FM_PR_ROLLUP_EXEMPT_FAILING"
+    fm_pr_rollup_each "$FM_PR_ROLLUP_INFRA_NAMES" | sed 's/^/infra: /'
     fm_pr_rollup_each "$FM_PR_ROLLUP_FAILING_NAMES" | sed 's/^/failing: /'
     fm_pr_rollup_each "$FM_PR_ROLLUP_PENDING_NAMES" | sed 's/^/pending: /'
     fm_pr_rollup_each "$FM_PR_ROLLUP_UNKNOWN_NAMES" | sed 's/^/unknown: /'
@@ -52,37 +53,70 @@ test_classify_passing_conclusions() {
     $'CheckRun\tCOMPLETED\tNEUTRAL\t-\toptional-scan' \
     $'CheckRun\tCOMPLETED\tSKIPPED\t-\tpath-filtered' \
     $'StatusContext\t-\t-\tSUCCESS\texternal-gate')
-  assert_contains "$out" 'total=4 failing=0 pending=0 unknown=0 exempt=0' \
+  assert_contains "$out" 'total=4 failing=0 infra=0 pending=0 unknown=0 exempt=0' \
     "SUCCESS/NEUTRAL/SKIPPED conclusions and a SUCCESS status context must all classify as passing"
   pass "classification: every passing shape counts as passing and nothing else"
 }
 
+# A check that reached a verdict about the code and said no. Somebody fixes the
+# branch, so it is FAILING.
 test_classify_failing_conclusions() {
   local out conclusion
-  for conclusion in FAILURE CANCELLED TIMED_OUT ACTION_REQUIRED STALE STARTUP_FAILURE; do
+  for conclusion in FAILURE ACTION_REQUIRED; do
     out=$(classify '' "$(printf 'CheckRun\tCOMPLETED\t%s\t-\tlint' "$conclusion")")
-    assert_contains "$out" 'total=1 failing=1 pending=0 unknown=0 exempt=0' \
+    assert_contains "$out" 'total=1 failing=1 infra=0 pending=0 unknown=0 exempt=0' \
       "a COMPLETED CheckRun with conclusion $conclusion must classify as failing"
     assert_contains "$out" 'failing: lint' "the $conclusion check was not named"
   done
   for conclusion in FAILURE ERROR; do
     out=$(classify '' "$(printf 'StatusContext\t-\t-\t%s\texternal-gate' "$conclusion")")
-    assert_contains "$out" 'total=1 failing=1 pending=0 unknown=0 exempt=0' \
+    assert_contains "$out" 'total=1 failing=1 infra=0 pending=0 unknown=0 exempt=0' \
       "a StatusContext in state $conclusion must classify as failing"
   done
-  pass "classification: every failing conclusion and status-context state counts as failing"
+  pass "classification: a check that reached a no verdict counts as failing"
+}
+
+# A check that never delivered a verdict about the code at all. The branch may be
+# fine; the machinery is not. Re-running it hides the alarm, so it is its own
+# class - the captain's standing rule of 2026-09-07.
+test_classify_infrastructure_conclusions() {
+  local out conclusion
+  for conclusion in CANCELLED TIMED_OUT STALE STARTUP_FAILURE; do
+    out=$(classify '' "$(printf 'CheckRun\tCOMPLETED\t%s\t-\tslow-suite' "$conclusion")")
+    assert_contains "$out" 'total=1 failing=0 infra=1 pending=0 unknown=0 exempt=0' \
+      "a COMPLETED CheckRun with conclusion $conclusion must classify as infrastructure, not as a red"
+    assert_contains "$out" 'infra: slow-suite' "the $conclusion check was not named as infrastructure"
+  done
+  # The split must never make a non-green PR green: both classes are counted.
+  out=$(classify '' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint' \
+    $'CheckRun\tCOMPLETED\tTIMED_OUT\t-\tslow-suite')
+  assert_contains "$out" 'total=2 failing=1 infra=1 pending=0 unknown=0 exempt=0' \
+    "a PR carrying both a red and an infrastructure check must count both"
+  pass "classification: a check that never reached a verdict counts as infrastructure, separately from a red"
+}
+
+# An excused check is excused whichever shape its failure took, so an exemption
+# can never reappear as an infrastructure finding.
+test_classify_exemption_covers_an_infrastructure_shape() {
+  local out
+  out=$(classify 'PR must be raised via no-mistakes' \
+    $'CheckRun\tCOMPLETED\tTIMED_OUT\t-\tPR must be raised via no-mistakes')
+  assert_contains "$out" 'total=1 failing=0 infra=0 pending=0 unknown=0 exempt=1' \
+    "an exempt check that timed out must divert, not surface as an infrastructure finding"
+  pass "classification: the exemption covers an infrastructure-shaped failure too"
 }
 
 test_classify_pending_states() {
   local out status
   for status in QUEUED IN_PROGRESS PENDING WAITING REQUESTED; do
     out=$(classify '' "$(printf 'CheckRun\t%s\t-\t-\tslow-suite' "$status")")
-    assert_contains "$out" 'total=1 failing=0 pending=1 unknown=0 exempt=0' \
+    assert_contains "$out" 'total=1 failing=0 infra=0 pending=1 unknown=0 exempt=0' \
       "a CheckRun with status $status must classify as pending"
   done
   for status in PENDING EXPECTED; do
     out=$(classify '' "$(printf 'StatusContext\t-\t-\t%s\texternal-gate' "$status")")
-    assert_contains "$out" 'total=1 failing=0 pending=1 unknown=0 exempt=0' \
+    assert_contains "$out" 'total=1 failing=0 infra=0 pending=1 unknown=0 exempt=0' \
       "a StatusContext in state $status must classify as pending"
   done
   pass "classification: every queued or running shape counts as pending"
@@ -95,7 +129,7 @@ test_classify_unclassifiable_entry_is_unknown() {
   out=$(classify '' \
     $'CheckRun\tCOMPLETED\tMYSTERY\t-\tnovel-conclusion' \
     $'Wormhole\t-\t-\t-\tnovel-typename')
-  assert_contains "$out" 'total=2 failing=0 pending=0 unknown=2 exempt=0' \
+  assert_contains "$out" 'total=2 failing=0 infra=0 pending=0 unknown=2 exempt=0' \
     "an unrecognized conclusion or typename must count as unknown, not passing"
   assert_contains "$out" 'unknown: novel-conclusion (type=CheckRun status=COMPLETED conclusion=MYSTERY state=-)' \
     "an unknown entry must be reported with the fields that could not be read"
@@ -110,14 +144,14 @@ test_classify_exempt_name_is_exact_and_diverts_only_failures() {
     $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes' \
     $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes' \
     $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint')
-  assert_contains "$out" 'total=3 failing=1 pending=0 unknown=0 exempt=2' \
+  assert_contains "$out" 'total=3 failing=1 infra=0 pending=0 unknown=0 exempt=2' \
     "each occurrence of the exempt name must divert, and every other failure must still count"
   assert_contains "$out" 'failing: lint' "a failure with another name was diverted by the exemption"
 
   out=$(classify 'PR must be raised via no-mistakes' \
     $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes (renamed)' \
     $'CheckRun\tIN_PROGRESS\t-\t-\tPR must be raised via no-mistakes')
-  assert_contains "$out" 'total=2 failing=1 pending=1 unknown=0 exempt=0' \
+  assert_contains "$out" 'total=2 failing=1 infra=0 pending=1 unknown=0 exempt=0' \
     "the exemption must match by exact name and must divert only a FAILING check"
   pass "classification: the exempt name is matched exactly and diverts only failures"
 }
@@ -125,7 +159,7 @@ test_classify_exempt_name_is_exact_and_diverts_only_failures() {
 test_classify_empty_rollup_counts_nothing() {
   local out
   out=$(classify '')
-  assert_contains "$out" 'total=0 failing=0 pending=0 unknown=0 exempt=0' \
+  assert_contains "$out" 'total=0 failing=0 infra=0 pending=0 unknown=0 exempt=0' \
     "an empty rollup must count no checks at all"
   pass "classification: an empty rollup counts nothing"
 }
@@ -179,6 +213,22 @@ case " \$* " in
     fi
     if [ -f '$case_dir/pr-checks.tsv' ]; then
       cat '$case_dir/pr-checks.tsv'
+    fi
+    exit 0
+    ;;
+  *check-runs*)
+    # The infrastructure-enrichment call. The case's infra-hints.tsv stands in
+    # for what the jq over repos/<o>/<r>/commits/<sha>/check-runs would print:
+    # "<name><TAB><reason>" per check run that looks like machinery. Absent
+    # means the enrichment found nothing, and the unreadable marker makes the
+    # call FAIL, which must degrade to the conclusion-only rule rather than
+    # weakening any verdict.
+    if [ -e '$case_dir/infra-unreadable' ]; then
+      echo 'mock: check-runs query failed' >&2
+      exit 1
+    fi
+    if [ -f '$case_dir/infra-hints.tsv' ]; then
+      cat '$case_dir/infra-hints.tsv'
     fi
     exit 0
     ;;
@@ -280,23 +330,59 @@ test_zero_checks_is_never_green() {
   pass "fm-pr-green.sh: a PR reporting zero checks is never green"
 }
 
-# This command excuses nothing, so its green is strictly the stronger reading:
-# the one check the merge gate may excuse under a captain's authority is an
-# ordinary failure here.
-test_the_attestation_check_is_not_excused_here() {
-  local case_dir rc
+# The one excusable check is resolved through bin/fm-attestation-lib.sh, the
+# owner the merge gate and the pipeline view already share, so this command
+# cannot answer it differently from the merge that follows. With NO authority it
+# is an ordinary failure. Without this, firstmate's own PRs - the project is
+# registered direct-PR, so that check fails on every one by construction - would
+# report red on every poll forever.
+test_the_attestation_check_follows_the_shared_authority() {
+  local case_dir rc out
   case_dir=$(make_green_case green-attestation)
   add_gh_mock "$case_dir"
   write_checks "$case_dir" \
     $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
     $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes'
 
+  # No registry, no signed skip: nothing excuses it, so it is an ordinary red.
   run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
-  expect_code 1 "$rc" "green-attestation: no check is excused by this command"
+  expect_code 1 "$rc" "green-attestation: with no authority the check must count as failing"
   assert_grep 'error: PR check is failing: PR must be raised via no-mistakes' "$case_dir/stderr" \
-    "green-attestation: the failing attestation check was not named"
-  pass "fm-pr-green.sh: it excuses no check, so its green is the stronger reading"
+    "green-attestation: the unexcused attestation check was not named"
+
+  # Registering the project direct-PR is one of the two authorities the shared
+  # owner recognizes, and that mode's PRs cannot carry the attestation at all.
+  mkdir -p "$case_dir/fmhome/data" "$case_dir/project"
+  printf -- '- project [direct-PR] - fixture (added 2026-09-07)\n' > "$case_dir/fmhome/data/projects.md"
+  out=$(run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" 2>"$case_dir/stderr2"); rc=$?
+  expect_code 0 "$rc" "green-attestation: a direct-PR project's PR must not be red for that check alone (stderr: $(cat "$case_dir/stderr2"))"
+  assert_grep 'PR check excused' "$case_dir/stderr2" \
+    "green-attestation: the excusal was not disclosed"
+  [ "$out" = "green: $PR_URL $GREEN_SHA 1 checks" ] \
+    || fail "green-attestation: an excused check must not count as evidence, got: $out"
+  pass "fm-pr-green.sh: the one excusable check follows the shared authority, and never counts as evidence"
+}
+
+# An excused check is an authorized red, not proof anything ran, so a rollup
+# holding nothing else is the same false-green shape as an empty one. The merge
+# gate has captain authorities that let that through; this command has none.
+test_an_excused_only_rollup_is_not_green() {
+  local case_dir rc
+  case_dir=$(make_green_case green-attestation-only)
+  add_gh_mock "$case_dir"
+  write_checks "$case_dir" $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes'
+  mkdir -p "$case_dir/fmhome/data" "$case_dir/project"
+  printf -- '- project [direct-PR] - fixture (added 2026-09-07)\n' > "$case_dir/fmhome/data/projects.md"
+
+  run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
+  expect_code 1 "$rc" "green-attestation-only: a rollup left empty by discounting must not report green"
+  assert_grep 'only check(s) were excused' "$case_dir/stderr" \
+    "green-attestation-only: the outcome did not say the rollup was left with no evidence"
+  assert_no_grep 'green:' "$case_dir/stdout" \
+    "green-attestation-only: a rollup with no evidence printed a green line"
+  pass "fm-pr-green.sh: a rollup left empty by discounting an excused check is not green"
 }
 
 test_unreadable_rollup_is_not_green() {
@@ -414,6 +500,97 @@ test_malformed_request_is_refused() {
   pass "fm-pr-green.sh: a path-unsafe task id and a non-PR link are both refused"
 }
 
+# A check that timed out is an ALARM, not a red, and the outcome must say so in
+# that word with the check named. The captain's standing rule of 2026-09-07: a
+# timed-out review is never re-run.
+test_a_timed_out_check_is_an_infrastructure_outcome_not_a_red() {
+  local case_dir rc
+  case_dir=$(make_green_case green-infra-conclusion)
+  add_gh_mock "$case_dir"
+  write_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tTIMED_OUT\t-\tbehaviour tests'
+
+  run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
+  expect_code 1 "$rc" "green-infra-conclusion: a timed-out check must not report green"
+  assert_grep 'infrastructure: behaviour tests' "$case_dir/stderr" \
+    "green-infra-conclusion: the timed-out check was not reported under the word infrastructure with its name"
+  assert_grep 'not a red PR' "$case_dir/stderr" \
+    "green-infra-conclusion: the outcome did not distinguish infrastructure from a red PR"
+  assert_grep 'do NOT re-run them' "$case_dir/stderr" \
+    "green-infra-conclusion: the outcome did not forbid re-running the check"
+  assert_no_grep 'error: PR check is failing: behaviour tests' "$case_dir/stderr" \
+    "green-infra-conclusion: a check that never reached a verdict was reported as a red"
+  assert_no_grep 'green:' "$case_dir/stdout" "green-infra-conclusion: an infrastructure outcome printed a green line"
+  pass "fm-pr-green.sh: a timed-out check is an infrastructure outcome, named and never a red"
+}
+
+# Rule 2: a check whose own report says it could not run. The rollup carries no
+# report text at all, so this comes from the enrichment call on the head SHA.
+test_a_check_reporting_it_could_not_run_is_infrastructure() {
+  local case_dir rc
+  case_dir=$(make_green_case green-infra-text)
+  add_gh_mock "$case_dir"
+  write_checks "$case_dir" $'CheckRun\tCOMPLETED\tFAILURE\t-\tintegration'
+  printf 'integration\tits report says the job did not run to a verdict\n' \
+    > "$case_dir/infra-hints.tsv"
+
+  run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
+  expect_code 1 "$rc" "green-infra-text: a check that could not run must not report green"
+  assert_grep 'infrastructure: integration - its report says the job did not run to a verdict' "$case_dir/stderr" \
+    "green-infra-text: the check was not moved to infrastructure with its reason attached"
+  assert_no_grep 'error: PR check is failing: integration' "$case_dir/stderr" \
+    "green-infra-text: the check was still reported as a red"
+  pass "fm-pr-green.sh: a check whose own report says it could not run is infrastructure, with the reason attached"
+}
+
+# The enrichment may only ever move a check from red to infrastructure. When its
+# call FAILS, the conclusion-only rule still stands and the verdict is unchanged
+# - a failed enrichment must never soften a red or produce a green.
+test_a_failed_enrichment_degrades_without_weakening_the_verdict() {
+  local case_dir rc
+  case_dir=$(make_green_case green-infra-degraded)
+  add_gh_mock "$case_dir"
+  touch "$case_dir/infra-unreadable"
+  write_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint' \
+    $'CheckRun\tCOMPLETED\tSTARTUP_FAILURE\t-\tbehaviour tests'
+
+  run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
+  expect_code 1 "$rc" "green-infra-degraded: a failed enrichment must not report green"
+  assert_grep 'infrastructure: behaviour tests' "$case_dir/stderr" \
+    "green-infra-degraded: the conclusion-only infrastructure rule stopped working without the enrichment"
+  assert_grep 'error: PR check is failing: lint' "$case_dir/stderr" \
+    "green-infra-degraded: a red was softened by the enrichment failing"
+  assert_no_grep 'green:' "$case_dir/stdout" "green-infra-degraded: a failed enrichment produced a green line"
+  pass "fm-pr-green.sh: a failed enrichment degrades to the conclusion-only rule and weakens no verdict"
+}
+
+# A PR carrying both must report both, because the two have different remedies
+# and reporting only one would send the reader at the wrong half.
+test_a_red_and_an_infrastructure_check_are_both_reported() {
+  local case_dir rc
+  case_dir=$(make_green_case green-infra-and-red)
+  add_gh_mock "$case_dir"
+  write_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint' \
+    $'CheckRun\tCOMPLETED\tCANCELLED\t-\tslow-suite'
+
+  run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
+  expect_code 1 "$rc" "green-infra-and-red: a PR with both must not report green"
+  assert_grep 'infrastructure: slow-suite' "$case_dir/stderr" \
+    "green-infra-and-red: the infrastructure check was not reported"
+  assert_grep 'error: PR check is failing: lint' "$case_dir/stderr" \
+    "green-infra-and-red: the red check was not reported"
+  assert_grep 'this PR is red' "$case_dir/stderr" \
+    "green-infra-and-red: the red outcome was swallowed by the infrastructure one"
+  pass "fm-pr-green.sh: a PR carrying both a red and an infrastructure check reports both"
+}
+
 # The merge gate and this command must keep ONE verdict-bearing reading of the
 # rollup, not two. The classification table is what carries that verdict, so a
 # second copy of it under bin/ is the drift this extraction removed reappearing
@@ -438,6 +615,8 @@ test_the_classification_table_has_exactly_one_implementation() {
 
 test_classify_passing_conclusions
 test_classify_failing_conclusions
+test_classify_infrastructure_conclusions
+test_classify_exemption_covers_an_infrastructure_shape
 test_classify_pending_states
 test_classify_unclassifiable_entry_is_unknown
 test_classify_exempt_name_is_exact_and_diverts_only_failures
@@ -446,7 +625,12 @@ test_green_pr_reports_green_with_the_verified_head
 test_failing_check_is_named_and_not_green
 test_pending_check_is_distinct_from_red
 test_zero_checks_is_never_green
-test_the_attestation_check_is_not_excused_here
+test_a_timed_out_check_is_an_infrastructure_outcome_not_a_red
+test_a_check_reporting_it_could_not_run_is_infrastructure
+test_a_failed_enrichment_degrades_without_weakening_the_verdict
+test_a_red_and_an_infrastructure_check_are_both_reported
+test_the_attestation_check_follows_the_shared_authority
+test_an_excused_only_rollup_is_not_green
 test_unreadable_rollup_is_not_green
 test_head_moving_mid_read_is_not_green
 test_recorded_pr_is_used_when_no_url_is_given

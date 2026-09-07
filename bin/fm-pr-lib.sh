@@ -318,10 +318,12 @@ fm_pr_head_valid() {
 FM_PR_ROLLUP_TSV=
 FM_PR_ROLLUP_TOTAL=0
 FM_PR_ROLLUP_FAILING=0
+FM_PR_ROLLUP_INFRA=0
 FM_PR_ROLLUP_PENDING=0
 FM_PR_ROLLUP_UNKNOWN=0
 FM_PR_ROLLUP_EXEMPT_FAILING=0
 FM_PR_ROLLUP_FAILING_NAMES=
+FM_PR_ROLLUP_INFRA_NAMES=
 FM_PR_ROLLUP_PENDING_NAMES=
 FM_PR_ROLLUP_UNKNOWN_NAMES=
 
@@ -360,15 +362,32 @@ fm_pr_rollup_read() {
 # same name in the rollup more than once.
 # An entry the table cannot classify is counted UNKNOWN rather than guessed at:
 # a merge or a done report that cannot be verified must not proceed silently.
+#
+# FAILING IS SPLIT IN TWO, because the two have different remedies and the
+# captain's standing rule is that a timed-out review is an alarm, never a re-run
+# (2026-09-07):
+#   - FAILING is a check that reached a verdict about the code and the verdict
+#     was no: conclusion FAILURE or ACTION_REQUIRED, or a StatusContext in state
+#     FAILURE or ERROR. Somebody fixes the branch.
+#   - INFRASTRUCTURE is a check that never delivered a verdict about the code at
+#     all: conclusion TIMED_OUT, CANCELLED, STALE, or STARTUP_FAILURE. The branch
+#     may be perfectly fine; what failed is the machinery. Re-running it hides
+#     the alarm, so it is reported under its own word and escalated.
+# Both are non-green everywhere, so this split can never turn a red PR green - it
+# only changes which remedy the reader is pointed at. A caller that has no use
+# for the distinction adds the two counts, which is exactly what
+# bin/fm-pr-merge.sh does, leaving its refusal unchanged.
 fm_pr_rollup_classify() {
   local tsv=${1-} exempt=${2-}
   local ck_type ck_status ck_conclusion ck_state ck_name verdict
   FM_PR_ROLLUP_TOTAL=0
   FM_PR_ROLLUP_FAILING=0
+  FM_PR_ROLLUP_INFRA=0
   FM_PR_ROLLUP_PENDING=0
   FM_PR_ROLLUP_UNKNOWN=0
   FM_PR_ROLLUP_EXEMPT_FAILING=0
   FM_PR_ROLLUP_FAILING_NAMES=
+  FM_PR_ROLLUP_INFRA_NAMES=
   FM_PR_ROLLUP_PENDING_NAMES=
   FM_PR_ROLLUP_UNKNOWN_NAMES=
   while IFS=$'\t' read -r ck_type ck_status ck_conclusion ck_state ck_name; do
@@ -381,7 +400,8 @@ fm_pr_rollup_classify() {
           COMPLETED)
             case "$ck_conclusion" in
               SUCCESS|NEUTRAL|SKIPPED) verdict=passing ;;
-              FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED|STALE|STARTUP_FAILURE) verdict=failing ;;
+              FAILURE|ACTION_REQUIRED) verdict=failing ;;
+              CANCELLED|TIMED_OUT|STALE|STARTUP_FAILURE) verdict=infrastructure ;;
             esac
             ;;
           QUEUED|IN_PROGRESS|PENDING|WAITING|REQUESTED) verdict=pending ;;
@@ -403,6 +423,16 @@ fm_pr_rollup_classify() {
         fi
         FM_PR_ROLLUP_FAILING=$((FM_PR_ROLLUP_FAILING + 1))
         FM_PR_ROLLUP_FAILING_NAMES=$FM_PR_ROLLUP_FAILING_NAMES$ck_name$'\n'
+        ;;
+      infrastructure)
+        # An exempt name diverts whatever shape its failure took, so an excused
+        # check cannot come back as an infrastructure finding.
+        if [ -n "$exempt" ] && [ "$ck_name" = "$exempt" ]; then
+          FM_PR_ROLLUP_EXEMPT_FAILING=$((FM_PR_ROLLUP_EXEMPT_FAILING + 1))
+          continue
+        fi
+        FM_PR_ROLLUP_INFRA=$((FM_PR_ROLLUP_INFRA + 1))
+        FM_PR_ROLLUP_INFRA_NAMES=$FM_PR_ROLLUP_INFRA_NAMES$ck_name$'\n'
         ;;
       pending)
         FM_PR_ROLLUP_PENDING=$((FM_PR_ROLLUP_PENDING + 1))

@@ -144,6 +144,15 @@ test_no_mistakes_dod_verifies_ci_on_the_pr_itself() {
     "no-mistakes DOD does not tell the worker to abort a run left looping on the broken step"
   assert_grep "checks green at {sha}" "$brief" \
     "no-mistakes DOD's done report does not carry the verified head commit"
+  # The captain's standing rule of 2026-09-07: a timed-out review is an alarm,
+  # never a re-run. The brief must route that outcome to blocked-and-stop, not
+  # to a retry loop that would bury it.
+  assert_grep "is not a red and is never re-run" "$brief" \
+    "no-mistakes DOD does not distinguish an infrastructure outcome from a red"
+  assert_grep "blocked: infrastructure" "$brief" \
+    "no-mistakes DOD does not tell the worker to report an infrastructure outcome and stop"
+  assert_grep "do not push an empty commit to retrigger it" "$brief" \
+    "no-mistakes DOD does not forbid retriggering a check that never delivered a verdict"
   # The decision-verification requirement predates this contract and must
   # survive it: the done report still depends on it.
   assert_grep "rerun-check" "$brief" \

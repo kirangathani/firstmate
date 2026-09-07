@@ -942,7 +942,13 @@ fi
 # the same name in the rollup more than once.
 fm_pr_rollup_classify "$FM_PR_ROLLUP_TSV" "$ATTESTATION_CHECK_NAME"
 checks_total=$FM_PR_ROLLUP_TOTAL
-checks_failing=$FM_PR_ROLLUP_FAILING
+# The classifier splits a check that reached a no verdict from one that never
+# delivered a verdict at all (bin/fm-pr-lib.sh owns that split). THIS GATE DOES
+# NOT DISTINGUISH THEM: both mean the PR is not verified green, and a merge must
+# refuse either way, so they are added back together here and reported in the
+# one wording this gate has always used. The distinction matters to the reader
+# who has to act on it, which is bin/fm-pr-green.sh's worker, not to the merge.
+checks_failing=$((FM_PR_ROLLUP_FAILING + FM_PR_ROLLUP_INFRA))
 checks_pending=$FM_PR_ROLLUP_PENDING
 checks_unknown=$FM_PR_ROLLUP_UNKNOWN
 checks_exempted=0
@@ -950,6 +956,9 @@ attestation_failing=$FM_PR_ROLLUP_EXEMPT_FAILING
 while IFS= read -r ck_name; do
   echo "error: PR check is failing: $ck_name" >&2
 done < <(fm_pr_rollup_each "$FM_PR_ROLLUP_FAILING_NAMES")
+while IFS= read -r ck_name; do
+  echo "error: PR check is failing: $ck_name" >&2
+done < <(fm_pr_rollup_each "$FM_PR_ROLLUP_INFRA_NAMES")
 while IFS= read -r ck_name; do
   echo "note: PR check has not finished: $ck_name" >&2
 done < <(fm_pr_rollup_each "$FM_PR_ROLLUP_PENDING_NAMES")
