@@ -45,6 +45,9 @@
 # Environment:
 #   FM_NM_DB_NOW   override the clock used for a running step's elapsed, for tests.
 
+# Read by every caller after a failed read, which shellcheck cannot see from
+# inside a sourced library.
+# shellcheck disable=SC2034
 FM_NM_DB_REASON=''
 
 fm_nm_db_lit() {  # SQL string literal body, single quotes doubled

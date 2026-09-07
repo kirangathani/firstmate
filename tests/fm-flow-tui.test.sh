@@ -24,6 +24,13 @@ TUI="$ROOT/bin/fm-flow-tui.mjs"
 NCELLS=$(node --input-type=module -e \
   'const m = await import(process.argv[1]); process.stdout.write(String(m.CELL_WIDTHS.length))' \
   "$TUI")
+# Which box the push+PR stage is, counting from the left. The connector label
+# below is read as the field just after it, so this comes from the renderer's
+# own step list rather than from a position that a step inserted anywhere to its
+# left or right would quietly move.
+PRBOX=$(node --input-type=module -e \
+  'const m = await import(process.argv[1]); process.stdout.write(String(m.STEPS.findIndex((s) => s.key === "pr") + 1))' \
+  "$TUI")
 TMP_ROOT=$(fm_test_tmproot fm-flow-tui)
 mkdir -p "$TMP_ROOT"
 
@@ -773,14 +780,16 @@ const withSkips = (skips) => ({
 // local_skip switches the whole local pipeline off, so every validation stage
 // is skipped - but push and PR still happen, by hand, which is why that box is
 // NOT skipped and why the CI cell beside it carries real checks.
-// `building` is not a pipeline stage and no flag removes it: the worker still
-// implements the change by hand, and under local_skip there is never a run to
-// end that phase, so it stays running. Drawing it as skipped would say the
-// work itself did not happen.
+// `building` and `rework` are the WORKER's own phases, not pipeline stages, and
+// no flag removes either: the worker still implements the change by hand, and
+// under local_skip there is never a run to end the building phase, so it stays
+// running. Drawing either as skipped would say the work itself did not happen.
+// This fixture's steps carry no rework entry, so that cell is simply empty.
 const localCells = timerCells(withSkips({ local: true, ci: false }));
 STEPS.forEach((s, i) => {
   const want = s.key === "building"
     ? "running"
+    : s.key === "rework" ? ""
     : LOCAL_SKIP_STAGES.has(s.key) ? "skipped" : "by hand";
   if (localCells[i] !== want) {
     say(`local skip: stage ${s.key} reads "${localCells[i]}", want "${want}"`);
@@ -1135,6 +1144,34 @@ labels() {  # <agents-json> [cols]
   node "$TMP_ROOT/labels.mjs" "$TUI" "$(snap "$1")" "${2:-200}"
 }
 
+# The expected label row, written by naming only the cells that carry a label
+# and letting the rest of the row come from the renderer's own cell count
+# ($NCELLS above). A row spelled out as literal empty strings asserts the WIDTH
+# of the row as well as its contents, so a cell added to STEPS broke every one
+# of these on a fact they were never about.
+label_row() {  # <index>:<value>... -> the JSON array for that axis
+  local spec out
+  out=$(jq -cn --argjson n "$NCELLS" '[range($n) | ""]')
+  for spec in "$@"; do
+    out=$(printf '%s' "$out" |
+      jq -c --argjson i "${spec%%:*}" --arg v "${spec#*:}" '.[$i] = $v')
+  done
+  printf '%s' "$out"
+}
+# The two rows together, in the shape labels.mjs prints them. Specs before `--`
+# are the model row, specs after it the effort row; either side may be empty.
+label_rows() {  # <model-spec...> -- <effort-spec...>
+  local a seen=0
+  local -a model=() effort=()
+  for a in "$@"; do
+    if [ "$a" = -- ]; then seen=1; continue; fi
+    if [ "$seen" = 0 ]; then model+=("$a"); else effort+=("$a"); fi
+  done
+  printf '{"model":%s,"effort":%s}' \
+    "$(label_row ${model[@]+"${model[@]}"})" \
+    "$(label_row ${effort[@]+"${effort[@]}"})"
+}
+
 STEP_BUILD='[{"step":"building","status":"running","findings":0,"duration_ms":0}]'
 ACT_BUILD='[{"step":"building","status":"running","active_ms":90000}]'
 
@@ -1143,7 +1180,7 @@ BUILDING=$(model_agent building-a1 \
   '{"harness":"claude","model":"claude-fable-5-1","effort":"xhigh"}' \
   "$STEP_BUILD" "$ACT_BUILD")
 out=$(labels "[$BUILDING]")
-[ "$out" = '{"model":["fable 5.1","","","","","","","","",""],"effort":["xhigh","","","","","","","","",""]}' ] ||
+[ "$out" = "$(label_rows 0:'fable 5.1' -- 0:xhigh)" ] ||
   fail "the building cell did not carry the worker's own model and effort:
 $out"
 pass "the building cell names the model the worker itself runs on"
@@ -1159,7 +1196,7 @@ REVIEW=$(model_agent review-b2 \
              {step:"review",status:"running",findings:0,duration_ms:0}]')" \
   '[{"step":"review","status":"running","active_ms":600000,"model":"claude-opus-5","effort":"high"}]')
 out=$(labels "[$REVIEW]")
-[ "$out" = '{"model":["","","","opus 5","","","","","",""],"effort":["","","","high","","","","","",""]}' ] ||
+[ "$out" = "$(label_rows 3:'opus 5' -- 3:high)" ] ||
   fail "a running review step did not carry the model the run launched for it:
 $out"
 pass "a pipeline step names the model the run launched for that step, not the worker's"
@@ -1169,7 +1206,7 @@ pass "a pipeline step names the model the run launched for that step, not the wo
 UNKNOWN=$(model_agent unknown-c3 '{"harness":"claude","model":null,"effort":null}' \
   "$STEP_BUILD" "$ACT_BUILD")
 out=$(labels "[$UNKNOWN]")
-[ "$out" = '{"model":["-","","","","","","","","",""],"effort":["-","","","","","","","","",""]}' ] ||
+[ "$out" = "$(label_rows 0:- -- 0:-)" ] ||
   fail "an agent with nothing recorded did not render both axes as dashes:
 $out"
 pass "an axis with no machine record behind it renders as a dash"
@@ -1180,7 +1217,7 @@ pass "an axis with no machine record behind it renders as a dash"
 DONE=$(model_agent done-d4 '{"harness":"claude","model":"claude-opus-5","effort":"high"}' \
   "$(steps_all completed | jq '[{step:"building",status:"completed",findings:0,duration_ms:60000}] + .')" '[]')
 out=$(labels "[$DONE]")
-[ "$out" = '{"model":["","","","","","","","","",""],"effort":["","","","","","","","","",""]}' ] ||
+[ "$out" = "$(label_rows -- )" ] ||
   fail "a row with no active cell drew a label anyway:
 $out"
 pass "a cell that is not the active one carries no model label"
@@ -1224,13 +1261,15 @@ pr_connector_label() {  # <snapshot-json> [render args...]
   local doc=$1; shift
   printf '%s' "$doc" | node "$TUI" --cols "${1:-200}" --rows 60 --tick 0 |
     sed 's/\x1b\[[0-9;]*m//g' |
-    awk '/push\+PR/ {
+    awk -v prbox="$PRBOX" '/push\+PR/ {
       getline
       # The box row splits into whitespace-separated cells, so the label under
-      # the eighth arrow is the field after the eighth box. Reading it this way
-      # rather than by column number means a width change moves the assertion
-      # with the renderer instead of leaving it reading empty space.
-      print $(NF - 2)
+      # the arrow leaving push+PR is the field just after that box. Reading it
+      # this way rather than by column number means a width change moves the
+      # assertion with the renderer instead of leaving it reading empty space,
+      # and counting from push+PR rather than from the end of the row means a
+      # cell added after it does not move the assertion onto a box.
+      print $(prbox + 1)
       exit
     }'
 }
@@ -1286,13 +1325,20 @@ REWORKING=$(agent_with dp3 \
   '{"mode":"direct-PR","pr":{"url":"https://github.com/o/r/pull/31","number":31},
     "active_steps":[{"step":"rework","status":"running","active_for":"",
                      "active_ms":7400000,"last_activity":"","agent_pid":"","round":""}]}')
+# The timer row is read CELL BY CELL: the two phases sit at opposite ends of the
+# same line, so a check against the whole row would see the other one's word and
+# pass or fail for the wrong reason.
 out=$(render "$(snap "[$REWORKING]")" | sed 's/\x1b\[[0-9;]*m//g')
 timers=$(printf '%s' "$out" | awk '/building/ { getline; getline; print; exit }')
-assert_contains "$timers" "10m" "a finished building phase did not state its duration"
-assert_not_contains "$timers" "running" "building was still running with the PR open"
-timers=$(printf '%s' "$out" | awk '/rework/ { getline; getline; print; exit }')
-assert_contains "$timers" "running" "post-PR work was not drawn as running rework"
-assert_not_contains "$timers" "skipped" "the delivery mode painted the worker's own rework phase skipped"
+build_cell=$(printf '%s' "$timers" | awk '{ print $1 }')
+rework_cell=$(printf '%s' "$timers" | awk '{ print $NF }')
+assert_contains "$build_cell" "10m" "a finished building phase did not state its duration"
+assert_not_contains "$build_cell" "running" "building was still running with the PR open"
+# The rework cell is the last STAGE box, and the two cells after it on this row
+# are the CI and model columns, so it is addressed from the stage row's own end.
+rework_cell=$(printf '%s' "$timers" | awk '{ print $(NF - 2) }')
+assert_contains "$rework_cell" "running" "post-PR work was not drawn as running rework"
+assert_not_contains "$rework_cell" "skipped" "the delivery mode painted the worker's own rework phase skipped"
 pass "a direct-PR row ends building at its PR and draws the work after it as rework"
 
 # The flag is a SEPARATE axis and is named by the flag the captain passed,
