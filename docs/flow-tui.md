@@ -360,6 +360,8 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
       "state": null,
       "endpoint_alive": true,
       "skips": { "local": false, "ci": false },
+      "worker": { "harness": "claude", "model": "claude-opus-5", "effort": "high" },
+      "gate": { "model": "claude-opus-5", "effort": "high", "source": "transcript" },
       "pr": { "url": "https://github.com/kirangathani/firstmate/pull/25", "number": 25 },
       "collection": { "ok": true, "reason": "", "at": "2026-08-08T16:30:00Z", "epoch": 1786000000 },
       "run": {
@@ -415,6 +417,8 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
       },
       "endpoint_alive": true,
       "skips": { "local": false, "ci": false },
+      "worker": { "harness": "claude", "model": null, "effort": "xhigh" },
+      "gate": null,
       "pr": { "url": null, "number": null },
       "collection": { "ok": true, "reason": "this worker runs no pipeline", "at": "2026-08-08T16:30:00Z", "epoch": 1786000000 },
       "run": { "present": false, "id": "", "status": "", "db_updated_epoch": 0, "db_age_seconds": null },
@@ -458,6 +462,34 @@ Guarantees the renderer is entitled to rely on:
 - `ci.passed`, `ci.failed`, `ci.pending`, `ci.skipped` and `ci.excused` partition `ci.checks`, and their sum is always `ci.total`.
 - `skips` reports the captain's testing skips as the task's own `state/<id>.meta` records them, read through `bin/fm-testing-skip-lib.sh`.
   It is a report of what the record says, never an authorization: the flag line alone is reachable by a worker, and the signature beside it is what grants anything.
+- `worker` is on every agent and names which LLM the worker itself runs on, from the `harness=`, `model=` and `effort=` fields `bin/fm-spawn.sh` wrote into that task's own `state/<id>.meta` at dispatch.
+  A missing field, and the recorded word `default` - which says the harness picked, and is not the name of any model - both reach the wire as `null`, which the renderer draws as a dash.
+- `gate` is on every agent too, and is `null` for a `pipeline: false` agent: that worker has no gate agents, which is a different claim from a gate whose model is unknown.
+  For a `pipeline: true` agent it names which LLM the pipeline's own review, test, document and fix agents are running on, and `source` says where that came from - `transcript`, or `none` with two nulls when nothing machine-recorded answers it yet.
+- Raw model ids reach the wire; mapping one to the captain's short form is the renderer's job, and an id this repo has never seen still reaches the screen as itself.
+
+### Which LLM is doing the work, and the two records that say so
+
+The row's title answers two different questions, and they have two different machine records behind them.
+
+The worker's own model and effort are recorded at dispatch, in that task's `state/<id>.meta`, and are simply read back.
+The recorded word `default` means the harness chose, so it is emitted as absent: a dash is honest and `default` is not the name of anything the captain can reason about.
+
+The pipeline's GATE agents are a separate question, because nothing in the task's own record says what the pipeline launched them as.
+The pipeline runs the `claude` CLI from the run's own worktree, and the only machine record of what actually ran is the transcript Claude Code writes under `$HOME/.claude/projects/`, in a directory whose name ends in that run's ULID.
+The newest session file in it is read from the end, and the last record with `"type":"assistant"` and a real `.message.model` gives the model; the sibling `.effort` field on that same record gives the effort when it carries one.
+A `"model":"<synthetic>"` record is skipped: it is Claude Code's own placeholder for a turn no model produced, and it is frequently the newest assistant record in the file.
+
+`~/.no-mistakes/config.yaml` is deliberately not consulted.
+It states what the NEXT run will use, so a run already under way on a different model would be labelled with a model it is not using - which is exactly the guess this field exists to replace.
+A run that has not yet reached an agent step has no transcript, and that reports `source: "none"` and draws as a dash rather than borrowing the config's intention.
+
+Reading the transcript is bounded: only the newest session file is opened, only its last 256KB are parsed, and the whole file is parsed only when that chunk holds no assistant record at all.
+These files reach tens of megabytes, and the collector runs on a cadence.
+
+The label is not carried into `bin/fm-nm-flow.sh`, the single-task detail view, and that is a decision rather than an omission.
+Its header runs on a hard 80-column budget with a stated drop order - the title shortens first, then the `no-mistakes flow: ` prefix is sacrificed to keep more of it, and the branch and run id are never shortened at all - so a fourth segment would need its own tier in that order and its own tests to prove it.
+The fleet view is where the captain compares one worker against another, which is where the question "which of these is on which model" is actually asked; the detail view already names the one run the captain drilled into.
 
 ### Five check classes, because three folded two facts away
 
