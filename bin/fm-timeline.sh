@@ -16,6 +16,10 @@
 # for whatever reads it later.
 #
 #   task_id project mode model effort           what the task was
+#   local_skip ci_skip                          true/false, the captain's testing
+#                                               skips as the task's own record has them
+#   skipped_stages                              which pipeline stages did not run,
+#                                               and by whose authority
 #   spawned_at first_run_at pr_opened_at        epoch SECONDS
 #     ci_green_at merged_at torn_down_at
 #   build_s                                     dispatch -> pipeline took over
@@ -34,13 +38,38 @@
 # is the total of the differences, so machine+agent time is per-step minus its
 # share of parked.
 #
+# SKIPPED IS NOT UNREACHED, and the two must never read alike. A stage that was
+# skipped by an authority is named in skipped_stages; a stage that simply never
+# happened - because the task never validated at all - is named nowhere. Either
+# way its seconds cell is EMPTY rather than 0, because the pipeline records a
+# skipped step with no started_at, so it can never enter a wall-time sum.
+#
+# WHICH STAGES EACH AUTHORITY REMOVES is not decided here. bin/fm-flow-tui.mjs's
+# LOCAL_SKIP_STAGES is the one owner of that mapping, derived there from
+# bin/fm-spawn.sh's flag contract and bin/fm-brief.sh's definitions of done, and
+# FM_TIMELINE_LOCAL_SKIP_STAGES below mirrors it. The mirror is not trusted to
+# stay right by hand: tests/fm-timeline.test.sh reads that owner's own set out of
+# the module at run time and fails if the two ever differ.
+# Three consequences of that contract are worth stating, because each is a
+# plausible-sounding guess it contradicts:
+#   - `direct-PR` and `local_skip` remove the SAME six stages. Push and PR are
+#     not among them: the worker still pushes and opens the PR, by hand.
+#   - `ci_skip` removes no local stage at all. It waives the PR's expensive lint
+#     and test JOBS, so it is listed as `ci-jobs(ci_skip)` - deliberately not
+#     `ci`, which is this ledger's own pipeline step and is a different thing.
+#   - a step the pipeline itself recorded as skipped (a gate the captain closed
+#     with --action skip) is listed under `(pipeline)`.
+#
 # THE SECONDS-VERSUS-MILLISECONDS TRAP. In that database every *_at column is
 # epoch SECONDS and every *_ms column is genuinely milliseconds. Dividing a
 # timestamp by 1000 yields a 1970 date and no error. Same report, same section.
 #
 # SOURCES, all read-only:
 #   state/<id>.meta       project, mode, model, effort, pr=, and spawned_at=.
-#                         bin/fm-spawned-at-lib.sh owns reading the spawn time.
+#                         bin/fm-spawned-at-lib.sh owns reading the spawn time and
+#                         bin/fm-testing-skip-lib.sh owns reading the skip flags,
+#                         so this ledger and the merge gate's own disclosure
+#                         cannot disagree about what the record says.
 #   the no-mistakes state database, opened `file:...?mode=ro` and never written,
 #                         matched on the task's branch fm/<task-id>.
 #   GitHub, through gh, for the PR's created/merged times and the completion of
@@ -82,13 +111,20 @@ GH="${FM_TIMELINE_GH:-gh}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-spawned-at-lib.sh
 . "$SCRIPT_DIR/fm-spawned-at-lib.sh"
+# shellcheck source=bin/fm-testing-skip-lib.sh
+. "$SCRIPT_DIR/fm-testing-skip-lib.sh"
 
 # The step columns, in pipeline order. The ledger's own header is built from
 # this list, so a step added here lands in both places at once.
 STEPS="intent rebase review test document lint push pr ci"
 
+# The stages a `direct-PR` delivery mode and a captain's `--local-skip` each
+# remove. This MIRRORS bin/fm-flow-tui.mjs's LOCAL_SKIP_STAGES, which owns the
+# rule; the header says why the mirror is safe and which test enforces it.
+FM_TIMELINE_LOCAL_SKIP_STAGES="intent rebase review test document lint"
+
 HEADER=$(
-  printf 'task_id\tproject\tmode\tmodel\teffort\tspawned_at\tfirst_run_at\tpr_opened_at\tci_green_at\tmerged_at\ttorn_down_at\tbuild_s'
+  printf 'task_id\tproject\tmode\tmodel\teffort\tlocal_skip\tci_skip\tskipped_stages\tspawned_at\tfirst_run_at\tpr_opened_at\tci_green_at\tmerged_at\ttorn_down_at\tbuild_s'
   for step in $STEPS; do printf '\t%s_s' "$step"; done
   printf '\tparked_s\treview_rounds\truns\tpr_number\tnote\n'
 )
@@ -116,6 +152,42 @@ sql_lit() {  # SQL string literal body, single quotes doubled
   printf '%s' "$1" | sed "s/'/''/g"
 }
 
+# skipped_stages <mode> <local_skip true|false> <ci_skip true|false> <names...>:
+# the skipped_stages cell. <names...> is the newline-separated list of steps the
+# pipeline itself recorded as skipped. Stages come out in pipeline order and
+# consecutive stages sharing one authority are grouped, so the cell reads as the
+# journey it describes rather than as a repeated tag per stage.
+skipped_stages() {
+  printf '%s\n' "$4" | awk -v steps="$STEPS" -v localset="$FM_TIMELINE_LOCAL_SKIP_STAGES" \
+      -v mode="$1" -v ls="$2" -v cs="$3" '
+    { if ($0 != "") pipeline_skipped[$0] = 1 }
+    END {
+      n = split(localset, l, " ")
+      for (i = 1; i <= n; i++) removable[l[i]] = 1
+      n = split(steps, order, " ")
+      for (i = 1; i <= n; i++) {
+        s = order[i]
+        a = ""
+        # The delivery mode comes first because it is the reason the stages are
+        # gone; a captain-authorised testing skip is a separate axis, and a task
+        # can carry both, so both are named rather than one standing in.
+        if (mode == "direct-PR" && (s in removable)) a = "direct-PR"
+        if (ls == "true" && (s in removable)) a = (a == "" ? "local_skip" : a ",local_skip")
+        if (s in pipeline_skipped) a = (a == "" ? "pipeline" : a ",pipeline")
+        if (a == "") continue
+        if (a == prev) { group = group "," s; continue }
+        if (group != "") out = (out == "" ? "" : out ",") group "(" prev ")"
+        group = s; prev = a
+      }
+      if (group != "") out = (out == "" ? "" : out ",") group "(" prev ")"
+      # ci_skip removes no local stage. It waives the PR CI test and lint JOBS,
+      # so it is named as those jobs and never as this ledger own `ci` step,
+      # which is the pipeline stage that monitors the merge.
+      if (cs == "true") out = (out == "" ? "" : out ",") "ci-jobs(ci_skip)"
+      print out
+    }'
+}
+
 # step_wall <step> <rows>: the wall seconds the pipeline recorded for one step,
 # or empty when that step never ran. <rows> is sqlite's "step|wall|active" output.
 step_wall() {
@@ -135,6 +207,15 @@ cmd_record() {
 
   local meta="$STATE/$id.meta"
   local project='' mode='' model='' effort='' pr_url=''
+  # The captain's testing skips, read from the task's OWN record through their
+  # one owner. bin/fm-spawn.sh is the only thing that writes them, and the flag
+  # line is disclosure evidence, not authority - the signature beside it is what
+  # granted anything, and this ledger records what was skipped, not what was
+  # allowed.
+  local local_skip=false ci_skip=false
+  fm_testing_skip_read "$meta"
+  [ "$FM_TESTING_SKIP_LOCAL" = off ] || local_skip=true
+  [ "$FM_TESTING_SKIP_CI" = off ] || ci_skip=true
   if [ -f "$meta" ]; then
     project=$(basename "$(fm_meta_get "$meta" project)")
     mode=$(fm_meta_get "$meta" mode)
@@ -151,7 +232,7 @@ cmd_record() {
 
   # --- the pipeline's own records -------------------------------------------
   local branch="fm/$id" step
-  local runs='' first_run_at='' parked_s='' review_rounds='' step_rows=''
+  local runs='' first_run_at='' parked_s='' review_rounds='' step_rows='' pipeline_skipped=''
 
   if [ ! -f "$NM_DB" ]; then
     note_add "no validation database at $NM_DB"
@@ -184,6 +265,13 @@ cmd_record() {
           GROUP BY s.step_name;" 2>/dev/null) || step_rows=
       parked_s=$(printf '%s\n' "$step_rows" | awk -F'|' '
         NF >= 3 { wall += $2; active += $3 } END { if (NR) print wall - active }')
+      # A step the pipeline recorded as skipped. It carries a completed_at and
+      # no started_at, so it is already outside the wall-time sums above and its
+      # seconds cell stays empty; this read is only to NAME it.
+      pipeline_skipped=$(sqlite3 "file:$NM_DB?mode=ro" \
+        "SELECT DISTINCT s.step_name
+           FROM step_results s JOIN runs r ON r.id = s.run_id
+          WHERE r.branch = '$blit' AND s.status = 'skipped';" 2>/dev/null) || pipeline_skipped=
       review_rounds=$(sqlite3 "file:$NM_DB?mode=ro" \
         "SELECT COUNT(DISTINCT a.round)
            FROM agent_invocations a JOIN runs r ON r.id = a.run_id
@@ -246,8 +334,10 @@ EOF
   # newline, so the row separator is printed here rather than carried in it.
   [ -s "$LEDGER" ] || printf '%s\n' "$HEADER" > "$LEDGER"
   {
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
       "$id" "$project" "$mode" "$model" "$effort" \
+      "$local_skip" "$ci_skip" \
+      "$(skipped_stages "$mode" "$local_skip" "$ci_skip" "$pipeline_skipped")" \
       "$spawned_at" "$first_run_at" "$pr_opened_at" "$ci_green_at" "$merged_at" \
       "$torn_down_at" "$build_s"
     for step in $STEPS; do printf '\t%s' "$(step_wall "$step" "$step_rows")"; done
@@ -283,12 +373,21 @@ cmd_report() {
     | column -t -s "$(printf '\t')"
 
   echo
-  printf 'medians in hours, per project; "recent" is that project'"'"'s last %s rows and "before" the %s before them\n' "$last" "$last"
+  printf 'medians in hours, per project and split by whether the task skipped anything; "recent" is that bucket'"'"'s last %s rows and "before" the %s before them\n' "$last" "$last"
   awk -v last="$last" -v FS='\t' '
     NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
-    # Rows are appended in completion order, so a project'"'"'s newest rows are
-    # simply its last ones.
-    { p = $(col["project"]); rows[p, ++n[p]] = $0; if (!(p in seen)) { seen[p] = 1; order[++np] = p } }
+    # A row with any skip is kept in its OWN bucket and never folded in with the
+    # rest. A journey that skipped six stages is faster for a reason that is not
+    # an improvement, and a median that mixed the two would report exactly that
+    # as progress.
+    {
+      p = $(col["project"])
+      k = ($(col["local_skip"]) == "true" || $(col["ci_skip"]) == "true" \
+           || $(col["skipped_stages"]) != "") ? "yes" : "no"
+      key = p SUBSEP k
+      rows[key, ++n[key]] = $0
+      if (!(key in seen)) { seen[key] = 1; order[++np] = key; okey[np] = p; oskip[np] = k }
+    }
 
     function med(vals, count,   i, j, t) {
       if (count == 0) return ""
@@ -298,22 +397,22 @@ cmd_report() {
       return (vals[count/2] + vals[count/2+1]) / 2
     }
 
-    # One window of a project'"'"'s rows, from index `lo` up to `hi` inclusive.
-    function window(p, lo, hi, label,   i, f, k, vals, m, s) {
-      printf "%s\t%s\t%d", p, label, hi - lo + 1
+    # One window of one bucket, from index `lo` up to `hi` inclusive.
+    function window(key, proj, skip, lo, hi, label,   i, f, k, vals, m, st) {
+      printf "%s\t%s\t%s\t%d", proj, skip, label, hi - lo + 1
       k = 0
       for (i = lo; i <= hi; i++) {
-        split(rows[p, i], f, FS)
+        split(rows[key, i], f, FS)
         if (f[col["merged_at"]] != "" && f[col["spawned_at"]] != "")
           vals[++k] = f[col["merged_at"]] - f[col["spawned_at"]]
       }
       m = med(vals, k)
       printf "\t%s", (m == "" ? "-" : sprintf("%.2f", m / 3600))
-      for (s = 1; s <= nstage; s++) {
+      for (st = 1; st <= nstage; st++) {
         k = 0; delete vals
         for (i = lo; i <= hi; i++) {
-          split(rows[p, i], f, FS)
-          if (f[col[stage[s] "_s"]] != "") vals[++k] = f[col[stage[s] "_s"]] + 0
+          split(rows[key, i], f, FS)
+          if (f[col[stage[st] "_s"]] != "") vals[++k] = f[col[stage[st] "_s"]] + 0
         }
         m = med(vals, k)
         printf "\t%s", (m == "" ? "-" : sprintf("%.2f", m / 3600))
@@ -323,19 +422,19 @@ cmd_report() {
 
     END {
       nstage = split("build intent rebase review test document lint push pr ci parked", stage, " ")
-      printf "project\twindow\tn\tlaunch_to_merge_h"
-      for (s = 1; s <= nstage; s++) printf "\t%s_h", stage[s]
+      printf "project\tskipped\twindow\tn\tlaunch_to_merge_h"
+      for (st = 1; st <= nstage; st++) printf "\t%s_h", stage[st]
       printf "\n"
       for (j = 1; j <= np; j++) {
-        p = order[j]
+        key = order[j]
         # Two windows of the same width, so one can be read against the other:
         # a single median says how long a ship task takes, never whether that is
         # getting better or worse.
-        lo = n[p] - last + 1; if (lo < 1) lo = 1
-        window(p, lo, n[p], "recent")
+        lo = n[key] - last + 1; if (lo < 1) lo = 1
+        window(key, okey[j], oskip[j], lo, n[key], "recent")
         if (lo > 1) {
           plo = lo - last; if (plo < 1) plo = 1
-          window(p, plo, lo - 1, "before")
+          window(key, okey[j], oskip[j], plo, lo - 1, "before")
         }
       }
     }

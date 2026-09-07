@@ -131,8 +131,9 @@ SH
 
 # --- a home -----------------------------------------------------------------
 
-make_home() {  # <name> <task-id> [pr-url] -> home path
-  local name=$1 id=$2 pr=${3:-} home
+make_home() {  # <name> <task-id> [pr-url] [mode] [extra-meta-line...] -> home path
+  local name=$1 id=$2 pr=${3:-} mode=${4:-no-mistakes} home extra
+  shift 4 2>/dev/null || shift $#
   home="$TMP_ROOT/$name"
   mkdir -p "$home/state" "$home/data"
   {
@@ -141,12 +142,13 @@ make_home() {  # <name> <task-id> [pr-url] -> home path
     echo "project=/fixture/alpha"
     echo "harness=claude"
     echo "kind=ship"
-    echo "mode=no-mistakes"
+    echo "mode=$mode"
     echo "yolo=off"
     echo "model=opus-5"
     echo "effort=xhigh"
     echo "spawned_at=$((RUN_START - 3922))"
     [ -z "$pr" ] || echo "pr=$pr"
+    for extra in "$@"; do printf '%s\n' "$extra"; done
   } > "$home/state/$id.meta"
   printf '%s\n' "$home"
 }
@@ -328,6 +330,106 @@ test_spawned_at_prefers_the_recorded_field() {
   pass "the recorded dispatch time wins, and an absent or malformed one falls back to the file times"
 }
 
+test_header_is_stable() {
+  # The ledger is read months later by whatever can open a TSV, and every
+  # assertion in this file resolves its column THROUGH this header. Pinning the
+  # exact line is what makes both of those safe: a column inserted in the middle
+  # of an existing ledger silently reinterprets every row already written.
+  local want got
+  want='task_id	project	mode	model	effort	local_skip	ci_skip	skipped_stages	spawned_at	first_run_at	pr_opened_at	ci_green_at	merged_at	torn_down_at	build_s	intent_s	rebase_s	review_s	test_s	document_s	lint_s	push_s	pr_s	ci_s	parked_s	review_rounds	runs	pr_number	note'
+  got=$(head -1 "$TMP_ROOT/full/data/timeline.tsv")
+  [ "$got" = "$want" ] || fail "the ledger header changed:"$'\n'"want: $want"$'\n'"got:  $got"
+  pass "the ledger header is exactly the documented column list, in order"
+}
+
+test_local_skip_stages_mirror_their_owner() {
+  # bin/fm-flow-tui.mjs owns which stages a direct-PR mode and a --local-skip
+  # remove. bin/fm-timeline.sh mirrors that set, and a mirror nobody checks is a
+  # second copy waiting to drift, so the owner's own set is read out of the
+  # module HERE at run time rather than written down again.
+  local owner mirror
+  owner=$(sed -n 's/^export const LOCAL_SKIP_STAGES = new Set(\[\(.*\)\]);$/\1/p' \
+    "$ROOT/bin/fm-flow-tui.mjs" | tr -d '" ' | tr ',' ' ')
+  [ -n "$owner" ] || fail "could not read LOCAL_SKIP_STAGES out of bin/fm-flow-tui.mjs"
+  mirror=$(sed -n 's/^FM_TIMELINE_LOCAL_SKIP_STAGES="\(.*\)"$/\1/p' "$ROOT/bin/fm-timeline.sh")
+  [ -n "$mirror" ] || fail "could not read FM_TIMELINE_LOCAL_SKIP_STAGES out of bin/fm-timeline.sh"
+  [ "$owner" = "$mirror" ] \
+    || fail "the skipped-stage set drifted from its owner"$'\n'"bin/fm-flow-tui.mjs: $owner"$'\n'"bin/fm-timeline.sh:  $mirror"
+  pass "the skipped-stage set matches bin/fm-flow-tui.mjs, which owns the rule"
+}
+
+test_direct_pr_names_its_skipped_stages() {
+  local home ledger
+  home=$(make_home directpr alpha-directpr-e5 "" direct-PR)
+  run_record "$home" alpha-directpr-e5 > /dev/null 2>&1 \
+    || fail "recording a direct-PR task failed"
+  ledger="$home/data/timeline.tsv"
+  expect_field "$ledger" alpha-directpr-e5 local_skip false "direct-PR is a delivery mode, not a testing skip"
+  expect_field "$ledger" alpha-directpr-e5 ci_skip false "direct-PR is a delivery mode, not a testing skip"
+  # Push and pr are deliberately NOT here: bin/fm-flow-tui.mjs's contract is that
+  # a direct-PR worker still pushes and opens the PR, by hand.
+  expect_field "$ledger" alpha-directpr-e5 skipped_stages \
+    "intent,rebase,review,test,document,lint(direct-PR)" "direct-PR names the stages its mode removes"
+  pass "a direct-PR task names the six stages its delivery mode removed, and not push or pr"
+}
+
+test_local_skip_and_ci_skip_are_separate_axes() {
+  local home ledger
+  home=$(make_home localskip alpha-localskip-f6 "" no-mistakes "local_skip=on")
+  run_record "$home" alpha-localskip-f6 > /dev/null 2>&1 || fail "recording a local_skip task failed"
+  ledger="$home/data/timeline.tsv"
+  expect_field "$ledger" alpha-localskip-f6 local_skip true "the flag is read from the record"
+  expect_field "$ledger" alpha-localskip-f6 ci_skip false "an absent flag is false, never empty"
+  expect_field "$ledger" alpha-localskip-f6 skipped_stages \
+    "intent,rebase,review,test,document,lint(local_skip)" "local_skip removes the local pipeline stages"
+
+  home=$(make_home ciskip alpha-ciskip-g7 "" no-mistakes "ci_skip=on")
+  run_record "$home" alpha-ciskip-g7 > /dev/null 2>&1 || fail "recording a ci_skip task failed"
+  ledger="$home/data/timeline.tsv"
+  expect_field "$ledger" alpha-ciskip-g7 ci_skip true "the flag is read from the record"
+  # ci_skip removes no LOCAL stage, and the waived PR jobs are named apart from
+  # this ledger's own `ci` pipeline step so the two can never be read as one.
+  expect_field "$ledger" alpha-ciskip-g7 skipped_stages "ci-jobs(ci_skip)" \
+    "ci_skip waives the PR's test and lint jobs, not a pipeline stage"
+  pass "the two testing skips are recorded as separate axes and remove different things"
+}
+
+test_pipeline_skipped_step_is_named_and_leaves_no_seconds() {
+  local home ledger db
+  db="$TMP_ROOT/skipped.sqlite"
+  init_db "$db"
+  add_run "$db" run3 fm/alpha-pipeskip-h8
+  # A gate the captain closed with --action skip. The pipeline records it with a
+  # completed_at and NO started_at, which is exactly how the real database
+  # writes one, so it can never enter a wall-time sum.
+  sqlite3 "$db" "
+    UPDATE step_results SET status = 'skipped', duration_ms = 0,
+                            started_at = NULL, completed_at = $RUN_START
+      WHERE run_id = 'run3' AND step_name = 'review';"
+  home=$(make_home pipeskip alpha-pipeskip-h8)
+  ( cd "$TMP_ROOT" && env FM_HOME="$home" FM_TIMELINE_GH="$GH_DIR/gh" \
+      FM_TIMELINE_DB="$db" FM_TIMELINE_NOW=1788789513 \
+      "$TIMELINE" record alpha-pipeskip-h8 ) > /dev/null 2>&1 \
+    || fail "recording a task with a pipeline-skipped step failed"
+  ledger="$home/data/timeline.tsv"
+  expect_field "$ledger" alpha-pipeskip-h8 skipped_stages "review(pipeline)" \
+    "a step the pipeline itself skipped is named under its own authority"
+  expect_field "$ledger" alpha-pipeskip-h8 review_s "" \
+    "a skipped step's seconds cell must be EMPTY, never 0"
+  # Skipped is not unreached: the stages that DID run are still measured.
+  expect_field "$ledger" alpha-pipeskip-h8 test_s 735 "the stages that ran still record"
+  pass "a pipeline-skipped step is named by authority and leaves its seconds cell empty, not zero"
+}
+
+test_an_unflagged_task_names_nothing_skipped() {
+  local ledger
+  ledger="$TMP_ROOT/full/data/timeline.tsv"
+  expect_field "$ledger" alpha-full-a1 local_skip false "an ordinary task carries no skip"
+  expect_field "$ledger" alpha-full-a1 ci_skip false "an ordinary task carries no skip"
+  expect_field "$ledger" alpha-full-a1 skipped_stages "" "an ordinary task skipped nothing"
+  pass "an ordinary no-mistakes task records false, false and an empty skipped-stage cell"
+}
+
 test_report_medians_per_project() {
   local home ledger out header row
   home="$TMP_ROOT/report"
@@ -338,8 +440,9 @@ test_report_medians_per_project() {
   # Two projects. alpha's launch-to-merge spans are 1h, 2h and 3h (median 2h);
   # beta's are 10h and 20h (median 15h). The medians are per project, so one
   # project's rows must not move the other's answer.
-  add_row() {  # <task> <project> <hours-to-merge> <review-seconds>
-    awk -v id="$1" -v proj="$2" -v span="$(( $3 * 3600 ))" -v rev="$4" -v hdr="$header" '
+  add_row() {  # <task> <project> <hours-to-merge> <review-seconds> [skipped-stages]
+    awk -v id="$1" -v proj="$2" -v span="$(( $3 * 3600 ))" -v rev="$4" \
+        -v skipped="${5:-}" -v hdr="$header" '
       BEGIN {
         n = split(hdr, h, "\t")
         for (i = 1; i <= n; i++) {
@@ -348,7 +451,9 @@ test_report_medians_per_project() {
           else if (h[i] == "project") v = proj
           else if (h[i] == "spawned_at") v = 1700000000
           else if (h[i] == "merged_at") v = 1700000000 + span
-          else if (h[i] == "review_s") v = rev
+          else if (h[i] == "review_s") v = (skipped == "" ? rev : "")
+          else if (h[i] == "skipped_stages") v = skipped
+          else if (h[i] == "local_skip" || h[i] == "ci_skip") v = (skipped == "" ? "false" : "true")
           printf "%s%s", v, (i < n ? "\t" : "\n")
         }
       }' >> "$ledger"
@@ -358,15 +463,24 @@ test_report_medians_per_project() {
   add_row alpha-2 alpha 3 300
   add_row beta-2 beta 20 500
   add_row alpha-3 alpha 2 200
+  # A skipped journey, and a very fast one. It must land in its own bucket: if it
+  # were folded in, alpha's median would drop to 1.50 h and read as an improvement
+  # that nothing about the work actually earned.
+  add_row alpha-skip alpha 1 0 "intent,rebase,review,test,document,lint(local_skip)"
 
   out=$( cd "$TMP_ROOT" && env FM_HOME="$home" "$TIMELINE" report ) \
     || fail "report failed on a two-project ledger"
   assert_contains "$out" "alpha-3" "the report must list the ledger's rows"
-  row=$(printf '%s\n' "$out" | awk '$1 == "alpha" && $2 == "recent" { print; exit }')
-  [ -n "$row" ] || fail "no medians line for alpha:"$'\n'"$out"
-  assert_contains "$row" "2.00" "alpha's median launch-to-merge should be 2.00 h, got: $row"
+  row=$(printf '%s\n' "$out" | awk '$1 == "alpha" && $2 == "no" && $3 == "recent" { print; exit }')
+  [ -n "$row" ] || fail "no unskipped medians line for alpha:"$'\n'"$out"
+  assert_contains "$row" "2.00" "alpha's unskipped median launch-to-merge should be 2.00 h, got: $row"
   assert_contains "$row" "0.06" "alpha's median review should be 200 s = 0.06 h, got: $row"
-  row=$(printf '%s\n' "$out" | awk '$1 == "beta" && $2 == "recent" { print; exit }')
+  assert_not_contains "$row" "1.50" \
+    "the skipped row must not be folded into alpha's ordinary median, got: $row"
+  row=$(printf '%s\n' "$out" | awk '$1 == "alpha" && $2 == "yes" && $3 == "recent" { print; exit }')
+  [ -n "$row" ] || fail "the skipped rows need their own displayed bucket:"$'\n'"$out"
+  assert_contains "$row" "1.00" "alpha's skipped bucket should median 1.00 h, got: $row"
+  row=$(printf '%s\n' "$out" | awk '$1 == "beta" && $2 == "no" && $3 == "recent" { print; exit }')
   [ -n "$row" ] || fail "no medians line for beta:"$'\n'"$out"
   assert_contains "$row" "15.00" "beta's median launch-to-merge should be 15.00 h, got: $row"
 
@@ -375,7 +489,7 @@ test_report_medians_per_project() {
   # while beta's newest is 20 h against 10 h before it.
   out=$( cd "$TMP_ROOT" && env FM_HOME="$home" "$TIMELINE" report --last 1 ) \
     || fail "report --last 1 failed"
-  row=$(printf '%s\n' "$out" | awk '$1 == "beta" && $2 == "before" { print; exit }')
+  row=$(printf '%s\n' "$out" | awk '$1 == "beta" && $2 == "no" && $3 == "before" { print; exit }')
   [ -n "$row" ] || fail "a narrowed window must also print the window before it:"$'\n'"$out"
   assert_contains "$row" "10.00" "beta's earlier window should be 10.00 h, got: $row"
   pass "the report medians launch-to-merge and every stage per project, in two comparable windows"
@@ -388,4 +502,10 @@ test_no_pr
 test_unreadable_sources_never_block
 test_teardown_records_before_it_removes
 test_spawned_at_prefers_the_recorded_field
+test_header_is_stable
+test_local_skip_stages_mirror_their_owner
+test_direct_pr_names_its_skipped_stages
+test_local_skip_and_ci_skip_are_separate_axes
+test_pipeline_skipped_step_is_named_and_leaves_no_seconds
+test_an_unflagged_task_names_nothing_skipped
 test_report_medians_per_project
