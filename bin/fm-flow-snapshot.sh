@@ -140,6 +140,9 @@ command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; ex
 # shellcheck source=bin/fm-pr-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-nm-db-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-nm-db-lib.sh"
 
 NOW_EPOCH=${FM_FLOW_SNAPSHOT_NOW_EPOCH:-$(date -u +%s)}
 NOW_ISO=${FM_FLOW_SNAPSHOT_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
@@ -672,7 +675,7 @@ agent_json() {  # <task-json>
   run_status=''
   run_updated=0
   run_created=0
-  local collect_ok=true collect_reason=''
+  local collect_ok=true collect_reason='' collect_source=axi
 
   idx=$(run_index "$project" "$branch")
   if [ -z "$idx" ]; then
@@ -689,24 +692,40 @@ agent_json() {  # <task-json>
     axi=$(axi_read "$project" "$run_id" "$axi_err")
     rc=$?
     if [ $rc -ne 0 ] || [ -z "$axi" ]; then
-      # A failed or timed-out read is reported as such. It must NOT fall back to
-      # the last known state or to pending: pending reads as "not started yet",
-      # which is a different claim from "we could not find out".
+      # A failed, timed-out, or SILENT read is reported in the command's own
+      # words. An exit code alone tells the captain a read failed and nothing
+      # they can act on, and the whole of the cwd defect above was invisible
+      # behind one.
       #
-      # The reason states what went wrong, in the command's own words. An exit
-      # code alone tells the captain a read failed and nothing they can act on,
-      # and the whole of the defect above was invisible behind one.
-      collect_ok=false
+      # Exit 0 with an empty stdout is its own outcome, neither of the other
+      # two: measured 2026-09-07 on v1.37.0, one healthy running task's
+      # `axi status --run` printed nothing at all while its siblings printed
+      # their normal body (bin/fm-nm-db-lib.sh's header carries the evidence).
+      local why
       if [ "$rc" = 124 ]; then
-        collect_reason="axi status timed out after ${NM_TIMEOUT}s"
+        why="axi status timed out after ${NM_TIMEOUT}s"
+      elif [ "$rc" = 0 ]; then
+        why='axi printed nothing'
       else
-        local why
         why=$(axi_error "$axi" "$axi_err")
         if [ -n "$why" ]; then
-          collect_reason="axi status failed (exit $rc): $why"
+          why="axi status failed (exit $rc): $why"
         else
-          collect_reason="axi status failed (exit $rc)"
+          why="axi status failed (exit $rc)"
         fi
+      fi
+      # The daemon's own database is the truth the CLI was rendering, so it is
+      # read directly rather than reporting a healthy run as unreadable. It
+      # must NOT fall back to the last known state or to pending: pending reads
+      # as "not started yet", which is a different claim from "we could not
+      # find out", and that claim is only made when BOTH sources fail.
+      local db_toon
+      if db_toon=$(fm_nm_db_toon "$NM_DB" "$run_id"); then
+        axi=$db_toon
+        collect_source=db
+      else
+        collect_ok=false
+        collect_reason="$why; db: $FM_NM_DB_REASON"
       fi
     fi
     rm -f "$axi_err"
@@ -795,6 +814,7 @@ agent_json() {  # <task-json>
     --arg run_status "$run_status" \
     --arg agent_alive "$agent_alive" \
     --arg collect_reason "$collect_reason" \
+    --arg collect_source "$collect_source" \
     --arg now_iso "$NOW_ISO" \
     --argjson now_epoch "$NOW_EPOCH" \
     --argjson run_updated "${run_updated:-0}" \
@@ -823,7 +843,8 @@ agent_json() {  # <task-json>
         effort:(if $w_effort == "" then null else $w_effort end)
       },
       pr:{url:(if $pr_url == "" then null else $pr_url end), number:$pr_num},
-      collection:{ok:$collect_ok, reason:$collect_reason, at:$now_iso, epoch:$now_epoch},
+      collection:{ok:$collect_ok, reason:$collect_reason, source:$collect_source,
+                  at:$now_iso, epoch:$now_epoch},
       run:{
         present:($run_id != ""),
         id:$run_id, status:$run_status,
@@ -924,7 +945,7 @@ compact_json() {  # <task-json>
         effort:(if $w_effort == "" then null else $w_effort end)
       },
       pr:{url:(if $pr_url == "" then null else $pr_url end), number:null},
-      collection:{ok:true, reason:"this worker runs no pipeline",
+      collection:{ok:true, reason:"this worker runs no pipeline", source:"",
                   at:$now_iso, epoch:$now_epoch},
       run:{present:false, id:"", status:"",
            db_updated_epoch:0, db_age_seconds:null},

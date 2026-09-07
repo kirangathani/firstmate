@@ -822,6 +822,12 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   if (authority) notes.push(blue(authority));
   if (agent.collection?.ok === false) notes.push(magenta(`unreadable: ${agent.collection.reason}`));
   else if (agent.endpoint_alive === false) notes.push(magenta("worker gone"));
+  // A run the CLI would not render, read straight from the daemon database
+  // instead. Muted, because the row is healthy - but stated, because these
+  // steps are not the view `no-mistakes axi status` would have printed. It sits
+  // beside the notes above rather than replacing one: a worker being gone is a
+  // separate fact from where its run record was read.
+  if (agent.collection?.source === "db") notes.push(dim("run read from database"));
   // The hint rides the SELECTED agent whatever cell is highlighted, because
   // enter is agent-scoped: it opens the worker, and no cell has an action of
   // its own. It used to appear only while the head itself was selected, so
