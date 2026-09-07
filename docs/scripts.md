@@ -81,7 +81,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-green.sh`         | Report whether a task's PR is green, read from the PR's own head commit by URL so it works from any directory and from a detached HEAD, reporting a check that never delivered a verdict as a distinct `infrastructure` outcome rather than a red; the check a no-mistakes ship worker polls instead of waiting on the pipeline's broken CI-monitor step |
-| `fm-pr-merge.sh`         | Record PR metadata, gate on AI attribution in the PR's commits and description, on every landed merge resolution being additive, on `fm-assert-tests-kept.sh`, and on the PR's checks being green, then merge a task's canonical full GitHub URL |
+| `fm-pr-merge.sh`         | Record PR metadata, gate on AI attribution in the PR's commits and description, on every landed merge resolution being additive, on the PR's head already containing the current tip of the branch it targets, on `fm-assert-tests-kept.sh`, and on the PR's checks being green, then merge a task's canonical full GitHub URL |
 | `fm-attribution-lib.sh`  | Single owner of the AI-attribution pattern set and the scan every enforcer reads (docs/attribution-gate.md) |
 | `fm-commit-msg-check.sh` | Refuse a commit message carrying AI attribution; the git `commit-msg` hook target    |
 | `fm-install-commit-hook.sh` | Install the `commit-msg` hook carrying both authorship-time checks into the repository behind a task worktree, never clobbering a project's own |
