@@ -222,6 +222,63 @@ export function skipDisclosure(agent) {
   return `captain-authorised skip: ${parts.join(", ")}`;
 }
 
+// --- who is doing the work ---------------------------------------------------
+//
+// The captain's own short form for a model id. Anything unrecognised is
+// printed VERBATIM rather than mapped to a friendly guess: a new model id on
+// screen as itself is readable, and a wrong familiar name is not.
+const MODEL_SHORT = new Map([
+  ["claude-opus-5", "opus 5"],
+  ["claude-fable-5-1", "fable 5.1"],
+  ["claude-sonnet-5", "sonnet 5"],
+  ["claude-haiku-4-5-20251001", "haiku 4.5"],
+]);
+
+// Both axes are named on every render, and an axis with no machine record
+// behind it is a dash - never a zero, never a blank, and never the config
+// file's opinion of what would run next.
+export function modelLabel(model, effort) {
+  const m = model ? (MODEL_SHORT.get(model) ?? String(model)) : "-";
+  const e = effort ? String(effort) : "-";
+  return `${m} ${e}`;
+}
+
+export const workerLabel = (agent) =>
+  modelLabel(agent?.worker?.model, agent?.worker?.effort);
+
+// Only an agent whose pipeline is running has gate agents at all, and only a
+// run that has reached one has a transcript saying what it launched them as.
+// Both absences read the same on screen - dashes - but the label is dropped
+// entirely for a worker that has no pipeline, because there is no gate there
+// to be unknown about.
+export function gateLabel(agent) {
+  if (!agent?.gate) return "";
+  return modelLabel(agent.gate.model, agent.gate.effort);
+}
+
+// The two labels ride the title, and neither may be cut mid-token: `opus` is a
+// different claim from `opus 5`, and a half-written model id is worse than no
+// model id. So a title too narrow drops the gate label WHOLE, then the worker
+// label whole, and only the parts that survive reach clip().
+//
+// The gate goes first because it is the weaker fact: the worker's model is
+// recorded at dispatch and is always there, while the gate's is only ever
+// known once the pipeline has launched an agent.
+// Painted cyan and dim rather than in any of this view's alarm slots - red,
+// magenta and yellow - because a label naming which model is working is an
+// identity, never a fault. A healthy idle second mate's row must carry no
+// alarm colour at all, and this label rides that row too.
+export function titleWithLabels(base, tail, worker, gate, cols) {
+  const w = worker ? `  ${cyan(worker)}` : "";
+  const g = gate ? `  ${dim("·")} ${dim(`gate ${gate}`)}` : "";
+  const limit = Number.isFinite(cols) && cols > 0 ? cols : Infinity;
+  for (const extras of [w + g, w, ""]) {
+    const line = base + extras + tail;
+    if (visLen(line) <= limit) return line;
+  }
+  return base + tail;
+}
+
 export function dur(ms) {
   if (ms == null) return "";
   if (ms < 1000) return `${ms}ms`;
@@ -629,7 +686,7 @@ function premergeBox() {
 const DEFAULT_OPEN_HINT = "enter: open this worker's window";
 const DEFAULT_DETAIL_HINT = "d pipeline detail, ctrl-c back";
 
-function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
+function agentBlock(agent, n, selected, cell, anim, lay, openHint, cols) {
   const cells = STEPS.map((s) => stepBox(agent, s, anim));
   cells.push(ciBox(agent, anim));
   cells.push(premergeBox());
@@ -671,10 +728,15 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   // its own. It used to appear only while the head itself was selected, so
   // stepping right onto GITHUB CI left the captain with a highlighted cell and
   // nothing on screen saying what enter would do to it.
-  const head =
-    `${marker} ${name}  ${dim(shortProject(agent.project))}` +
-    (notes.length ? `  ${notes.join("  ")}` : "") +
-    (selected ? `  ${dim(openHint || DEFAULT_OPEN_HINT)}` : "");
+  const head = titleWithLabels(
+    `${marker} ${name}`,
+    `  ${dim(shortProject(agent.project))}` +
+      (notes.length ? `  ${notes.join("  ")}` : "") +
+      (selected ? `  ${dim(openHint || DEFAULT_OPEN_HINT)}` : ""),
+    workerLabel(agent),
+    gateLabel(agent),
+    cols,
+  );
 
   // The facts line. It carries the two things no cell has room for and no
   // reader should have to infer: the complete check tally, and - when the task
@@ -777,7 +839,7 @@ export function compactState(agent) {
 // Two content rows, matching the pipeline block's own head-then-facts shape so
 // the two read as one view rather than as two. Everything between them - the
 // boxes - is exactly what this worker does not have.
-function compactBlock(agent, n, selected, openHint) {
+function compactBlock(agent, n, selected, openHint, cols) {
   const marker = selected ? greenBold("▸") : " ";
   const name = selected
     ? `${ESC}7m Agent ${n}  ${agent.id} ${R}`
@@ -787,10 +849,15 @@ function compactBlock(agent, n, selected, openHint) {
   // these back. Drawn the same way the pipeline block draws it, so the captain
   // learns one signal rather than two.
   if (agent.endpoint_alive === false) notes.push(magenta("worker gone"));
-  const head =
-    `${marker} ${name}  ${blue(kindLabel(agent.kind))}  ${dim(shortProject(agent.project))}` +
-    (notes.length ? `  ${notes.join("  ")}` : "") +
-    (selected ? `  ${dim(openHint || DEFAULT_OPEN_HINT)}` : "");
+  const head = titleWithLabels(
+    `${marker} ${name}`,
+    `  ${blue(kindLabel(agent.kind))}  ${dim(shortProject(agent.project))}` +
+      (notes.length ? `  ${notes.join("  ")}` : "") +
+      (selected ? `  ${dim(openHint || DEFAULT_OPEN_HINT)}` : ""),
+    workerLabel(agent),
+    gateLabel(agent),
+    cols,
+  );
 
   // The facts row, in the pipeline block's facts position. Its segments are
   // ordered by what has to survive a narrow terminal: the state word first,
@@ -955,8 +1022,8 @@ export function render(snap, opts) {
     const n = win.top + i;
     const selected = n === sel;
     out.push(...(hasPipeline(a)
-      ? agentBlock(a, n + 1, selected, cell, anim, lay, openHint)
-      : compactBlock(a, n + 1, selected, openHint)));
+      ? agentBlock(a, n + 1, selected, cell, anim, lay, openHint, cols)
+      : compactBlock(a, n + 1, selected, openHint, cols)));
     out.push("");
   });
 

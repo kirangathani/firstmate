@@ -65,6 +65,14 @@
 #   FM_FLOW_SNAPSHOT_FLEET_JSON   consume this file instead of running
 #                                 bin/fm-fleet-snapshot.sh. Tests use it to feed
 #                                 a recorded fleet document.
+#   FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT  override the Claude Code transcript root
+#                                 (default $HOME/.claude/projects), which is
+#                                 where the pipeline's own gate agents record
+#                                 the model they actually ran on. Tests point
+#                                 this at a fixture tree.
+#   FM_FLOW_SNAPSHOT_TRANSCRIPT_TAIL  bytes of a transcript read from the end
+#                                 before falling back to the whole file
+#                                 (default 262144)
 #
 # Exit codes: 0 snapshot emitted, 1 a dependency or the fleet read failed,
 # 2 usage error. A per-agent collection failure is NOT an error: it is reported
@@ -82,13 +90,15 @@ NM_TIMEOUT=${FM_FLOW_SNAPSHOT_NM_TIMEOUT:-10}
 GH_TIMEOUT=${FM_FLOW_SNAPSHOT_GH_TIMEOUT:-20}
 STATE_TIMEOUT=${FM_FLOW_SNAPSHOT_STATE_TIMEOUT:-15}
 NM_DB=${FM_FLOW_SNAPSHOT_DB:-$HOME/.no-mistakes/state.sqlite}
+TRANSCRIPT_ROOT=${FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT:-$HOME/.claude/projects}
+TRANSCRIPT_TAIL=${FM_FLOW_SNAPSHOT_TRANSCRIPT_TAIL:-262144}
 
 WANT_CI=1
 ONLY_TASK=
 INCLUDE_DEAD=0
 
 usage() {
-  sed -n '2,72p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,80p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -360,6 +370,60 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
       }'
 }
 
+# Which model the PIPELINE'S OWN gate agents ran on, which is a different
+# question from which model the task worker runs: the pipeline launches its
+# review, test, document and fix agents itself, and nothing in the task's own
+# record says what it launched them as.
+#
+# The only machine record of what ACTUALLY ran is the transcript Claude Code
+# writes from the run's own worktree, under a directory whose name ends in the
+# run's ULID. `~/.no-mistakes/config.yaml` is deliberately NOT read: it states
+# what the NEXT run will use, so a run already under way on a different model
+# would be labelled with a model it is not using, which is exactly the guess
+# this field exists to replace.
+#
+# No transcript yet - the ordinary state of a run that has not reached an agent
+# step - reports source "none" and two nulls, and the renderer prints dashes.
+gate_pick() {  # <jsonl on stdin> -> gate object, or nothing
+  # A tail chunk starts mid-line, and `fromjson?` discards that partial record
+  # rather than this having to guess where the first whole line begins.
+  jq -sR '
+    split("\n") | map(fromjson?)
+    | map(select(.type == "assistant"
+                 and (.message.model // "") != ""
+                 and .message.model != "<synthetic>"))
+    | last
+    | if . == null then empty
+      else {
+        model: .message.model,
+        effort: (if (.effort // "") == "" then null else .effort end),
+        source: "transcript"
+      } end'
+}
+
+gate_json() {  # <run-id>
+  local run_id=$1 dir f out
+  if [ -n "$run_id" ]; then
+    for dir in "$TRANSCRIPT_ROOT"/*-"$run_id"; do
+      [ -d "$dir" ] || continue
+      # Newest session first, and within it the last assistant record: that is
+      # "the most recent model value for this run". These files reach tens of
+      # megabytes, so the tail chunk is read first and the whole file is parsed
+      # only when the chunk holds no assistant record at all.
+      while IFS= read -r f; do
+        [ -f "$f" ] || continue
+        out=$(tail -c "$TRANSCRIPT_TAIL" "$f" | gate_pick)
+        [ -n "$out" ] || out=$(gate_pick < "$f")
+        if [ -n "$out" ]; then printf '%s' "$out"; return 0; fi
+      done <<EOF
+$(ls -t "$dir"/*.jsonl 2>/dev/null)
+EOF
+      break
+    done
+  fi
+  jq -n '{model:null, effort:null, source:"none"}'
+}
+
 # The fields every agent carries whether or not it has a pipeline, resolved
 # once so the two builders below cannot drift apart in how they read the fleet
 # document. Sets the FM_ROW_* globals rather than echoing, because several of
@@ -396,6 +460,17 @@ row_common() {  # <task-json>
   # that predates the field.
   FM_ROW_META=$(printf '%s' "$task" | jq -r '.paths.meta.path // ""')
   [ -n "$FM_ROW_META" ] || FM_ROW_META="$STATE_DIR/$FM_ROW_ID.meta"
+  # Which model and effort the WORKER itself runs on, from the one machine
+  # record of it: the fields bin/fm-spawn.sh wrote at dispatch. `default` means
+  # the harness picked, which is not a known model, so it is emitted as absent
+  # rather than as the word - a dash on screen is honest and "default" is not
+  # the name of anything.
+  FM_ROW_HARNESS=$(printf '%s' "$task" | jq -r '.harness // ""')
+  [ -n "$FM_ROW_HARNESS" ] || FM_ROW_HARNESS=$(fm_meta_get "$FM_ROW_META" harness)
+  FM_ROW_MODEL=$(fm_meta_get "$FM_ROW_META" model)
+  [ "$FM_ROW_MODEL" != default ] || FM_ROW_MODEL=
+  FM_ROW_EFFORT=$(fm_meta_get "$FM_ROW_META" effort)
+  [ "$FM_ROW_EFFORT" != default ] || FM_ROW_EFFORT=
 }
 
 agent_json() {  # <task-json>
@@ -466,6 +541,9 @@ agent_json() {  # <task-json>
     ci=$(ci_json "$pr_url" "$id" "$meta")
   fi
 
+  local gate
+  gate=$(gate_json "$run_id")
+
   local pr_num
   pr_num=$(printf '%s' "$pr_url" | grep -Eo '[0-9]+$' || true)
 
@@ -490,6 +568,10 @@ agent_json() {  # <task-json>
     --argjson pr_num "${pr_num:-null}" \
     --argjson skip_local "$skip_local" \
     --argjson skip_ci "$skip_ci" \
+    --arg harness "$FM_ROW_HARNESS" \
+    --arg w_model "$FM_ROW_MODEL" \
+    --arg w_effort "$FM_ROW_EFFORT" \
+    --argjson gate "$gate" \
     --argjson steps "$steps" \
     --argjson actives "$actives" \
     --argjson ci "$ci" \
@@ -501,6 +583,12 @@ agent_json() {  # <task-json>
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
       skips:{local:$skip_local, ci:$skip_ci},
+      worker:{
+        harness:(if $harness == "" then null else $harness end),
+        model:(if $w_model == "" then null else $w_model end),
+        effort:(if $w_effort == "" then null else $w_effort end)
+      },
+      gate:$gate,
       pr:{url:(if $pr_url == "" then null else $pr_url end), number:$pr_num},
       collection:{ok:$collect_ok, reason:$collect_reason, at:$now_iso, epoch:$now_epoch},
       run:{
@@ -580,6 +668,9 @@ compact_json() {  # <task-json>
     --arg kind "$FM_ROW_KIND" \
     --arg mode "$FM_ROW_MODE" \
     --arg agent_alive "$FM_ROW_AGENT_ALIVE" \
+    --arg harness "$FM_ROW_HARNESS" \
+    --arg w_model "$FM_ROW_MODEL" \
+    --arg w_effort "$FM_ROW_EFFORT" \
     --arg pr_url "$FM_ROW_PR_URL" \
     --arg now_iso "$NOW_ISO" \
     --argjson now_epoch "$NOW_EPOCH" \
@@ -594,6 +685,15 @@ compact_json() {  # <task-json>
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
       skips:{local:false, ci:false},
+      worker:{
+        harness:(if $harness == "" then null else $harness end),
+        model:(if $w_model == "" then null else $w_model end),
+        effort:(if $w_effort == "" then null else $w_effort end)
+      },
+      # A worker with no pipeline has no gate agents to report a model for, and
+      # that is a stated null rather than an absent field so the renderer reads
+      # one shape for every agent.
+      gate:null,
       pr:{url:(if $pr_url == "" then null else $pr_url end), number:null},
       collection:{ok:true, reason:"this worker runs no pipeline",
                   at:$now_iso, epoch:$now_epoch},

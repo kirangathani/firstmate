@@ -660,3 +660,126 @@ got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$ATT_HOME" \
 [ "$got" = "gated-b2:false/false shipped-a1:true/true " ] ||
   fail "the recorded testing skips did not reach the view: $got"
 pass "a task's recorded testing skips reach the view, and an unflagged task's do not"
+
+# --- which LLM is doing the work --------------------------------------------
+#
+# Two different questions with two different machine records behind them, and
+# neither may be answered from prose or from a config file's intention.
+#
+# The WORKER's model and effort are the fields bin/fm-spawn.sh wrote into the
+# task's own state/<id>.meta at dispatch.
+#
+# The GATE agents' model is what the no-mistakes pipeline actually launched its
+# review, test, document and fix agents as, and the only machine record of it
+# is the transcript Claude Code writes from the run's own worktree, in a
+# directory whose name ends in the run's ULID.
+#
+# The two transcript lines below are EXACT bytes, captured on 2026-09-07 from
+#   ~/.claude/projects/-home-kiran--no-mistakes-worktrees-3b169b9eb68e-01M1VAGQM160X68A8GQS5YND1Z/
+# by grepping each record out by its own "uuid" field:
+#   grep -h -F '"uuid":"f0b24c05-6bc4-49e6-b2e2-4999061064f5"' <dir>/*.jsonl
+#   grep -h -F '"uuid":"6f85f260-33ce-4cc0-83f6-48ea5617f2c7"' <dir>/*.jsonl
+# Nothing is redacted: `.type`, `.message.model` and `.effort` are exactly what
+# the parser reads, and the run id inside the captured `cwd` is what named the
+# directory it came from.
+#
+# The synthetic record is written LAST on purpose. It is the newest assistant
+# record in the file and it carries a `model`, so a parser that simply took the
+# last one would report `<synthetic>` as the gate's model.
+
+MODEL_HOME="$TMP_ROOT/home-model"
+TRANSCRIPTS="$TMP_ROOT/transcripts"
+RUN_WITH_TRANSCRIPT=01KZETHEHPT5RQFB14A83FMZCK
+mkdir -p "$MODEL_HOME/state" \
+  "$TRANSCRIPTS/-home-kiran--no-mistakes-worktrees-3b169b9eb68e-$RUN_WITH_TRANSCRIPT"
+{
+  cat <<'REAL'
+{"parentUuid":"33e6910a-cc77-435f-98df-10cb8265a120","isSidechain":false,"message":{"model":"claude-opus-5","id":"msg_011CeoEagoQYT6K9LEkm9iYE","type":"message","role":"assistant","content":[{"type":"text","text":"Phase 8 of 18."}],"stop_reason":"tool_use","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":2,"cache_creation_input_tokens":635,"cache_read_input_tokens":281915,"output_tokens":141,"output_tokens_details":{"thinking_tokens":0},"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":635,"ephemeral_5m_input_tokens":0},"inference_geo":"not_available","iterations":[{"input_tokens":2,"output_tokens":141,"cache_read_input_tokens":281915,"cache_creation_input_tokens":635,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":635},"type":"message"}],"speed":"standard"},"diagnostics":null},"apiBlockIndex":0,"requestId":"req_011CeoEa6eq4LrywaMZN5d7d","type":"assistant","uuid":"f0b24c05-6bc4-49e6-b2e2-4999061064f5","timestamp":"2026-09-07T01:46:25.013Z","effort":"high","userType":"external","entrypoint":"sdk-cli","cwd":"/home/kiran/.no-mistakes/worktrees/3b169b9eb68e/01M1VAGQM160X68A8GQS5YND1Z","sessionId":"251866a3-c09a-4a88-8ef5-3fec8ba0935a","version":"2.1.263","gitBranch":"HEAD"}
+REAL
+  cat <<'SYNTHETIC'
+{"parentUuid":"83bb96f5-4d5f-4c35-8d0e-3ebb2ddbcfda","isSidechain":false,"type":"assistant","uuid":"6f85f260-33ce-4cc0-83f6-48ea5617f2c7","timestamp":"2026-09-06T21:32:20.150Z","message":{"diagnostics":null,"id":"c0f998d5-e07a-4649-b75e-5b53d0359deb","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","usage":{"output_tokens_details":null,"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":null,"iterations":null,"speed":null},"content":[{"type":"text","text":"No response requested."}],"context_management":null},"isApiErrorMessage":false,"userType":"external","entrypoint":"sdk-cli","cwd":"/home/kiran/.no-mistakes/worktrees/3b169b9eb68e/01M1VAGQM160X68A8GQS5YND1Z","sessionId":"4d6070dc-37d8-47a7-a2f2-f28e4791066a","version":"2.1.263","gitBranch":"HEAD"}
+SYNTHETIC
+} > "$TRANSCRIPTS/-home-kiran--no-mistakes-worktrees-3b169b9eb68e-$RUN_WITH_TRANSCRIPT/251866a3-c09a-4a88-8ef5-3fec8ba0935a.jsonl"
+
+# eager-dispatch-e2 owns the run that has a transcript; arm-lock-gate-q4's run
+# has none, which is the ordinary state of a run that has not reached an agent
+# step yet. `default` is what bin/fm-spawn.sh records when the harness picked
+# the model, so it is not the name of a model and must not reach the screen.
+printf 'window=fm:1\nharness=claude\nmodel=claude-opus-5\neffort=high\n' \
+  > "$MODEL_HOME/state/eager-dispatch-e2.meta"
+printf 'window=fm:2\nmodel=default\neffort=xhigh\n' \
+  > "$MODEL_HOME/state/arm-lock-gate-q4.meta"
+# No model or effort line at all, which is what a record written before those
+# fields existed looks like.
+printf 'window=fm:4\n' > "$MODEL_HOME/state/no-run-yet-n1.meta"
+
+MODELOUT="$TMP_ROOT/model-out.json"
+PATH="$FAKEBIN:$PATH" FM_HOME="$MODEL_HOME" \
+  FM_FLOW_SNAPSHOT_DB="$NM_DB" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/fleet.json" \
+  FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT="$TRANSCRIPTS" \
+  "$SNAPSHOT" --json --no-ci > "$MODELOUT" 2>/dev/null
+expect_code 0 $? "the model-label snapshot exits clean"
+
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2")
+  | "\(.worker.harness)/\(.worker.model)/\(.worker.effort)"' "$MODELOUT")
+[ "$got" = "claude/claude-opus-5/high" ] ||
+  fail "the worker's recorded model and effort did not reach the view: $got"
+
+# `default` is the harness's choice, not a model, so it is emitted as absent -
+# the renderer draws a dash. The effort beside it is real and survives.
+got=$(jq -r '.agents[] | select(.id=="arm-lock-gate-q4")
+  | "\(.worker.model)/\(.worker.effort)"' "$MODELOUT")
+[ "$got" = "null/xhigh" ] ||
+  fail "model=default was reported as a known model: $got"
+
+got=$(jq -r '.agents[] | select(.id=="no-run-yet-n1")
+  | "\(.worker.model)/\(.worker.effort)"' "$MODELOUT")
+[ "$got" = "null/null" ] ||
+  fail "a record carrying no model or effort invented one: $got"
+pass "the worker's model and effort are read from its own record, and default is not a model"
+
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2")
+  | "\(.gate.model)/\(.gate.effort)/\(.gate.source)"' "$MODELOUT")
+[ "$got" = "claude-opus-5/high/transcript" ] ||
+  fail "the gate agents' model was not read from the run's transcript: $got"
+
+got=$(jq -r '.agents[] | select(.id=="arm-lock-gate-q4")
+  | "\(.gate.model)/\(.gate.effort)/\(.gate.source)"' "$MODELOUT")
+[ "$got" = "null/null/none" ] ||
+  fail "a run with no transcript yet was given a gate model: $got"
+
+got=$(jq -r '.agents[] | select(.id=="no-run-yet-n1")
+  | "\(.gate.model)/\(.gate.source)"' "$MODELOUT")
+[ "$got" = "null/none" ] ||
+  fail "a task with no pipeline run at all was given a gate model: $got"
+pass "the gate agents' model comes from the run's own transcript, and its absence is stated"
+
+# A worker with no pipeline has no gate agents to report, and that is a stated
+# null rather than a missing field: one shape for every agent.
+got=$(jq -r '.agents[] | select(.pipeline == false) | "\(.id):\(.gate)"' "$MODELOUT" |
+  sort | tr '\n' ' ')
+[ "$got" = "idle-sm-z2:null some-scout-x1:null " ] ||
+  fail "a worker with no pipeline did not carry a stated null gate: $got"
+# Every agent carries the worker object whatever its kind.
+got=$(jq -r '[.agents[] | select(.worker == null)] | length' "$MODELOUT")
+[ "$got" = 0 ] || fail "$got agents reached the wire with no worker object at all"
+pass "every agent carries a worker object, and only a pipeline agent carries a gate"
+
+# The config file states what the NEXT run will use, so it can disagree with a
+# run already under way; reading it would turn this label into a guess. The
+# assertion is behavioural rather than a grep of the source, because the source
+# names that file in the comment saying why it is not read: a config declaring
+# a different model must not move the gate label of a run that is already going.
+mkdir -p "$TMP_ROOT/fake-nm-config"
+printf 'model: claude-haiku-4-5-20251001\n' > "$TMP_ROOT/fake-nm-config/config.yaml"
+got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$MODEL_HOME" \
+  HOME="$TMP_ROOT/fake-nm-config-home" \
+  FM_FLOW_SNAPSHOT_DB="$NM_DB" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/fleet.json" \
+  FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT="$TRANSCRIPTS" \
+  "$SNAPSHOT" --json --no-ci 2>/dev/null |
+  jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .gate.model')
+[ "$got" = "claude-opus-5" ] ||
+  fail "the gate model moved when the environment around the run changed: $got"
+pass "the gate model is the run's own transcript, not the config file's intention"

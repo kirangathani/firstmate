@@ -1023,3 +1023,136 @@ for f in "$ROOT"/bin/*.mjs; do
   node --check "$f" || fail "node --check failed for $f"
 done
 pass "every tracked bin/*.mjs passes node --check"
+
+# --- which LLM is doing the work --------------------------------------------
+#
+# Two facts on one line, and both must be readable at a glance and honest when
+# absent. The worker's model is what the task's own record says it was
+# dispatched on; the gate's is what the pipeline actually launched its review,
+# test, document and fix agents as.
+#
+# A dash is a fact here, not a placeholder: it says nothing machine-recorded
+# answers that axis. AGENTS.md section 9 forbids the alternatives - a blank
+# reads as "no label", and a guessed name reads as a measurement.
+
+# The pure mapping, exercised through the module rather than through a frame,
+# because every unrecognised id must survive VERBATIM and a frame can only show
+# the handful this fleet happens to run.
+map_out=$(node --input-type=module -e "
+import { modelLabel } from '$TUI';
+const cases = [
+  ['claude-opus-5', 'high'],
+  ['claude-fable-5-1', 'xhigh'],
+  ['claude-sonnet-5', 'medium'],
+  ['claude-haiku-4-5-20251001', 'low'],
+  ['claude-some-model-nobody-has-shipped-yet', 'high'],
+  ['claude-opus-5', null],
+  [null, 'high'],
+  [null, null],
+];
+for (const [m, e] of cases) console.log(modelLabel(m, e));
+")
+want='opus 5 high
+fable 5.1 xhigh
+sonnet 5 medium
+haiku 4.5 low
+claude-some-model-nobody-has-shipped-yet high
+opus 5 -
+- high
+- -'
+[ "$map_out" = "$want" ] ||
+  fail "the model label mapping drifted:
+$map_out"
+pass "each known model id maps to the captain's short form and an unknown one is printed verbatim"
+
+model_agent() {  # <id> <worker-json> <gate-json>
+  jq -n --arg id "$1" --argjson worker "$2" --argjson gate "$3" \
+    --argjson steps "$(steps_all completed)" '{
+    id:$id, branch:("fm/"+$id), project:"/p/firstmate", worktree:"/wt",
+    window:"fm:1", kind:"ship", mode:"no-mistakes", pipeline:true, state:null,
+    endpoint_alive:true, agent_alive:"alive", skips:{local:false,ci:false},
+    worker:$worker, gate:$gate,
+    pr:{url:null,number:null},
+    collection:{ok:true,reason:"",at:"t",epoch:1786000000},
+    run:{present:true,id:"01K",status:"running",db_updated_epoch:1786000000,db_age_seconds:0},
+    steps:$steps, active_steps:[],
+    ci:{collection:{ok:false,reason:"skipped"},checks:[],
+        total:0,passed:0,failed:0,pending:0,skipped:0,excused:0}
+  }'
+}
+
+WORKER_ONLY=$(model_agent worker-only-a1 \
+  '{"harness":"claude","model":"claude-fable-5-1","effort":"xhigh"}' \
+  '{"model":null,"effort":null,"source":"none"}')
+WORKER_AND_GATE=$(model_agent worker-and-gate-b2 \
+  '{"harness":"claude","model":"claude-opus-5","effort":"high"}' \
+  '{"model":"claude-opus-5","effort":"high","source":"transcript"}')
+NOTHING_KNOWN=$(model_agent nothing-known-c3 \
+  '{"harness":"claude","model":null,"effort":null}' \
+  '{"model":null,"effort":null,"source":"none"}')
+
+# The gate label is distinct from the worker's, so the two can never be read as
+# one four-word model name.
+out=$(render "$(snap "[$WORKER_ONLY]")" | sed 's/\x1b\[[0-9;]*m//g' | sed -n 3p)
+[ "$out" = "▸  Agent 1  worker-only-a1   fable 5.1 xhigh  · gate - -  firstmate  enter: open this worker's window" ] ||
+  fail "the worker-only title is not the frame it should be:
+$out"
+
+out=$(render "$(snap "[$WORKER_AND_GATE]")" | sed 's/\x1b\[[0-9;]*m//g' | sed -n 3p)
+[ "$out" = "▸  Agent 1  worker-and-gate-b2   opus 5 high  · gate opus 5 high  firstmate  enter: open this worker's window" ] ||
+  fail "the worker-and-gate title is not the frame it should be:
+$out"
+
+out=$(render "$(snap "[$NOTHING_KNOWN]")" | sed 's/\x1b\[[0-9;]*m//g' | sed -n 3p)
+[ "$out" = "▸  Agent 1  nothing-known-c3   - -  · gate - -  firstmate  enter: open this worker's window" ] ||
+  fail "an agent with nothing recorded did not render both axes as dashes:
+$out"
+pass "the title names the worker's model and effort, and a pipeline agent's gate model beside it"
+
+# The unselected title carries the same labels, so the captain does not have to
+# move the selector down the fleet to find out what each row is running on.
+TWO="[$WORKER_AND_GATE,$WORKER_ONLY]"
+out=$(render "$(snap "$TWO")" | sed 's/\x1b\[[0-9;]*m//g' | grep "Agent 2")
+[ "$out" = "  Agent 2  worker-only-a1  fable 5.1 xhigh  · gate - -  firstmate" ] ||
+  fail "an unselected row did not carry the same labels:
+$out"
+pass "both the selected and the unselected title styles carry the labels"
+
+# Narrow: the gate label goes WHOLE before the worker label, and neither is cut
+# mid-token. `opus` is a different claim from `opus 5`.
+for width in 120 100 92 80 70; do
+  out=$(printf '%s' "$(snap "[$WORKER_AND_GATE]")" |
+    node "$TUI" --cols "$width" --rows 60 --tick 0 | sed 's/\x1b\[[0-9;]*m//g' | sed -n 3p)
+  # Either label is present WHOLE or absent entirely; a partial one is the
+  # failure this discipline exists to prevent.
+  case $out in
+    *"· gate"*) assert_contains "$out" "· gate opus 5 high" \
+      "at $width columns the gate label was cut rather than dropped" ;;
+  esac
+  case $out in
+    *opus*) assert_contains "$out" "opus 5 high" \
+      "at $width columns the worker label was cut mid-token" ;;
+  esac
+  # Whichever survived, the frame still fits the terminal it was drawn for.
+  [ "${#out}" -le "$width" ] ||
+    fail "at $width columns the title line ran to ${#out} columns"
+done
+# 92 columns is narrow enough that the gate label cannot fit and the worker's
+# still can: the weaker fact is the one that goes. At 70 neither fits, and both
+# go whole rather than one being shortened into a fragment.
+out=$(printf '%s' "$(snap "[$WORKER_AND_GATE]")" |
+  node "$TUI" --cols 92 --rows 60 --tick 0 | sed 's/\x1b\[[0-9;]*m//g' | sed -n 3p)
+assert_not_contains "$out" "· gate" "a 92-column title kept the gate label it has no room for"
+assert_contains "$out" "opus 5 high" "a 92-column title dropped the worker label before the gate label"
+out=$(printf '%s' "$(snap "[$WORKER_AND_GATE]")" |
+  node "$TUI" --cols 70 --rows 60 --tick 0 | sed 's/\x1b\[[0-9;]*m//g' | sed -n 3p)
+assert_not_contains "$out" "opus" "a 70-column title kept a label it has no room for"
+pass "a narrow title drops the gate label whole, and the worker label survives it"
+
+# A worker with no pipeline has no gate agents, so it carries no gate label at
+# all - which is a different thing from a gate whose model is unknown.
+FLAT=$(printf '%s' "$SCOUT" | jq '.worker={harness:"claude",model:"claude-opus-5",effort:"xhigh"} | .gate=null')
+out=$(render "$(snap "[$FLAT]")" | sed 's/\x1b\[[0-9;]*m//g' | sed -n 3p)
+assert_contains "$out" "opus 5 xhigh" "a worker with no pipeline lost its own model label"
+assert_not_contains "$out" "· gate" "a worker with no pipeline was given a gate label"
+pass "a worker with no pipeline carries its own label and no gate label"
