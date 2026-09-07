@@ -322,7 +322,10 @@ Those are exactly the states where the missing number - how long it has been tha
 
 Neither time fits beside its word in a nine-column cell, so the timer is two rows: the word on the first, its elapsed on the second, in the same `dur()` shape the finished steps print, so the whole column reads as one clock rather than three.
 The second row is drawn unconditionally and left blank where a cell has no time, so the frame height does not depend on which states happen to be on screen.
-Two further rows below it carry the model label, on the same unconditional terms and for the same reason; `BLOCK` is therefore 10 rather than 7, and `scrollWindow()` reads that constant.
+Two further rows below it carry the model label, on the same unconditional terms and for the same reason.
+All four of those detail rows are left-aligned to their box's own first column, through `padLeft()` rather than the centring `pad()` the box label itself uses: the eye follows one vertical edge down a stage instead of a ragged middle, and each cell still occupies exactly its own columns so neighbours cannot collide.
+A blank row then separates the last detail row from the check tally, always, including for an agent whose detail rows are all empty, so the tally reads as the agent's summary rather than as one more per-stage line.
+`BLOCK` is therefore 11 rather than 7, and `scrollWindow()` reads that constant.
 
 The two elapsed values come from different places, and neither is computed in the viewer.
 A parked step's is its own `duration_ms`, which the tool freezes when the step produced its findings.
