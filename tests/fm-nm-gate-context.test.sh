@@ -204,6 +204,20 @@ test_decision_record_rewrites_the_same_key() {
   pass "decision: re-recording a key rewrites its statement in both places"
 }
 
+test_decision_record_when_task_is_the_last_section() {
+  local home brief
+  home=$(decision_home dec-tail)
+  printf '# Task\nThe whole brief is one section.\n' > "$home/data/t1/brief.md"
+  dec "$home" record t1 --finding F1 --key k --requires 'The requirement.' >/dev/null \
+    || fail "recording against a brief whose Task section runs to EOF failed"
+  brief="$home/data/t1/brief.md"
+  assert_grep '## Gate decisions' "$brief" "the subsection must be appended at the end of the file too"
+  assert_grep '- F1 [k]: The requirement.' "$brief" "the decision line must be written"
+  assert_contains "$(FM_HOME="$home" "$INTENT" t1)" '- F1 [k]: The requirement.' \
+    "the intent must carry a decision appended at EOF"
+  pass "decision: record appends correctly when the Task section runs to the end of the brief"
+}
+
 test_decision_record_refuses_without_a_task_section() {
   local home out rc
   home=$(decision_home dec-notask)
@@ -488,6 +502,7 @@ test_intent_refuses_an_empty_task_section
 test_decision_record_amends_the_task_section
 test_decision_record_rewrites_the_same_key
 test_decision_record_refuses_without_a_task_section
+test_decision_record_when_task_is_the_last_section
 test_rerun_check_passes_with_no_decisions
 test_rerun_check_refuses_until_a_fresh_run
 test_rerun_check_refuses_an_unreadable_run
