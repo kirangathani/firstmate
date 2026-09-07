@@ -218,7 +218,9 @@ Until a repository holds the secret, or while a PR carries no line, the review s
 ## The supersession attestation secret (FM_SUPERSESSION_SECRET)
 
 A captain-approved test-assertion supersession lives in `data/supersessions/<project>.md`, which is captain-private and gitignored, so `bin/fm-pr-merge.sh` can honour it and CI cannot see it at all.
-That asymmetry made the required `Base assertions re-verified` check unpassable for an approved override: it re-runs the same base assertions on a runner, reports the same findings, and stays red with nothing the branch can push to fix it, because the branch is not what is wrong.
+That asymmetry makes the required `Base assertions re-verified` check unpassable for an approved override: it re-runs the same base assertions on a runner, reports the same findings, and stays red with nothing the branch can push to fix it, because the branch is not what is wrong.
+That no longer blocks the merge - `bin/fm-pr-merge.sh` excuses that check from the local run that read the approval, so nothing here is a prerequisite for landing one.
+What this secret buys is the PR's own check going green as well, for a public record of the approval or for branch protection enforced outside firstmate's merge path.
 This section owns the secret's configuration and provisioning; `bin/fm-supersession-attest-lib.sh` owns the signed payload, the entry token, and the published line's grammar, `bin/fm-supersession-verify.sh` owns the verdict rules, and `bin/fm-supersession-attest.sh` owns the signing and publishing commands.
 
 The signing key is the same master at `config/ci-waiver-secret`, so a home that has run `bin/fm-ci-waiver.sh init` needs no second key.
@@ -228,7 +230,8 @@ It is deliberately not that repository's `FM_CI_WAIVER_SECRET`: the waiver key s
 Until a repository holds the secret the feature is inert there, in the safe direction: an attestation cannot be verified, so the verifier refuses it loudly and every base-assertion finding blocks, which is exactly the behaviour without this feature at all.
 Enrol a repository once with `publish`; there is nothing else to configure, and a repository may hold either secret, both, or neither.
 
-`bin/fm-supersession-attest.sh attest <task-id>` is the routine form: it reads the PR's current head commit from GitHub, signs that project's approvals for it, appends the one line to the PR body, and prints the command that re-runs the check.
+`bin/fm-supersession-attest.sh attest <task-id>` is the routine form: it reads the PR's current head commit from GitHub, signs that project's approvals for it, appends the one line to the PR body through the REST `pulls/<n>` endpoint, and prints the command that re-runs the check.
+It edits the body over REST rather than through `gh pr edit`, whose GraphQL path requests the deprecated `projectCards` field and fails outright on a repository with classic projects enabled.
 The authority is the approval record plus the master key, and no dispatch flag gates it, because a supersession can only be decided after the gate has reported which assertion the branch supersedes; that script's header owns the full reasoning, including why a worker can produce neither half.
 What the line publishes is each approved entry's matching half - its identifier or glob and the finding class it excuses - and never the captain's stated reason or the approval date, which stay in the private record.
 

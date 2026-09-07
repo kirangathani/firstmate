@@ -2178,6 +2178,217 @@ test_exempted_check_name_matches_the_workflow_job() {
   pass "the excused check name still equals the workflow job name that reports it"
 }
 
+### the base-re-verification exemption #######################################
+#
+# The second and last check whose failure the merge gate may excuse, and the one
+# whose authority is this merge's OWN local run rather than a record it looks up
+# (contract in bin/fm-pr-merge.sh's header). Before it existed, a captain's
+# approval cleared the local kept-tests gate and was then refused by the
+# checks-green gate for the same findings, so landing it needed an attestation
+# published into the PR body and a full CI re-run first.
+#
+#   (b1) a red base-assertions check whose findings the captain approved merges,
+#        and the log names the check and each entry that excused it
+#   (b2) the same red check with no covering entry refuses at the local gate,
+#        before the rollup is even read
+#   (b3) the same red check with a SECOND red check refuses
+#   (b4) a clean local run with no findings at all excuses it too: the two runs
+#        disagree and the local one is the fresher reading
+#   (b5) a run whose only findings were ungated unexecuted ones excuses nothing -
+#        those are assertions nothing verified, not decisions anybody made
+#   (b6) the excused name still equals the workflow job name that reports it
+#   (b7) both excusable checks over an empty-otherwise rollup still take the
+#        zero-checks refusal, and it names both
+
+# Written out here rather than read back out of the script, so this file is an
+# INDEPENDENT statement of the name and (b6) catches either side drifting from
+# the workflow job that actually reports it.
+BASE_REVERIFY_CHECK='Base assertions re-verified'
+
+base_reverify_failed_line() {
+  printf 'CheckRun\tCOMPLETED\tFAILURE\t-\t%s\n' "$BASE_REVERIFY_CHECK"
+}
+
+test_approved_supersession_merges_past_a_red_base_reverification() {
+  local case_dir
+  case_dir=$(make_stub_case base-reverify-approved 1 \
+    'failing: tests/x.test.sh::X behaves' \
+    'failing: tests/x.test.sh::Y behaves')
+  write_supersessions "$case_dir" \
+    '- ids: tests/x.test.sh::* | project: project | kind: failing | date: 2026-09-07 | reason: captain approved the 9-step to 10-step change'
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts' \
+    "$(base_reverify_failed_line)"
+
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/120 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "base-reverify-approved: an approved supersession must land without an attestation or a CI re-run"
+
+  assert_grep 'BASE RE-VERIFICATION EXEMPTED (before the remaining gates)' "$case_dir/stderr" \
+    "base-reverify-approved: the exemption was not disclosed before the gates"
+  assert_grep 'BASE RE-VERIFICATION EXEMPTED (MERGING NOW)' "$case_dir/stderr" \
+    "base-reverify-approved: the exemption was not disclosed again at the merge"
+  assert_grep "$BASE_REVERIFY_CHECK" "$case_dir/stderr" \
+    "base-reverify-approved: the banner did not name the excused check"
+  assert_grep '- tests/x.test.sh::X behaves (failing)' "$case_dir/stderr" \
+    "base-reverify-approved: the banner did not name the entries that excused it"
+  assert_grep '- tests/x.test.sh::Y behaves (failing)' "$case_dir/stderr" \
+    "base-reverify-approved: the banner named only one of the excused entries"
+  assert_grep 'every OTHER check must be green' "$case_dir/stderr" \
+    "base-reverify-approved: the banner did not say what is still enforced"
+  grep -qxF 'pr merge 120 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "base-reverify-approved: the PR was not merged"
+  pass "a captain-approved supersession merges past the red base-assertions check on its own"
+}
+
+# The red check with NO captain approval behind it, which is the shape this
+# exemption must never soften. The local run reports the same finding the runner
+# did, nothing covers it, and the merge is refused by the kept-tests gate before
+# the rollup is ever read - so the red check cannot be reached, let alone
+# excused.
+test_red_base_reverification_without_approval_refuses() {
+  local case_dir rc
+  case_dir=$(make_stub_case base-reverify-unapproved 1 \
+    'failing: tests/x.test.sh::X behaves')
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts' \
+    "$(base_reverify_failed_line)"
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/121 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "base-reverify-unapproved: a red base-assertions check with nothing excusing it must refuse"
+  assert_grep 'no captain-approved supersession entry covers: tests/x.test.sh::X behaves (failing)' "$case_dir/stderr" \
+    "base-reverify-unapproved: the unexcused finding was not named"
+  assert_grep 'refusing to merge' "$case_dir/stderr" \
+    "base-reverify-unapproved: the refusal did not explain itself"
+  assert_no_grep 'BASE RE-VERIFICATION EXEMPTED' "$case_dir/stderr" \
+    "base-reverify-unapproved: an unexcused red check was reported as exempted"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "base-reverify-unapproved: a red base-assertions check merged with no approval"
+  pass "a red base-assertions check with no covering approval refuses as before"
+}
+
+test_another_red_check_refuses_under_the_base_reverification_exemption() {
+  local case_dir rc
+  case_dir=$(make_stub_case base-reverify-other-red 1 \
+    'failing: tests/x.test.sh::X behaves')
+  write_supersessions "$case_dir" \
+    '- id: tests/x.test.sh::X behaves | project: project | date: 2026-09-07 | reason: captain approved the behavior change'
+  write_pr_checks "$case_dir" \
+    "$(base_reverify_failed_line)" \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tBehavior tests (shard 1)'
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/122 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "base-reverify-other-red: the exemption must not carry a second failing check"
+  assert_grep 'PR check is failing: Behavior tests (shard 1)' "$case_dir/stderr" \
+    "base-reverify-other-red: the genuinely failing check was not named"
+  assert_grep 'refusing to merge a red PR' "$case_dir/stderr" \
+    "base-reverify-other-red: the red-PR refusal did not fire"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "base-reverify-other-red: a PR with an unrelated failing check was merged"
+  pass "the base-re-verification exemption excuses one named check and nothing else that is failing"
+}
+
+test_clean_local_run_excuses_a_stale_red_base_reverification() {
+  local case_dir
+  case_dir=$(make_stub_case base-reverify-stale 0)
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts' \
+    "$(base_reverify_failed_line)"
+
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/123 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "base-reverify-stale: a local run reporting no finding must excuse a red result measured against a moved base"
+
+  assert_grep 'BASE RE-VERIFICATION EXEMPTED' "$case_dir/stderr" \
+    "base-reverify-stale: the exemption was not disclosed"
+  assert_grep 'reported no finding at all' "$case_dir/stderr" \
+    "base-reverify-stale: the banner did not name the local run as the authority"
+  assert_no_grep 'excused here:' "$case_dir/stderr" \
+    "base-reverify-stale: a run that excused no entry claimed to have excused one"
+  grep -qxF 'pr merge 123 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "base-reverify-stale: the PR was not merged"
+  pass "a local run that found nothing excuses a red base-assertions check as the staler reading"
+}
+
+# The deliberate non-grant: an ungated unexecuted finding is an assertion nothing
+# verified, not a decision anybody made, so it must not excuse a check reporting
+# exactly that.
+test_ungated_unexecuted_findings_do_not_excuse_the_red_check() {
+  local case_dir rc
+  case_dir=$(make_stub_case base-reverify-unexecuted 1 \
+    'unexecuted: tests/x.test.sh::X behaves')
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts' \
+    "$(base_reverify_failed_line)"
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/124 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "base-reverify-unexecuted: an ungated unexecuted finding must not excuse the red check"
+  assert_grep 'note: unexecuted (not gated for project)' "$case_dir/stderr" \
+    "base-reverify-unexecuted: the ungated finding stopped being reported"
+  assert_grep "PR check is failing: $BASE_REVERIFY_CHECK" "$case_dir/stderr" \
+    "base-reverify-unexecuted: the red check was not refused"
+  assert_no_grep 'BASE RE-VERIFICATION EXEMPTED' "$case_dir/stderr" \
+    "base-reverify-unexecuted: an unverified assertion was treated as an approval"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "base-reverify-unexecuted: a red base-assertions check merged on an unexecuted finding"
+  pass "an ungated unexecuted finding excuses nothing at the base-re-verification check"
+}
+
+# Both excusable checks at once, over a rollup holding nothing else. Neither is
+# evidence that anything ran, so the zero-checks refusal takes the PR - and it
+# has to name BOTH, because its whole job is telling the captain what it
+# discounted. The attestation-only wording is unchanged, which is what keeps a
+# base's own copy of this file passing against this branch.
+test_two_exempted_checks_alone_are_not_evidence_of_ci() {
+  local case_dir rc
+  case_dir=$(make_stub_case base-reverify-both-exempt 0)
+  write_projects_registry "$case_dir" direct-PR
+  write_pr_checks "$case_dir" \
+    "$(attestation_failed_line)" \
+    "$(base_reverify_failed_line)"
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/125 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "base-reverify-both-exempt: two excused checks must not count as CI having reported"
+  assert_grep 'only check(s) were the exempted attestation check and the exempted base re-verification check' "$case_dir/stderr" \
+    "base-reverify-both-exempt: the refusal did not name both checks it discounted"
+  assert_grep 'refusing to treat absent CI as green' "$case_dir/stderr" \
+    "base-reverify-both-exempt: the zero-checks refusal did not fire"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "base-reverify-both-exempt: a PR whose only checks were excused was merged"
+  pass "two excused checks are still not evidence, so a PR reporting nothing else refuses"
+}
+
+# The drift guard the exact-name match depends on, the same shape (x11) applies
+# to the attestation check.
+test_base_reverify_check_name_matches_the_workflow_job() {
+  local wf="$ROOT/.github/workflows/reverify-base.yml"
+  assert_grep "    name: $BASE_REVERIFY_CHECK" "$wf" \
+    "the re-verification workflow's job name no longer matches the name the merge gate excuses"
+  assert_grep "BASE_REVERIFY_CHECK_NAME='$BASE_REVERIFY_CHECK'" "$ROOT/bin/fm-pr-merge.sh" \
+    "bin/fm-pr-merge.sh no longer excuses the name that workflow's job reports"
+  pass "the second excused check name still equals the workflow job name that reports it"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_merge_asserts_the_branch_suite_premise_to_the_kept_gate
@@ -2242,6 +2453,13 @@ test_no_mistakes_project_without_a_skip_still_refuses
 test_exempted_check_alone_is_not_evidence_of_ci
 test_renamed_attestation_check_is_not_excused
 test_exempted_check_name_matches_the_workflow_job
+test_approved_supersession_merges_past_a_red_base_reverification
+test_red_base_reverification_without_approval_refuses
+test_another_red_check_refuses_under_the_base_reverification_exemption
+test_clean_local_run_excuses_a_stale_red_base_reverification
+test_ungated_unexecuted_findings_do_not_excuse_the_red_check
+test_base_reverify_check_name_matches_the_workflow_job
+test_two_exempted_checks_alone_are_not_evidence_of_ci
 test_signed_ci_skip_satisfies_zero_checks
 test_unsigned_ci_skip_does_not_satisfy_zero_checks
 test_signed_local_skip_does_not_satisfy_zero_checks
