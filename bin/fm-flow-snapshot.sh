@@ -501,9 +501,19 @@ attribute_models() {  # <actives-json> <sessions-json> <now-epoch>
 # into the TOON that steps_json() parses, so stderr goes to a file the caller
 # names and is consulted only on the failure path, as a fallback for a future
 # failure mode that does write there.
+# The directory change is a precondition to satisfy, not a lookup key: the
+# daemon does not scope `--run` to the resolved repository, so a run id read
+# from any gated directory returns that run. A recorded project that no longer
+# exists is therefore not a reason to refuse the read - there is nothing better
+# to do than run where we already are, which is exactly what this did before and
+# is no worse. What it must never do is `cd` nowhere silently and call that the
+# project, so the two cases are written out rather than leaning on `cd ... ||`.
 axi_read() {  # <project-path> <run-id> <stderr-file>
-  ( cd "$1" 2>/dev/null &&
-    run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$2" 2>"$3" )
+  if [ -d "$1" ]; then
+    ( cd "$1" && run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$2" 2>"$3" )
+  else
+    run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$2" 2>"$3"
+  fi
 }
 
 # The failed read's own words: its first line of stdout, and failing that the
@@ -668,8 +678,6 @@ agent_json() {  # <task-json>
       collect_ok=false
       if [ "$rc" = 124 ]; then
         collect_reason="axi status timed out after ${NM_TIMEOUT}s"
-      elif [ ! -d "$project" ]; then
-        collect_reason="axi status not run: the project directory is missing ($project)"
       else
         local why
         why=$(axi_error "$axi" "$axi_err")

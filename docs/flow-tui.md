@@ -469,7 +469,7 @@ Guarantees the renderer is entitled to rely on:
 - `collection.ok` false means the read failed or timed out.
   `steps` is then empty and the renderer must draw the agent as unknown, never as pending and never as its last-known state.
   These are different claims: pending reads as "not started yet", which is a fact this snapshot does not have.
-- `collection.reason` names the concrete failure, not a bare exit code: the deadline for a timeout, a missing project directory when that is what it is, and otherwise the failed read's own first line of stdout, falling back to stderr.
+- `collection.reason` names the concrete failure, not a bare exit code: the deadline for a timeout, and otherwise the failed read's own first line of stdout, falling back to stderr.
   The diagnosis is on stdout - no-mistakes writes only its version-update banner to stderr, on every call including the ones that work.
 - `ci.collection` is separate from the agent's `collection`, because a GitHub read can fail while the local read succeeds.
 - `run.present` false means no pipeline run exists for that branch, which is the ordinary state of a task that has not yet started validating.
@@ -613,9 +613,13 @@ Verified on this host, 2026-09-07, against a real completed run:
 The task's own recorded project path is the repository that run belongs to - it is the same value the run index is keyed on - so the read is done from there, inside a subshell.
 The collector reads several tasks in one pass, and one task's directory must not be carried into the next.
 
+A recorded project that no longer exists is not a reason to refuse the read.
+The daemon does not scope `--run` to the resolved repository - a run id read from any gated directory returns that run - so the directory change is a precondition to satisfy, not a lookup key.
+With the directory gone there is nothing better to do than read from where the collector already is, which is what it did before this change and is no worse; refusing instead would let a removed clone break a read that would otherwise have worked.
+
 The diagnosis is on STDOUT, not stderr.
 Stderr carries only the version-update banner, which is written on every call including the ones that work, so a reader that took stderr for the error would report a bare exit code forever - which is exactly how this defect stayed invisible: the collector was holding `error: repo not initialized` in a variable at the moment it decided to say nothing but a number.
-`collection.reason` therefore carries the failed read's own first line of stdout, falling back to the first line of stderr that is not that banner, with a timeout and a missing project directory named as themselves.
+`collection.reason` therefore carries the failed read's own first line of stdout, falling back to the first line of stderr that is not that banner, with a timeout named as itself.
 
 The two streams stay separate rather than being merged with `2>&1`: the banner in the stdout stream would corrupt the TOON parse.
 

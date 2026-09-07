@@ -944,6 +944,31 @@ got=$(jq -r '[.agents[] | select(.collection.ok == false)] | length' "$CWDOUT")
 [ "$got" = 0 ] || fail "$got agents were left unreadable after another task's read"
 pass "the directory change is scoped to one read and does not leak into the next"
 
+# A recorded project that no longer exists is not a reason to refuse the read.
+# The directory change is a precondition to satisfy, not a lookup key - the
+# daemon does not scope `--run` to the resolved repository - so there is nothing
+# better to do than run where we already are, which is what this did before the
+# change and is no worse. Refusing instead would make a removed clone break a
+# read that would otherwise have worked.
+GONE_HOME="$TMP_ROOT/home-gone"
+mkdir -p "$GONE_HOME/state"
+cp "$MODEL_HOME/state/eager-dispatch-e2.meta" "$GONE_HOME/state/"
+jq --arg p "$TMP_ROOT/project-that-was-removed" \
+  '.tasks |= map(.project = $p)' "$TMP_ROOT/fleet.json" > "$TMP_ROOT/fleet-gone.json"
+sqlite3 "$NM_DB" \
+  "UPDATE repos SET working_path='$TMP_ROOT/project-that-was-removed' WHERE id='repo1';"
+got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$GONE_HOME" \
+  FM_FLOW_SNAPSHOT_NOW_EPOCH=10000 \
+  FM_FLOW_SNAPSHOT_DB="$NM_DB" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/fleet-gone.json" \
+  FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT="$TRANSCRIPTS" \
+  "$SNAPSHOT" --json --no-ci 2>/dev/null |
+  jq -r '.agents[] | select(.id=="eager-dispatch-e2") | "\(.collection.ok)/\(.steps|length)"')
+[ "$got" = "true/10" ] ||
+  fail "a task whose project directory is gone was refused its run read: $got"
+sqlite3 "$NM_DB" "UPDATE repos SET working_path='$PROJECT' WHERE id='repo1';"
+pass "a task whose recorded project is gone still gets its run read, from where we already are"
+
 # A failure that is real still says why, in the command's own words. An exit
 # code alone is what hid the defect above for as long as it did. The version
 # banner is on stderr of every call, successful ones included, so it is not the
