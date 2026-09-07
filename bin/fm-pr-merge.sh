@@ -919,12 +919,13 @@ fi
 
 # --- checks-green gate (classification table and zero-checks contract in this
 # --- script's header) ---------------------------------------------------------
-# Empty fields are mapped to "-" in jq because tab is IFS whitespace to `read`,
-# so consecutive tabs would collapse and shift every later field over.
+# The rollup read and its classification live in bin/fm-pr-lib.sh so this gate
+# and bin/fm-pr-green.sh, which is how a ship worker learns its own PR is green,
+# cannot answer "is this PR green" two different ways. The POLICY below - the
+# exemption, the zero-checks authorities, and every refusal - stays here, where
+# this script's header owns it.
 set +e
-checks_raw=$(gh pr view "$URL" --json statusCheckRollup \
-  -q '.statusCheckRollup // [] | .[] | [.__typename, .status, .conclusion, .state, (.name // .context // "unnamed")] | map(if . == null or . == "" then "-" else . end) | @tsv' \
-  2> "$CHECKS_ERR")
+fm_pr_rollup_read "$URL" "$CHECKS_ERR"
 checks_rc=$?
 set -e
 if [ "$checks_rc" -ne 0 ]; then
@@ -934,63 +935,36 @@ if [ "$checks_rc" -ne 0 ]; then
   exit 1
 fi
 
-checks_total=0
-checks_failing=0
-checks_pending=0
-checks_unknown=0
+# The attestation check is passed as the exempt name so the classifier diverts
+# it rather than counting it failing. That is DEFERRED, not decided: its
+# authority is resolved once below, after the pass, and only if that named check
+# turned out to be failing at all. The count is kept because a re-run can leave
+# the same name in the rollup more than once.
+fm_pr_rollup_classify "$FM_PR_ROLLUP_TSV" "$ATTESTATION_CHECK_NAME"
+checks_total=$FM_PR_ROLLUP_TOTAL
+# The classifier splits a check that reached a no verdict from one that never
+# delivered a verdict at all (bin/fm-pr-lib.sh owns that split). THIS GATE DOES
+# NOT DISTINGUISH THEM: both mean the PR is not verified green, and a merge must
+# refuse either way, so they are added back together here and reported in the
+# one wording this gate has always used. The distinction matters to the reader
+# who has to act on it, which is bin/fm-pr-green.sh's worker, not to the merge.
+checks_failing=$((FM_PR_ROLLUP_FAILING + FM_PR_ROLLUP_INFRA))
+checks_pending=$FM_PR_ROLLUP_PENDING
+checks_unknown=$FM_PR_ROLLUP_UNKNOWN
 checks_exempted=0
-# Deferred rather than decided inside the loop: the exemption's authority is
-# resolved once, after the pass, and only if that named check turned out to be
-# failing at all. Its count is kept because a re-run can leave the same name in
-# the rollup more than once.
-attestation_failing=0
-while IFS=$'\t' read -r ck_type ck_status ck_conclusion ck_state ck_name; do
-  [ -n "$ck_type$ck_status$ck_conclusion$ck_state$ck_name" ] || continue
-  checks_total=$((checks_total + 1))
-  verdict=unknown
-  case "$ck_type" in
-    CheckRun)
-      case "$ck_status" in
-        COMPLETED)
-          case "$ck_conclusion" in
-            SUCCESS|NEUTRAL|SKIPPED) verdict=passing ;;
-            FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED|STALE|STARTUP_FAILURE) verdict=failing ;;
-          esac
-          ;;
-        QUEUED|IN_PROGRESS|PENDING|WAITING|REQUESTED) verdict=pending ;;
-      esac
-      ;;
-    StatusContext)
-      case "$ck_state" in
-        SUCCESS) verdict=passing ;;
-        FAILURE|ERROR) verdict=failing ;;
-        PENDING|EXPECTED) verdict=pending ;;
-      esac
-      ;;
-  esac
-  case "$verdict" in
-    failing)
-      # Exact equality, so a renamed job falls straight through to the ordinary
-      # refusal below (header: a rename costs a merge, it never grants one).
-      if [ "$ck_name" = "$ATTESTATION_CHECK_NAME" ]; then
-        attestation_failing=$((attestation_failing + 1))
-        continue
-      fi
-      checks_failing=$((checks_failing + 1))
-      echo "error: PR check is failing: $ck_name" >&2
-      ;;
-    pending)
-      checks_pending=$((checks_pending + 1))
-      echo "note: PR check has not finished: $ck_name" >&2
-      ;;
-    unknown)
-      checks_unknown=$((checks_unknown + 1))
-      echo "error: PR check state could not be classified: $ck_name (type=$ck_type status=$ck_status conclusion=$ck_conclusion state=$ck_state)" >&2
-      ;;
-  esac
-done <<EOF_CHECKS
-$checks_raw
-EOF_CHECKS
+attestation_failing=$FM_PR_ROLLUP_EXEMPT_FAILING
+while IFS= read -r ck_name; do
+  echo "error: PR check is failing: $ck_name" >&2
+done < <(fm_pr_rollup_each "$FM_PR_ROLLUP_FAILING_NAMES")
+while IFS= read -r ck_name; do
+  echo "error: PR check is failing: $ck_name" >&2
+done < <(fm_pr_rollup_each "$FM_PR_ROLLUP_INFRA_NAMES")
+while IFS= read -r ck_name; do
+  echo "note: PR check has not finished: $ck_name" >&2
+done < <(fm_pr_rollup_each "$FM_PR_ROLLUP_PENDING_NAMES")
+while IFS= read -r ck_name; do
+  echo "error: PR check state could not be classified: $ck_name" >&2
+done < <(fm_pr_rollup_each "$FM_PR_ROLLUP_UNKNOWN_NAMES")
 
 if [ "$attestation_failing" -gt 0 ]; then
   resolve_attestation_exemption

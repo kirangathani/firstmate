@@ -322,6 +322,8 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 ### PR ready, landing, and teardown
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
+A no-mistakes worker establishes that green itself with `bin/fm-pr-green.sh <task-id> [<pr-url>]`, which reads the PR's own head commit and that commit's checks by link, because the pipeline's own CI-monitor step cannot see a PR go green from its detached-HEAD copy; firstmate can run the same command to confirm a reported green.
+That command reports a check that never delivered a verdict about the branch - it timed out, was cancelled, could not run, or died having written nothing - as a distinct `infrastructure` outcome rather than a red, and a worker reports one and stops rather than re-running it, because a timed-out review is an alarm and a re-run hides it.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and GitHub's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 For a no-mistakes ship task, run `bin/fm-review-attest.sh attest <id>` on that report or on a worker's `review-attest needed for <sha> on <owner>/<repo>` line, so the PR carries signed proof that the pipeline already reviewed that exact commit and the project's own AI review can skip it; a later push needs a fresh one, and that script's header owns the contract.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
