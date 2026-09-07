@@ -29,6 +29,8 @@
 #       and commit, in both directions
 #   (m) the key is the repository's already-published FM_CI_WAIVER_SECRET, so an
 #       enrolled repository needs no second secret
+#   (n) signing always derives from the master, so an ambient FM_CI_WAIVER_SECRET
+#       exported for some other repository cannot select the signing key
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -393,6 +395,28 @@ test_the_key_is_the_repositorys_already_published_waiver_secret() {
   pass "the key is the repository's already-published FM_CI_WAIVER_SECRET"
 }
 
+test_signing_ignores_an_ambient_repository_secret() {
+  local home line other
+  # verify accepts FM_CI_WAIVER_SECRET because a runner has no master. Signing
+  # must not: an operator with that variable exported for one repository would
+  # otherwise sign another repository's line with the wrong key, and the
+  # mismatch would only surface wherever the line failed to verify.
+  home=$(ready_home ambient-secret)
+  line=$(line_only "$(run_attest "$home" attest "$ID" --print-only)")
+  other=$(FM_ROOT_OVERRIDE='' \
+    FM_HOME="$home" \
+    FM_STATE_OVERRIDE='' \
+    FM_DATA_OVERRIDE='' \
+    FM_CONFIG_OVERRIDE='' \
+    FM_REVIEW_ATTEST_DB="$home/nm.sqlite" \
+    FM_REVIEW_ATTEST_GH="$home/fakebin/gh" \
+    FM_CI_WAIVER_SECRET="$(waiver_repo_key "$home" "$OTHER_REPO")" \
+    "$ATTEST" attest "$ID" --print-only 2>&1)
+  [ "$(line_only "$other")" = "$line" ] \
+    || fail "an ambient FM_CI_WAIVER_SECRET changed the signing key"
+  pass "signing derives from the master and ignores an ambient repository secret"
+}
+
 test_attest_signs_a_review_that_completed_on_the_prs_head
 test_attest_refuses_a_review_of_another_commit
 test_attest_refuses_when_the_pipeline_never_ran_on_the_branch
@@ -406,3 +430,4 @@ test_verify_round_trips_a_line_attest_issued
 test_verify_refuses_another_commit_task_signature_and_shape
 test_the_review_attest_domain_differs_from_a_ci_waiver
 test_the_key_is_the_repositorys_already_published_waiver_secret
+test_signing_ignores_an_ambient_repository_secret

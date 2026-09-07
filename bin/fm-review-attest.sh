@@ -189,11 +189,18 @@ read_secret_or_die() {
   fi
 }
 
-# repo_key_for <owner/repo>: the key this repository's CI verifies against.
-# FM_CI_WAIVER_SECRET, when set, IS that already-derived key - which is what
-# lets `verify` run on a runner, where the master does not exist and must not.
+# repo_key_for <owner/repo> [<accept-env>]: the key this repository's CI
+# verifies against, derived from this home's master.
+#
+# FM_CI_WAIVER_SECRET, when set, IS that already-derived key, which is what lets
+# `verify` run on a runner where the master does not exist and must not. Only
+# `verify` passes `env`, deliberately: signing must always derive from the
+# master for the repository it was asked about, or an operator with that
+# variable exported for one repository would sign another repository's line
+# with the wrong key and never see the mismatch until the line failed to verify
+# somewhere else.
 repo_key_for() {
-  if [ -n "${FM_CI_WAIVER_SECRET-}" ]; then
+  if [ "${2-}" = env ] && [ -n "${FM_CI_WAIVER_SECRET-}" ]; then
     printf '%s\n' "$FM_CI_WAIVER_SECRET"
     return 0
   fi
@@ -365,7 +372,7 @@ case "$cmd" in
       exit 1
     fi
     fm_ci_waiver_valid_sig "$5" || { echo "unverified: the line's signature is not a 64-character hex digest" >&2; exit 1; }
-    V_KEY=$(repo_key_for "$V_REPO") || {
+    V_KEY=$(repo_key_for "$V_REPO" env) || {
       echo "error: could not derive the repository key for $V_REPO" >&2
       exit 1
     }
