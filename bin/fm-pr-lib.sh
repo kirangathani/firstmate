@@ -341,6 +341,7 @@ FM_PR_ROLLUP_JQ='.statusCheckRollup // [] | .[] | [.__typename, .status, .conclu
 # gh-axi is this repo's GitHub interface for ACTIONS; this is a raw-gh JSON read
 # exactly as fm_pr_base_branch_read and bin/fm-pr-check.sh's headRefOid lookup
 # are, because gh-axi exposes no rollup field.
+# shellcheck disable=SC2034  # FM_PR_ROLLUP_TSV is this function's return value, read by its callers.
 fm_pr_rollup_read() {
   local url=$1 err=$2 rc=0
   FM_PR_ROLLUP_TSV=
