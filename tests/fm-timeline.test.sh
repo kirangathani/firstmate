@@ -288,7 +288,10 @@ test_teardown_records_before_it_removes() {
   local teardown call_line rm_line
   teardown="$ROOT/bin/fm-teardown.sh"
   call_line=$(grep -n 'bin/fm-timeline.sh" record' "$teardown" | head -1 | cut -d: -f1)
-  rm_line=$(grep -n '^rm -f "\$STATE/\$ID.status"' "$teardown" | head -1 | cut -d: -f1)
+  # The literal line teardown removes the task's state files on. The $ signs
+  # are the script's own, not this shell's, so the pattern is fixed-string.
+  # shellcheck disable=SC2016
+  rm_line=$(grep -nF 'rm -f "$STATE/$ID.status"' "$teardown" | head -1 | cut -d: -f1)
   [ -n "$call_line" ] || fail "bin/fm-teardown.sh no longer records the timeline ledger"
   [ -n "$rm_line" ] || fail "could not find teardown's state-file removal to order against"
   [ "$call_line" -lt "$rm_line" ] \
