@@ -177,8 +177,15 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
+# FM_CREW_STATE_DB is pinned for EVERY case, never left to inherit: unset, the
+# reader defaults to the operator's own ~/.no-mistakes/state.sqlite, and a case
+# whose branch happened to match a real run there would measure that machine
+# instead of its fixture. The default here is a path that does not exist, which
+# is the "no database" answer; a case that wants one sets FM_FAKE_NM_DB.
 run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" \
+    FM_CREW_STATE_DB="${FM_FAKE_NM_DB:-$1/no-such-database.sqlite}" \
+    "$CREW_STATE" "$2"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -204,6 +211,8 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_NM_DB=""
+  export FM_FAKE_NM_DB
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
   export FM_FAKE_TMUX_COMMAND
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
@@ -1505,6 +1514,118 @@ SH
   pass "no timeout command uses perl bound"
 }
 
+# --- an axi status that prints NOTHING falls back to the daemon database -----
+#
+# Measured 2026-09-07 on no-mistakes v1.37.0: `axi status` exited 0 and printed
+# an EMPTY body for a healthy running task while two sibling runs printed
+# theirs. That left this reader with no run-step source at all and it fell
+# through to the pane. The daemon's own database still held the run, so it is
+# read there, keyed on this task's own fm/<id>, and rendered as the TOON this
+# file already parses. The step-to-state mapping is unchanged; only the source.
+
+# A fixture database in the schema the live one uses, trimmed to the columns
+# this path reads plus the keys they depend on.
+make_nm_db() {  # <path> <branch> <run-status> <step-name> <step-status>
+  sqlite3 "$1" <<SQL
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
+  head_sha TEXT NOT NULL, base_sha TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+  pr_url TEXT, error TEXT, awaiting_agent_since INTEGER,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE step_results (
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_name TEXT NOT NULL,
+  step_order INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', exit_code INTEGER,
+  duration_ms INTEGER, log_path TEXT, findings_json TEXT, error TEXT,
+  started_at INTEGER, completed_at INTEGER, last_activity_at INTEGER,
+  last_activity TEXT, agent_pid INTEGER, auto_fix_limit INTEGER);
+INSERT INTO runs VALUES
+  ('R1','repo1','$2','abc123','base','$3',NULL,NULL,NULL,1000,2000);
+INSERT INTO step_results
+  (id,run_id,step_name,step_order,status,duration_ms,findings_json,started_at,completed_at)
+VALUES
+  ('p1','R1','intent',1,'completed',6,NULL,1000,1006),
+  ('p2','R1','rebase',2,'completed',3225,NULL,1006,1009),
+  ('p3','R1','$4',3,'$5',19890,'{"findings":[{"id":"a"},{"id":"b"}]}',1009,NULL),
+  ('p4','R1','document',4,'pending',0,NULL,NULL,NULL),
+  ('p5','R1','lint',5,'pending',0,NULL,NULL,NULL),
+  ('p6','R1','push',6,'pending',0,NULL,NULL,NULL),
+  ('p7','R1','pr',7,'pending',0,NULL,NULL,NULL),
+  ('p8','R1','ci',8,'pending',0,NULL,NULL,NULL);
+SQL
+}
+
+test_silent_axi_reads_the_database() {
+  reset_fakes
+  command -v sqlite3 >/dev/null 2>&1 || { echo "skip: sqlite3 not found"; return 0; }
+  local d out; d=$(new_case silent-axi)
+  make_repo_on_branch "$d/wt" fm/silent-run-s1
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/silent-run-s1.meta" "window=fm:fm-silent-run-s1" "worktree=$d/wt" "kind=ship"
+  make_nm_db "$d/nm.sqlite" fm/silent-run-s1 running review fixing
+  # The CLI answers with nothing at all, which is the whole failure.
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_NM_DB="$d/nm.sqlite"
+  out=$(run_crew_state "$d" silent-run-s1)
+  assert_contains "$out" "source: run-step" "a silent CLI lost the run-step source"
+  assert_contains "$out" "state: working" "a fixing run read from the database was not working"
+  assert_contains "$out" "run read from database" "the database read did not name its source"
+  pass "an empty axi status reads the run from the daemon database"
+}
+
+# The mapping is the SAME mapping, whichever source the record came from: a run
+# parked at a gate is parked, and its findings are still counted.
+test_database_read_maps_a_gate_the_same_way() {
+  reset_fakes
+  command -v sqlite3 >/dev/null 2>&1 || { echo "skip: sqlite3 not found"; return 0; }
+  local d out; d=$(new_case silent-axi-gate)
+  make_repo_on_branch "$d/wt" fm/silent-gate-s2
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/silent-gate-s2.meta" "window=fm:fm-silent-gate-s2" "worktree=$d/wt" "kind=ship"
+  make_nm_db "$d/nm.sqlite" fm/silent-gate-s2 awaiting_approval test awaiting_approval
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_NM_DB="$d/nm.sqlite"
+  out=$(run_crew_state "$d" silent-gate-s2)
+  assert_contains "$out" "state: parked" "a gate read from the database was not parked"
+  assert_contains "$out" "test" "the parked gate was not named from the database record"
+  assert_contains "$out" "2 finding" "the gate's findings were lost on the database path"
+  pass "a gate read from the database maps to parked exactly as the CLI's own does"
+}
+
+# A CLI that ANSWERS is still the source: the fallback is a fallback and never
+# overrides a working read, or the two could disagree with the database winning.
+test_answering_axi_is_still_the_source() {
+  reset_fakes
+  command -v sqlite3 >/dev/null 2>&1 || { echo "skip: sqlite3 not found"; return 0; }
+  local d out; d=$(new_case answering-axi)
+  make_repo_on_branch "$d/wt" fm/answering-s3
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/answering-s3.meta" "window=fm:fm-answering-s3" "worktree=$d/wt" "kind=ship"
+  # The database says parked; the CLI says running. The CLI answered, so it wins.
+  make_nm_db "$d/nm.sqlite" fm/answering-s3 awaiting_approval test awaiting_approval
+  FM_FAKE_AXI_STATUS="$(run_running fm/answering-s3)"
+  FM_FAKE_NM_DB="$d/nm.sqlite"
+  out=$(run_crew_state "$d" answering-s3)
+  assert_contains "$out" "state: working" "the database overrode a CLI that answered"
+  assert_not_contains "$out" "run read from database" "a CLI read was labelled a database read"
+  pass "a CLI that answers is still the source, and is never overridden"
+}
+
+# Both silent is the unchanged old behaviour: no run to attribute, so the pane
+# is read. The fallback must not invent a run where neither source has one.
+test_silent_axi_and_no_database_falls_through() {
+  reset_fakes
+  local d out; d=$(new_case silent-axi-no-db)
+  make_repo_on_branch "$d/wt" fm/silent-nodb-s4
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/silent-nodb-s4.meta" "window=fm:fm-silent-nodb-s4" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=1
+  out=$(run_crew_state "$d" silent-nodb-s4)
+  assert_contains "$out" "source: pane" "a silent CLI with no database did not fall through to the pane"
+  assert_not_contains "$out" "run read from database" "a run was reported with no database to read it from"
+  pass "a silent CLI with no database still falls through to the pane"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -1650,6 +1771,10 @@ test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
+test_silent_axi_reads_the_database
+test_database_read_maps_a_gate_the_same_way
+test_answering_axi_is_still_the_source
+test_silent_axi_and_no_database_falls_through
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta

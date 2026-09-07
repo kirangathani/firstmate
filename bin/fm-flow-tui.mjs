@@ -470,7 +470,10 @@ const INDENT = 2;
 // columns on the same frame. The widest ordinary spacing is already five, so at
 // full width nothing moves at all.
 const PR_LABEL_W = 5;
-const PR_CONNECTOR = STEPS.length;
+// The gutter LEAVING push+PR, which is the one the PR number rides. Derived
+// from where that step actually sits rather than from the end of the row, so a
+// step added after it does not silently move the label onto another connector.
+const PR_CONNECTOR = STEPS.findIndex((s) => s.key === "pr") + 1;
 // The width of the gutter drawn BEFORE cell `i`. Exported for the same reason
 // CELL_WIDTHS is: a test addressing a cell by arithmetic has to use the
 // renderer's own spacing rather than a number copied out of one frame.
@@ -549,6 +552,18 @@ function stepFor(agent, spec) {
 // What a recorded testing skip does to ONE stage box, or null when it does
 // nothing to it. Read from the task's own state/<id>.meta by the collector, so
 // this never guesses from a status log, a brief, or the absence of a run.
+// How long the worker has been reworking its own PR, as the marker that rides
+// under the push+PR box, or "" when it is not.
+//
+// The collector states this rather than the renderer deriving it: it is claimed
+// only on a recorded PR, no pipeline run to own the work instead, and a worker
+// still there, and this view performs no outside reads of its own. A gone
+// worker leaves the line blank rather than counting time against nobody.
+function reworkFor(agent) {
+  const ms = agent?.rework?.active_ms;
+  return typeof ms === "number" ? `rework ${dur(ms)}` : "";
+}
+
 function skipOverride(agent, spec) {
   if (!skipsOf(agent).local && !isDirectPR(agent)) return null;
   if (LOCAL_SKIP_STAGES.has(spec.key)) return { state: "skipped", timer: "skipped" };
@@ -558,7 +573,17 @@ function skipOverride(agent, spec) {
     // this box as skipped would contradict the live CI cell one step to its
     // right, so it reports the hand-run delivery it actually is, and the
     // recorded PR link is what says it has happened.
-    return { state: agent.pr?.url ? "done" : "pending", timer: "by hand" };
+    //
+    // The work AFTER that PR - answering review, which on a `direct-PR` project
+    // is the whole of the rest of the task's life - rides the box's second line
+    // as a marker rather than a stage of its own. It belongs here because it is
+    // this box's own aftermath, and a column would have said the row grew a
+    // stage the pipeline does not have.
+    return {
+      state: agent.pr?.url ? "done" : "pending",
+      timer: "by hand",
+      timer2: reworkFor(agent),
+    };
   }
   return null;
 }
@@ -582,8 +607,13 @@ function stepBox(agent, spec, anim) {
   // whatever the read did.
   const forced = skipOverride(agent, spec);
   if (forced) {
-    const b = box(spec.label, forced.state, W, { timer: forced.timer });
-    return { ...b, timer: (PAINT[forced.state] ?? dim)(b.timer) };
+    const b = box(spec.label, forced.state, W, {
+      timer: forced.timer,
+      timer2: forced.timer2 ?? "",
+    });
+    // The marker is dim whatever the box's own state is: it reports work still
+    // going on, not a verdict on the stage above it.
+    return { ...b, timer: (PAINT[forced.state] ?? dim)(b.timer), timer2: dim(b.timer2) };
   }
   if (agent.collection?.ok === false) {
     return box(spec.label, "unknown", W, { timer: "?" });
@@ -822,6 +852,12 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   if (authority) notes.push(blue(authority));
   if (agent.collection?.ok === false) notes.push(magenta(`unreadable: ${agent.collection.reason}`));
   else if (agent.endpoint_alive === false) notes.push(magenta("worker gone"));
+  // A run the CLI would not render, read straight from the daemon database
+  // instead. Muted, because the row is healthy - but stated, because these
+  // steps are not the view `no-mistakes axi status` would have printed. It sits
+  // beside the notes above rather than replacing one: a worker being gone is a
+  // separate fact from where its run record was read.
+  if (agent.collection?.source === "db") notes.push(dim("run read from database"));
   // The hint rides the SELECTED agent whatever cell is highlighted, because
   // enter is agent-scoped: it opens the worker, and no cell has an action of
   // its own. It used to appear only while the head itself was selected, so
