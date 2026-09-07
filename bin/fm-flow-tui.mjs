@@ -95,7 +95,13 @@ const blue = sgr("94");
 // across several cells rather than from more hues.
 const TAIL = ["1;92", "1;92", "92", "92", "92", "1;97", "97"].map(sgr);
 
+// `building` is the worker's own implementation phase - from the moment
+// dispatch wrote its record until the pipeline run for that branch starts - so
+// the row covers every stage of a task's life rather than beginning at the
+// gate. A task that has not yet reached validation used to draw nine pending
+// boxes and no indication that anything was happening at all.
 export const STEPS = [
+  { key: "building", label: "building" },
   { key: "intent", label: "intent" },
   { key: "rebase", label: "rebase" },
   { key: "review", label: "review" },
@@ -109,7 +115,7 @@ const CIW = 13;
 const MW = 9;
 const NCELLS = STEPS.length + 2;
 // One PIPELINE block: the head, the three box rows, the TWO timer rows, the
-// facts row, and one blank. One COMPACT block: the head, the state row, and one
+// TWO model rows, the facts row, and one blank. One COMPACT block: the head, the state row, and one
 // blank. scrollWindow() below derives the frame from these two numbers, so a
 // row added to either builder has to be added here in the same edit or the
 // frame runs past the bottom of the terminal.
@@ -120,7 +126,11 @@ const NCELLS = STEPS.length + 2;
 // nine-column cell. The second row is drawn unconditionally, blank where a cell
 // has no time, so the frame height does not depend on which states happen to be
 // on screen.
-export const BLOCK = 8;
+//
+// Two further rows carry WHICH MODEL is pushing the active cell through, split
+// one axis per row for the reason modelLabel() states, and drawn on the same
+// unconditional terms for the same reason.
+export const BLOCK = 10;
 export const COMPACT_BLOCK = 3;
 
 // Whether this agent has a no-mistakes pipeline to draw. The snapshot STATES
@@ -237,47 +247,39 @@ const MODEL_SHORT = new Map([
 // Both axes are named on every render, and an axis with no machine record
 // behind it is a dash - never a zero, never a blank, and never the config
 // file's opinion of what would run next.
+export function modelShort(model) {
+  return model ? (MODEL_SHORT.get(model) ?? String(model)) : "-";
+}
+
+export const effortShort = (effort) => (effort ? String(effort) : "-");
+
+// The one-line form, for the row that has a whole line to spend. A cell does
+// not: the two axes are drawn on two rows of their own there, because the
+// widest pair - `fable 5.1` and `xhigh` - is fifteen columns against an
+// eleven-column field, and shortening either half is exactly the mid-token cut
+// this label must never make. `opus` is a different claim from `opus 5`.
 export function modelLabel(model, effort) {
-  const m = model ? (MODEL_SHORT.get(model) ?? String(model)) : "-";
-  const e = effort ? String(effort) : "-";
-  return `${m} ${e}`;
+  return `${modelShort(model)} ${effortShort(effort)}`;
 }
 
 export const workerLabel = (agent) =>
   modelLabel(agent?.worker?.model, agent?.worker?.effort);
 
-// Only an agent whose pipeline is running has gate agents at all, and only a
-// run that has reached one has a transcript saying what it launched them as.
-// Both absences read the same on screen - dashes - but the label is dropped
-// entirely for a worker that has no pipeline, because there is no gate there
-// to be unknown about.
-export function gateLabel(agent) {
-  if (!agent?.gate) return "";
-  return modelLabel(agent.gate.model, agent.gate.effort);
-}
-
-// The two labels ride the title, and neither may be cut mid-token: `opus` is a
-// different claim from `opus 5`, and a half-written model id is worse than no
-// model id. So a title too narrow drops the gate label WHOLE, then the worker
-// label whole, and only the parts that survive reach clip().
+// Which model is pushing ONE cell through, and it is asked only of the cell
+// that is currently active. A finished cell states its duration and nothing
+// more: the question "which model is doing this" is about work in progress,
+// and a label on every finished box would be six answers to a question nobody
+// is asking beside the one that matters.
 //
-// The gate goes first because it is the weaker fact: the worker's model is
-// recorded at dispatch and is always there, while the gate's is only ever
-// known once the pipeline has launched an agent.
-//
-// Both are painted cyan and dim rather than in any of this view's alarm slots
-// - red, magenta and yellow - because a label naming which model is working is
-// an identity, never a fault. A healthy idle second mate's row must carry no
-// alarm colour at all, and this label rides that row too.
-export function titleWithLabels(base, tail, worker, gate, cols) {
-  const w = worker ? `  ${cyan(worker)}` : "";
-  const g = gate ? `  ${dim("·")} ${dim(`gate ${gate}`)}` : "";
-  const limit = Number.isFinite(cols) && cols > 0 ? cols : Infinity;
-  for (const extras of [w + g, w, ""]) {
-    const line = base + extras + tail;
-    if (visLen(line) <= limit) return line;
-  }
-  return base + tail;
+// `building` is the worker's own model, from the record dispatch wrote. Every
+// other cell is the model the PIPELINE launched for that step, which the
+// collector attributes from the run's own session transcripts. Neither is ever
+// inferred from the other: the worker and the gate agents are separate agents
+// and routinely run on different models.
+export function stepModel(agent, spec) {
+  if (spec.key === "building") return agent?.worker ?? null;
+  const keys = spec.folds ?? [spec.key];
+  return (agent?.active_steps ?? []).find((a) => keys.includes(a?.step)) ?? null;
 }
 
 export function dur(ms) {
@@ -377,7 +379,10 @@ function perimeter(w) {
 // ONE renderer for step boxes, the CI container, and pre-merge, so they cannot
 // drift apart in how they signal the same thing.
 function box(label, state, width, opts = {}) {
-  const { dashed = false, badge = false, timer = "", timer2 = "", anim = 0 } = opts;
+  const {
+    dashed = false, badge = false, timer = "", timer2 = "",
+    model = "", effort = "", anim = 0,
+  } = opts;
   const base = PAINT[state] ?? dim;
   const [tl, tr, bl, br, hz, vt] = dashed
     ? ["+", "+", "+", "+", "-", ":"]
@@ -403,6 +408,7 @@ function box(label, state, width, opts = {}) {
   return {
     top: row(0), mid: row(1), bot: row(2),
     timer: pad(timer, width + 2), timer2: pad(timer2, width + 2),
+    model: pad(model, width + 2), effort: pad(effort, width + 2),
   };
 }
 
@@ -554,12 +560,29 @@ function stepBox(agent, spec, anim) {
   if (state === "live") timer2 = dur(activeMs(agent, spec));
   else if (state === "waiting") timer2 = st?.duration_ms ? dur(st.duration_ms) : "";
 
-  const b = box(spec.label, state, W, { timer, timer2, anim });
+  // Which model is pushing this cell through, on the two rows below the timer,
+  // and only while the cell is one the captain is actually watching: a step
+  // that is running, and one parked on its findings. Both axes are named
+  // whenever the label is drawn at all, an axis with no machine record behind
+  // it as a dash, so "nobody recorded it" is never read as "there is none".
+  let model = "";
+  let effort = "";
+  if (state === "live" || state === "waiting") {
+    const m = stepModel(agent, spec);
+    model = modelShort(m?.model);
+    effort = effortShort(m?.effort);
+  }
+
+  const b = box(spec.label, state, W, { timer, timer2, model, effort, anim });
   const paint = PAINT[state] ?? dim;
   return {
     ...b,
     timer: timer ? paint(b.timer) : b.timer,
     timer2: timer2 ? paint(b.timer2) : b.timer2,
+    // Cyan and dim, never one of this view's alarm slots: a label naming which
+    // model is working is an identity, never a fault.
+    model: model ? cyan(b.model) : b.model,
+    effort: effort ? dim(b.effort) : b.effort,
   };
 }
 
@@ -687,7 +710,7 @@ function premergeBox() {
 const DEFAULT_OPEN_HINT = "enter: open this worker's window";
 const DEFAULT_DETAIL_HINT = "d pipeline detail, ctrl-c back";
 
-function agentBlock(agent, n, selected, cell, anim, lay, openHint, cols) {
+function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   const cells = STEPS.map((s) => stepBox(agent, s, anim));
   cells.push(ciBox(agent, anim));
   cells.push(premergeBox());
@@ -699,7 +722,7 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint, cols) {
     const mark = (s) => `${ESC}7m${s.replace(ANSI, "")}${R}`;
     cells[cell] = {
       top: mark(c.top), mid: mark(c.mid), bot: mark(c.bot),
-      timer: c.timer, timer2: c.timer2,
+      timer: c.timer, timer2: c.timer2, model: c.model, effort: c.effort,
     };
   }
 
@@ -707,13 +730,15 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint, cols) {
   const arrowGlyph = "─".repeat(Math.max(0, lay.gap - 1)) + "→";
   const arrow = dim(arrowGlyph);
   const gap = " ".repeat(lay.gap);
-  const top = [], mid = [], bot = [], tim = [], tim2 = [];
+  const top = [], mid = [], bot = [], tim = [], tim2 = [], mod = [], eff = [];
   shown.forEach((c, i) => {
     if (i > 0) {
-      top.push(gap); mid.push(arrow); bot.push(gap); tim.push(gap); tim2.push(gap);
+      top.push(gap); mid.push(arrow); bot.push(gap);
+      tim.push(gap); tim2.push(gap); mod.push(gap); eff.push(gap);
     }
     top.push(c.top); mid.push(c.mid); bot.push(c.bot);
     tim.push(c.timer); tim2.push(c.timer2);
+    mod.push(c.model); eff.push(c.effort);
   });
 
   const onHead = selected && cell < 0;
@@ -729,15 +754,11 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint, cols) {
   // its own. It used to appear only while the head itself was selected, so
   // stepping right onto GITHUB CI left the captain with a highlighted cell and
   // nothing on screen saying what enter would do to it.
-  const head = titleWithLabels(
-    `${marker} ${name}`,
+  const head =
+    `${marker} ${name}` +
     `  ${dim(shortProject(agent.project))}` +
-      (notes.length ? `  ${notes.join("  ")}` : "") +
-      (selected ? `  ${dim(openHint || DEFAULT_OPEN_HINT)}` : ""),
-    workerLabel(agent),
-    gateLabel(agent),
-    cols,
-  );
+    (notes.length ? `  ${notes.join("  ")}` : "") +
+    (selected ? `  ${dim(openHint || DEFAULT_OPEN_HINT)}` : "");
 
   // The facts line. It carries the two things no cell has room for and no
   // reader should have to infer: the complete check tally, and - when the task
@@ -762,6 +783,8 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint, cols) {
     "  " + bot.join(""),
     "  " + tim.join(""),
     "  " + tim2.join(""),
+    "  " + mod.join(""),
+    "  " + eff.join(""),
     "  " + facts,
   ];
 }
@@ -840,7 +863,7 @@ export function compactState(agent) {
 // Two content rows, matching the pipeline block's own head-then-facts shape so
 // the two read as one view rather than as two. Everything between them - the
 // boxes - is exactly what this worker does not have.
-function compactBlock(agent, n, selected, openHint, cols) {
+function compactBlock(agent, n, selected, openHint) {
   const marker = selected ? greenBold("▸") : " ";
   const name = selected
     ? `${ESC}7m Agent ${n}  ${agent.id} ${R}`
@@ -850,15 +873,11 @@ function compactBlock(agent, n, selected, openHint, cols) {
   // these back. Drawn the same way the pipeline block draws it, so the captain
   // learns one signal rather than two.
   if (agent.endpoint_alive === false) notes.push(magenta("worker gone"));
-  const head = titleWithLabels(
-    `${marker} ${name}`,
+  const head =
+    `${marker} ${name}` +
     `  ${blue(kindLabel(agent.kind))}  ${dim(shortProject(agent.project))}` +
-      (notes.length ? `  ${notes.join("  ")}` : "") +
-      (selected ? `  ${dim(openHint || DEFAULT_OPEN_HINT)}` : ""),
-    workerLabel(agent),
-    gateLabel(agent),
-    cols,
-  );
+    (notes.length ? `  ${notes.join("  ")}` : "") +
+    (selected ? `  ${dim(openHint || DEFAULT_OPEN_HINT)}` : "");
 
   // The facts row, in the pipeline block's facts position. Its segments are
   // ordered by what has to survive a narrow terminal: the state word first,
@@ -868,6 +887,11 @@ function compactBlock(agent, n, selected, openHint, cols) {
   const st = compactState(agent);
   const bits = [st.paint(st.word)];
   if (st.detail) bits.push(dim(st.detail));
+  // This worker has no step cells to hang its model on, and it is still an
+  // agent working on one. It rides the facts row rather than the title,
+  // painted cyan - never an alarm slot, because a healthy idle second mate's
+  // row must carry no alarm colour and this label rides that row too.
+  bits.push(cyan(workerLabel(agent)));
   if (agent.window) bits.push(dim(agent.window));
   return [head, "  " + bits.join(`  ${dim("·")}  `)];
 }
@@ -1023,8 +1047,8 @@ export function render(snap, opts) {
     const n = win.top + i;
     const selected = n === sel;
     out.push(...(hasPipeline(a)
-      ? agentBlock(a, n + 1, selected, cell, anim, lay, openHint, cols)
-      : compactBlock(a, n + 1, selected, openHint, cols)));
+      ? agentBlock(a, n + 1, selected, cell, anim, lay, openHint)
+      : compactBlock(a, n + 1, selected, openHint)));
     out.push("");
   });
 
