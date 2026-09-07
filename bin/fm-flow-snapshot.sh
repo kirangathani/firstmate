@@ -791,16 +791,20 @@ agent_json() {  # <task-json>
   # What the worker is doing AFTER its PR is open, which is not building and is
   # not the pipeline either: it is answering review, and on a `direct-PR`
   # project it is the whole of the rest of the task's life. Ending building at
-  # the PR without this would draw a live worker as a row of finished boxes.
+  # the PR without stating this would draw a live worker as a row of finished
+  # boxes.
+  #
+  # It is a FACT ABOUT THE AGENT, not a tenth step. The renderer draws it as a
+  # marker under the push+PR box, whose own aftermath it is; a step of its own
+  # would have said the row grew a stage the pipeline does not have, and
+  # `steps` stays exactly the nine the tool names plus `building`.
   #
   # It is claimed only on the evidence for it: a recorded PR, no pipeline run to
-  # own the work instead, and a worker still there. A gone worker leaves the
-  # cell pending rather than counting time against nobody.
-  local rework_step='{"step":"rework","status":"pending","findings":0,"duration_ms":0}'
-  local rework_active=''
+  # own the work instead, and a worker still there. A gone worker leaves it null
+  # rather than counting time against nobody.
+  local rework=null
   if [ -n "$pr_at" ] && [ "$endpoint_alive" = true ]; then
-    rework_step='{"step":"rework","status":"running","findings":0,"duration_ms":0}'
-    rework_active="{\"step\":\"rework\",\"status\":\"running\",\"active_for\":\"\",\"active_ms\":$(( (NOW_EPOCH - pr_at) * 1000 )),\"last_activity\":\"\",\"agent_pid\":\"\",\"round\":\"\"}"
+    rework="{\"active_ms\":$(( (NOW_EPOCH - pr_at) * 1000 ))}"
   fi
 
   # Which model is pushing each ACTIVE pipeline step through, attributed from
@@ -812,13 +816,9 @@ agent_json() {  # <task-json>
   # building is the WORKER's own step, so its model is the worker's own record
   # and never a transcript. The renderer reads it from `worker` directly.
   if [ "$collect_ok" = true ]; then
-    steps=$(printf '%s' "$steps" \
-      | jq -c --argjson b "$build_step" --argjson r "$rework_step" '[$b] + . + [$r]')
+    steps=$(printf '%s' "$steps" | jq -c --argjson b "$build_step" '[$b] + .')
     if [ -n "$build_active" ]; then
       actives=$(printf '%s' "$actives" | jq -c --argjson b "$build_active" '[$b] + .')
-    fi
-    if [ -n "$rework_active" ]; then
-      actives=$(printf '%s' "$actives" | jq -c --argjson r "$rework_active" '. + [$r]')
     fi
   else
     actives='[]'
@@ -856,6 +856,7 @@ agent_json() {  # <task-json>
     --argjson endpoint_alive "$endpoint_alive" \
     --argjson collect_ok "$collect_ok" \
     --argjson pr_num "${pr_num:-null}" \
+    --argjson rework "$rework" \
     --argjson skip_local "$skip_local" \
     --argjson skip_ci "$skip_ci" \
     --arg harness "$FM_ROW_HARNESS" \
@@ -872,6 +873,7 @@ agent_json() {  # <task-json>
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
       skips:{local:$skip_local, ci:$skip_ci},
+      rework:$rework,
       worker:{
         harness:(if $harness == "" then null else $harness end),
         model:(if $w_model == "" then null else $w_model end),
@@ -974,6 +976,7 @@ compact_json() {  # <task-json>
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
       skips:{local:false, ci:false},
+      rework:null,
       worker:{
         harness:(if $harness == "" then null else $harness end),
         model:(if $w_model == "" then null else $w_model end),

@@ -109,12 +109,6 @@ export const STEPS = [
   { key: "document", label: "docs" },
   { key: "lint", label: "lint" },
   { key: "pr", label: "push+PR", folds: ["push", "pr"] },
-  // What the worker does AFTER its PR is open, which is neither building nor
-  // the pipeline: answering review. It closes the row for a `direct-PR` task,
-  // whose whole life after the PR used to be drawn as a building step that
-  // never ended - the captain saw `building running 3h54m` beside a PR that had
-  // been open for hours.
-  { key: "rework", label: "rework" },
 ];
 const W = 9;
 const CIW = 13;
@@ -314,7 +308,7 @@ export const workerLabel = (agent) =>
 // inferred from the other: the worker and the gate agents are separate agents
 // and routinely run on different models.
 export function stepModel(agent, spec) {
-  if (spec.key === "building" || spec.key === "rework") return agent?.worker ?? null;
+  if (spec.key === "building") return agent?.worker ?? null;
   const keys = spec.folds ?? [spec.key];
   return (agent?.active_steps ?? []).find((a) => keys.includes(a?.step)) ?? null;
 }
@@ -558,10 +552,19 @@ function stepFor(agent, spec) {
 // What a recorded testing skip does to ONE stage box, or null when it does
 // nothing to it. Read from the task's own state/<id>.meta by the collector, so
 // this never guesses from a status log, a brief, or the absence of a run.
+// How long the worker has been reworking its own PR, as the marker that rides
+// under the push+PR box, or "" when it is not.
+//
+// The collector states this rather than the renderer deriving it: it is claimed
+// only on a recorded PR, no pipeline run to own the work instead, and a worker
+// still there, and this view performs no outside reads of its own. A gone
+// worker leaves the line blank rather than counting time against nobody.
+function reworkFor(agent) {
+  const ms = agent?.rework?.active_ms;
+  return typeof ms === "number" ? `rework ${dur(ms)}` : "";
+}
+
 function skipOverride(agent, spec) {
-  // rework is the WORKER's own phase, like building: no delivery mode and no
-  // testing skip removes it, so neither may paint it.
-  if (spec.key === "rework") return null;
   if (!skipsOf(agent).local && !isDirectPR(agent)) return null;
   if (LOCAL_SKIP_STAGES.has(spec.key)) return { state: "skipped", timer: "skipped" };
   if (spec.key === "pr") {
@@ -570,7 +573,17 @@ function skipOverride(agent, spec) {
     // this box as skipped would contradict the live CI cell one step to its
     // right, so it reports the hand-run delivery it actually is, and the
     // recorded PR link is what says it has happened.
-    return { state: agent.pr?.url ? "done" : "pending", timer: "by hand" };
+    //
+    // The work AFTER that PR - answering review, which on a `direct-PR` project
+    // is the whole of the rest of the task's life - rides the box's second line
+    // as a marker rather than a stage of its own. It belongs here because it is
+    // this box's own aftermath, and a column would have said the row grew a
+    // stage the pipeline does not have.
+    return {
+      state: agent.pr?.url ? "done" : "pending",
+      timer: "by hand",
+      timer2: reworkFor(agent),
+    };
   }
   return null;
 }
@@ -594,8 +607,13 @@ function stepBox(agent, spec, anim) {
   // whatever the read did.
   const forced = skipOverride(agent, spec);
   if (forced) {
-    const b = box(spec.label, forced.state, W, { timer: forced.timer });
-    return { ...b, timer: (PAINT[forced.state] ?? dim)(b.timer) };
+    const b = box(spec.label, forced.state, W, {
+      timer: forced.timer,
+      timer2: forced.timer2 ?? "",
+    });
+    // The marker is dim whatever the box's own state is: it reports work still
+    // going on, not a verdict on the stage above it.
+    return { ...b, timer: (PAINT[forced.state] ?? dim)(b.timer), timer2: dim(b.timer2) };
   }
   if (agent.collection?.ok === false) {
     return box(spec.label, "unknown", W, { timer: "?" });

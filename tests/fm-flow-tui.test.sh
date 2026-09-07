@@ -780,16 +780,14 @@ const withSkips = (skips) => ({
 // local_skip switches the whole local pipeline off, so every validation stage
 // is skipped - but push and PR still happen, by hand, which is why that box is
 // NOT skipped and why the CI cell beside it carries real checks.
-// `building` and `rework` are the WORKER's own phases, not pipeline stages, and
-// no flag removes either: the worker still implements the change by hand, and
-// under local_skip there is never a run to end the building phase, so it stays
-// running. Drawing either as skipped would say the work itself did not happen.
-// This fixture's steps carry no rework entry, so that cell is simply empty.
+// `building` is not a pipeline stage and no flag removes it: the worker still
+// implements the change by hand, and under local_skip there is never a run to
+// end that phase, so it stays running. Drawing it as skipped would say the
+// work itself did not happen.
 const localCells = timerCells(withSkips({ local: true, ci: false }));
 STEPS.forEach((s, i) => {
   const want = s.key === "building"
     ? "running"
-    : s.key === "rework" ? ""
     : LOCAL_SKIP_STAGES.has(s.key) ? "skipped" : "by hand";
   if (localCells[i] !== want) {
     say(`local skip: stage ${s.key} reads "${localCells[i]}", want "${want}"`);
@@ -1313,33 +1311,39 @@ assert_contains "$timers" "skipped" "a direct-PR row drew no stage as skipped"
 pass "a direct-PR row draws its pipeline stages as skipped and names the mode that authorised it"
 
 # A direct-PR task's building phase ENDS at its PR, and what the worker does
-# afterwards is its own cell. Before this, `building` had no end on that path at
-# all - the captain saw `building running 3h54m` beside a PR that had been open
-# for hours - and the row said nothing about the review work still going on.
+# afterwards is a MARKER under the push+PR box, not a stage of its own. Before
+# this, `building` had no end on that path at all - the captain saw
+# `building running 3h54m` beside a PR that had been open for hours - and the
+# row said nothing about the review work still going on.
 #
-# Neither phase is the pipeline's, so neither may be painted skipped by the
-# delivery mode that skips every stage between them.
+# The row keeps exactly the stages the pipeline has. A column for the aftermath
+# would have said it grew one it does not.
 REWORKING=$(agent_with dp3 \
-  '[{"step":"building","status":"completed","findings":0,"duration_ms":600000},
-    {"step":"rework","status":"running","findings":0,"duration_ms":0}]' \
+  '[{"step":"building","status":"completed","findings":0,"duration_ms":600000}]' \
   '{"mode":"direct-PR","pr":{"url":"https://github.com/o/r/pull/31","number":31},
-    "active_steps":[{"step":"rework","status":"running","active_for":"",
-                     "active_ms":7400000,"last_activity":"","agent_pid":"","round":""}]}')
-# The timer row is read CELL BY CELL: the two phases sit at opposite ends of the
-# same line, so a check against the whole row would see the other one's word and
-# pass or fail for the wrong reason.
+    "rework":{"active_ms":7400000}}')
 out=$(render "$(snap "[$REWORKING]")" | sed 's/\x1b\[[0-9;]*m//g')
+# The building phase and the push+PR box sit on the same timer line, so it is
+# read CELL BY CELL: a check against the whole row would see the other cell's
+# word and pass or fail for the wrong reason.
 timers=$(printf '%s' "$out" | awk '/building/ { getline; getline; print; exit }')
 build_cell=$(printf '%s' "$timers" | awk '{ print $1 }')
-rework_cell=$(printf '%s' "$timers" | awk '{ print $NF }')
 assert_contains "$build_cell" "10m" "a finished building phase did not state its duration"
 assert_not_contains "$build_cell" "running" "building was still running with the PR open"
-# The rework cell is the last STAGE box, and the two cells after it on this row
-# are the CI and model columns, so it is addressed from the stage row's own end.
-rework_cell=$(printf '%s' "$timers" | awk '{ print $(NF - 2) }')
-assert_contains "$rework_cell" "running" "post-PR work was not drawn as running rework"
-assert_not_contains "$rework_cell" "skipped" "the delivery mode painted the worker's own rework phase skipped"
-pass "a direct-PR row ends building at its PR and draws the work after it as rework"
+# The marker rides the SECOND timer line, under the push+PR box.
+marker=$(printf '%s' "$out" | awk '/building/ { getline; getline; getline; print; exit }')
+assert_contains "$marker" "rework" "post-PR work left no marker under push+PR"
+assert_contains "$marker" "2h" "the rework marker did not state how long it has been going"
+pass "a direct-PR row ends building at its PR and marks the work after it under push+PR"
+
+# The row still has exactly the stages it had: the aftermath earned a marker,
+# not a column.
+STAGE_COUNT=$(node --input-type=module -e \
+  'const m = await import(process.argv[1]); process.stdout.write(String(m.STEPS.length))' \
+  "$TUI")
+[ "$STAGE_COUNT" = 8 ] ||
+  fail "the stage row grew or lost a cell: $STAGE_COUNT stages, want 8"
+pass "the post-PR marker adds no stage to the row"
 
 # The flag is a SEPARATE axis and is named by the flag the captain passed,
 # taken from the record rather than inferred from the missing run.

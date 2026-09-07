@@ -379,15 +379,12 @@ got=$(jq -r '.agents[] | select(.id=="arm-lock-gate-q4") | .steps[] | select(.st
 [ "$got" = "skipped" ] || fail "status not passed through verbatim: $got"
 pass "passes unfamiliar step statuses through unmapped"
 
-# The tool's own nine, plus the two phases the WORKER owns and the pipeline has
-# no record of: `building` before them and `rework` after.
-WORKER_STEPS=2
 got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .steps | length' "$OUT")
-[ "$got" = $((9 + WORKER_STEPS)) ] || fail "expected $((9 + WORKER_STEPS)) steps, got $got"
+[ "$got" = 10 ] || fail "expected 10 steps, got $got"
 # The tool's own nine, in its own order, unchanged - that is what this assertion
 # has always been for and its name stays exactly as it was.
 got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2")
-  | [.steps[] | select(.step != "building" and .step != "rework") | .step] | join(",")' "$OUT")
+  | [.steps[] | select(.step != "building") | .step] | join(",")' "$OUT")
 [ "$got" = "intent,rebase,review,test,document,lint,push,pr,ci" ] || fail "step order wrong: $got"
 pass "carries all nine steps in pipeline order"
 
@@ -1002,7 +999,7 @@ got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.ok' "$CW
   fail "a run read from outside a repository was reported unreadable: $(
     jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.reason' "$CWDOUT")"
 got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .steps | length' "$CWDOUT")
-[ "$got" = $((9 + WORKER_STEPS)) ] || fail "the run read from the project produced $got steps"
+[ "$got" = 10 ] || fail "the run read from the project produced $got steps"
 pass "the run read happens in the task's own project, whatever directory the view was opened from"
 
 # One task's directory must not be carried into the next: the collector reads
@@ -1031,7 +1028,7 @@ got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$GONE_HOME" \
   FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT="$TRANSCRIPTS" \
   "$SNAPSHOT" --json --no-ci 2>/dev/null |
   jq -r '.agents[] | select(.id=="eager-dispatch-e2") | "\(.collection.ok)/\(.steps|length)"')
-[ "$got" = "true/$((9 + WORKER_STEPS))" ] ||
+[ "$got" = "true/10" ] ||
   fail "a task whose project directory is gone was refused its run read: $got"
 sqlite3 "$NM_DB" "UPDATE repos SET working_path='$PROJECT' WHERE id='repo1';"
 pass "a task whose recorded project is gone still gets its run read, from where we already are"
@@ -1159,7 +1156,7 @@ ok=$(jq -r '.agents[] | select(.id=="silent-axi-s5") | .collection.ok' "$SILENTO
 [ "$ok" = "true" ] || fail "a run the database could answer for was reported unreadable: $(
   jq -r '.agents[] | select(.id=="silent-axi-s5") | .collection.reason' "$SILENTOUT")"
 got=$(jq -r '.agents[] | select(.id=="silent-axi-s5")
-  | [.steps[] | select(.step != "building" and .step != "rework") | .step] | join(",")' "$SILENTOUT")
+  | [.steps[] | select(.step != "building") | .step] | join(",")' "$SILENTOUT")
 [ "$got" = "intent,rebase,review,test,document,lint,push,pr,ci" ] ||
   fail "the database read did not produce the pipeline's own steps in order: $got"
 pass "an axi status that prints nothing falls back to the daemon database"
@@ -1252,22 +1249,24 @@ n=$(jq -r '.agents[] | select(.id=="shipped-d1")
 [ "$n" = 0 ] || fail "a finished building phase was still counting time"
 pass "a task with no pipeline run ends its building phase at the recorded PR"
 
-# The work after the PR is its own phase, not building and not the pipeline. It
-# counts from the PR against the same clock, and is claimed only while the
-# worker is still there.
-got=$(jq -r '.agents[] | select(.id=="shipped-d1")
-  | .steps[] | select(.step=="rework") | .status' "$DPROUT")
-[ "$got" = "running" ] || fail "post-PR work was not marked as rework: $got"
-got=$(jq -r '.agents[] | select(.id=="shipped-d1")
-  | .active_steps[] | select(.step=="rework") | .active_ms' "$DPROUT")
+# The work after the PR is a fact about the AGENT, not a tenth step: the row
+# still carries exactly the nine the tool names plus `building`, and the marker
+# rides under the push+PR box the work is the aftermath of. It counts from the
+# PR against the same clock.
+got=$(jq -r '.agents[] | select(.id=="shipped-d1") | .rework.active_ms' "$DPROUT")
 [ "$got" = 7400000 ] || fail "rework counted from the wrong moment: $got"
-pass "work after the PR is drawn as rework, counting from the PR"
+got=$(jq -r '.agents[] | select(.id=="shipped-d1")
+  | [.steps[] | select(.step != "building") | .step] | join(",")' "$DPROUT")
+[ "$got" = "" ] || fail "a task with no pipeline run was given pipeline steps: $got"
+n=$(jq -r '.agents[] | select(.id=="shipped-d1")
+  | [.steps[] | select(.step=="rework")] | length' "$DPROUT")
+[ "$n" = 0 ] || fail "rework was emitted as a step rather than as a fact about the agent"
+pass "work after the PR is reported on the agent, not added to its step list"
 
 # A task the pipeline DOES own is untouched: its building phase still ends when
 # the run was created, and nothing after that is the worker's rework.
-got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2")
-  | .steps[] | select(.step=="rework") | .status' "$OUT")
-[ "$got" = "pending" ] || fail "a pipeline task was given rework it is not doing: $got"
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .rework' "$OUT")
+[ "$got" = "null" ] || fail "a pipeline task was given rework it is not doing: $got"
 pass "a task the pipeline owns is never given a rework phase"
 
 # A worker that is gone leaves the cell pending rather than counting time
@@ -1283,7 +1282,6 @@ got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$DPR_HOME" \
   FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/fleet-directpr-dead.json" \
   FM_FLOW_SNAPSHOT_NOW_EPOCH="$DPR_NOW" \
   "$SNAPSHOT" --json --no-ci --include-dead 2>/dev/null |
-  jq -r '.agents[] | select(.id=="shipped-d1")
-    | .steps[] | select(.step=="rework") | .status')
-[ "$got" = "pending" ] || fail "a gone worker was reported as reworking: $got"
+  jq -r '.agents[] | select(.id=="shipped-d1") | .rework')
+[ "$got" = "null" ] || fail "a gone worker was reported as reworking: $got"
 pass "a gone worker is not counted as reworking its PR"
