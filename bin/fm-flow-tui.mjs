@@ -264,9 +264,10 @@ export function gateLabel(agent) {
 // The gate goes first because it is the weaker fact: the worker's model is
 // recorded at dispatch and is always there, while the gate's is only ever
 // known once the pipeline has launched an agent.
-// Painted cyan and dim rather than in any of this view's alarm slots - red,
-// magenta and yellow - because a label naming which model is working is an
-// identity, never a fault. A healthy idle second mate's row must carry no
+//
+// Both are painted cyan and dim rather than in any of this view's alarm slots
+// - red, magenta and yellow - because a label naming which model is working is
+// an identity, never a fault. A healthy idle second mate's row must carry no
 // alarm colour at all, and this label rides that row too.
 export function titleWithLabels(base, tail, worker, gate, cols) {
   const w = worker ? `  ${cyan(worker)}` : "";
