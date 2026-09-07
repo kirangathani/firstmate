@@ -251,11 +251,17 @@ prove_reviewed() {
     echo "error: no no-mistakes database at $NM_DB, so there is no record that anything reviewed $sha" >&2
     return 1
   fi
+  # A completed review at this commit is preferred over a newer run that has
+  # not reached one, because the question is whether the commit was EVER
+  # reviewed, not what the branch is doing now: a re-run started for a later
+  # step would otherwise mask the review that already happened. Among runs that
+  # did not complete a review, the most recent is the one reported, so the
+  # refusal names the state an operator would see.
   status=$(nm_query "
     SELECT s.status FROM runs r
       JOIN step_results s ON s.run_id = r.id AND s.step_name = 'review'
      WHERE r.branch = $(sql_quote "$branch") AND r.head_sha = $(sql_quote "$sha")
-     ORDER BY r.created_at DESC LIMIT 1;") || {
+     ORDER BY (s.status = 'completed') DESC, r.created_at DESC LIMIT 1;") || {
     echo "error: could not read $NM_DB; refusing to attest a review that cannot be confirmed" >&2
     return 1
   }

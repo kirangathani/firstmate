@@ -14,7 +14,8 @@
 #   (a) attest signs when a run for the branch reviewed the exact PR head
 #   (b) attest refuses when the reviewed commit is not the PR's head
 #   (c) attest refuses when the pipeline has no run for the branch at all
-#   (d) attest refuses a review step that did not reach `completed`
+#   (d) attest refuses a review step that did not reach `completed`, but a
+#       completed review is not masked by a newer run that has not reached one
 #   (e) a skipped review refuses without the captain's recorded decision, and
 #       is attested with it, naming what it is endorsing
 #   (f) attest refuses a task with no durable record and one with no PR
@@ -223,6 +224,19 @@ test_attest_refuses_a_review_that_did_not_complete() {
   pass "attest refuses a review step that did not reach completed"
 }
 
+test_a_completed_review_is_not_masked_by_a_newer_run() {
+  local home out
+  # The question is whether this commit was ever reviewed, not what the branch
+  # is doing now: a re-run started for a later step must not hide the review
+  # that already finished on the same commit.
+  home=$(ready_home newer-run)
+  add_run "$home" r2 "fm/$ID" "$SHA_A" running 200
+  out=$(run_attest "$home" attest "$ID" --print-only) \
+    || fail "a newer unfinished run hid a completed review of the same commit: $out"
+  [ -n "$(line_only "$out")" ] || fail "attest printed no line: $out"
+  pass "a completed review is not masked by a newer run that has not reached one"
+}
+
 test_a_skipped_review_needs_the_captains_recorded_decision() {
   local home out
   home=$(ready_home skipped)
@@ -421,6 +435,7 @@ test_attest_signs_a_review_that_completed_on_the_prs_head
 test_attest_refuses_a_review_of_another_commit
 test_attest_refuses_when_the_pipeline_never_ran_on_the_branch
 test_attest_refuses_a_review_that_did_not_complete
+test_a_completed_review_is_not_masked_by_a_newer_run
 test_a_skipped_review_needs_the_captains_recorded_decision
 test_attest_refuses_a_task_with_no_record_and_a_task_with_no_pr
 test_attest_refuses_a_repository_the_task_does_not_belong_to
