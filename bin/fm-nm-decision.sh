@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Durable record of the decisions a worker submits at no-mistakes gates, and the
-# gate that proves each one survived to the end of the run.
+# path by which each one becomes part of the goal the pipeline scores against.
 #
 # THIS SCRIPT IS THE ONE OWNER of that record. It lives at
 # data/<task-id>/decisions.md, alongside the task's brief and report, so it
@@ -17,40 +17,65 @@
 # decisions recorded at a gate are treated as input to the step that raised them,
 # not as constraints on later steps, and the final review evaluates against
 # --intent, which was written before any decision existed and therefore always
-# describes the pre-decision state. The pipeline self-certified a state that
-# contradicted three explicit decisions, and it was caught only because the
-# driving agent diffed by hand instead of trusting `checks-passed`.
+# describes the pre-decision state.
 #
-# no-mistakes is third-party and this fleet does not own its source, so the guard
-# is firstmate-side: the worker records what each decision REQUIRED in concrete,
-# checkable terms, then must check each one against the final diff before
-# reporting a PR ready. `checks-passed` is not evidence that a decision survived;
-# in #591 it was emitted over the reverted state.
+# THE FIX IS TO MOVE THE INTENT, NOT TO AUDIT THE DIFF. A stale --intent is the
+# root cause, and it costs more than the reverted-decision case: a re-run and a
+# final review scored against a goal the captain has since changed can also fail
+# code that correctly matches the DECIDED goal. So `record` amends the task's
+# pinned intent in place - it writes the decision into the `# Task` section of
+# data/<task-id>/brief.md, under a `## Gate decisions` subsection - and
+# bin/fm-nm-intent.sh, which reads that whole section and remains the one owner
+# of "what is the intent", emits it on the very next call with no second reader
+# and nothing to keep in sync. The worker then starts a fresh run on the amended
+# intent, and THAT run's review is the mechanical proof that the branch and the
+# decided goal agree. It also re-reviews whatever the later auto-fix steps
+# (test, document, lint) changed, which nothing else in the pipeline does.
 #
 # Usage:
 #   fm-nm-decision.sh record <task-id> --finding <id> --key <key> --requires <text> [--step <step>]
-#   fm-nm-decision.sh verify <task-id> --finding <id> --evidence <text>
-#   fm-nm-decision.sh reverted <task-id> --finding <id> --evidence <text>
+#   fm-nm-decision.sh rerun-check <task-id>
 #   fm-nm-decision.sh list <task-id>
-#   fm-nm-decision.sh check <task-id>
 #   fm-nm-decision.sh path <task-id>
+#   fm-nm-decision.sh verify <task-id> --finding <id> --evidence <text>      (optional diagnostic)
+#   fm-nm-decision.sh reverted <task-id> --finding <id> --evidence <text>    (optional diagnostic)
+#   fm-nm-decision.sh check <task-id>                                        (optional diagnostic)
 #
-#   record    appends one decision, state `pending`. Run it at the moment the
-#             decision is submitted to the gate, not later from memory.
-#   verify    marks a decision `satisfied` with the evidence that proves it still
-#             holds in the final diff (a diff hunk, a file:line, a test name).
-#   reverted  marks a decision `contradicted`. `check` then always refuses, and
-#             the worker must stop and escalate rather than report done.
-#   list      prints the record.
-#   check     exit 0 only when every recorded decision is `satisfied`. Exit 1
-#             naming every pending or contradicted decision. A task with no
-#             recorded decisions passes: a run with no gate decisions has nothing
-#             to survive. Exit 2 for a usage error.
-#   path      prints the record path (it may not exist yet).
+#   record       records one decision AND amends the brief's `# Task` section
+#                with `- <finding> [<key>]: <requires>`. Run it at the moment the
+#                decision is submitted to the gate, not later from memory.
+#                Re-recording the same key rewrites that line and that decision's
+#                block rather than duplicating either, so a revised decision
+#                leaves one current statement of itself in both places. Refuses
+#                when the brief is missing or has no `# Task` section, because a
+#                decision that cannot reach the intent is the failure this exists
+#                to prevent. Also stores the no-mistakes run id current at the
+#                moment of recording, which is what rerun-check compares.
+#   rerun-check  the done gate. Exit 0 only when every recorded decision was
+#                recorded during a run OLDER than the most recent one, which is
+#                what proves a fresh run scored the branch against the amended
+#                intent. Exit 1 naming every decision still waiting for that
+#                re-run, and exit 1 when the current run id cannot be read at
+#                all, since an unreadable run confirms nothing either way. A task
+#                with no recorded decisions passes: an unamended intent needs no
+#                re-run. Exit 2 for a usage error.
+#   list         prints the record.
+#   path         prints the record path (it may not exist yet).
 #
-# The record is append-mostly: `verify` and `reverted` rewrite only the state and
-# evidence lines of the named decision, never its `requires` text, so what the
-# decision demanded cannot be edited after the fact to match what shipped.
+# The three optional diagnostics below are NOT a gate and nothing blocks on them.
+# They predate the intent amendment, when the guard was a hand audit of the final
+# diff; that audit is now the fresh run's review. They remain because reading
+# what a decision demanded, and marking by hand what a specific inspection found,
+# is still useful when investigating a suspect run:
+#
+#   verify    marks a decision `satisfied` with evidence that it holds.
+#   reverted  marks a decision `contradicted` with the reverting commit.
+#   check     exit 0 only when every recorded decision is `satisfied`, exit 1
+#             naming every pending or contradicted one.
+#
+# `verify` and `reverted` rewrite only the state and evidence lines of the named
+# decision, never its `requires` text, so what the decision demanded cannot be
+# edited after the fact to match what shipped.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,6 +105,14 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 RECORD="$DATA/$ID/decisions.md"
+BRIEF="$DATA/$ID/brief.md"
+
+# The subsection `record` maintains inside the brief's `# Task` section. The
+# heading is the anchor: it carries no HTML marker because bin/fm-nm-intent.sh
+# emits this text verbatim into --intent, where a marker would be noise the
+# pipeline's review has to read past.
+GATE_HEADING='## Gate decisions'
+GATE_LEAD='These were decided at this task'"'"'s validation gates and are part of the goal; the branch must reflect them.'
 
 FINDING=
 KEY=
@@ -108,6 +141,17 @@ one_line() {
   printf '%s' "$1" | tr '\n\t' '  ' | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//'
 }
 
+# The no-mistakes run id current in this directory, or empty when it cannot be
+# read. Best-effort by design: `record` must never refuse a real decision just
+# because the pipeline is momentarily unreadable, and `rerun-check` reports the
+# unknown case rather than guessing past it.
+current_run_id() {
+  command -v no-mistakes >/dev/null 2>&1 || return 0
+  no-mistakes axi status 2>/dev/null \
+    | sed -n 's/^[[:space:]]*id:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' \
+    | head -1
+}
+
 case "$ACTION" in
   path)
     printf '%s\n' "$RECORD"
@@ -117,32 +161,132 @@ case "$ACTION" in
     [ -n "$FINDING" ] || { echo "error: record requires --finding <id>" >&2; exit 2; }
     [ -n "$KEY" ] || { echo "error: record requires --key <decision-key>" >&2; exit 2; }
     [ -n "$REQUIRES" ] || { echo "error: record requires --requires <what the decision required, in concrete checkable terms>" >&2; exit 2; }
+    FINDING=$(one_line "$FINDING")
+    KEY=$(one_line "$KEY")
+    REQUIRES=$(one_line "$REQUIRES")
+
+    # Refuse before writing anything. A decision recorded into a record but not
+    # into the intent is exactly the drift this script exists to remove, so half
+    # an amendment must never be the outcome.
+    [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF; a decision amends the task's pinned intent, and there is no intent to amend" >&2; exit 2; }
+    grep -qx '# Task' "$BRIEF" || { echo "error: $BRIEF has no '# Task' section, so a decision has nowhere to land; bin/fm-nm-intent.sh reads the intent from that section" >&2; exit 2; }
+
+    BRIEF_TMP="$BRIEF.tmp.$$"
+    awk -v heading="$GATE_HEADING" -v lead="$GATE_LEAD" -v key="$KEY" \
+        -v newline="- $FINDING [$KEY]: $REQUIRES" '
+      function out(s) { print s; blank = (s == "") }
+      # Blank lines inside the Task section are held back and re-emitted only
+      # when a further line follows, so a trailing blank never lands between the
+      # existing decision lines and the one being appended.
+      function emit(s) { while (pending > 0) { out(""); pending-- } out(s) }
+      # True only for a line this subsection owns: "- <finding-id> [<key>]: ...",
+      # with nothing but the finding id before the bracket, so a `[<key>]:` that
+      # appears inside some other decision'"'"'s requires text is never rewritten.
+      function is_key_line(s,   p) {
+        if (substr(s, 1, 2) != "- ") return 0
+        p = index(s, " [" key "]: ")
+        if (p == 0) return 0
+        return index(substr(s, 3, p - 3), " ") == 0
+      }
+      function flush() {
+        if (emitted) return
+        emitted = 1
+        pending = 0
+        if (!seen) { out(""); out(heading); out(lead) }
+        if (!replaced) out(newline)
+      }
+      !intask && $0 == "# Task" { intask = 1; out($0); next }
+      intask && $0 == "" { pending++; next }
+      intask && /^# / { flush(); out(""); intask = 0; out($0); next }
+      intask && $0 == heading { seen = 1; emit($0); next }
+      intask && seen && is_key_line($0) {
+        if (!replaced) { emit(newline); replaced = 1 }
+        next
+      }
+      intask { emit($0); next }
+      { out($0) }
+      END { if (intask) flush() }
+    ' "$BRIEF" > "$BRIEF_TMP"
+    mv "$BRIEF_TMP" "$BRIEF"
+
     mkdir -p "$DATA/$ID"
     if [ ! -e "$RECORD" ]; then
       cat > "$RECORD" <<EOF
 # Gate decisions - $ID
 
 Written by bin/fm-nm-decision.sh. One block per decision submitted at a
-no-mistakes gate, with what it required and whether that requirement still holds
-in the final diff. See that script's header and upstream no-mistakes issue #591
-for why a run's own \`checks-passed\` is not evidence that a decision survived.
+no-mistakes gate, with what it required and the run it was recorded during.
+Each decision is also written into the \`# Task\` section of this task's brief,
+which is where the pipeline's own \`--intent\` comes from; see that script's
+header and upstream no-mistakes issue #591 for why.
 EOF
     fi
-    if grep -qxF -- "- finding: $FINDING" "$RECORD" 2>/dev/null; then
-      echo "error: finding $FINDING is already recorded in $RECORD" >&2
-      exit 2
-    fi
+    RUN_ID=$(current_run_id)
+    # Drop any earlier block for this key or this finding, then append the fresh
+    # one, so a re-recorded decision leaves exactly one current block.
+    RECORD_TMP="$RECORD.tmp.$$"
+    awk -v keyline="- key: $KEY" -v findline="- finding: $FINDING" '
+      function out(s) { print s; blank = (s == "") }
+      function flush(   i) {
+        while (n > 0 && blk[n] == "") n--
+        if (n > 0 && !drop) {
+          if (!blank) out("")
+          for (i = 1; i <= n; i++) out(blk[i])
+        }
+        n = 0; drop = 0
+      }
+      /^## / { flush(); blk[++n] = $0; inblock = 1; next }
+      inblock { blk[++n] = $0; if ($0 == keyline || $0 == findline) drop = 1; next }
+      { out($0) }
+      END { flush() }
+    ' "$RECORD" > "$RECORD_TMP"
+    mv "$RECORD_TMP" "$RECORD"
     {
-      printf '\n## %s\n' "$(one_line "$FINDING")"
-      printf -- '- finding: %s\n' "$(one_line "$FINDING")"
-      printf -- '- key: %s\n' "$(one_line "$KEY")"
+      printf '\n## %s\n' "$FINDING"
+      printf -- '- finding: %s\n' "$FINDING"
+      printf -- '- key: %s\n' "$KEY"
       printf -- '- step: %s\n' "$(one_line "${STEP:-unrecorded}")"
       printf -- '- recorded: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-      printf -- '- requires: %s\n' "$(one_line "$REQUIRES")"
+      printf -- '- run: %s\n' "${RUN_ID:-unknown}"
+      printf -- '- requires: %s\n' "$REQUIRES"
       printf -- '- state: pending\n'
       printf -- '- evidence: (none yet)\n'
     } >> "$RECORD"
-    printf 'recorded: %s (%s) in %s\n' "$FINDING" "$KEY" "$RECORD"
+    printf 'recorded: %s (%s) in %s and in the pinned intent at %s\n' "$FINDING" "$KEY" "$RECORD" "$BRIEF"
+    ;;
+
+  rerun-check)
+    if [ ! -f "$RECORD" ]; then
+      echo "rerun-check: no gate decisions recorded for $ID; the intent was never amended, so no re-run is owed"
+      exit 0
+    fi
+    CURRENT=$(current_run_id)
+    if [ -z "$CURRENT" ]; then
+      echo "rerun-check: REFUSED - could not read the current no-mistakes run id from $PWD, so a re-run cannot be confirmed either way." >&2
+      echo "Run this from the task worktree. If the run really is unreadable, say so when you report, rather than reporting done on an unchecked re-run." >&2
+      exit 1
+    fi
+    STALE=$(awk -v cur="$CURRENT" '
+      /^- finding: / { finding = substr($0, 12) }
+      /^- run: / { if (substr($0, 8) == cur) print finding }
+    ' "$RECORD")
+    UNKNOWN=$(awk '
+      /^- finding: / { finding = substr($0, 12) }
+      /^- run: unknown$/ { print finding }
+    ' "$RECORD")
+    if [ -n "$STALE" ]; then
+      echo "rerun-check: REFUSED - these decisions were recorded during run $CURRENT, which is still the most recent run:" >&2
+      printf '%s\n' "$STALE" >&2
+      echo "Nothing has yet scored the branch against the amended intent, and nothing has re-reviewed what the later auto-fix steps changed." >&2
+      echo "Start a fresh run with the pinned-intent command, then run this check again." >&2
+      exit 1
+    fi
+    if [ -n "$UNKNOWN" ]; then
+      echo "rerun-check: WARNING - these decisions were recorded with no readable run id, so their re-run could not be confirmed:" >&2
+      printf '%s\n' "$UNKNOWN" >&2
+    fi
+    COUNT=$(grep -c '^- finding: ' "$RECORD" || true)
+    printf 'rerun-check: all %s recorded gate decisions predate run %s, the most recent run\n' "$COUNT" "$CURRENT"
     ;;
 
   verify|reverted)
@@ -183,13 +327,12 @@ EOF
       /^- state: contradicted$/ { print "contradicted " finding }
     ' "$RECORD")
     if [ -n "$UNRESOLVED" ]; then
-      echo "check: REFUSED - these gate decisions are not proven to survive the final diff:" >&2
+      echo "check: these gate decisions carry no by-hand verification (this is a diagnostic, not a gate; rerun-check is the gate):" >&2
       printf '%s\n' "$UNRESOLVED" >&2
-      echo "Do not report done. Verify each against the final diff with 'verify', or escalate a 'contradicted' decision to firstmate naming the decision and the reverting commit." >&2
       exit 1
     fi
     COUNT=$(grep -c '^- state: satisfied$' "$RECORD" || true)
-    printf 'check: all %s recorded gate decisions verified against the final diff\n' "$COUNT"
+    printf 'check: all %s recorded gate decisions carry a by-hand verification\n' "$COUNT"
     ;;
 
   *)
