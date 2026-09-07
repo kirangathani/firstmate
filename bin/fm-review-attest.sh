@@ -23,9 +23,13 @@
 # branch whose recorded head commit IS the PR's current head and whose `review`
 # step reached `completed`. The database is opened READ-ONLY through a
 # `file:...?mode=ro` URI; the shared daemon's state is never written by this
-# script. bin/fm-timeline.sh is this fleet's other reader of that database and
-# opens it the same way; its header and tests/fixtures/timeline/README.md own
-# the schema facts, including that the timestamps are epoch SECONDS. A `skipped` review counts only when the captain's decision to skip it
+# script. bin/fm-nm-db-lib.sh owns that read-only contract, including why the
+# live file is read rather than a copy, and this script borrows its guard and
+# its SQL quoting rather than rolling a second pair; bin/fm-timeline.sh's header
+# and tests/fixtures/timeline/README.md own the schema facts, including that the
+# timestamps are epoch SECONDS. The question asked here - was THIS commit
+# reviewed - is its own query, because the library's own entry points answer the
+# viewer's question, which is what a branch's newest run is doing now. A `skipped` review counts only when the captain's decision to skip it
 # is on record (see THE SKIPPED-REVIEW CASE below); anything else refuses and
 # names what is missing.
 #
@@ -122,6 +126,8 @@ esac
 . "$SCRIPT_DIR/fm-ci-waiver-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-nm-db-lib.sh
+. "$SCRIPT_DIR/fm-nm-db-lib.sh"
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -167,12 +173,6 @@ require_node() {
   return 1
 }
 
-require_sqlite() {
-  command -v sqlite3 >/dev/null 2>&1 && return 0
-  echo "error: sqlite3 is required to read the pipeline's own record of the review at $NM_DB" >&2
-  return 1
-}
-
 # The same shape rule bin/fm-ci-waiver.sh applies to the same file, and for the
 # same reason: the secret must live in the home's own config dir rather than
 # wherever a symlink points. Each case names its own remedy.
@@ -210,20 +210,11 @@ repo_key_for() {
   fm_ci_waiver_repo_key "$1" < "$SECRET_FILE"
 }
 
-# nm_query <sql>: one read-only query against the shared daemon's database.
-# The URI form is what makes the read-only guarantee real rather than a
-# convention - sqlite3's own immutable flag is deliberately NOT used, because it
-# would read a database the live daemon is writing without honouring its locks.
+# nm_query <sql>: one read-only query against the shared daemon's database,
+# opened exactly as bin/fm-nm-db-lib.sh opens it. The live file is read rather
+# than a copy for the WAL reason that library's header states.
 nm_query() {
   sqlite3 -batch -noheader "file:$NM_DB?mode=ro" "$1"
-}
-
-# sql_quote <text>: single-quote a value for the queries below. Every value they
-# interpolate is validated first (a task id's slug rule, a 40-hex SHA), so this
-# is defence in depth rather than the only thing standing between a branch name
-# and the parser.
-sql_quote() {
-  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
 }
 
 # skip_decision_requires <task-id>: the `requires` text of the captain's
@@ -249,8 +240,8 @@ skip_decision_requires() {
 # refusal an operator cannot act on is a refusal they will route around.
 prove_reviewed() {
   local id=$1 sha=$2 branch="fm/$1" status heads requires
-  if [ ! -f "$NM_DB" ]; then
-    echo "error: no no-mistakes database at $NM_DB, so there is no record that anything reviewed $sha" >&2
+  if ! fm_nm_db_ready "$NM_DB"; then
+    echo "error: the pipeline's own record cannot be read ($FM_NM_DB_REASON), so there is nothing to show that anything reviewed $sha" >&2
     return 1
   fi
   # A completed review at this commit is preferred over a newer run that has
@@ -262,7 +253,7 @@ prove_reviewed() {
   status=$(nm_query "
     SELECT s.status FROM runs r
       JOIN step_results s ON s.run_id = r.id AND s.step_name = 'review'
-     WHERE r.branch = $(sql_quote "$branch") AND r.head_sha = $(sql_quote "$sha")
+     WHERE r.branch = '$(fm_nm_db_lit "$branch")' AND r.head_sha = '$(fm_nm_db_lit "$sha")'
      ORDER BY (s.status = 'completed') DESC, r.created_at DESC LIMIT 1;") || {
     echo "error: could not read $NM_DB; refusing to attest a review that cannot be confirmed" >&2
     return 1
@@ -270,7 +261,7 @@ prove_reviewed() {
   if [ -z "$status" ]; then
     heads=$(nm_query "
       SELECT DISTINCT substr(r.head_sha, 1, 12) FROM runs r
-       WHERE r.branch = $(sql_quote "$branch")
+       WHERE r.branch = '$(fm_nm_db_lit "$branch")'
        ORDER BY r.created_at DESC LIMIT 5;" || true)
     if [ -z "$heads" ]; then
       echo "error: the pipeline has no run at all for branch $branch, so nothing has reviewed $sha" >&2
@@ -327,7 +318,6 @@ sign_attestation() {
     exit 1
   fi
   require_node || exit 1
-  require_sqlite || exit 1
   prove_reviewed "$ID" "$SHA" || exit 1
   REPO_KEY=$(repo_key_for "$REPO") || {
     echo "error: could not derive the repository key for $REPO" >&2
