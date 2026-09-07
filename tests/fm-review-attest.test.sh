@@ -38,7 +38,13 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ATTEST="$ROOT/bin/fm-review-attest.sh"
+# The REAL captured DDL of the no-mistakes tables, so a column or constraint the
+# live database does not have cannot be asserted against here. Shared with
+# tests/fm-timeline.test.sh, which captured it; its README records how.
+FIXTURES="$ROOT/tests/fixtures/timeline"
 TMP_ROOT=$(fm_test_tmproot fm-review-attest)
+
+command -v sqlite3 >/dev/null 2>&1 || { echo "ok - skipped: sqlite3 not installed"; exit 0; }
 
 SHA_A=1111111111111111111111111111111111111111
 SHA_B=2222222222222222222222222222222222222222
@@ -63,23 +69,23 @@ make_home() {  # <slug>
   printf '%s\n' "$home"
 }
 
-# The columns each query actually reads, in the shape the real database holds
-# them (bin/fm-review-attest.sh's header names the source). Timestamps are epoch
-# SECONDS there, so they are here too.
+# A database with the live schema and one repo row. Timestamps are epoch SECONDS
+# in the real tables, so they are here too.
 make_db() {  # <home>
-  sqlite3 "$1/nm.sqlite" '
-    CREATE TABLE runs (id TEXT PRIMARY KEY, branch TEXT NOT NULL,
-                       head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
-    CREATE TABLE step_results (id TEXT PRIMARY KEY, run_id TEXT NOT NULL,
-                               step_name TEXT NOT NULL, status TEXT NOT NULL);'
+  sqlite3 "$1/nm.sqlite" < "$FIXTURES/schema.sql"
+  sqlite3 "$1/nm.sqlite" "
+    INSERT INTO repos (id, working_path, upstream_url, default_branch, created_at)
+      VALUES ('repo1', '$1/project', 'https://github.com/$REPO', 'main', 100);"
 }
 
 # add_run <home> <run-id> <branch> <head-sha> <review-status> [<created-at>]
 add_run() {
   sqlite3 "$1/nm.sqlite" "
-    INSERT INTO runs VALUES ('$2', '$3', '$4', ${6:-100});
-    INSERT INTO step_results VALUES ('$2-rev', '$2', 'review', '$5');
-    INSERT INTO step_results VALUES ('$2-test', '$2', 'test', 'completed');"
+    INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, created_at, updated_at)
+      VALUES ('$2', 'repo1', '$3', '$4', 'basesha', 'passed', ${6:-100}, ${6:-100});
+    INSERT INTO step_results (id, run_id, step_name, step_order, status)
+      VALUES ('$2-rev', '$2', 'review', 3, '$5'),
+             ('$2-test', '$2', 'test', 4, 'completed');"
 }
 
 clear_runs() {  # <home>

@@ -23,7 +23,9 @@
 # branch whose recorded head commit IS the PR's current head and whose `review`
 # step reached `completed`. The database is opened READ-ONLY through a
 # `file:...?mode=ro` URI; the shared daemon's state is never written by this
-# script. A `skipped` review counts only when the captain's decision to skip it
+# script. bin/fm-timeline.sh is this fleet's other reader of that database and
+# opens it the same way; its header and tests/fixtures/timeline/README.md own
+# the schema facts, including that the timestamps are epoch SECONDS. A `skipped` review counts only when the captain's decision to skip it
 # is on record (see THE SKIPPED-REVIEW CASE below); anything else refuses and
 # names what is missing.
 #
