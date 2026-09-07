@@ -54,7 +54,9 @@
 # Environment knobs:
 #   FM_FLOW_SNAPSHOT_NM_TIMEOUT   seconds bounding one `no-mistakes axi status`
 #                                 (default 10, matching fm-nm-flow.sh's budget)
-#   FM_FLOW_SNAPSHOT_GH_TIMEOUT   seconds bounding one `gh pr view` (default 20)
+#   FM_FLOW_SNAPSHOT_GH_TIMEOUT   seconds bounding one `gh pr view` (default 20).
+#                                 Every such read is qualified with --repo from
+#                                 the recorded link, parsed by bin/fm-pr-lib.sh.
 #   FM_FLOW_SNAPSHOT_STATE_TIMEOUT  seconds bounding one bin/fm-crew-state.sh
 #                                 read for a non-pipeline agent (default 15,
 #                                 above that reader's own 10s no-mistakes bound
@@ -98,7 +100,7 @@ ONLY_TASK=
 INCLUDE_DEAD=0
 
 usage() {
-  sed -n '2,80p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,82p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -129,6 +131,15 @@ command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; ex
 # shellcheck source=bin/fm-attestation-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-attestation-lib.sh"
+# The ONE owner of the GitHub PR-link grammar. A recorded link is read through
+# fm_pr_url_parse rather than by stripping its trailing number, because the
+# number alone does not say WHICH repository it belongs to: `gh pr view <n>`
+# with no --repo resolves the repository from the process's working directory,
+# and this view runs from the firstmate root while the PR belongs to the task's
+# own project.
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 NOW_EPOCH=${FM_FLOW_SNAPSHOT_NOW_EPOCH:-$(date -u +%s)}
 NOW_ISO=${FM_FLOW_SNAPSHOT_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
@@ -260,17 +271,27 @@ ci_unread() {  # <reason>
 }
 
 ci_json() {  # <pr-url> <task-id> <meta-file>
-  local url=$1 id=$2 meta=$3 num raw norm excuse=false authority='[]'
-  num=$(printf '%s' "$url" | grep -Eo '[0-9]+$' || true)
-  if [ -z "$num" ]; then
-    ci_unread "no pr number"
+  local url=$1 id=$2 meta=$3 raw norm excuse=false authority='[]'
+  local owner repo num
+  # A link the one parser refuses is NOT EVALUATED, never guessed at: reading a
+  # trailing number off an unrecognised string and querying it is how this view
+  # reported another repository's PR of the same number as the task's own.
+  if ! fm_pr_url_parse "$url"; then
+    ci_unread "not a github pull request link"
     return
   fi
+  owner=$FM_PR_OWNER
+  repo=$FM_PR_REPO
+  num=$FM_PR_NUMBER
   if ! command -v gh >/dev/null 2>&1; then
     ci_unread "gh not found"
     return
   fi
-  raw=$(run_bounded "$GH_TIMEOUT" gh pr view "$num" --json statusCheckRollup 2>/dev/null) || raw=
+  # --repo is what makes the answer the TASK's repository. Without it gh
+  # resolves the repository from the working directory, which is the firstmate
+  # root for every task this view draws: measured 2026-09-07, an ELN PR 28 with
+  # four checks rendered as firstmate PR 28's eleven green ones.
+  raw=$(run_bounded "$GH_TIMEOUT" gh pr view "$num" --repo "$owner/$repo" --json statusCheckRollup 2>/dev/null) || raw=
   if [ -z "$raw" ]; then
     ci_unread "gh read failed or timed out"
     return
@@ -754,8 +775,12 @@ agent_json() {  # <task-json>
     ci=$(ci_json "$pr_url" "$id" "$meta")
   fi
 
-  local pr_num
-  pr_num=$(printf '%s' "$pr_url" | grep -Eo '[0-9]+$' || true)
+  # The number the view labels the PR with comes from the same parser the CI
+  # read used, so a link one of them refuses cannot be numbered by the other.
+  local pr_num=
+  if [ -n "$pr_url" ] && fm_pr_url_parse "$pr_url"; then
+    pr_num=$FM_PR_NUMBER
+  fi
 
   jq -n \
     --arg id "$id" \

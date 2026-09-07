@@ -594,6 +594,12 @@ Verified 2026-08-09 against seven real PRs on this repository, comparing the col
 | 33 | 11 total, 7 pass, 3 fail, 1 pending | 11 total, 8 pass, 3 fail, 1 pending | 11 total, 7 pass, 3 fail, 1 pending |
 | 39, 38, 37, 36, 35 | 11 total, 10 pass, 1 fail | - | 11 total, 10 pass, 1 fail |
 
+### The checks must come from the PR's own repository
+
+`gh pr view <n>` with no `--repo` resolves the repository from the working directory, and the collector runs from the firstmate root while a task's PR belongs to that task's project.
+Measured 2026-09-07: ELN PR 28, which carries four checks (`ci` passing, a pending review gate, and two Vercel checks), rendered as `11/11` because firstmate PR 28 is a merged, green, eleven-check PR of the same number, and ELN PR 29 rendered `10/11 FAIL` from firstmate PR 29.
+The recorded link is therefore read through `fm_pr_url_parse` in `bin/fm-pr-lib.sh`, the one owner of that grammar, and every `gh pr view` is qualified with `--repo <owner>/<repo>` from it.
+A link that parser refuses is reported as an unread CI cell carrying the reason, never as a number guessed off the end of the string.
 ### The run read has to happen in the project
 
 `no-mistakes axi status --run <id>` resolves the repository from the CURRENT WORKING DIRECTORY.
@@ -622,6 +628,31 @@ Stderr carries only the version-update banner, which is written on every call in
 `collection.reason` therefore carries the failed read's own first line of stdout, falling back to the first line of stderr that is not that banner, with a timeout named as itself.
 
 The two streams stay separate rather than being merged with `2>&1`: the banner in the stdout stream would corrupt the TOON parse.
+
+## The PR number rides the connector leaving push+PR
+
+The number is drawn on the row under the arrow between `push+PR` and `GITHUB CI`, so it reads as belonging to the connector rather than to either box.
+It comes from the snapshot's `pr.number`, which the collector derives from the recorded link through `fm_pr_url_parse`, so the number on screen and the repository the checks came from are the same reading.
+
+A task with no PR recorded gets a dash there, never blank: not evaluated and absent are different answers and a blank space says neither.
+
+That one gutter is never narrower than five columns, whatever spacing the rest of the frame is drawn at.
+Five holds `#9999`; a wider number is clipped rather than allowed to widen the gutter, because a gutter whose width came from a value would put two agents' cells in different columns on the same frame.
+The widest ordinary spacing is already five, so at full width nothing moves.
+
+## A direct-PR project draws the journey it actually takes
+
+`direct-PR` is a delivery mode, not a testing skip: the project's workers push and open the PR themselves and no validation pipeline ever runs.
+So every stage that mode removes is drawn as `skipped`, in the same blue a captain-authorised local skip already uses, and the title names `direct-PR` as what authorised it.
+A testing skip is a separate axis and is named beside it by the flag the captain actually passed - `--local-skip`, `--ci-skip` - read from the task's own record.
+
+The mode is read from `state/<id>.meta` and carried on the wire, never inferred from an absent run: a wedged worker and a pipeline that has not started yet also have no run.
+
+`push+PR` is NOT drawn as skipped under this mode, for the same reason it is not under a local skip: the push and the PR did happen, by hand, and the CI cell one step to its right is showing that PR's real checks.
+It reads `by hand` instead.
+`pre-merge` is never skipped under any mode or flag, because `bin/fm-pr-merge.sh` runs the base's own assertions regardless.
+
+The header carries a blue `skipped` legend exactly when a skipped cell is on screen, and never otherwise.
 
 ## Cost
 
