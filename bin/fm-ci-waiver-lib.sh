@@ -118,21 +118,27 @@ FM_CI_WAIVER_LINE_VERSION='v1'
 FM_CI_WAIVER_LINE_PREFIX='fm-ci-waiver:'
 
 # The one HMAC implementation, shared by sign and verify.
-#   argv: <sign|verify> <scheme> <task-id> <sha> [<candidate-hex>]
+#   argv: <sign|verify> <candidate-hex-or-empty> <field>...
 #   stdin: the raw secret bytes
 #   sign   -> prints the hex digest, exit 0
 #   verify -> exit 0 iff the candidate matches in constant time, else exit 1
 #   exit 3 -> empty secret (no verdict is possible)
+#
+# The payload is the fields joined by a newline, with no trailing newline, and
+# the candidate sits BEFORE them rather than after so the field list can be any
+# length. Every domain below still passes exactly three fields and therefore
+# signs exactly the bytes it always did; bin/fm-review-attest.sh is the one
+# caller that passes four, because its payload names the repository as well.
 # shellcheck disable=SC2016  # deliberately literal: this is a node program, not shell
 FM_CI_WAIVER_NODE_PROGRAM='
 const crypto = require("crypto");
-const [mode, scheme, taskId, sha, candidate] = process.argv.slice(1);
+const [mode, candidate, ...fields] = process.argv.slice(1);
 const chunks = [];
 process.stdin.on("data", (d) => chunks.push(d));
 process.stdin.on("end", () => {
   const key = Buffer.concat(chunks);
   if (key.length === 0) { process.exitCode = 3; return; }
-  const payload = Buffer.from([scheme, taskId, sha].join("\n"), "utf8");
+  const payload = Buffer.from(fields.join("\n"), "utf8");
   const mac = crypto.createHmac("sha256", key).update(payload).digest();
   if (mode === "sign") { process.stdout.write(mac.toString("hex") + "\n"); return; }
   const given = Buffer.from(String(candidate || ""), "hex");
@@ -176,16 +182,29 @@ fm_ci_waiver_valid_sig() {
   [ "${#sig}" -eq 64 ]
 }
 
+# fm_ci_waiver_hmac_hex_n <field>...; secret on stdin. The variadic form, for a
+# domain whose payload is not three fields.
+fm_ci_waiver_hmac_hex_n() {
+  node -e "$FM_CI_WAIVER_NODE_PROGRAM" sign '' "$@"
+}
+
+# fm_ci_waiver_hmac_check_n <candidate-hex> <field>...; secret on stdin.
+fm_ci_waiver_hmac_check_n() {
+  local candidate=$1
+  shift
+  node -e "$FM_CI_WAIVER_NODE_PROGRAM" verify "$candidate" "$@"
+}
+
 # fm_ci_waiver_hmac_hex <scheme> <field-a> <field-b>; secret on stdin.
 fm_ci_waiver_hmac_hex() {
-  node -e "$FM_CI_WAIVER_NODE_PROGRAM" sign "$1" "$2" "$3"
+  fm_ci_waiver_hmac_hex_n "$1" "$2" "$3"
 }
 
 # fm_ci_waiver_hmac_check <scheme> <field-a> <field-b> <candidate-hex>; secret on
 # stdin. Exit 0 iff the candidate matches in constant time, 1 if it does not, 3
 # if the secret was empty. A non-zero exit is NEVER an authorization.
 fm_ci_waiver_hmac_check() {
-  node -e "$FM_CI_WAIVER_NODE_PROGRAM" verify "$1" "$2" "$3" "$4"
+  fm_ci_waiver_hmac_check_n "$4" "$1" "$2" "$3"
 }
 
 # fm_ci_waiver_sign <task-id> <sha>; secret on stdin. Prints the hex digest.
