@@ -413,6 +413,10 @@ case "$cmd" in
       echo "error: $GH_CMD is required to read the PR's current head commit" >&2
       exit 1
     }
+    command -v jq >/dev/null 2>&1 || {
+      echo "error: jq is required to build the PR body update (docs/configuration.md \"Toolchain\")" >&2
+      exit 1
+    }
     # Read from the PR itself rather than from a local ref or the task's own
     # record: the line covers ONE commit, and a local branch or a recorded
     # pr_head= is only as fresh as the last time it was written. A signature for
@@ -439,7 +443,7 @@ case "$cmd" in
       echo "error: could not create a scratch file for the PR body" >&2
       exit 1
     }
-    trap 'rm -f "$BODY_FILE" "$BODY_FILE.json"' EXIT
+    trap 'rm -f "$BODY_FILE"' EXIT
     "$GH_CMD" api "repos/$PR_REPO_SLUG/pulls/$PR_NUMBER" --jq '.body // ""' > "$BODY_FILE" || {
       echo "error: could not read the current body of $PR_URL; the line above is valid, publish it by hand" >&2
       exit 1
@@ -452,15 +456,16 @@ case "$cmd" in
     # superseded head simply stops verifying, exactly as a stale CI waiver line
     # does, so there is no reason to edit anything a human wrote.
     printf '\n%s\n' "$LINE" >> "$BODY_FILE"
-    # REST PATCH rather than `gh pr edit`, which fails outright on a repository
-    # that has classic projects enabled (verified 2026-09-07). The body goes
-    # through a file and stdin, never argv, so a long body cannot die at an
-    # argument-length limit.
-    jq -Rs '{body: .}' < "$BODY_FILE" > "$BODY_FILE.json" || {
-      echo "error: could not encode the PR body; the line above is valid, publish it by hand" >&2
-      exit 1
-    }
-    if ! "$GH_CMD" api --method PATCH "repos/$PR_REPO_SLUG/pulls/$PR_NUMBER" --input "$BODY_FILE.json" >/dev/null; then
+    # The REST endpoint directly, rather than `gh pr edit` / `gh-axi pr edit`:
+    # those take the GraphQL path, which requests the deprecated projectCards
+    # field and fails outright on a repository that has classic projects enabled
+    # ("Projects (classic) is being deprecated", observed 2026-09-07 on
+    # kirangathani/firstmate). The PATCH edits exactly the body and touches
+    # nothing else. The body goes over stdin as JSON, never through argv, so a
+    # long description cannot hit an argument-size limit. The same shape
+    # bin/fm-supersession-attest.sh publishes through, for the same reason.
+    if ! jq -Rs '{body: .}' < "$BODY_FILE" \
+      | "$GH_CMD" api --method PATCH "repos/$PR_REPO_SLUG/pulls/$PR_NUMBER" --input - >/dev/null; then
       echo "error: the attestation line above is valid but could not be published into $PR_URL; add it to the body by hand" >&2
       exit 1
     fi

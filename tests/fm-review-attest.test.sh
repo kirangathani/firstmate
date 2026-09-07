@@ -114,9 +114,13 @@ fake_gh() {  # <home> <head-sha>
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$home/gh-argv"
 if [ "\${1:-}" = api ] && [ "\${2:-}" = --method ]; then
+  # The real call passes the body as JSON on stdin (--input -), so capture it
+  # from there, exactly as the API receives it.
   prev=
   for a in "\$@"; do
-    if [ "\$prev" = --input ]; then cp "\$a" "$home/gh-patch.json"; fi
+    if [ "\$prev" = --input ]; then
+      if [ "\$a" = - ]; then cat > "$home/gh-patch.json"; else cp "\$a" "$home/gh-patch.json"; fi
+    fi
     prev=\$a
   done
   printf '{}\n'
