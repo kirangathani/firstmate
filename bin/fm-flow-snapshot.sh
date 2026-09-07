@@ -140,6 +140,9 @@ command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; ex
 # shellcheck source=bin/fm-pr-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-nm-db-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-nm-db-lib.sh"
 # When this task's worker was dispatched, which is where the `building` step
 # starts. bin/fm-timeline.sh's build_s asks the same question, so one answer is
 # shared rather than two written.
@@ -147,6 +150,10 @@ command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; ex
 . "$SCRIPT_DIR/fm-spawned-at-lib.sh"
 
 NOW_EPOCH=${FM_FLOW_SNAPSHOT_NOW_EPOCH:-$(date -u +%s)}
+# The database fallback measures an in-flight step against the SAME clock every
+# other elapsed on this snapshot is measured against, so a pinned clock pins the
+# whole document rather than every part of it but one.
+FM_NM_DB_NOW=$NOW_EPOCH
 NOW_ISO=${FM_FLOW_SNAPSHOT_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 
 # Bound one external read. `timeout` is not on stock macOS, so its absence
@@ -555,6 +562,32 @@ axi_error() {  # <stdout> <stderr-file>
   printf '%s' "$line" | cut -c1-160
 }
 
+# When this task's PR was recorded, which is the moment its BUILDING phase ended
+# for a task that never enters the pipeline at all.
+#
+# A `direct-PR` project has no no-mistakes run, so `run_created` is 0 for every
+# one of them and the building step used to have no end at all: the captain saw
+# `building running 3h54m` beside a PR that had been open for hours. The end is
+# the PR, and this is where the record of it is.
+#
+# bin/fm-pr-check.sh rewrites state/<id>.meta when it records the PR, so once
+# that file names a `pr=` its modification time is when the PR was recorded.
+# That later write is exactly what bin/fm-spawned-at-lib.sh works around to find
+# the START - it prefers the `spawned_at=` bin/fm-spawn.sh recorded at dispatch,
+# and treats the meta's own mtime as approximate for the same reason - so the
+# two readings are two halves of one fact about the same file rather than two
+# independent guesses.
+#
+# It is the record's time, not GitHub's `createdAt`: GitHub's is exact but is
+# only read on the CI-bearing cadence, and a building cell that ended at one
+# time on the slow refresh and at another on the fast one would move on screen
+# for no reason the captain could see. Nothing is invented - a meta with no
+# recorded PR yields nothing, and the building phase then stays open.
+pr_recorded_at() {  # <meta-path> -> epoch seconds, or empty
+  [ -e "$1" ] || return 0
+  grep -q '^pr=' "$1" 2>/dev/null || return 0
+  stat -c %Y "$1" 2>/dev/null || true
+}
 
 # The fields every agent carries whether or not it has a pipeline, resolved
 # once so the two builders below cannot drift apart in how they read the fleet
@@ -644,7 +677,7 @@ agent_json() {  # <task-json>
   run_status=''
   run_updated=0
   run_created=0
-  local collect_ok=true collect_reason=''
+  local collect_ok=true collect_reason='' collect_source=axi
 
   idx=$(run_index "$project" "$branch")
   if [ -z "$idx" ]; then
@@ -661,24 +694,40 @@ agent_json() {  # <task-json>
     axi=$(axi_read "$project" "$run_id" "$axi_err")
     rc=$?
     if [ $rc -ne 0 ] || [ -z "$axi" ]; then
-      # A failed or timed-out read is reported as such. It must NOT fall back to
-      # the last known state or to pending: pending reads as "not started yet",
-      # which is a different claim from "we could not find out".
+      # A failed, timed-out, or SILENT read is reported in the command's own
+      # words. An exit code alone tells the captain a read failed and nothing
+      # they can act on, and the whole of the cwd defect above was invisible
+      # behind one.
       #
-      # The reason states what went wrong, in the command's own words. An exit
-      # code alone tells the captain a read failed and nothing they can act on,
-      # and the whole of the defect above was invisible behind one.
-      collect_ok=false
+      # Exit 0 with an empty stdout is its own outcome, neither of the other
+      # two: measured 2026-09-07 on v1.37.0, one healthy running task's
+      # `axi status --run` printed nothing at all while its siblings printed
+      # their normal body (bin/fm-nm-db-lib.sh's header carries the evidence).
+      local why
       if [ "$rc" = 124 ]; then
-        collect_reason="axi status timed out after ${NM_TIMEOUT}s"
+        why="axi status timed out after ${NM_TIMEOUT}s"
+      elif [ "$rc" = 0 ]; then
+        why='axi printed nothing'
       else
-        local why
         why=$(axi_error "$axi" "$axi_err")
         if [ -n "$why" ]; then
-          collect_reason="axi status failed (exit $rc): $why"
+          why="axi status failed (exit $rc): $why"
         else
-          collect_reason="axi status failed (exit $rc)"
+          why="axi status failed (exit $rc)"
         fi
+      fi
+      # The daemon's own database is the truth the CLI was rendering, so it is
+      # read directly rather than reporting a healthy run as unreadable. It
+      # must NOT fall back to the last known state or to pending: pending reads
+      # as "not started yet", which is a different claim from "we could not
+      # find out", and that claim is only made when BOTH sources fail.
+      local db_toon
+      if db_toon=$(fm_nm_db_toon "$NM_DB" "$run_id"); then
+        axi=$db_toon
+        collect_source=db
+      else
+        collect_ok=false
+        collect_reason="$why; db: $FM_NM_DB_REASON"
       fi
     fi
     rm -f "$axi_err"
@@ -713,10 +762,23 @@ agent_json() {  # <task-json>
   if [ -n "$built_at" ] && [ "${run_created:-0}" -gt 0 ] && [ "$built_at" -gt "$run_created" ]; then
     built_at=
   fi
+  # A task with no pipeline run of its own ends its building phase at the PR.
+  # Every `direct-PR` task is in that position permanently, and a no-mistakes
+  # task is in it only before its run exists, where there is no PR yet either.
+  local build_end=${run_created:-0}
+  local pr_at=''
+  if [ "${run_created:-0}" -le 0 ]; then
+    pr_at=$(pr_recorded_at "$meta")
+    if [ -n "$pr_at" ] && [ -n "$built_at" ] && [ "$pr_at" -gt "$built_at" ]; then
+      build_end=$pr_at
+    else
+      pr_at=
+    fi
+  fi
   if [ -z "$built_at" ]; then
     build_step='{"step":"building","status":"unknown","findings":0,"duration_ms":0}'
-  elif [ "${run_created:-0}" -gt 0 ]; then
-    local ms=$(( (run_created - built_at) * 1000 ))
+  elif [ "$build_end" -gt 0 ]; then
+    local ms=$(( (build_end - built_at) * 1000 ))
     build_step="{\"step\":\"building\",\"status\":\"completed\",\"findings\":0,\"duration_ms\":$ms}"
   else
     build_step='{"step":"building","status":"running","findings":0,"duration_ms":0}'
@@ -724,6 +786,25 @@ agent_json() {  # <task-json>
     # step is not one of its own, so the field is empty and active_ms - the only
     # value the renderer reads - is computed from the two epochs directly.
     build_active="{\"step\":\"building\",\"status\":\"running\",\"active_for\":\"\",\"active_ms\":$(( (NOW_EPOCH - built_at) * 1000 )),\"last_activity\":\"\",\"agent_pid\":\"\",\"round\":\"\"}"
+  fi
+
+  # What the worker is doing AFTER its PR is open, which is not building and is
+  # not the pipeline either: it is answering review, and on a `direct-PR`
+  # project it is the whole of the rest of the task's life. Ending building at
+  # the PR without stating this would draw a live worker as a row of finished
+  # boxes.
+  #
+  # It is a FACT ABOUT THE AGENT, not a tenth step. The renderer draws it as a
+  # marker under the push+PR box, whose own aftermath it is; a step of its own
+  # would have said the row grew a stage the pipeline does not have, and
+  # `steps` stays exactly the nine the tool names plus `building`.
+  #
+  # It is claimed only on the evidence for it: a recorded PR, no pipeline run to
+  # own the work instead, and a worker still there. A gone worker leaves it null
+  # rather than counting time against nobody.
+  local rework=null
+  if [ -n "$pr_at" ] && [ "$endpoint_alive" = true ]; then
+    rework="{\"active_ms\":$(( (NOW_EPOCH - pr_at) * 1000 ))}"
   fi
 
   # Which model is pushing each ACTIVE pipeline step through, attributed from
@@ -768,12 +849,14 @@ agent_json() {  # <task-json>
     --arg run_status "$run_status" \
     --arg agent_alive "$agent_alive" \
     --arg collect_reason "$collect_reason" \
+    --arg collect_source "$collect_source" \
     --arg now_iso "$NOW_ISO" \
     --argjson now_epoch "$NOW_EPOCH" \
     --argjson run_updated "${run_updated:-0}" \
     --argjson endpoint_alive "$endpoint_alive" \
     --argjson collect_ok "$collect_ok" \
     --argjson pr_num "${pr_num:-null}" \
+    --argjson rework "$rework" \
     --argjson skip_local "$skip_local" \
     --argjson skip_ci "$skip_ci" \
     --arg harness "$FM_ROW_HARNESS" \
@@ -790,13 +873,15 @@ agent_json() {  # <task-json>
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
       skips:{local:$skip_local, ci:$skip_ci},
+      rework:$rework,
       worker:{
         harness:(if $harness == "" then null else $harness end),
         model:(if $w_model == "" then null else $w_model end),
         effort:(if $w_effort == "" then null else $w_effort end)
       },
       pr:{url:(if $pr_url == "" then null else $pr_url end), number:$pr_num},
-      collection:{ok:$collect_ok, reason:$collect_reason, at:$now_iso, epoch:$now_epoch},
+      collection:{ok:$collect_ok, reason:$collect_reason, source:$collect_source,
+                  at:$now_iso, epoch:$now_epoch},
       run:{
         present:($run_id != ""),
         id:$run_id, status:$run_status,
@@ -891,13 +976,14 @@ compact_json() {  # <task-json>
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
       skips:{local:false, ci:false},
+      rework:null,
       worker:{
         harness:(if $harness == "" then null else $harness end),
         model:(if $w_model == "" then null else $w_model end),
         effort:(if $w_effort == "" then null else $w_effort end)
       },
       pr:{url:(if $pr_url == "" then null else $pr_url end), number:null},
-      collection:{ok:true, reason:"this worker runs no pipeline",
+      collection:{ok:true, reason:"this worker runs no pipeline", source:"",
                   at:$now_iso, epoch:$now_epoch},
       run:{present:false, id:"", status:"",
            db_updated_epoch:0, db_age_seconds:null},

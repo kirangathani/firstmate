@@ -20,8 +20,15 @@
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's OWN ship branch fm/<id>, active
-#      or terminal (from `axi status`, or the coarse `no-mistakes runs`
-#      fallback)? Attribution is keyed on fm/<id> (bin/fm-brief.sh's branch
+#      or terminal (from `axi status`, from the daemon's own database when that
+#      command answers with an EMPTY body, or from the coarse `no-mistakes runs`
+#      fallback)? An `axi status` printing nothing at all is a real and measured
+#      failure of the CLI's rendering rather than an absent run (2026-09-07,
+#      v1.37.0; evidence in bin/fm-nm-db-lib.sh's header), so the run is read
+#      read-only from ~/.no-mistakes/state.sqlite instead, keyed on fm/<id> and
+#      rendered as the same TOON this file parses. The verdict then says `run
+#      read from database` so nobody mistakes it for the CLI's own view; the
+#      step-to-state mapping is identical either way. Attribution is keyed on fm/<id> (bin/fm-brief.sh's branch
 #      contract), because a worktree pool slot re-leased to a newer task after
 #      this worker died without teardown still sits at the path meta records, so
 #      a read through that path answers for the NEW occupant and would report a
@@ -98,6 +105,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-bounded-lib.sh
 . "$SCRIPT_DIR/fm-bounded-lib.sh"
+# shellcheck source=bin/fm-nm-db-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-nm-db-lib.sh"
 
 PROGRESS=0
 while [ "$#" -gt 0 ]; do
@@ -122,6 +132,11 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
+# The daemon state database the empty-`axi status` fallback above reads,
+# read-only and never written. FM_CREW_STATE_DB points tests at a fixture.
+NM_DB=${FM_CREW_STATE_DB:-$HOME/.no-mistakes/state.sqlite}
+# Set when the run record below came from the database rather than the CLI.
+RUN_FROM_DB=0
 SEP=' · '
 
 # Set only on the --progress path, and only for a working run read from a full
@@ -690,6 +705,21 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     fi
   else
     RUN_OUT=$(nm_run axi status)
+    # An `axi status` that answers with NOTHING is not an absent run: measured
+    # 2026-09-07 on v1.37.0, a healthy running task's status printed an empty
+    # body while its siblings printed theirs. The daemon's own database still
+    # held the run, so it is read there - keyed on this task's own fm/<id>,
+    # which is the same attribution contract the coarse runs list is held to,
+    # and rendered as the TOON this parser already reads
+    # (bin/fm-nm-db-lib.sh). Nothing about the step-to-state mapping below
+    # changes; only where the record was read from.
+    if [ -z "$RUN_OUT" ]; then
+      DB_RUN_ID=$(fm_nm_db_run_for_branch "$NM_DB" "$EXPECTED_BRANCH") || DB_RUN_ID=
+      if [ -n "$DB_RUN_ID" ]; then
+        RUN_OUT=$(fm_nm_db_toon "$NM_DB" "$DB_RUN_ID") || RUN_OUT=
+        [ -z "$RUN_OUT" ] || RUN_FROM_DB=1
+      fi
+    fi
     if [ -n "$RUN_OUT" ]; then
       run_branch=$(strip_quotes "$(nm_field branch)")
       if [ -n "$run_branch" ] && [ "$run_branch" = "$EXPECTED_BRANCH" ]; then
@@ -823,6 +853,16 @@ if [ "$HAVE_RUN" = 1 ]; then
             ;;
         esac
       fi
+    fi
+  fi
+
+  # Where the record came from, stated rather than left for the reader to
+  # assume it was the CLI's own view.
+  if [ "$RUN_FROM_DB" = 1 ]; then
+    if [ -n "$RUN_DETAIL" ]; then
+      RUN_DETAIL="$RUN_DETAIL${SEP}run read from database"
+    else
+      RUN_DETAIL="run read from database"
     fi
   fi
 
