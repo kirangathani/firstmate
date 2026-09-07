@@ -1085,3 +1085,114 @@ got=$(jq -r '.agents[] | "\(.id):\(.mode)"' "$ATTOUT" | sort | tr '\n' ' ')
 [ "$got" = "gated-b2:no-mistakes shipped-a1:direct-PR " ] ||
   fail "the recorded delivery mode did not reach the wire: $got"
 pass "each agent carries the delivery mode its own record names"
+
+# --- a CLI that prints NOTHING falls back to the daemon database -------------
+#
+# Measured 2026-09-07 on no-mistakes v1.37.0: `axi status --run
+# 01M1YFPB01T3AR66BPT6Y6JSXM` exited 0 and printed an EMPTY stdout for a healthy
+# running task while the same command for two sibling runs printed their normal
+# body. The view drew that row `unreadable: axi status failed (exit 0)` with
+# every step `?`. The run itself was fine - the daemon's database held the row
+# and its step_results - so the database is read instead, and the row says so.
+#
+# The step rows below are the exact columns that run's own step_results held,
+# read out of the live database that day.
+
+sqlite3 "$NM_DB" <<'SQL'
+CREATE TABLE step_results (
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), step_name TEXT NOT NULL,
+  step_order INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', exit_code INTEGER,
+  duration_ms INTEGER, log_path TEXT, findings_json TEXT, error TEXT,
+  started_at INTEGER, completed_at INTEGER, last_activity_at INTEGER,
+  last_activity TEXT, agent_pid INTEGER, auto_fix_limit INTEGER);
+INSERT INTO runs VALUES
+  ('01M1YFPB01T3AR66BPT6Y6JSXM','repo1','fm/silent-axi-s5','1d006fd7','base','running',
+   NULL,NULL,NULL,4000,4500);
+INSERT INTO step_results
+  (id,run_id,step_name,step_order,status,duration_ms,findings_json,started_at,completed_at,last_activity)
+VALUES
+  ('s1','01M1YFPB01T3AR66BPT6Y6JSXM','intent',1,'completed',6,NULL,4000,4006,'status: completed'),
+  ('s2','01M1YFPB01T3AR66BPT6Y6JSXM','rebase',2,'completed',3225,NULL,4006,4009,'status: completed'),
+  ('s3','01M1YFPB01T3AR66BPT6Y6JSXM','review',3,'completed',1659356,
+   '{"findings":[{"id":"a"}]}',4009,5668,'status: completed'),
+  ('s4','01M1YFPB01T3AR66BPT6Y6JSXM','test',4,'awaiting_approval',19890,
+   '{"findings":[{"id":"b"}]}',5668,NULL,'status: awaiting_approval'),
+  ('s5','01M1YFPB01T3AR66BPT6Y6JSXM','document',5,'pending',0,NULL,NULL,NULL,NULL),
+  ('s6','01M1YFPB01T3AR66BPT6Y6JSXM','lint',6,'pending',0,NULL,NULL,NULL,NULL),
+  ('s7','01M1YFPB01T3AR66BPT6Y6JSXM','push',7,'pending',0,NULL,NULL,NULL,NULL),
+  ('s8','01M1YFPB01T3AR66BPT6Y6JSXM','pr',8,'pending',0,NULL,NULL,NULL,NULL),
+  ('s9','01M1YFPB01T3AR66BPT6Y6JSXM','ci',9,'pending',0,NULL,NULL,NULL,NULL);
+SQL
+
+# Exit 0 and an empty stdout, with the version banner on stderr every real call
+# writes. That is the whole failure: nothing distinguishes it from a successful
+# read but the absence of a body.
+SILENTBIN="$TMP_ROOT/silentbin"
+mkdir -p "$SILENTBIN"
+cat > "$SILENTBIN/no-mistakes" <<SH
+#!/usr/bin/env bash
+printf 'A new version of no-mistakes is available\n' >&2
+exit 0
+SH
+chmod 755 "$SILENTBIN/no-mistakes"
+
+SILENT_HOME="$TMP_ROOT/home-silent"
+mkdir -p "$SILENT_HOME/state"
+jq -n --arg p "$PROJECT" '{tasks:[
+  {id:"silent-axi-s5",kind:"ship",mode:"no-mistakes",project:$p,
+   paths:{worktree:{path:"/wt/8"}},endpoint:{target:"fm:8",exists:true},pr:{url:null}},
+  {id:"stale-runner-s9",kind:"ship",mode:"no-mistakes",project:$p,
+   paths:{worktree:{path:"/wt/3"}},endpoint:{target:"fm:3",exists:true},pr:{url:null}}
+]}' > "$TMP_ROOT/fleet-silent.json"
+
+SILENTOUT="$TMP_ROOT/out-silent.json"
+PATH="$SILENTBIN:$PATH" FM_HOME="$SILENT_HOME" \
+  FM_FLOW_SNAPSHOT_DB="$NM_DB" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/fleet-silent.json" \
+  FM_FLOW_SNAPSHOT_NOW_EPOCH=10000 \
+  "$SNAPSHOT" --json --no-ci > "$SILENTOUT" 2>/dev/null
+
+ok=$(jq -r '.agents[] | select(.id=="silent-axi-s5") | .collection.ok' "$SILENTOUT")
+[ "$ok" = "true" ] || fail "a run the database could answer for was reported unreadable: $(
+  jq -r '.agents[] | select(.id=="silent-axi-s5") | .collection.reason' "$SILENTOUT")"
+got=$(jq -r '.agents[] | select(.id=="silent-axi-s5")
+  | [.steps[] | select(.step != "building") | .step] | join(",")' "$SILENTOUT")
+[ "$got" = "intent,rebase,review,test,document,lint,push,pr,ci" ] ||
+  fail "the database read did not produce the pipeline's own steps in order: $got"
+pass "an axi status that prints nothing falls back to the daemon database"
+
+# The statuses, durations and finding counts are the database's own, not a
+# placeholder shape: a fallback that filled the row with pending would state as
+# fact that nothing has started.
+got=$(jq -r '.agents[] | select(.id=="silent-axi-s5")
+  | .steps[] | select(.step=="test") | "\(.status)/\(.findings)/\(.duration_ms)"' "$SILENTOUT")
+[ "$got" = "awaiting_approval/1/19890" ] || fail "step facts lost on the database path: $got"
+got=$(jq -r '.agents[] | select(.id=="silent-axi-s5")
+  | .steps[] | select(.step=="review") | .duration_ms' "$SILENTOUT")
+[ "$got" = 1659356 ] || fail "a completed step lost its duration on the database path: $got"
+pass "the database path carries each step's real status, findings and duration"
+
+# The one step in flight - started and not completed - reaches active_steps with
+# its elapsed, so a live cell counts time exactly as it does off the CLI. The
+# fixture's step started at 5668 and the clock is pinned at 10000.
+got=$(jq -r '.agents[] | select(.id=="silent-axi-s5")
+  | .active_steps[] | select(.step=="test") | "\(.active_for)/\(.active_ms)"' "$SILENTOUT")
+[ "$got" = "4332s/4332000" ] || fail "the in-flight step's elapsed was wrong: $got"
+pass "a step in flight reaches the wire with its elapsed on the database path"
+
+# WHERE the record came from is stated, because these steps are not the view
+# `no-mistakes axi status` would have printed and nobody may mistake them for it.
+got=$(jq -r '.agents[] | select(.id=="silent-axi-s5") | .collection.source' "$SILENTOUT")
+[ "$got" = "db" ] || fail "a database read did not name its source: $got"
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.source' "$OUT")
+[ "$got" = "axi" ] || fail "a normal CLI read did not name its source: $got"
+pass "the wire names whether a run was read from the CLI or from the database"
+
+# BOTH failing is the only case left that is unreadable, and the reason names
+# each failure: the run in this fixture database has no steps recorded at all.
+ok=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .collection.ok' "$SILENTOUT")
+[ "$ok" = "false" ] || fail "a run neither source could answer for was reported readable"
+reason=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .collection.reason' "$SILENTOUT")
+assert_contains "$reason" "axi printed nothing" "the silent CLI failure was not named"
+assert_contains "$reason" "db: " "the database failure was not named"
+pass "only both sources failing is unreadable, and the reason names each failure"

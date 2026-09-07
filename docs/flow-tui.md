@@ -363,7 +363,7 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
       "skips": { "local": false, "ci": false },
       "worker": { "harness": "claude", "model": "claude-opus-5", "effort": "high" },
       "pr": { "url": "https://github.com/kirangathani/firstmate/pull/25", "number": 25 },
-      "collection": { "ok": true, "reason": "", "at": "2026-08-08T16:30:00Z", "epoch": 1786000000 },
+      "collection": { "ok": true, "reason": "", "source": "axi", "at": "2026-08-08T16:30:00Z", "epoch": 1786000000 },
       "run": {
         "present": true,
         "id": "01KZETHEHPT5RQFB14A83FMZCK",
@@ -430,7 +430,7 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
       "skips": { "local": false, "ci": false },
       "worker": { "harness": "claude", "model": null, "effort": "xhigh" },
       "pr": { "url": null, "number": null },
-      "collection": { "ok": true, "reason": "this worker runs no pipeline", "at": "2026-08-08T16:30:00Z", "epoch": 1786000000 },
+      "collection": { "ok": true, "reason": "this worker runs no pipeline", "source": "", "at": "2026-08-08T16:30:00Z", "epoch": 1786000000 },
       "run": { "present": false, "id": "", "status": "", "db_updated_epoch": 0, "db_age_seconds": null },
       "steps": [],
       "active_steps": [],
@@ -466,11 +466,14 @@ Guarantees the renderer is entitled to rely on:
   A shape the parser does not recognise emits `null`, and the viewer then says nothing rather than guessing.
 - Step `status` strings are passed through verbatim, never mapped.
   Mapping a status onto one of the five display states is the renderer's job and is asserted exhaustively in its own tests, so a status this script has never seen still reaches the renderer intact rather than being flattened here.
-- `collection.ok` false means the read failed or timed out.
+- `collection.ok` false means BOTH reads of the run failed - the CLI and the daemon database behind it.
   `steps` is then empty and the renderer must draw the agent as unknown, never as pending and never as its last-known state.
   These are different claims: pending reads as "not started yet", which is a fact this snapshot does not have.
-- `collection.reason` names the concrete failure, not a bare exit code: the deadline for a timeout, and otherwise the failed read's own first line of stdout, falling back to stderr.
+- `collection.source` is `axi` when the run came from `no-mistakes axi status`, `db` when it came from the daemon's own database, and empty for a worker that runs no pipeline at all.
+  See "A CLI that prints nothing is not an absent run" below.
+- `collection.reason` names the concrete failure, not a bare exit code: the deadline for a timeout, `axi printed nothing` for a silent exit 0, and otherwise the failed read's own first line of stdout, falling back to stderr.
   The diagnosis is on stdout - no-mistakes writes only its version-update banner to stderr, on every call including the ones that work.
+  When the database fallback also failed, its own reason follows as `; db: <error>`, so the row says which source failed how rather than naming only the first.
 - `ci.collection` is separate from the agent's `collection`, because a GitHub read can fail while the local read succeeds.
 - `run.present` false means no pipeline run exists for that branch, which is the ordinary state of a task that has not yet started validating.
 - Every entry of `agents` has a recorded endpoint that resolved at collection time, unless `--include-dead` was passed.
@@ -628,6 +631,35 @@ Stderr carries only the version-update banner, which is written on every call in
 `collection.reason` therefore carries the failed read's own first line of stdout, falling back to the first line of stderr that is not that banner, with a timeout named as itself.
 
 The two streams stay separate rather than being merged with `2>&1`: the banner in the stdout stream would corrupt the TOON parse.
+
+## A CLI that prints nothing is not an absent run
+
+Measured 2026-09-07 on no-mistakes v1.37.0, on this host:
+
+| command | exit | stdout |
+| --- | --- | --- |
+| `no-mistakes axi status --run 01M1YFPB01T3AR66BPT6Y6JSXM` | 0 | empty |
+| `no-mistakes axi status --run 01M1YFH9YHQEVK03GQ75QQQ6DC` | 0 | the normal 18-26 line body |
+| `no-mistakes axi status --run 01M1Y5G49ZGVGM08Y38Q105ZTY` | 0 | the normal 18-26 line body |
+
+The first run was healthy: `~/.no-mistakes/state.sqlite` held its row and its nine `step_results` (intent and rebase completed, review running, the rest pending).
+The database was the truth and the CLI's rendering was what failed.
+Firstmate saw the row as `unreadable: axi status failed (exit 0)` with every step `?`, and `bin/fm-crew-state.sh` lost its run-step source for that task entirely.
+
+Exit 0 with an empty stdout is therefore its own outcome, neither a success nor the failure an exit code describes, and it falls back to reading the run from the daemon's own database.
+`bin/fm-nm-db-lib.sh` is the single owner of that read for both callers.
+It renders what it finds as the same TOON `axi status` prints, so each caller keeps the parser it already had for the real tool's bytes and nothing about the step-to-state mapping changes - only where the record was read from.
+
+The read is always `sqlite3 "file:<path>?mode=ro"` against the live file, and never a copy.
+The daemon runs SQLite in WAL mode, so the committed tail of every recent write lives in the sibling `-wal` file and not in `state.sqlite` at all.
+Verified 2026-09-07 on that same run: a copy of `state.sqlite` alone read `review=fixing` and `test=pending` while the live file read `mode=ro` read `review=completed` and `test=awaiting_approval`.
+A copy that must be taken has to carry `state.sqlite`, `state.sqlite-wal` and `state.sqlite-shm` together.
+
+The source is never silent.
+`collection.source` says `db` on the wire, and the viewer prints a muted `run read from database` beside that agent's name, so a database read is never mistaken for the CLI's own view.
+`bin/fm-crew-state.sh` appends `run read from database` to its own detail for the same reason.
+
+`unreadable` now means both sources failed, and `collection.reason` names each: `axi printed nothing; db: no steps recorded for <run>`.
 
 ## The PR number rides the connector leaving push+PR
 

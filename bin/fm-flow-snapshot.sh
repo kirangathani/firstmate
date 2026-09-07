@@ -145,6 +145,10 @@ command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; ex
 . "$SCRIPT_DIR/fm-nm-db-lib.sh"
 
 NOW_EPOCH=${FM_FLOW_SNAPSHOT_NOW_EPOCH:-$(date -u +%s)}
+# The database fallback measures an in-flight step against the SAME clock every
+# other elapsed on this snapshot is measured against, so a pinned clock pins the
+# whole document rather than every part of it but one.
+FM_NM_DB_NOW=$NOW_EPOCH
 NOW_ISO=${FM_FLOW_SNAPSHOT_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 
 # Bound one external read. `timeout` is not on stock macOS, so its absence
