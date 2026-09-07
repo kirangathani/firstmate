@@ -142,7 +142,9 @@ done
 case "\$run" in
   01KZETHEHPT5RQFB14A83FMZCK) cat "$TMP_ROOT/axi-running.txt" ;;
   01KZGM44YAB57YWGBN0E0XFZF4) cat "$TMP_ROOT/axi-failed.txt" ;;
-  01KZWEDGEDWEDGEDWEDGEDWEDG) exit 1 ;;
+  01KZWEDGEDWEDGEDWEDGEDWEDG)
+    printf 'error: could not open the run database\n' >&2
+    exit 1 ;;
   *) exit 1 ;;
 esac
 exit 0
@@ -854,3 +856,68 @@ pass "building runs from the record dispatch left to the moment the run began"
 n=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .steps | length' "$DEADOUT")
 [ "$n" = 0 ] || fail "an unreadable agent still emitted $n steps"
 pass "an unreadable pipeline emits no steps at all, building included"
+
+# --- a transient read is retried once, and a real one says why ---------------
+#
+# The captain saw a row report a live run unreadable and the very next
+# collection read the same run fine: `no-mistakes axi status --run` fails
+# transiently. One such failure taken as the answer paints an alarm over a
+# healthy pipeline for a whole cadence, so the read is attempted twice.
+#
+# The retry is not a fallback: two failures still report the collection
+# unreadable with no steps, never the last known state and never pending.
+
+FLAKYBIN=$(fm_fakebin "$TMP_ROOT/flaky")
+FLAKY_MARK="$TMP_ROOT/flaky-attempts"
+cat > "$FLAKYBIN/no-mistakes" <<SH
+#!/usr/bin/env bash
+set -u
+printf 'A new version of no-mistakes is available\n' >&2
+run=""
+prev=""
+for a in "\$@"; do
+  [ "\$prev" = "--run" ] && run=\$a
+  prev=\$a
+done
+[ "\$run" = 01KZETHEHPT5RQFB14A83FMZCK ] || exit 1
+printf 'x\n' >> "$FLAKY_MARK"
+# Fail the FIRST attempt only, exactly as the transient failure does, then
+# answer normally.
+if [ "\$(wc -l < "$FLAKY_MARK")" -le 1 ]; then
+  printf 'error: connection reset by the no-mistakes daemon\n' >&2
+  exit 1
+fi
+cat "$TMP_ROOT/axi-running.txt"
+SH
+chmod 755 "$FLAKYBIN/no-mistakes"
+
+: > "$FLAKY_MARK"
+FLAKYOUT="$TMP_ROOT/flaky-out.json"
+PATH="$FLAKYBIN:$PATH" FM_HOME="$MODEL_HOME" \
+  FM_FLOW_SNAPSHOT_NOW_EPOCH=10000 \
+  FM_FLOW_SNAPSHOT_DB="$NM_DB" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/fleet.json" \
+  FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT="$TRANSCRIPTS" \
+  "$SNAPSHOT" --json --no-ci > "$FLAKYOUT" 2>/dev/null
+expect_code 0 $? "the retrying snapshot exits clean"
+
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.ok' "$FLAKYOUT")
+[ "$got" = "true" ] || fail "a read that failed once and then succeeded was reported unreadable"
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .steps | length' "$FLAKYOUT")
+[ "$got" = 10 ] || fail "the retried read produced $got steps"
+got=$(wc -l < "$FLAKY_MARK" | tr -d ' ')
+[ "$got" = 2 ] || fail "expected exactly two attempts at the run read, got $got"
+pass "a transient failure of the run read is retried once instead of painting an alarm"
+
+# Two failures is still unreadable, and the reason carries the command's own
+# words rather than a bare exit code, which tells the captain nothing they can
+# act on. The version banner is on stderr of every call, successful ones
+# included, so it is not the diagnosis and must not be reported as one.
+reason=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .collection.reason' "$DEADOUT")
+assert_contains "$reason" "could not open the run database" \
+  "the failure reason did not carry the command's own first line of stderr"
+assert_not_contains "$reason" "A new version" \
+  "the version banner was reported as the reason the read failed"
+n=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .steps | length' "$DEADOUT")
+[ "$n" = 0 ] || fail "a twice-failed read still emitted $n steps"
+pass "a read that fails twice stays unreadable and says why in the command's own words"

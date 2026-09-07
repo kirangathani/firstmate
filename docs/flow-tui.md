@@ -466,9 +466,11 @@ Guarantees the renderer is entitled to rely on:
   A shape the parser does not recognise emits `null`, and the viewer then says nothing rather than guessing.
 - Step `status` strings are passed through verbatim, never mapped.
   Mapping a status onto one of the five display states is the renderer's job and is asserted exhaustively in its own tests, so a status this script has never seen still reaches the renderer intact rather than being flattened here.
-- `collection.ok` false means the read failed or timed out.
+- `collection.ok` false means the read failed or timed out, after being attempted TWICE a second apart.
   `steps` is then empty and the renderer must draw the agent as unknown, never as pending and never as its last-known state.
   These are different claims: pending reads as "not started yet", which is a fact this snapshot does not have.
+- `collection.reason` names the concrete failure, not a bare exit code: the deadline for a timeout, and otherwise the command's own first line of stderr.
+  The version-update banner no-mistakes writes to stderr on every call, successful ones included, is not a diagnosis and is skipped.
 - `ci.collection` is separate from the agent's `collection`, because a GitHub read can fail while the local read succeeds.
 - `run.present` false means no pipeline run exists for that branch, which is the ordinary state of a task that has not yet started validating.
 - Every entry of `agents` has a recorded endpoint that resolved at collection time, unless `--include-dead` was passed.
@@ -591,6 +593,18 @@ Verified 2026-08-09 against seven real PRs on this repository, comparing the col
 | 40 | 11 total, 10 pass, 1 fail | 13 total, 11 pass, 2 fail | 11 total, 10 pass, 1 fail |
 | 33 | 11 total, 7 pass, 3 fail, 1 pending | 11 total, 8 pass, 3 fail, 1 pending | 11 total, 7 pass, 3 fail, 1 pending |
 | 39, 38, 37, 36, 35 | 11 total, 10 pass, 1 fail | - | 11 total, 10 pass, 1 fail |
+
+### A single failed read is not an answer
+
+`no-mistakes axi status --run` fails transiently.
+The captain saw a row report a live run unreadable and the very next collection read the same run without trouble, on an exit status of 1 rather than the 124 a deadline gives.
+A view that takes one such failure as the answer paints an alarm over a healthy pipeline for a whole cadence, which is the same class of untruth as animating a dead one.
+
+So the read is attempted once, and once more a second later if that failed.
+That is a retry, not a fallback: two failures still report the collection unreadable with no steps, and nothing reaches for the last known state or dresses the failure up as pending.
+
+The reason states what went wrong rather than only that something did.
+An exit code alone tells the captain a read failed and nothing they can act on, so the command's own first line of stderr rides the reason - with the version-update banner skipped, because no-mistakes writes that on every call including the ones that work, and it is not a diagnosis.
 
 ## Cost
 

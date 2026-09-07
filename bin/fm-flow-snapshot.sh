@@ -472,6 +472,24 @@ attribute_models() {  # <actives-json> <sessions-json> <now-epoch>
     )' 2>/dev/null || printf '%s' "$1"
 }
 
+# One attempt at the run read. The command's stderr goes to the file the caller
+# names, so the caller can say WHY rather than only that it failed - this runs
+# inside a command substitution, and a variable set here would not survive that
+# subshell.
+axi_read() {  # <run-id> <stderr-file> -> status on stdout; exits as the command
+  run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$1" 2>"$2"
+}
+
+# The first line of that stderr that is actually a diagnosis. no-mistakes writes
+# its version-update banner to stderr on every call, successful ones included,
+# so that is not one.
+axi_error() {  # <stderr-file>
+  [ -s "$1" ] || return 0
+  sed 's/\x1b\[[0-9;]*m//g' "$1" 2>/dev/null |
+    grep -v -e '^[[:space:]]*$' -e 'version of no-mistakes' -e '^Run "no-mistakes update"' |
+    head -1 | cut -c1-160
+}
+
 # When this task's worker was dispatched, from the durable records dispatch
 # creates and to the second. There is no recorded spawn timestamp to read, so
 # the file times are the record, and the EARLIEST of them is the answer:
@@ -606,15 +624,48 @@ agent_json() {  # <task-json>
     rest=${rest#*|}
     run_updated=${rest%%|*}
     run_created=${rest##*|}
-    axi=$(run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$run_id" 2>/dev/null)
+    # Read ONCE, and once more a second later if that failed. The captain saw a
+    # row report a live run unreadable when the very next collection read it
+    # fine: `no-mistakes axi status --run` fails transiently, and a view that
+    # takes one such failure as the answer paints an alarm over a healthy
+    # pipeline until the next cadence.
+    #
+    # This is a retry, not a fallback. Both attempts failing still reports the
+    # collection unreadable rather than reaching for the last known state - the
+    # rule that failure is never dressed up as pending is untouched.
+    local axi_err
+    axi_err="${TMPDIR:-/tmp}/fm-flow-axi-err.$$.$id"
+    axi=$(axi_read "$run_id" "$axi_err")
     rc=$?
+    if [ $rc -ne 0 ] || [ -z "$axi" ]; then
+      sleep 1
+      axi=$(axi_read "$run_id" "$axi_err")
+      rc=$?
+    fi
     if [ $rc -ne 0 ] || [ -z "$axi" ]; then
       # A failed or timed-out read is reported as such. It must NOT fall back to
       # the last known state or to pending: pending reads as "not started yet",
       # which is a different claim from "we could not find out".
+      #
+      # The command's own first line of stderr goes into the reason: an exit
+      # code alone tells the captain a read failed and nothing about why, and
+      # "why" is the whole of what they would act on. 124 is timeout's own code
+      # for the deadline, which the command itself never writes anything about.
       collect_ok=false
-      collect_reason="axi status failed (exit $rc)"
+      if [ "$rc" = 124 ]; then
+        collect_reason="axi status timed out after ${NM_TIMEOUT}s"
+      else
+        local why
+        why=$(axi_error "$axi_err")
+        if [ -n "$why" ]; then
+          collect_reason="axi status failed (exit $rc): $why"
+        else
+          collect_reason="axi status failed (exit $rc)"
+        fi
+      fi
+      rm -f "$axi_err"
     else
+      rm -f "$axi_err"
       steps=$(steps_json "$axi")
       actives=$(active_steps_json "$axi")
       [ -n "$pr_url" ] || pr_url=$(toon_field "$axi" pr)
