@@ -74,6 +74,10 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# Before the first removal, and after every refusal gate, a ship task's row is
+# appended to the task timeline ledger through bin/fm-timeline.sh, which owns
+# that record. A failed ledger write is reported on stderr and never blocks
+# cleanup.
 # Usage: fm-teardown.sh <task-id> [--force | --release-lost-slot]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -1289,6 +1293,19 @@ if [ "$SLOT_LOST" != 1 ] && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+fi
+
+# The last moment every record of this task still exists. Everything below
+# removes them, and the durations they encode - dispatch to merged PR, and each
+# stage in between - are readable nowhere else afterwards, so they are written to
+# the ledger here, after every refusal gate above has passed and before the first
+# removal. A failed write is reported and never blocks cleanup: the ledger is a
+# record of work already finished, and refusing to clean up because history could
+# not be filed would be the worse failure.
+if [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$FM_ROOT/bin/fm-timeline.sh" record "$ID" \
+    || echo "teardown: could not record $ID in the task timeline ledger (reported above); cleanup continues" >&2
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.

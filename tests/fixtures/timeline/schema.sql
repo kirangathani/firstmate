@@ -1,0 +1,76 @@
+CREATE TABLE repos (
+    id             TEXT PRIMARY KEY,
+    working_path   TEXT NOT NULL UNIQUE,
+    upstream_url   TEXT NOT NULL,
+    fork_url       TEXT,
+    default_branch TEXT NOT NULL DEFAULT 'main',
+    created_at     INTEGER NOT NULL
+);
+CREATE TABLE runs (
+    id                   TEXT PRIMARY KEY,
+    repo_id              TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    branch               TEXT NOT NULL,
+    head_sha             TEXT NOT NULL,
+    base_sha             TEXT NOT NULL,
+    status               TEXT NOT NULL DEFAULT 'pending',
+    pr_url               TEXT,
+    error                TEXT,
+    awaiting_agent_since INTEGER,
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL
+, intent TEXT, intent_source TEXT, intent_session_id TEXT, intent_score REAL, parked_ms INTEGER);
+CREATE TABLE step_results (
+    id            TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    step_name     TEXT NOT NULL,
+    step_order    INTEGER NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    exit_code     INTEGER,
+    duration_ms   INTEGER,
+    log_path      TEXT,
+    findings_json TEXT,
+    error         TEXT,
+    started_at    INTEGER,
+    completed_at  INTEGER
+, last_activity_at INTEGER, last_activity TEXT, agent_pid INTEGER, auto_fix_limit INTEGER);
+CREATE TABLE agent_invocations (
+    id                    TEXT PRIMARY KEY,
+    run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    step_name             TEXT NOT NULL,
+    round                 INTEGER NOT NULL,
+    purpose               TEXT NOT NULL,
+    agent                 TEXT NOT NULL,
+    model                 TEXT,
+    model_provider        TEXT,
+    session_mode          TEXT NOT NULL,
+    session_key           TEXT,
+    fallback_reason       TEXT,
+    started_at            INTEGER NOT NULL,
+    completed_at          INTEGER NOT NULL,
+    duration_ms           INTEGER NOT NULL,
+    subprocess_wait_ms    INTEGER,
+    exit_status           TEXT NOT NULL,
+    failure_category      TEXT,
+    input_tokens          INTEGER,
+    output_tokens         INTEGER,
+    cache_read_tokens     INTEGER,
+    cache_creation_tokens INTEGER,
+    fresh_input_tokens    INTEGER,
+    reasoning_tokens      INTEGER,
+    delta_input_tokens    INTEGER,
+    delta_output_tokens   INTEGER,
+    delta_cache_read_tokens INTEGER,
+    model_roundtrips      INTEGER,
+    tool_calls            INTEGER,
+    tool_wait_calls       INTEGER,
+    tool_test_lint_calls  INTEGER,
+    tool_edit_calls       INTEGER,
+    tool_read_calls       INTEGER,
+    tool_git_calls        INTEGER,
+    tool_other_calls      INTEGER,
+    workload_files        INTEGER,
+    workload_lines        INTEGER,
+    finding_count         INTEGER
+);
+CREATE INDEX idx_agent_invocations_run_started_id
+    ON agent_invocations (run_id, started_at, id);
