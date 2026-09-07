@@ -189,6 +189,7 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 FM_HOME_ENV="FM_HOME=$(shell_quote "$FM_HOME")"
 NM_INTENT_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-nm-intent.sh")"
 NM_DECISION_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-nm-decision.sh")"
+PR_GREEN_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-pr-green.sh")"
 
 # --- the three machine-owned regions of a ship brief ------------------------
 #
@@ -344,7 +345,16 @@ A decision you submit at a gate changes what this branch is supposed to be, but 
    Repeat this for every round: a gate round that produced a decision always ends with a re-run.
 3. \`$NM_DECISION_CMD rerun-check $ID\` must exit 0 before you report done. It refuses while any decision was recorded during the run that is still the most recent one, which is exactly the case where nothing has yet scored the branch against the decided goal.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run that \`rerun-check\`, then append \`done: PR {url} checks green\` and stop. You are finished.
+# Reporting done: verify CI green yourself, on the PR
+Do NOT wait for the pipeline to report CI green. Its \`ci\` step cannot see your PR go green: it polls \`gh pr checks\` with no PR number from a detached-HEAD worktree, so gh exits 1 on every poll with \`could not determine current branch\` and the step loops on \`warning: could not check CI: gh pr checks: exit status 1\` for up to 168 hours while the PR is green on GitHub. Reproduced 2026-09-07 on two separate PRs.
+
+Once the pipeline's \`pr\` step has opened the PR, you verify CI yourself:
+
+1. Poll \`$PR_GREEN_CMD $ID {url}\`, passing the PR link the pipeline printed. It reads the PR's head commit and that commit's checks from GitHub by URL, so it works from any directory and from a detached HEAD.
+2. While it exits non-zero it names every check that is failing, unfinished, unreadable, or infrastructure. Wait 60 seconds and run it again. A PR reporting zero checks is never green and that command never calls one green, so keep polling rather than reading silence as success.
+   **An \`infrastructure:\` line is not a red and is never re-run.** It means a check never delivered a verdict about your branch at all - it timed out, was cancelled, could not run, or died having written nothing. A timed-out review is an alarm, not a retry. Stop polling, append \`blocked: infrastructure - {the infrastructure line verbatim}\` to the status file, and stop. Do not re-run that check, do not push an empty commit to retrigger it, and do not keep waiting for it to pass on its own.
+3. When it exits 0 it prints \`green: {url} {sha} {n} checks\`. Run that \`rerun-check\`, then append \`done: PR {url} checks green at {sha}\` quoting the exact sha it printed, and stop. You are finished.
+4. If the run is still parked at its \`ci\` step looping on that warning once you have verified green, abort it with \`no-mistakes axi abort\` - a between-runs action, so it is yours to take - and say in your \`done:\` line that every prior step completed and only the stuck CI-monitor step was aborted.
 EOF
 )
       fi

@@ -300,6 +300,166 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# --- PR check rollup: the ONE reading of "is this PR green" -------------------
+# Two callers ask that question and must never answer it differently: the merge
+# gate (bin/fm-pr-merge.sh), which refuses a merge on it, and the worker-facing
+# bin/fm-pr-green.sh, which is how a ship worker learns its own PR is green
+# without waiting on the no-mistakes pipeline's ci step. A second reading of
+# "which checks, and what does each one mean" would let a worker report green on
+# a PR the merge gate then refuses, which is the same class of disagreement
+# fm_pr_base_branch_read above exists to remove.
+# bin/fm-pr-merge.sh's header remains the OWNER of the policy this pair
+# implements: the classification table, the zero-checks rule, and every
+# exemption. These functions own only the reading and the counting, and DECIDE
+# NOTHING - a caller applies its own policy to the counts, because the two
+# callers legitimately differ (the merge gate excuses one named check and honors
+# captain authorities over an empty rollup; the worker check excuses nothing, so
+# its green is strictly the stronger reading).
+FM_PR_ROLLUP_TSV=
+FM_PR_ROLLUP_TOTAL=0
+FM_PR_ROLLUP_FAILING=0
+FM_PR_ROLLUP_INFRA=0
+FM_PR_ROLLUP_PENDING=0
+FM_PR_ROLLUP_UNKNOWN=0
+FM_PR_ROLLUP_EXEMPT_FAILING=0
+FM_PR_ROLLUP_FAILING_NAMES=
+FM_PR_ROLLUP_INFRA_NAMES=
+FM_PR_ROLLUP_PENDING_NAMES=
+FM_PR_ROLLUP_UNKNOWN_NAMES=
+
+# The jq the rollup is read through. Empty fields are mapped to "-" because tab
+# is IFS whitespace to `read`, so consecutive tabs would collapse and shift
+# every later field over.
+FM_PR_ROLLUP_JQ='.statusCheckRollup // [] | .[] | [.__typename, .status, .conclusion, .state, (.name // .context // "unnamed")] | map(if . == null or . == "" then "-" else . end) | @tsv'
+
+# fm_pr_rollup_read <pr-url> <err-file>: read the PR's current check rollup into
+# FM_PR_ROLLUP_TSV, returning gh's own exit status and leaving gh's stderr in
+# <err-file> so a caller can print the real cause.
+# Addressed by PR URL, so it never depends on the current branch. `gh pr checks`
+# is unsuitable for the same two reasons the merge gate's header records: its
+# exit code conflates pending with failing, and without an argument it fails
+# outright from a detached HEAD ("could not determine current branch"), which
+# every gate worktree and every no-mistakes pipeline worktree is.
+# gh-axi is this repo's GitHub interface for ACTIONS; this is a raw-gh JSON read
+# exactly as fm_pr_base_branch_read and bin/fm-pr-check.sh's headRefOid lookup
+# are, because gh-axi exposes no rollup field.
+# shellcheck disable=SC2034  # FM_PR_ROLLUP_TSV is this function's return value, read by its callers.
+fm_pr_rollup_read() {
+  local url=$1 err=$2 rc=0
+  FM_PR_ROLLUP_TSV=
+  FM_PR_ROLLUP_TSV=$(gh pr view "$url" --json statusCheckRollup -q "$FM_PR_ROLLUP_JQ" 2> "$err") || rc=$?
+  return "$rc"
+}
+
+# fm_pr_rollup_classify <tsv> [<exempt-name>]: apply the classification table to
+# a rollup read by fm_pr_rollup_read, counting each class and collecting the
+# names in rollup order so a caller can name every non-passing check.
+# <exempt-name> is matched by EXACT equality against a failing check's name and
+# diverts it to FM_PR_ROLLUP_EXEMPT_FAILING instead of the failing count, so the
+# caller can resolve that check's authority once, after the pass, and only if
+# that name turned out to be failing at all. An empty <exempt-name> diverts
+# nothing. The count is kept rather than a flag because a re-run can leave the
+# same name in the rollup more than once.
+# An entry the table cannot classify is counted UNKNOWN rather than guessed at:
+# a merge or a done report that cannot be verified must not proceed silently.
+#
+# FAILING IS SPLIT IN TWO, because the two have different remedies and the
+# captain's standing rule is that a timed-out review is an alarm, never a re-run
+# (2026-09-07):
+#   - FAILING is a check that reached a verdict about the code and the verdict
+#     was no: conclusion FAILURE or ACTION_REQUIRED, or a StatusContext in state
+#     FAILURE or ERROR. Somebody fixes the branch.
+#   - INFRASTRUCTURE is a check that never delivered a verdict about the code at
+#     all: conclusion TIMED_OUT, CANCELLED, STALE, or STARTUP_FAILURE. The branch
+#     may be perfectly fine; what failed is the machinery. Re-running it hides
+#     the alarm, so it is reported under its own word and escalated.
+# Both are non-green everywhere, so this split can never turn a red PR green - it
+# only changes which remedy the reader is pointed at. A caller that has no use
+# for the distinction adds the two counts, which is exactly what
+# bin/fm-pr-merge.sh does, leaving its refusal unchanged.
+fm_pr_rollup_classify() {
+  local tsv=${1-} exempt=${2-}
+  local ck_type ck_status ck_conclusion ck_state ck_name verdict
+  FM_PR_ROLLUP_TOTAL=0
+  FM_PR_ROLLUP_FAILING=0
+  FM_PR_ROLLUP_INFRA=0
+  FM_PR_ROLLUP_PENDING=0
+  FM_PR_ROLLUP_UNKNOWN=0
+  FM_PR_ROLLUP_EXEMPT_FAILING=0
+  FM_PR_ROLLUP_FAILING_NAMES=
+  FM_PR_ROLLUP_INFRA_NAMES=
+  FM_PR_ROLLUP_PENDING_NAMES=
+  FM_PR_ROLLUP_UNKNOWN_NAMES=
+  while IFS=$'\t' read -r ck_type ck_status ck_conclusion ck_state ck_name; do
+    [ -n "$ck_type$ck_status$ck_conclusion$ck_state$ck_name" ] || continue
+    FM_PR_ROLLUP_TOTAL=$((FM_PR_ROLLUP_TOTAL + 1))
+    verdict=unknown
+    case "$ck_type" in
+      CheckRun)
+        case "$ck_status" in
+          COMPLETED)
+            case "$ck_conclusion" in
+              SUCCESS|NEUTRAL|SKIPPED) verdict=passing ;;
+              FAILURE|ACTION_REQUIRED) verdict=failing ;;
+              CANCELLED|TIMED_OUT|STALE|STARTUP_FAILURE) verdict=infrastructure ;;
+            esac
+            ;;
+          QUEUED|IN_PROGRESS|PENDING|WAITING|REQUESTED) verdict=pending ;;
+        esac
+        ;;
+      StatusContext)
+        case "$ck_state" in
+          SUCCESS) verdict=passing ;;
+          FAILURE|ERROR) verdict=failing ;;
+          PENDING|EXPECTED) verdict=pending ;;
+        esac
+        ;;
+    esac
+    case "$verdict" in
+      failing)
+        if [ -n "$exempt" ] && [ "$ck_name" = "$exempt" ]; then
+          FM_PR_ROLLUP_EXEMPT_FAILING=$((FM_PR_ROLLUP_EXEMPT_FAILING + 1))
+          continue
+        fi
+        FM_PR_ROLLUP_FAILING=$((FM_PR_ROLLUP_FAILING + 1))
+        FM_PR_ROLLUP_FAILING_NAMES=$FM_PR_ROLLUP_FAILING_NAMES$ck_name$'\n'
+        ;;
+      infrastructure)
+        # An exempt name diverts whatever shape its failure took, so an excused
+        # check cannot come back as an infrastructure finding.
+        if [ -n "$exempt" ] && [ "$ck_name" = "$exempt" ]; then
+          FM_PR_ROLLUP_EXEMPT_FAILING=$((FM_PR_ROLLUP_EXEMPT_FAILING + 1))
+          continue
+        fi
+        FM_PR_ROLLUP_INFRA=$((FM_PR_ROLLUP_INFRA + 1))
+        FM_PR_ROLLUP_INFRA_NAMES=$FM_PR_ROLLUP_INFRA_NAMES$ck_name$'\n'
+        ;;
+      pending)
+        FM_PR_ROLLUP_PENDING=$((FM_PR_ROLLUP_PENDING + 1))
+        FM_PR_ROLLUP_PENDING_NAMES=$FM_PR_ROLLUP_PENDING_NAMES$ck_name$'\n'
+        ;;
+      unknown)
+        FM_PR_ROLLUP_UNKNOWN=$((FM_PR_ROLLUP_UNKNOWN + 1))
+        FM_PR_ROLLUP_UNKNOWN_NAMES=$FM_PR_ROLLUP_UNKNOWN_NAMES"$ck_name (type=$ck_type status=$ck_status conclusion=$ck_conclusion state=$ck_state)"$'\n'
+        ;;
+    esac
+  done <<EOF_FM_PR_ROLLUP
+$tsv
+EOF_FM_PR_ROLLUP
+}
+
+# fm_pr_rollup_each <names>: print one collected name per line, skipping the
+# trailing empty element the accumulator's newline terminator leaves behind.
+fm_pr_rollup_each() {
+  local name
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    printf '%s\n' "$name"
+  done <<EOF_FM_PR_ROLLUP_EACH
+${1-}
+EOF_FM_PR_ROLLUP_EACH
+}
+
 # Resolved ONCE at source time, not per call. These four helpers run thousands of
 # times per migration or poll run, and a per-call `uname` fork costs more than the
 # stat it selects; tests/fm-pr-check-security.test.sh already hoists its own copy
