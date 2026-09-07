@@ -3,7 +3,8 @@
 # Behavior tests for the two firstmate-side channels that carry a worker's own
 # context through a no-mistakes run: the pinned run intent
 # (bin/fm-nm-intent.sh) and the durable gate-decision record
-# (bin/fm-nm-decision.sh), plus the generated ship brief that drives both.
+# (bin/fm-nm-decision.sh), which amends that intent as decisions are made, plus
+# the generated ship brief that drives both.
 # See docs/fix-instructions-gate.md for the contract.
 set -u
 
@@ -116,74 +117,205 @@ test_intent_refuses_an_empty_task_section() {
 
 # --- bin/fm-nm-decision.sh --------------------------------------------------
 
+# `record` amends the brief's `# Task` section, so a decision fixture needs a
+# real brief, and it reads the current run id from `no-mistakes axi status`, so
+# the fixture also puts a stub on PATH whose answer the test controls. The stub's
+# output is the exact TOON shape captured from the real `no-mistakes axi status`
+# in this repo on 2026-09-07 (v1.37.0), trimmed to the fields this reader parses.
 decision_home() {
-  local name=$1 home
+  local name=$1 id=${2:-t1} home
   home="$TMP_ROOT/$name"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data/$id" "$home/bin"
+  cat > "$home/data/$id/brief.md" <<EOF
+You are a crewmate: an autonomous worker agent managed by firstmate.
+
+# Task
+Ship the thing the captain asked for.
+
+# Setup
+Later sections must never be touched.
+EOF
+  printf 'RUN_A\n' > "$home/run-id"
+  cat > "$home/bin/no-mistakes" <<EOF
+#!/usr/bin/env bash
+printf 'run:\\n  id: "%s"\\n  branch: fm/demo\\n  status: completed\\n' "\$(cat '$home/run-id')"
+EOF
+  chmod 755 "$home/bin/no-mistakes"
   printf '%s\n' "$home"
 }
+
+# Points the stub at a different run id, which is what a fresh pipeline run looks
+# like to `rerun-check`.
+set_run_id() {
+  printf '%s\n' "$2" > "$1/run-id"
+}
+
+# Runs bin/fm-nm-decision.sh against a decision fixture, with its stub first on
+# PATH so the real `no-mistakes` on the operator's machine is never consulted.
+dec() {
+  local home=$1
+  shift
+  PATH="$home/bin:$PATH" FM_HOME="$home" "$DECISION" "$@"
+}
+
+# --- record amends the pinned intent ----------------------------------------
+
+test_decision_record_amends_the_task_section() {
+  local home brief intent
+  home=$(decision_home dec-amend)
+  dec "$home" record t1 --finding F1 --key marker-kept \
+    --requires 'Every unchecked row keeps the explicit unverified marker.' --step review >/dev/null \
+    || fail "recording a decision failed"
+  brief="$home/data/t1/brief.md"
+  assert_grep '## Gate decisions' "$brief" "record must open the gate-decisions subsection"
+  assert_grep '- F1 [marker-kept]: Every unchecked row keeps' "$brief" \
+    "record must write the finding, the key, and the requirement as one line"
+  # The subsection has to sit INSIDE the `# Task` section, because that is the
+  # only part of the brief bin/fm-nm-intent.sh emits.
+  intent=$(FM_HOME="$home" "$INTENT" t1) || fail "intent extraction failed after recording"
+  assert_contains "$intent" '- F1 [marker-kept]: Every unchecked row keeps' \
+    "the very next intent call must already carry the decision"
+  assert_contains "$intent" 'Ship the thing the captain asked for.' "the intent must keep the original goal"
+  assert_not_contains "$intent" 'Later sections must never be touched' \
+    "the amendment must not push the subsection past the end of the Task section"
+  pass "decision: record amends the brief's Task section, so the next intent carries the decision"
+}
+
+test_decision_record_rewrites_the_same_key() {
+  local home brief
+  home=$(decision_home dec-rerecord)
+  dec "$home" record t1 --finding F1 --key marker-kept --requires 'Marker on every row.' >/dev/null
+  dec "$home" record t1 --finding F2 --key prefix-kept --requires 'fm- prefix kept.' >/dev/null
+  dec "$home" record t1 --finding F1 --key marker-kept --requires 'Marker moves to the header row.' >/dev/null \
+    || fail "re-recording the same key must be allowed, not refused"
+  brief="$home/data/t1/brief.md"
+  [ "$(grep -c '^- F1 \[marker-kept\]: ' "$brief")" -eq 1 ] \
+    || fail "re-recording a key must rewrite its line, not add a second one"
+  assert_grep '- F1 [marker-kept]: Marker moves to the header row.' "$brief" \
+    "the rewritten line must carry the revised requirement"
+  assert_grep '- F2 [prefix-kept]: fm- prefix kept.' "$brief" \
+    "re-recording one key must leave every other decision alone"
+  [ "$(grep -c '^## Gate decisions$' "$brief")" -eq 1 ] \
+    || fail "the subsection heading must be written exactly once"
+  [ "$(grep -c '^- key: marker-kept$' "$home/data/t1/decisions.md")" -eq 1 ] \
+    || fail "re-recording a key must leave one block for it in the durable record too"
+  assert_grep '- requires: Marker moves to the header row.' "$home/data/t1/decisions.md" \
+    "the durable record must carry the revised requirement"
+  pass "decision: re-recording a key rewrites its statement in both places"
+}
+
+test_decision_record_refuses_without_a_task_section() {
+  local home out rc
+  home=$(decision_home dec-notask)
+  printf '# Setup\nno task section here\n' > "$home/data/t1/brief.md"
+  out=$(dec "$home" record t1 --finding F1 --key k --requires 'x' 2>&1); rc=$?
+  expect_code 2 "$rc" "a brief with no Task section must refuse, not record half the amendment"
+  assert_contains "$out" "no '# Task' section" "the refusal must name the missing section"
+  assert_absent "$home/data/t1/decisions.md" "a refused record must not write the durable record either"
+
+  rm -f "$home/data/t1/brief.md"
+  out=$(dec "$home" record t1 --finding F1 --key k --requires 'x' 2>&1); rc=$?
+  expect_code 2 "$rc" "a missing brief must refuse"
+  assert_contains "$out" 'no brief at' "the refusal must name the missing brief"
+  pass "decision: record refuses when the decision cannot reach the intent"
+}
+
+# --- rerun-check is the done gate -------------------------------------------
+
+test_rerun_check_passes_with_no_decisions() {
+  local home out rc
+  home=$(decision_home rerun-none)
+  out=$(dec "$home" rerun-check t1 2>&1); rc=$?
+  expect_code 0 "$rc" "an unamended intent needs no re-run"
+  assert_contains "$out" 'no re-run is owed' "the empty case must say so plainly"
+  pass "rerun-check: passes when no decision was ever recorded"
+}
+
+test_rerun_check_refuses_until_a_fresh_run() {
+  local home out rc
+  home=$(decision_home rerun-gate)
+  dec "$home" record t1 --finding F1 --key marker-kept --requires 'Marker kept.' >/dev/null
+  out=$(dec "$home" rerun-check t1 2>&1); rc=$?
+  expect_code 1 "$rc" "a decision recorded during the most recent run has not been re-scored yet"
+  assert_contains "$out" 'RUN_A' "the refusal must name the run the decision was recorded during"
+  assert_contains "$out" 'F1' "the refusal must name the decision still waiting"
+  assert_contains "$out" 'Start a fresh run' "the refusal must say what to do instead"
+
+  set_run_id "$home" RUN_B
+  out=$(dec "$home" rerun-check t1 2>&1); rc=$?
+  expect_code 0 "$rc" "a fresh run after the decision must clear the gate: $out"
+  assert_contains "$out" 'RUN_B' "the pass line must name the run that did the re-scoring"
+
+  # A second decision round re-arms the gate: the fresh run is now the run that
+  # produced the decision, so another one is owed.
+  dec "$home" record t1 --finding F2 --key prefix-kept --requires 'Prefix kept.' >/dev/null
+  out=$(dec "$home" rerun-check t1 2>&1); rc=$?
+  expect_code 1 "$rc" "a decision recorded during the re-run must demand another re-run"
+  assert_contains "$out" 'F2' "the refusal must name the newly recorded decision"
+  pass "rerun-check: refuses until a run started after the last decision"
+}
+
+test_rerun_check_refuses_an_unreadable_run() {
+  local home out rc
+  home=$(decision_home rerun-blind)
+  dec "$home" record t1 --finding F1 --key k --requires 'x' >/dev/null
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$home/bin/no-mistakes"
+  chmod 755 "$home/bin/no-mistakes"
+  out=$(dec "$home" rerun-check t1 2>&1); rc=$?
+  expect_code 1 "$rc" "an unreadable run confirms nothing, so it must not pass the gate"
+  assert_contains "$out" 'could not read the current no-mistakes run id' "the refusal must name the cause"
+  pass "rerun-check: refuses when the current run id cannot be read"
+}
+
+# --- the optional diagnostics still work ------------------------------------
 
 test_decision_check_passes_with_no_decisions() {
   local home out rc
   home=$(decision_home dec-none)
-  out=$(FM_HOME="$home" "$DECISION" check t1 2>&1); rc=$?
-  expect_code 0 "$rc" "a run with no gate decisions has nothing to survive"
+  out=$(dec "$home" check t1 2>&1); rc=$?
+  expect_code 0 "$rc" "a task with no gate decisions has nothing to inspect"
   assert_contains "$out" 'nothing to verify' "the empty case must say so plainly"
-  pass "decision: check passes when no decision was ever recorded"
-}
-
-test_decision_record_then_check_refuses() {
-  local home out rc
-  home=$(decision_home dec-pending)
-  FM_HOME="$home" "$DECISION" record t1 --finding F1 --key marker-kept \
-    --requires 'Every unchecked row keeps the explicit unverified marker.' --step review >/dev/null \
-    || fail "recording a decision failed"
-  assert_present "$home/data/t1/decisions.md" "the decision record must be written under data/<id>/"
-  out=$(FM_HOME="$home" "$DECISION" check t1 2>&1); rc=$?
-  expect_code 1 "$rc" "an unverified decision must refuse the done gate"
-  assert_contains "$out" 'pending' "the refusal must name the pending decision"
-  assert_contains "$out" 'F1' "the refusal must name the finding"
-  assert_contains "$out" 'Do not report done' "the refusal must say what to do instead"
-  pass "decision: a recorded but unverified decision refuses the done gate"
+  pass "decision: the optional check passes when no decision was ever recorded"
 }
 
 test_decision_verify_then_check_passes() {
   local home out rc
   home=$(decision_home dec-verified)
-  FM_HOME="$home" "$DECISION" record t1 --finding F1 --key marker-kept --requires 'Marker kept.' >/dev/null
-  FM_HOME="$home" "$DECISION" record t1 --finding F2 --key prefix-kept --requires 'fm- prefix kept.' >/dev/null
-  out=$(FM_HOME="$home" "$DECISION" check t1 2>&1); rc=$?
-  expect_code 1 "$rc" "two pending decisions must still refuse"
-  FM_HOME="$home" "$DECISION" verify t1 --finding F1 --evidence 'bin/x.sh:44 still prints unverified' >/dev/null
-  out=$(FM_HOME="$home" "$DECISION" check t1 2>&1); rc=$?
-  expect_code 1 "$rc" "one verified of two must still refuse"
-  FM_HOME="$home" "$DECISION" verify t1 --finding F2 --evidence 'grep confirms the prefix' >/dev/null
-  out=$(FM_HOME="$home" "$DECISION" check t1 2>&1); rc=$?
+  dec "$home" record t1 --finding F1 --key marker-kept --requires 'Marker kept.' >/dev/null
+  dec "$home" record t1 --finding F2 --key prefix-kept --requires 'fm- prefix kept.' >/dev/null
+  out=$(dec "$home" check t1 2>&1); rc=$?
+  expect_code 1 "$rc" "two decisions with no by-hand verification must report so"
+  dec "$home" verify t1 --finding F1 --evidence 'bin/x.sh:44 still prints unverified' >/dev/null
+  out=$(dec "$home" check t1 2>&1); rc=$?
+  expect_code 1 "$rc" "one verified of two must still report the other"
+  dec "$home" verify t1 --finding F2 --evidence 'grep confirms the prefix' >/dev/null
+  out=$(dec "$home" check t1 2>&1); rc=$?
   expect_code 0 "$rc" "every decision verified must pass: $out"
-  assert_contains "$out" 'all 2 recorded gate decisions verified' "the pass line must state the count"
-  pass "decision: check passes only once every recorded decision is verified"
+  assert_contains "$out" 'all 2 recorded gate decisions carry a by-hand verification' \
+    "the pass line must state the count"
+  pass "decision: the optional check tracks by-hand verification"
 }
 
 test_decision_reverted_always_refuses() {
   local home out rc
   home=$(decision_home dec-reverted)
-  FM_HOME="$home" "$DECISION" record t1 --finding F1 --key prefix-kept --requires 'fm- prefix kept.' >/dev/null
-  FM_HOME="$home" "$DECISION" verify t1 --finding F1 --evidence 'held at the time' >/dev/null
-  FM_HOME="$home" "$DECISION" check t1 >/dev/null || fail "a verified decision should pass before the revert"
-  FM_HOME="$home" "$DECISION" reverted t1 --finding F1 --evidence 'commit def456 removed it and pinned the reversal in a test' >/dev/null
-  out=$(FM_HOME="$home" "$DECISION" check t1 2>&1); rc=$?
-  expect_code 1 "$rc" "a contradicted decision must refuse even after an earlier verify"
-  assert_contains "$out" 'contradicted' "the refusal must name the contradicted state"
-  pass "decision: a contradicted decision refuses the done gate for good"
+  dec "$home" record t1 --finding F1 --key prefix-kept --requires 'fm- prefix kept.' >/dev/null
+  dec "$home" verify t1 --finding F1 --evidence 'held at the time' >/dev/null
+  dec "$home" check t1 >/dev/null || fail "a verified decision should pass before the revert"
+  dec "$home" reverted t1 --finding F1 --evidence 'commit def456 removed it and pinned the reversal in a test' >/dev/null
+  out=$(dec "$home" check t1 2>&1); rc=$?
+  expect_code 1 "$rc" "a contradicted decision must report even after an earlier verify"
+  assert_contains "$out" 'contradicted' "the report must name the contradicted state"
+  pass "decision: a contradicted decision keeps reporting for good"
 }
 
 test_decision_requires_text_is_not_rewritten() {
   local home before after
   home=$(decision_home dec-immutable)
-  FM_HOME="$home" "$DECISION" record t1 --finding F1 --key marker-kept \
+  dec "$home" record t1 --finding F1 --key marker-kept \
     --requires 'Every unchecked row keeps the explicit unverified marker.' >/dev/null
   before=$(grep '^- requires: ' "$home/data/t1/decisions.md")
-  FM_HOME="$home" "$DECISION" verify t1 --finding F1 --evidence 'proof' >/dev/null
+  dec "$home" verify t1 --finding F1 --evidence 'proof' >/dev/null
   after=$(grep '^- requires: ' "$home/data/t1/decisions.md")
   [ "$before" = "$after" ] || fail "verify must not rewrite what the decision required: $before -> $after"
   pass "decision: verify never edits the recorded requirement"
@@ -192,10 +324,10 @@ test_decision_requires_text_is_not_rewritten() {
 test_decision_marks_only_the_named_block() {
   local home
   home=$(decision_home dec-scoped)
-  FM_HOME="$home" "$DECISION" record t1 --finding F1 --key a --requires 'first' >/dev/null
-  FM_HOME="$home" "$DECISION" record t1 --finding F2 --key b --requires 'second' >/dev/null
-  FM_HOME="$home" "$DECISION" record t1 --finding F3 --key c --requires 'third' >/dev/null
-  FM_HOME="$home" "$DECISION" verify t1 --finding F2 --evidence 'only this one' >/dev/null
+  dec "$home" record t1 --finding F1 --key a --requires 'first' >/dev/null
+  dec "$home" record t1 --finding F2 --key b --requires 'second' >/dev/null
+  dec "$home" record t1 --finding F3 --key c --requires 'third' >/dev/null
+  dec "$home" verify t1 --finding F2 --evidence 'only this one' >/dev/null
   [ "$(grep -c '^- state: satisfied$' "$home/data/t1/decisions.md")" -eq 1 ] \
     || fail "verify must mark exactly one decision"
   [ "$(grep -c '^- state: pending$' "$home/data/t1/decisions.md")" -eq 2 ] \
@@ -207,20 +339,16 @@ test_decision_marks_only_the_named_block() {
 test_decision_usage_errors() {
   local home out rc
   home=$(decision_home dec-usage)
-  out=$(FM_HOME="$home" "$DECISION" record t1 --finding F1 --key k 2>&1); rc=$?
+  out=$(dec "$home" record t1 --finding F1 --key k 2>&1); rc=$?
   expect_code 2 "$rc" "record without --requires must be a usage error"
   assert_contains "$out" 'requires --requires' "the usage error must name the missing flag"
 
-  FM_HOME="$home" "$DECISION" record t1 --finding F1 --key k --requires 'x' >/dev/null
-  out=$(FM_HOME="$home" "$DECISION" record t1 --finding F1 --key k --requires 'y' 2>&1); rc=$?
-  expect_code 2 "$rc" "recording the same finding twice must refuse"
-  assert_contains "$out" 'already recorded' "the duplicate refusal must say so"
-
-  out=$(FM_HOME="$home" "$DECISION" verify t1 --finding F9 --evidence 'z' 2>&1); rc=$?
+  dec "$home" record t1 --finding F1 --key k --requires 'x' >/dev/null
+  out=$(dec "$home" verify t1 --finding F9 --evidence 'z' 2>&1); rc=$?
   expect_code 2 "$rc" "verifying an unrecorded finding must refuse"
   assert_contains "$out" 'not recorded' "the unknown-finding refusal must say so"
 
-  out=$(FM_HOME="$home" "$DECISION" bogus t1 2>&1); rc=$?
+  out=$(dec "$home" bogus t1 2>&1); rc=$?
   expect_code 2 "$rc" "an unknown action must be a usage error"
   pass "decision: usage errors refuse with a named cause"
 }
@@ -228,12 +356,12 @@ test_decision_usage_errors() {
 test_decision_list_and_path() {
   local home out
   home=$(decision_home dec-list)
-  out=$(FM_HOME="$home" "$DECISION" path t1)
+  out=$(dec "$home" path t1)
   [ "$out" = "$home/data/t1/decisions.md" ] || fail "path must point under data/<id>/: $out"
-  out=$(FM_HOME="$home" "$DECISION" list t1)
+  out=$(dec "$home" list t1)
   assert_contains "$out" 'no decision record' "list must be safe before anything is recorded"
-  FM_HOME="$home" "$DECISION" record t1 --finding F1 --key k --requires 'the requirement' >/dev/null
-  out=$(FM_HOME="$home" "$DECISION" list t1)
+  dec "$home" record t1 --finding F1 --key k --requires 'the requirement' >/dev/null
+  out=$(dec "$home" list t1)
   assert_contains "$out" 'the requirement' "list must print the recorded requirement"
   assert_contains "$out" '#591' "the record must point at the upstream evidence for why it exists"
   pass "decision: list and path behave before and after the first record"
@@ -271,26 +399,30 @@ test_ship_brief_states_the_fix_instructions_rule() {
   pass "brief: states the fix-instructions requirement the seatbelt enforces"
 }
 
-test_ship_brief_requires_decision_survival() {
+test_ship_brief_requires_recording_and_a_re_run() {
   local brief
   brief=$(generated_no_mistakes_brief)
   assert_grep "fm-nm-decision.sh' record gate-demo" "$brief" "the brief must require recording each gate decision"
-  assert_grep "fm-nm-decision.sh' verify gate-demo" "$brief" "the brief must require verifying each decision against the final diff"
-  assert_grep "fm-nm-decision.sh' reverted gate-demo" "$brief" "the brief must give the reverted path"
-  assert_grep "fm-nm-decision.sh' check gate-demo" "$brief" "the brief must require the check before done"
-  assert_grep 'Do NOT report done' "$brief" "the brief must hard-stop on a reverted decision"
+  assert_grep "fm-nm-decision.sh' rerun-check gate-demo" "$brief" "the brief must require the re-run gate before done"
+  assert_grep 'start a fresh run with the same pinned-intent command' "$brief" \
+    "the brief must require a re-run after any round that produced a decision"
+  assert_grep 'must exit 0 before you report done' "$brief" "the re-run gate must be a precondition, not advice"
   assert_grep '#591' "$brief" "the brief must cite the upstream evidence"
-  pass "brief: requires recording, verifying, and hard-stopping on gate decisions"
+  pass "brief: requires recording each decision and re-running on the amended intent"
 }
 
-test_ship_brief_denies_checks_passed_as_evidence() {
+test_ship_brief_retires_the_end_of_run_diff_check() {
   local brief
   brief=$(generated_no_mistakes_brief)
-  assert_grep 'is NOT evidence that a decision survived' "$brief" \
-    "the brief must state that checks-passed alone proves nothing about a decision"
-  assert_grep 'checks-passed' "$brief" "the brief must name checks-passed as the thing that is not evidence"
-  assert_grep 'Only the final diff is evidence' "$brief" "the brief must name what does count as evidence"
-  pass "brief: states that checks-passed alone is not evidence a decision survived"
+  # The hand audit of the final diff is gone: the fresh run's own review is what
+  # scores the branch against the decided goal now.
+  assert_no_grep "fm-nm-decision.sh' verify gate-demo" "$brief" \
+    "verifying each decision against the final diff must no longer be an obligation"
+  assert_no_grep "fm-nm-decision.sh' check gate-demo" "$brief" \
+    "the old check precondition must be gone from the definition of done"
+  assert_no_grep 'Only the final diff is evidence' "$brief" \
+    "the brief must not still send the worker to audit the diff by hand"
+  pass "brief: the separate end-of-run diff check is retired"
 }
 
 test_scout_and_local_only_briefs_are_untouched() {
@@ -353,8 +485,13 @@ test_intent_is_a_single_line
 test_intent_refuses_a_missing_brief
 test_intent_refuses_an_unreplaced_placeholder
 test_intent_refuses_an_empty_task_section
+test_decision_record_amends_the_task_section
+test_decision_record_rewrites_the_same_key
+test_decision_record_refuses_without_a_task_section
+test_rerun_check_passes_with_no_decisions
+test_rerun_check_refuses_until_a_fresh_run
+test_rerun_check_refuses_an_unreadable_run
 test_decision_check_passes_with_no_decisions
-test_decision_record_then_check_refuses
 test_decision_verify_then_check_passes
 test_decision_reverted_always_refuses
 test_decision_requires_text_is_not_rewritten
@@ -363,8 +500,8 @@ test_decision_usage_errors
 test_decision_list_and_path
 test_ship_brief_pins_the_intent_to_its_one_owner
 test_ship_brief_states_the_fix_instructions_rule
-test_ship_brief_requires_decision_survival
-test_ship_brief_denies_checks_passed_as_evidence
+test_ship_brief_requires_recording_and_a_re_run
+test_ship_brief_retires_the_end_of_run_diff_check
 test_scout_and_local_only_briefs_are_untouched
 test_ship_brief_commands_carry_the_resolved_home
 test_scripts_are_shellcheck_clean
