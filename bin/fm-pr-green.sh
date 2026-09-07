@@ -206,27 +206,42 @@ fi
 # shared classifier, so the worst case is a check reported as a plain red.
 INFRA_HINTS="$WORK/infra-hints.tsv"
 : > "$INFRA_HINTS"
-infra_secs=${FM_PR_INFRA_SECONDS:-10}
-case "$infra_secs" in ''|*[!0-9]*) infra_secs=10 ;; esac
-fm_pr_bounded gh api --paginate \
-  "repos/$FM_PR_OWNER/$FM_PR_REPO/commits/$HEAD_BEFORE/check-runs?per_page=100" \
-  --jq "
-    .check_runs[]
-    | (.conclusion // \"\" | ascii_downcase) as \$c
-    | ((.output.title // \"\") + \" \" + (.output.summary // \"\")) as \$raw
-    | (\$raw | ascii_downcase) as \$t
-    | (if (.started_at != null and .completed_at != null)
-         then ((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601))
-         else -1 end) as \$secs
-    | if ([\"failure\", \"action_required\"] | index(\$c))
-         and (\$t | test(\"timed out|timeout|could not run|cannot run|unable to run|was cancelled|was canceled|runner lost|lost communication|no space left|infrastructure failure\"))
-      then [.name, \"its report says the job did not run to a verdict\"]
-      elif \$c == \"failure\" and ((\$raw | gsub(\"[[:space:]]\"; \"\")) == \"\")
-           and \$secs >= 0 and \$secs <= $infra_secs
-      then [.name, \"it ended after \" + (\$secs | floor | tostring) + \"s having written no report, so it may never have run; it may instead be a gate that refused fast\"]
-      else empty end
-    | @tsv
-  " > "$INFRA_HINTS" 2>/dev/null || : > "$INFRA_HINTS"
+case "${FM_PR_INFRA_SECONDS:-}" in ''|*[!0-9]*) FM_PR_INFRA_SECONDS=10 ;; esac
+export FM_PR_INFRA_SECONDS
+
+# Kept in a single-quoted variable and given its threshold through the
+# environment rather than interpolated into the command line: an earlier version
+# built this inside a double-quoted string and the shell mangled it into a jq
+# syntax error, which the silent fallback below then hid completely, so the
+# enrichment never ran at all against real GitHub while every mocked test passed.
+# shellcheck disable=SC2016  # a jq program: $c, $t and $secs are jq bindings, not shell expansions.
+INFRA_JQ='
+.check_runs[]
+| (.conclusion // "" | ascii_downcase) as $c
+| ((.output.title // "") + " " + (.output.summary // "")) as $raw
+| ($raw | ascii_downcase) as $t
+| (if (.started_at != null and .completed_at != null)
+     then ((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601))
+     else -1 end) as $secs
+| (env.FM_PR_INFRA_SECONDS // "10" | tonumber) as $limit
+| if (["failure", "action_required"] | index($c))
+     and ($t | test("timed out|timeout|could not run|cannot run|unable to run|was cancelled|was canceled|runner lost|lost communication|no space left|infrastructure failure"))
+  then [.name, "its report says the job did not run to a verdict"]
+  elif $c == "failure" and (($raw | gsub("[[:space:]]"; "")) == "")
+       and $secs >= 0 and $secs <= $limit
+  then [.name, "it ended after " + ($secs | floor | tostring) + "s having written no report, so it may never have run; it may instead be a gate that refused fast"]
+  else empty end
+| @tsv
+'
+if ! fm_pr_bounded gh api --paginate \
+    "repos/$FM_PR_OWNER/$FM_PR_REPO/commits/$HEAD_BEFORE/check-runs?per_page=100" \
+    --jq "$INFRA_JQ" > "$INFRA_HINTS" 2> "$ERR"; then
+  # Said out loud rather than swallowed: the verdict below is unaffected, but a
+  # silently dead enrichment is how this shipped broken once already.
+  : > "$INFRA_HINTS"
+  echo "note: could not read the head commit's check reports, so a check that timed out will only be recognised by its own conclusion:" >&2
+  sed 's/^/note:   /' "$ERR" >&2
+fi
 
 # infra_reason <check name>: print the enrichment reason for that name, or
 # nothing. Matched on the whole first TSV field, so a name that is a prefix of

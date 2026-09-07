@@ -591,6 +591,48 @@ test_a_red_and_an_infrastructure_check_are_both_reported() {
   pass "fm-pr-green.sh: a PR carrying both a red and an infrastructure check reports both"
 }
 
+# The enrichment jq must be a VALID PROGRAM, compiled from the script's own
+# bytes. Every case above mocks gh, so all of them pass over a jq program that
+# does not compile - which is exactly what shipped once: the program was built
+# inside a double-quoted string, the shell mangled it into "unexpected token
+# then", and the fallback swallowed the error, so the enrichment never ran
+# against real GitHub while the suite stayed green. This test runs the real jq.
+test_the_enrichment_jq_compiles_and_classifies() {
+  local prog fixture out
+  command -v jq >/dev/null 2>&1 || { pass "fm-pr-green.sh: enrichment jq check skipped (no jq)"; return; }
+  prog="$TMP_ROOT/infra.jq"
+  # Extract the single-quoted INFRA_JQ program from the script itself, so this
+  # measures the shipped bytes rather than a copy that could drift.
+  awk "/^INFRA_JQ='\$/ { grab = 1; next } grab && /^'\$/ { exit } grab { print }" \
+    "$ROOT/bin/fm-pr-green.sh" > "$prog"
+  [ -s "$prog" ] || fail "could not extract INFRA_JQ from bin/fm-pr-green.sh"
+
+  fixture="$TMP_ROOT/check-runs.json"
+  cat > "$fixture" <<'JSON'
+{"check_runs":[
+ {"name":"died-fast","conclusion":"failure","started_at":"2026-01-01T00:00:00Z","completed_at":"2026-01-01T00:00:02Z","output":{"title":null,"summary":null}},
+ {"name":"said-timeout","conclusion":"failure","started_at":"2026-01-01T00:00:00Z","completed_at":"2026-01-01T01:00:00Z","output":{"title":"Job failed","summary":"The runner timed out waiting for the job"}},
+ {"name":"honest-red","conclusion":"failure","started_at":"2026-01-01T00:00:00Z","completed_at":"2026-01-01T00:30:00Z","output":{"title":"3 tests failed","summary":"assertion x did not hold"}},
+ {"name":"green-one","conclusion":"success","started_at":"2026-01-01T00:00:00Z","completed_at":"2026-01-01T00:10:00Z","output":{"title":null,"summary":null}}
+]}
+JSON
+
+  out=$(FM_PR_INFRA_SECONDS=10 jq -r -f "$prog" "$fixture" 2>&1) \
+    || fail "the enrichment jq does not compile or run: $out"
+
+  assert_contains "$out" "said-timeout" \
+    "the enrichment did not catch a check whose own report says it timed out"
+  assert_contains "$out" "died-fast" \
+    "the enrichment did not catch a check that ended in seconds having written no report"
+  assert_contains "$out" "may instead be a gate that refused fast" \
+    "a fast-death finding must disclose that it may be a gate refusing fast, not a dead job"
+  assert_not_contains "$out" "honest-red" \
+    "the enrichment moved a genuine red with a real report into infrastructure"
+  assert_not_contains "$out" "green-one" \
+    "the enrichment moved a passing check into infrastructure"
+  pass "fm-pr-green.sh: the enrichment jq compiles and separates dead machinery from a genuine red"
+}
+
 # The merge gate and this command must keep ONE verdict-bearing reading of the
 # rollup, not two. The classification table is what carries that verdict, so a
 # second copy of it under bin/ is the drift this extraction removed reappearing
@@ -625,6 +667,7 @@ test_green_pr_reports_green_with_the_verified_head
 test_failing_check_is_named_and_not_green
 test_pending_check_is_distinct_from_red
 test_zero_checks_is_never_green
+test_the_enrichment_jq_compiles_and_classifies
 test_a_timed_out_check_is_an_infrastructure_outcome_not_a_red
 test_a_check_reporting_it_could_not_run_is_infrastructure
 test_a_failed_enrichment_degrades_without_weakening_the_verdict
