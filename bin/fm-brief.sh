@@ -334,21 +334,17 @@ Four firstmate-specific rules layer on top of that guidance:
   That prints the \`# Task\` section of this brief verbatim. Use the identical command on every re-run in this task.
 - **Every \`--action fix\` needs substantive \`--instructions\`.** The gate agent that applies a fix is not you: it sees the finding text and the diff and nothing else, and it cannot read this brief or the project's AGENTS.md. So \`--instructions\` must carry the design reasoning behind the code the finding touches, the principle the fix must preserve, and what the fix must not break or reintroduce. A bare or one-phrase \`--instructions\` is refused before it runs; that refusal is the rule working, not a tool fault, so answer it rather than routing around it.
 
-# Gate decisions must survive to the end of the run
-A decision recorded at a no-mistakes gate constrains the step that raised it, but NOT the steps after it. A later step's auto-fix in the same run can revert a decision you already submitted, and the final review can then pass with zero findings because it scores against \`--intent\`, which was written before any decision existed. That is upstream no-mistakes issue #591 (open, third-party, v1.40.0), and it shipped a PR contradicting three explicit decisions. **\`checks-passed\` is NOT evidence that a decision survived** - in #591 it was emitted over the reverted state. Only the final diff is evidence.
+# Gate decisions become part of the goal
+A decision you submit at a gate changes what this branch is supposed to be, but the pipeline's final review scores the diff against \`--intent\`, which was written before that decision existed - upstream no-mistakes issue #591 (open, third-party, v1.40.0) documents a run whose later auto-fix reverted three submitted decisions and still reported \`checks-passed\`. Recording a decision closes that gap mechanically: it writes the decision into this brief's \`# Task\` section, so the pinned-intent command above already carries it the very next time you run it.
 
-So, for every decision you submit at a gate:
-
-1. Record it the moment you submit it, not later from memory:
+1. Record every decision the moment you submit it, not later from memory:
    \`$NM_DECISION_CMD record $ID --finding <finding-id> --key <decision-key> --requires "<what the decision requires, in concrete checkable terms>" --step <step>\`
-2. Before reporting the PR ready, check each recorded decision against the FINAL diff yourself - read the diff, do not infer from the pipeline's verdict - and mark it:
-   \`$NM_DECISION_CMD verify $ID --finding <finding-id> --evidence "<the file:line or commit that proves it still holds>"\`
-3. If any recorded decision was reverted or contradicted, mark it and STOP:
-   \`$NM_DECISION_CMD reverted $ID --finding <finding-id> --evidence "<the reverting commit>"\`
-   Then append \`blocked: gate decision <key> reverted by <commit>\` and stop. Do NOT report done, and do not re-fix it yourself.
-4. \`$NM_DECISION_CMD check $ID\` must exit 0 before you report done. It refuses while any recorded decision is unverified or contradicted.
+2. When a run in which you recorded ANY decision reaches its outcome, start a fresh run with the same pinned-intent command.
+   That run's review is what proves the branch and the decided goal agree, and it is also the only thing that re-reviews whatever the later auto-fix steps (test, document, lint) changed.
+   Repeat this for every round: a gate round that produced a decision always ends with a re-run.
+3. \`$NM_DECISION_CMD rerun-check $ID\` must exit 0 before you report done. It refuses while any decision was recorded during the run that is still the most recent one, which is exactly the case where nothing has yet scored the branch against the decided goal.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run that final \`check\`, then append \`done: PR {url} checks green\` and stop. Your completion line must state explicitly that every recorded gate decision was verified against the final diff (or that there were none). You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run that \`rerun-check\`, then append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
       fi
