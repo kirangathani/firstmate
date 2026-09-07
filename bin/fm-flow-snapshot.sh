@@ -472,22 +472,37 @@ attribute_models() {  # <actives-json> <sessions-json> <now-epoch>
     )' 2>/dev/null || printf '%s' "$1"
 }
 
-# One attempt at the run read. The command's stderr goes to the file the caller
-# names, so the caller can say WHY rather than only that it failed - this runs
-# inside a command substitution, and a variable set here would not survive that
-# subshell.
-axi_read() {  # <run-id> <stderr-file> -> status on stdout; exits as the command
-  run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$1" 2>"$2"
+# `no-mistakes axi status --run <id>` resolves the repository from the CURRENT
+# WORKING DIRECTORY, not from the run id it is handed. The run id scopes WHICH
+# run inside that repository; it does not say which repository.
+#
+# So the command inherits whatever directory the captain happened to run
+# bin/fm-flow.sh from, and from anywhere outside a git repository it fails on
+# every task that has a run at all. Verified on this host, 2026-09-07, against
+# a real completed run:
+#
+#   cd ~                          exit 1, "error: repo not initialized"
+#   cd /tmp                       exit 1, "error: not in a git repository"
+#   cd <the project>              exit 0, the run's TOON
+#
+# That is what the captain saw as `unreadable: axi status failed (exit 1)` on
+# every row at once, from a view opened in the home directory.
+#
+# The task's own recorded project path is the repository the run belongs to -
+# it is the same value the run index above is keyed on - so the read is done
+# from there. The subshell keeps the change local: this collector reads several
+# tasks in one pass and must not carry one task's directory into the next.
+#
+# The diagnosis is on STDOUT, not stderr. Stderr carries only the version-update
+# banner, which is written on every call including the ones that work, so a
+# reader that took stderr for the error would report a bare exit code forever.
+axi_read() {  # <project-path> <run-id>
+  ( cd "$1" 2>/dev/null && run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$2" 2>/dev/null )
 }
 
-# The first line of that stderr that is actually a diagnosis. no-mistakes writes
-# its version-update banner to stderr on every call, successful ones included,
-# so that is not one.
-axi_error() {  # <stderr-file>
-  [ -s "$1" ] || return 0
-  sed 's/\x1b\[[0-9;]*m//g' "$1" 2>/dev/null |
-    grep -v -e '^[[:space:]]*$' -e 'version of no-mistakes' -e '^Run "no-mistakes update"' |
-    head -1 | cut -c1-160
+# The first line the failed read printed, which is where its own words are.
+axi_error() {  # <output>
+  printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | head -1 | cut -c1-160
 }
 
 # When this task's worker was dispatched, from the durable records dispatch
@@ -624,48 +639,31 @@ agent_json() {  # <task-json>
     rest=${rest#*|}
     run_updated=${rest%%|*}
     run_created=${rest##*|}
-    # Read ONCE, and once more a second later if that failed. The captain saw a
-    # row report a live run unreadable when the very next collection read it
-    # fine: `no-mistakes axi status --run` fails transiently, and a view that
-    # takes one such failure as the answer paints an alarm over a healthy
-    # pipeline until the next cadence.
-    #
-    # This is a retry, not a fallback. Both attempts failing still reports the
-    # collection unreadable rather than reaching for the last known state - the
-    # rule that failure is never dressed up as pending is untouched.
-    local axi_err
-    axi_err="${TMPDIR:-/tmp}/fm-flow-axi-err.$$.$id"
-    axi=$(axi_read "$run_id" "$axi_err")
+    axi=$(axi_read "$project" "$run_id")
     rc=$?
-    if [ $rc -ne 0 ] || [ -z "$axi" ]; then
-      sleep 1
-      axi=$(axi_read "$run_id" "$axi_err")
-      rc=$?
-    fi
     if [ $rc -ne 0 ] || [ -z "$axi" ]; then
       # A failed or timed-out read is reported as such. It must NOT fall back to
       # the last known state or to pending: pending reads as "not started yet",
       # which is a different claim from "we could not find out".
       #
-      # The command's own first line of stderr goes into the reason: an exit
-      # code alone tells the captain a read failed and nothing about why, and
-      # "why" is the whole of what they would act on. 124 is timeout's own code
-      # for the deadline, which the command itself never writes anything about.
+      # The reason states what went wrong, in the command's own words. An exit
+      # code alone tells the captain a read failed and nothing they can act on,
+      # and the whole of the defect above was invisible behind one.
       collect_ok=false
       if [ "$rc" = 124 ]; then
         collect_reason="axi status timed out after ${NM_TIMEOUT}s"
+      elif [ ! -d "$project" ]; then
+        collect_reason="axi status not run: the project directory is missing ($project)"
       else
         local why
-        why=$(axi_error "$axi_err")
+        why=$(axi_error "$axi")
         if [ -n "$why" ]; then
           collect_reason="axi status failed (exit $rc): $why"
         else
           collect_reason="axi status failed (exit $rc)"
         fi
       fi
-      rm -f "$axi_err"
     else
-      rm -f "$axi_err"
       steps=$(steps_json "$axi")
       actives=$(active_steps_json "$axi")
       [ -n "$pr_url" ] || pr_url=$(toon_field "$axi" pr)

@@ -143,7 +143,9 @@ case "\$run" in
   01KZETHEHPT5RQFB14A83FMZCK) cat "$TMP_ROOT/axi-running.txt" ;;
   01KZGM44YAB57YWGBN0E0XFZF4) cat "$TMP_ROOT/axi-failed.txt" ;;
   01KZWEDGEDWEDGEDWEDGEDWEDG)
-    printf 'error: could not open the run database\n' >&2
+    # The real binary prints its diagnosis on STDOUT; stderr carries only the
+    # version banner, which every successful call writes too.
+    printf 'error: could not open the run database\n'
     exit 1 ;;
   *) exit 1 ;;
 esac
@@ -857,19 +859,27 @@ n=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .steps | length' "$DEADO
 [ "$n" = 0 ] || fail "an unreadable agent still emitted $n steps"
 pass "an unreadable pipeline emits no steps at all, building included"
 
-# --- a transient read is retried once, and a real one says why ---------------
+# --- the run read is done in the project, not in whatever cwd we inherited ----
 #
-# The captain saw a row report a live run unreadable and the very next
-# collection read the same run fine: `no-mistakes axi status --run` fails
-# transiently. One such failure taken as the answer paints an alarm over a
-# healthy pipeline for a whole cadence, so the read is attempted twice.
+# `no-mistakes axi status --run <id>` resolves the repository from the CURRENT
+# WORKING DIRECTORY. The run id scopes which run inside that repository; it does
+# not say which repository. So the command inherits whatever directory the
+# captain opened the view from, and from anywhere outside a git repository it
+# fails on every task that has a run at all.
 #
-# The retry is not a fallback: two failures still report the collection
-# unreadable with no steps, never the last known state and never pending.
+# Verified on this host, 2026-09-07, against the real binary and a real
+# completed run: from ~ it exits 1 with "error: repo not initialized (run
+# 'no-mistakes init' first)", from /tmp it exits 1 with "error: not in a git
+# repository", and from the project it exits 0 with the run's TOON. That is what
+# the captain saw as `unreadable: axi status failed (exit 1)` on every row at
+# once, from a view opened in the home directory.
+#
+# The fake below reproduces exactly that: it answers only when its own cwd is
+# the project, and the collector is run from a directory that is not a git
+# repository at all.
 
-FLAKYBIN=$(fm_fakebin "$TMP_ROOT/flaky")
-FLAKY_MARK="$TMP_ROOT/flaky-attempts"
-cat > "$FLAKYBIN/no-mistakes" <<SH
+CWDBIN=$(fm_fakebin "$TMP_ROOT/cwd")
+cat > "$CWDBIN/no-mistakes" <<SH
 #!/usr/bin/env bash
 set -u
 printf 'A new version of no-mistakes is available\n' >&2
@@ -879,45 +889,53 @@ for a in "\$@"; do
   [ "\$prev" = "--run" ] && run=\$a
   prev=\$a
 done
-[ "\$run" = 01KZETHEHPT5RQFB14A83FMZCK ] || exit 1
-printf 'x\n' >> "$FLAKY_MARK"
-# Fail the FIRST attempt only, exactly as the transient failure does, then
-# answer normally.
-if [ "\$(wc -l < "$FLAKY_MARK")" -le 1 ]; then
-  printf 'error: connection reset by the no-mistakes daemon\n' >&2
+if [ "\$(pwd -P)" != "$PROJECT" ]; then
+  # On STDOUT, exactly where the real binary puts it.
+  printf "error: repo not initialized (run 'no-mistakes init' first)\n"
   exit 1
 fi
-cat "$TMP_ROOT/axi-running.txt"
+case "\$run" in
+  01KZETHEHPT5RQFB14A83FMZCK) cat "$TMP_ROOT/axi-running.txt" ;;
+  01KZGM44YAB57YWGBN0E0XFZF4) cat "$TMP_ROOT/axi-failed.txt" ;;
+  *) exit 1 ;;
+esac
 SH
-chmod 755 "$FLAKYBIN/no-mistakes"
+chmod 755 "$CWDBIN/no-mistakes"
 
-: > "$FLAKY_MARK"
-FLAKYOUT="$TMP_ROOT/flaky-out.json"
-PATH="$FLAKYBIN:$PATH" FM_HOME="$MODEL_HOME" \
+NOTAREPO="$TMP_ROOT/not-a-repo"
+mkdir -p "$NOTAREPO"
+CWDOUT="$TMP_ROOT/cwd-out.json"
+( cd "$NOTAREPO" && PATH="$CWDBIN:$PATH" FM_HOME="$MODEL_HOME" \
   FM_FLOW_SNAPSHOT_NOW_EPOCH=10000 \
   FM_FLOW_SNAPSHOT_DB="$NM_DB" \
   FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/fleet.json" \
   FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT="$TRANSCRIPTS" \
-  "$SNAPSHOT" --json --no-ci > "$FLAKYOUT" 2>/dev/null
-expect_code 0 $? "the retrying snapshot exits clean"
+  "$SNAPSHOT" --json --no-ci ) > "$CWDOUT" 2>/dev/null
+expect_code 0 $? "the snapshot run from a non-repo directory exits clean"
 
-got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.ok' "$FLAKYOUT")
-[ "$got" = "true" ] || fail "a read that failed once and then succeeded was reported unreadable"
-got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .steps | length' "$FLAKYOUT")
-[ "$got" = 10 ] || fail "the retried read produced $got steps"
-got=$(wc -l < "$FLAKY_MARK" | tr -d ' ')
-[ "$got" = 2 ] || fail "expected exactly two attempts at the run read, got $got"
-pass "a transient failure of the run read is retried once instead of painting an alarm"
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.ok' "$CWDOUT")
+[ "$got" = "true" ] ||
+  fail "a run read from outside a repository was reported unreadable: $(
+    jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.reason' "$CWDOUT")"
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .steps | length' "$CWDOUT")
+[ "$got" = 10 ] || fail "the run read from the project produced $got steps"
+pass "the run read happens in the task's own project, whatever directory the view was opened from"
 
-# Two failures is still unreadable, and the reason carries the command's own
-# words rather than a bare exit code, which tells the captain nothing they can
-# act on. The version banner is on stderr of every call, successful ones
-# included, so it is not the diagnosis and must not be reported as one.
+# One task's directory must not be carried into the next: the collector reads
+# several tasks in one pass, and the change of directory is scoped to the read.
+got=$(jq -r '[.agents[] | select(.collection.ok == false)] | length' "$CWDOUT")
+[ "$got" = 0 ] || fail "$got agents were left unreadable after another task's read"
+pass "the directory change is scoped to one read and does not leak into the next"
+
+# A failure that is real still says why, in the command's own words. An exit
+# code alone is what hid the defect above for as long as it did. The version
+# banner is on stderr of every call, successful ones included, so it is not the
+# diagnosis and must not be reported as one.
 reason=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .collection.reason' "$DEADOUT")
 assert_contains "$reason" "could not open the run database" \
-  "the failure reason did not carry the command's own first line of stderr"
+  "the failure reason did not carry the command's own first line"
 assert_not_contains "$reason" "A new version" \
   "the version banner was reported as the reason the read failed"
 n=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .steps | length' "$DEADOUT")
-[ "$n" = 0 ] || fail "a twice-failed read still emitted $n steps"
-pass "a read that fails twice stays unreadable and says why in the command's own words"
+[ "$n" = 0 ] || fail "a failed read still emitted $n steps"
+pass "a failed read stays unreadable and says why in the command's own words"

@@ -158,7 +158,7 @@ SELECT r.id, r.status, r.updated_at
  ORDER BY r.created_at DESC LIMIT 1;
 ```
 
-Every fact that reaches the screen - step names, statuses, finding counts, durations - is then read through `no-mistakes axi status --run <id>`, the documented CLI.
+Every fact that reaches the screen - step names, statuses, finding counts, durations - is then read through `no-mistakes axi status --run <id>`, the documented CLI, run from the task's own project directory for the reason below.
 `step_results` is never read.
 That table is a private undocumented schema and the installed binary is eight minor versions behind current, so the risk of it changing is real; the run index is the smallest surface that solves the problem.
 
@@ -466,11 +466,11 @@ Guarantees the renderer is entitled to rely on:
   A shape the parser does not recognise emits `null`, and the viewer then says nothing rather than guessing.
 - Step `status` strings are passed through verbatim, never mapped.
   Mapping a status onto one of the five display states is the renderer's job and is asserted exhaustively in its own tests, so a status this script has never seen still reaches the renderer intact rather than being flattened here.
-- `collection.ok` false means the read failed or timed out, after being attempted TWICE a second apart.
+- `collection.ok` false means the read failed or timed out.
   `steps` is then empty and the renderer must draw the agent as unknown, never as pending and never as its last-known state.
   These are different claims: pending reads as "not started yet", which is a fact this snapshot does not have.
-- `collection.reason` names the concrete failure, not a bare exit code: the deadline for a timeout, and otherwise the command's own first line of stderr.
-  The version-update banner no-mistakes writes to stderr on every call, successful ones included, is not a diagnosis and is skipped.
+- `collection.reason` names the concrete failure, not a bare exit code: the deadline for a timeout, a missing project directory when that is what it is, and otherwise the failed read's own first line of output.
+  That line is on stdout - no-mistakes writes only its version-update banner to stderr, on every call including the ones that work.
 - `ci.collection` is separate from the agent's `collection`, because a GitHub read can fail while the local read succeeds.
 - `run.present` false means no pipeline run exists for that branch, which is the ordinary state of a task that has not yet started validating.
 - Every entry of `agents` has a recorded endpoint that resolved at collection time, unless `--include-dead` was passed.
@@ -594,17 +594,28 @@ Verified 2026-08-09 against seven real PRs on this repository, comparing the col
 | 33 | 11 total, 7 pass, 3 fail, 1 pending | 11 total, 8 pass, 3 fail, 1 pending | 11 total, 7 pass, 3 fail, 1 pending |
 | 39, 38, 37, 36, 35 | 11 total, 10 pass, 1 fail | - | 11 total, 10 pass, 1 fail |
 
-### A single failed read is not an answer
+### The run read has to happen in the project
 
-`no-mistakes axi status --run` fails transiently.
-The captain saw a row report a live run unreadable and the very next collection read the same run without trouble, on an exit status of 1 rather than the 124 a deadline gives.
-A view that takes one such failure as the answer paints an alarm over a healthy pipeline for a whole cadence, which is the same class of untruth as animating a dead one.
+`no-mistakes axi status --run <id>` resolves the repository from the CURRENT WORKING DIRECTORY.
+The run id scopes which run inside that repository; it does not say which repository.
 
-So the read is attempted once, and once more a second later if that failed.
-That is a retry, not a fallback: two failures still report the collection unreadable with no steps, and nothing reaches for the last known state or dresses the failure up as pending.
+So the command inherited whatever directory the captain opened the view from, and from anywhere outside a git repository it failed on every task that had a run at all.
+The captain ran `bin/fm-flow.sh` from the home directory and every row at once read `unreadable: axi status failed (exit 1)`.
 
-The reason states what went wrong rather than only that something did.
-An exit code alone tells the captain a read failed and nothing they can act on, so the command's own first line of stderr rides the reason - with the version-update banner skipped, because no-mistakes writes that on every call including the ones that work, and it is not a diagnosis.
+Verified on this host, 2026-09-07, against a real completed run:
+
+| cwd | result |
+|---|---|
+| `~` | exit 1, `error: repo not initialized (run 'no-mistakes init' first)` |
+| `/tmp` | exit 1, `error: not in a git repository` |
+| the project | exit 0, the run's TOON |
+
+The task's own recorded project path is the repository that run belongs to - it is the same value the run index is keyed on - so the read is done from there, inside a subshell.
+The collector reads several tasks in one pass, and one task's directory must not be carried into the next.
+
+The diagnosis is on STDOUT, not stderr.
+Stderr carries only the version-update banner, which is written on every call including the ones that work, so a reader that took stderr for the error would report a bare exit code forever - which is exactly how this defect stayed invisible.
+`collection.reason` therefore carries the failed read's own first line of output: the deadline for a timeout, the missing project directory when that is what it is, and otherwise the command's own words.
 
 ## Cost
 
