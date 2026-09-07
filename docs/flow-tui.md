@@ -629,6 +629,17 @@ Stderr carries only the version-update banner, which is written on every call in
 
 The two streams stay separate rather than being merged with `2>&1`: the banner in the stdout stream would corrupt the TOON parse.
 
+## The PR number rides the connector leaving push+PR
+
+The number is drawn on the row under the arrow between `push+PR` and `GITHUB CI`, so it reads as belonging to the connector rather than to either box.
+It comes from the snapshot's `pr.number`, which the collector derives from the recorded link through `fm_pr_url_parse`, so the number on screen and the repository the checks came from are the same reading.
+
+A task with no PR recorded gets a dash there, never blank: not evaluated and absent are different answers and a blank space says neither.
+
+That one gutter is never narrower than five columns, whatever spacing the rest of the frame is drawn at.
+Five holds `#9999`; a wider number is clipped rather than allowed to widen the gutter, because a gutter whose width came from a value would put two agents' cells in different columns on the same frame.
+The widest ordinary spacing is already five, so at full width nothing moves.
+
 ## Cost
 
 Measured 2026-08-08 on this host, no-mistakes v1.37.0.

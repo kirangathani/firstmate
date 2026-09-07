@@ -212,6 +212,7 @@ const PAINT = {
 // merge's only test evidence.
 export const LOCAL_SKIP_STAGES = new Set(["intent", "rebase", "review", "test", "document", "lint"]);
 
+
 export function skipsOf(agent) {
   return { local: agent?.skips?.local === true, ci: agent?.skips?.ci === true };
 }
@@ -432,9 +433,27 @@ const GAPS = [5, 3, 1];
 export const CELL_WIDTHS = [...STEPS.map(() => W + 2), CIW + 2, MW + 2];
 const INDENT = 2;
 
-const span = (first, count, gap) =>
-  CELL_WIDTHS.slice(first, first + count).reduce((a, b) => a + b, 0) +
-  gap * Math.max(0, count - 1);
+// The PR number is drawn under the arrow leaving push+PR, so that ONE gutter is
+// never narrower than the label it carries. Five columns holds `#9999`; a wider
+// number is clipped there rather than allowed to widen the gutter, because a
+// gutter whose width came from a value would put two agents' cells in different
+// columns on the same frame. The widest ordinary spacing is already five, so at
+// full width nothing moves at all.
+const PR_LABEL_W = 5;
+const PR_CONNECTOR = STEPS.length;
+// The width of the gutter drawn BEFORE cell `i`. Exported for the same reason
+// CELL_WIDTHS is: a test addressing a cell by arithmetic has to use the
+// renderer's own spacing rather than a number copied out of one frame.
+export const gutterWidth = (i, gap) =>
+  (i === PR_CONNECTOR ? Math.max(gap, PR_LABEL_W) : gap);
+
+const span = (first, count, gap) => {
+  let total = 0;
+  for (let i = first; i < first + count; i++) {
+    total += CELL_WIDTHS[i] + (i > first ? gutterWidth(i, gap) : 0);
+  }
+  return total;
+};
 
 export function layout(cols, focus = 0) {
   const avail = Math.max(1, Math.floor(cols) - INDENT);
@@ -450,7 +469,7 @@ export function layout(cols, focus = 0) {
     let used = 0;
     let count = 0;
     for (let i = first; i < n; i++) {
-      const add = (count === 0 ? 0 : gap) + CELL_WIDTHS[i];
+      const add = (count === 0 ? 0 : gutterWidth(i, gap)) + CELL_WIDTHS[i];
       if (used + add > avail) break;
       used += add;
       count++;
@@ -714,6 +733,14 @@ function premergeBox() {
   return box("pre-merge", "pending", MW);
 }
 
+// The number the snapshot derived from the recorded PR link, which
+// bin/fm-flow-snapshot.sh parses through the one owner of that grammar. A task
+// with no PR recorded reads as a dash, never as empty space.
+export function prLabel(agent) {
+  const n = agent?.pr?.number;
+  return n === null || n === undefined || n === "" ? "-" : `#${n}`;
+}
+
 const DEFAULT_OPEN_HINT = "enter: open this worker's window";
 const DEFAULT_DETAIL_HINT = "d pipeline detail, ctrl-c back";
 
@@ -734,14 +761,21 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   }
 
   const shown = cells.slice(lay.first, lay.first + lay.count);
-  const arrowGlyph = "─".repeat(Math.max(0, lay.gap - 1)) + "→";
-  const arrow = dim(arrowGlyph);
-  const gap = " ".repeat(lay.gap);
   const top = [], mid = [], bot = [], tim = [], tim2 = [], mod = [], eff = [];
   shown.forEach((c, i) => {
+    const idx = lay.first + i;
     if (i > 0) {
-      top.push(gap); mid.push(arrow); bot.push(gap);
-      tim.push(gap); tim2.push(gap); mod.push(gap); eff.push(gap);
+      const g = gutterWidth(idx, lay.gap);
+      const blank = " ".repeat(g);
+      top.push(blank);
+      mid.push(dim("─".repeat(Math.max(0, g - 1)) + "→"));
+      // The one labelled gutter. It rides the row UNDER the arrow so it reads
+      // as belonging to the connector rather than to either box, and it is
+      // drawn on every frame a PR cell is on: a task with no PR gets a dash,
+      // because not evaluated and absent are different answers and a blank
+      // says neither.
+      bot.push(idx === PR_CONNECTOR ? dim(pad(prLabel(agent), g)) : blank);
+      tim.push(blank); tim2.push(blank); mod.push(blank); eff.push(blank);
     }
     top.push(c.top); mid.push(c.mid); bot.push(c.bot);
     tim.push(c.timer); tim2.push(c.timer2);

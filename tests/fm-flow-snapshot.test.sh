@@ -1071,3 +1071,4 @@ assert_contains "$reason" "the daemon refused the connection" \
 assert_not_contains "$reason" "A new version" \
   "the version banner was reported as the reason on the stderr path"
 pass "a failure that writes only to stderr still says why, and the banner is not the why"
+
