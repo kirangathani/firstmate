@@ -130,7 +130,9 @@ const NCELLS = STEPS.length + 2;
 // Two further rows carry WHICH MODEL is pushing the active cell through, split
 // one axis per row for the reason modelLabel() states, and drawn on the same
 // unconditional terms for the same reason.
-export const BLOCK = 10;
+// A blank row then separates those detail rows from the check tally, so the
+// tally reads as the agent's summary rather than as one more per-stage line.
+export const BLOCK = 11;
 export const COMPACT_BLOCK = 3;
 
 // Whether this agent has a no-mistakes pipeline to draw. The snapshot STATES
@@ -352,6 +354,15 @@ function pad(s, w) {
   return " ".repeat(left) + t + " ".repeat(w - t.length - left);
 }
 
+// The detail rows under a box read as a left-hand column, not as four centred
+// captions: the eye follows one vertical edge down the stage rather than a
+// ragged middle. Same width as pad(), so a cell still occupies exactly its own
+// columns and neighbours cannot collide.
+function padLeft(s, w) {
+  const t = fit(s, w);
+  return t.length >= w ? t : t + " ".repeat(w - t.length);
+}
+
 const ANSI = /\x1b\[[0-9;]*m/g;
 // Sticky, and deliberately its own object: it carries a mutable lastIndex, and
 // sharing that with the global ANSI above would couple two scanners through
@@ -438,8 +449,8 @@ function box(label, state, width, opts = {}) {
 
   return {
     top: row(0), mid: row(1), bot: row(2),
-    timer: pad(timer, width + 2), timer2: pad(timer2, width + 2),
-    model: pad(model, width + 2), effort: pad(effort, width + 2),
+    timer: padLeft(timer, width + 2), timer2: padLeft(timer2, width + 2),
+    model: padLeft(model, width + 2), effort: padLeft(effort, width + 2),
   };
 }
 
@@ -894,6 +905,9 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
     "  " + tim2.join(""),
     "  " + mod.join(""),
     "  " + eff.join(""),
+    // One blank row, always, so the tally below is read as a summary of the
+    // whole agent rather than as a fifth detail line under the last box.
+    "",
     "  " + facts,
   ];
 }
