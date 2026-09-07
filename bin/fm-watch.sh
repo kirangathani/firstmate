@@ -381,15 +381,30 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
+  # .paused-<key> means THIS declaration already had its one live-agent surface
+  # (surface_nonterminal_stale and handle_paused_stale both set it; the poll loop
+  # clears it the moment the last status line stops being a pause or captain
+  # hold). Once it exists the live-agent probe below must not force another
+  # surface: a stale hash is classified on FIRST SIGHTING, and an idle pane's
+  # hash churns on its own (a clock, a token counter, a redrawn composer), so a
+  # per-hash probe re-surfaces a declared pause forever instead of once
+  # (2026-09-07 plated-readme-play-store-live-r2: six bare wedge-shaped stale
+  # wakes for a worker whose PR was open, green, and awaiting a merge decision).
+  # The bounded PAUSE_RESURFACE_SECS recheck, not this probe, is what keeps a
+  # forgotten pause from rotting invisibly. An authoritative active run still
+  # outranks the declaration here, exactly as on the first-sighting path below.
+  if [ -e "$STATE/.paused-$key" ]; then
+    if [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+      printf 'paused'
+      return
     fi
+    class=$(crew_absorb_class "$task")
+    if [ "$class" = working ]; then
+      rm -f "$recheck_file"
+      printf 'working'
+      return
+    fi
+    date +%s > "$recheck_file"
     printf 'paused'
     return
   fi
@@ -407,7 +422,7 @@ pause_state_class() {  # <window> <task>
       return
     fi
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
+  [ "$class" = none ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
     *) rm -f "$recheck_file" ;;
@@ -416,13 +431,19 @@ pause_state_class() {  # <window> <task>
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+  local win=$1 h=$2 key task last reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  fm_wake_append stale "$win" "stale: $win" || exit 1
-  printf '%s' "$h" > "$STATE/.stale-$key"
-  rm -f "$STATE/.stale-since-$key"
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
+  # The one surface a LIVE declared pause or captain hold gets says so, so it is
+  # not read as the wedge-shaped bare stale it used to be indistinguishable from.
+  reason="stale: $win"
+  if status_is_paused_or_captain_held "$last"; then
+    reason="stale: $win (declared pause, first check while the worker is still live - confirm the wait is real; later checks ride the long pause cadence, not a wedge timer)"
+  fi
+  fm_wake_append stale "$win" "$reason" || exit 1
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key"
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
@@ -430,7 +451,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   else
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   fi
-  wake "stale: $win"
+  wake "$reason"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
