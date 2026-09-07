@@ -565,12 +565,19 @@ function stepBox(agent, spec, anim) {
   // that is running, and one parked on its findings. Both axes are named
   // whenever the label is drawn at all, an axis with no machine record behind
   // it as a dash, so "nobody recorded it" is never read as "there is none".
+  //
+  // The question is asked only of a cell that launches an agent at all. The
+  // collector states which those are by putting the field there; a step that is
+  // the pipeline's own shell work carries none, and gets no label rather than a
+  // dash - a dash says nobody recorded the model, and here there is none.
   let model = "";
   let effort = "";
   if (state === "live" || state === "waiting") {
     const m = stepModel(agent, spec);
-    model = modelShort(m?.model);
-    effort = effortShort(m?.effort);
+    if (m && "model" in m) {
+      model = modelShort(m.model);
+      effort = effortShort(m.effort);
+    }
   }
 
   const b = box(spec.label, state, W, { timer, timer2, model, effort, anim });

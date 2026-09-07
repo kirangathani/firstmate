@@ -441,19 +441,34 @@ sessions_json() {  # <run-id> -> [ {start, model, effort} ]
 # genuinely ambiguous and the model is emitted as null, which the renderer draws
 # as a dash. No session in the window is null for the same reason: the run-level
 # value would be a guess about a different step.
+# Which steps launch an agent at all, which is what decides whether the model
+# question is even asked of a cell. The rest - rebase, lint, push, pr, ci - are
+# the pipeline's own shell work, and a dash under one of those would read as
+# "nobody recorded which model" where the truth is that no model is involved.
+#
+# Evidence, run 01M1VAGQM160X68A8GQS5YND1Z on this host, 2026-09-07: it
+# completed all nine steps and left exactly five session transcripts behind, one
+# per agent the pipeline launched - the four steps below plus a fix round, which
+# reuses its own step's name rather than adding a tenth.
+NM_AGENT_STEPS='["intent","review","test","document"]'
+
 attribute_models() {  # <actives-json> <sessions-json> <now-epoch>
-  printf '%s' "$1" | jq -c --argjson ss "$2" --argjson now "$3" '
+  printf '%s' "$1" | jq -c --argjson ss "$2" --argjson now "$3" \
+    --argjson agentsteps "$NM_AGENT_STEPS" '
     def agreed(f): (map(f) | unique) as $u
       | if ($u | length) == 1 then $u[0] else null end;
     map(
       . as $a
-      | (if ($a.active_ms // null) == null then []
-         else ($ss | map(select(.start >= ($now - (($a.active_ms / 1000) | floor)))))
-         end) as $c
-      | $a + (if ($c | length) == 0
-              then {model: null, effort: null}
-              else ($c | {model: agreed(.model), effort: agreed(.effort)})
-              end)
+      | if ($agentsteps | index($a.step)) == null then $a
+        else
+          (if ($a.active_ms // null) == null then []
+           else ($ss | map(select(.start >= ($now - (($a.active_ms / 1000) | floor)))))
+           end) as $c
+          | $a + (if ($c | length) == 0
+                  then {model: null, effort: null}
+                  else ($c | {model: agreed(.model), effort: agreed(.effort)})
+                  end)
+        end
     )' 2>/dev/null || printf '%s' "$1"
 }
 
@@ -461,26 +476,33 @@ attribute_models() {  # <actives-json> <sessions-json> <now-epoch>
 # creates and to the second. There is no recorded spawn timestamp to read, so
 # the file times are the record, and the EARLIEST of them is the answer:
 #
-#   state/<id>.meta    written by bin/fm-spawn.sh at dispatch, but REWRITTEN
-#                      whole by bin/fm-pr-check.sh when a PR is recorded, which
-#                      moves both its birth and its modification time to long
-#                      after the phase this measures.
+#   state/<id>.meta    written whole by bin/fm-spawn.sh at dispatch, and
+#                      REWRITTEN whole by bin/fm-pr-check.sh when a PR is
+#                      recorded, which moves its modification time to long after
+#                      the phase this measures. Nothing ever appends to it, so
+#                      its modification time is the only time it has.
 #   state/<id>.status  created by the worker's first status append and only ever
-#                      appended to afterwards, so its birth time survives that
-#                      rewrite and is the more durable of the two anchors.
+#                      appended to afterwards. Its BIRTH time is therefore the
+#                      durable anchor - it survives the rewrite above and every
+#                      later append - and its modification time stands in where
+#                      the filesystem records no birth time.
 #
-# A birth time of 0 means the filesystem does not record one, and the
-# modification time stands in for it. Nothing is invented: if neither file
-# yields a time, this emits nothing and the building step reports unknown.
+# Nothing is invented: if neither file yields a time, this emits nothing and the
+# building step reports unknown rather than a guessed start.
 spawned_at() {  # <task-id> <meta-path> -> epoch seconds, or empty
-  local id=$1 meta=$2 f t best=
-  for f in "$meta" "$STATE_DIR/$id.status"; do
-    [ -e "$f" ] || continue
-    t=$(stat -c %W "$f" 2>/dev/null) || t=0
-    [ "${t:-0}" -gt 0 ] 2>/dev/null || t=$(stat -c %Y "$f" 2>/dev/null) || continue
-    [ -n "$t" ] && [ "$t" -gt 0 ] 2>/dev/null || continue
-    if [ -z "$best" ] || [ "$t" -lt "$best" ]; then best=$t; fi
-  done
+  local id=$1 meta=$2 status t best=
+  status="$STATE_DIR/$id.status"
+  if [ -e "$meta" ]; then
+    t=$(stat -c %Y "$meta" 2>/dev/null) || t=
+    [ -z "$t" ] || best=$t
+  fi
+  if [ -e "$status" ]; then
+    t=$(stat -c %W "$status" 2>/dev/null) || t=0
+    [ "${t:-0}" -gt 0 ] 2>/dev/null || t=$(stat -c %Y "$status" 2>/dev/null) || t=
+    if [ -n "$t" ] && [ "$t" -gt 0 ] 2>/dev/null; then
+      if [ -z "$best" ] || [ "$t" -lt "$best" ]; then best=$t; fi
+    fi
+  fi
   printf '%s' "$best"
 }
 
@@ -609,6 +631,10 @@ agent_json() {  # <task-json>
   # status this renderer maps to unknown rather than to pending - "not started
   # yet" is a claim, and it is the wrong one for a worker that is demonstrably
   # running.
+  # Only when the pipeline read succeeded. `collection.ok` false means the whole
+  # of this agent's step list could not be established, and the renderer draws
+  # every cell unknown on the strength of it; one step slipped in beside that
+  # would be a fact reported inside a frame that says nothing is known.
   local built_at build_step build_active=''
   built_at=$(spawned_at "$id" "$meta")
   # A start later than the run it is supposed to precede is not a start. It
@@ -639,10 +665,14 @@ agent_json() {  # <task-json>
   fi
   # building is the WORKER's own step, so its model is the worker's own record
   # and never a transcript. The renderer reads it from `worker` directly.
-  if [ -n "$build_active" ]; then
-    actives=$(printf '%s' "$actives" | jq -c --argjson b "$build_active" '[$b] + .')
+  if [ "$collect_ok" = true ]; then
+    steps=$(printf '%s' "$steps" | jq -c --argjson b "$build_step" '[$b] + .')
+    if [ -n "$build_active" ]; then
+      actives=$(printf '%s' "$actives" | jq -c --argjson b "$build_active" '[$b] + .')
+    fi
+  else
+    actives='[]'
   fi
-  steps=$(printf '%s' "$steps" | jq -c --argjson b "$build_step" '[$b] + .')
 
   ci=$(ci_unread "skipped")
   if [ "$WANT_CI" = 1 ] && [ -n "$pr_url" ]; then
