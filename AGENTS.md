@@ -312,6 +312,7 @@ Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 An ask-user finding returns as `needs-decision`; firstmate decides only when the configured authority permits, otherwise escalates to the captain.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
+A recorded decision amends that task's pinned intent, so a gate round that produced any decision ends with a fresh run scored against the decided goal rather than a separate end-of-run check that each decision survived.
 Resume fleet supervision immediately after the decision lands.
 
 Judge validation by the branch-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
