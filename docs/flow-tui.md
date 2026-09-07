@@ -54,7 +54,7 @@ The no-outside-reads property the golden-frame tests rely on is unchanged by thi
 
 ## Fitting the terminal
 
-Nine cells at full spacing need 143 columns.
+Ten cells at full spacing need 161 columns.
 The first version drew all 143 whatever `--cols` said, and that single fact produced both of the defects seen on the captain's first run.
 
 An over-wide line wraps.
@@ -68,8 +68,8 @@ An over-tall frame does the same thing by scrolling the whole terminal.
 
 Width is recovered without ever cutting a box in half, in this order:
 
-1. tighten the arrow gutter, 5 to 3 to 1 columns, until all nine cells fit - this alone fits the whole pipeline into 130 columns;
-2. only if the tightest spacing still overflows, draw a contiguous window of whole cells and name it in the header (`stages 1-6 of 9`), with left/right moving the window.
+1. tighten the arrow gutter, 5 to 3 to 1 columns, until all the cells fit - this alone fits the whole pipeline into 125 columns;
+2. only if the tightest spacing still overflows, draw a contiguous window of whole cells and name it in the header (`stages 1-6 of 10`), with left/right moving the window.
 
 The header itself drops segments by stated priority rather than being clipped from the right, because the rightmost segment is the data age and that is the one fact the view exists to keep honest.
 
@@ -207,14 +207,14 @@ The view read as broken.
 It was not: it was telling the truth about a set it had defined too narrowly, and a view whose body is empty while workers are running is indistinguishable from one that has failed.
 
 The original reasoning behind the filter was sound and is preserved.
-Only a ship task has a no-mistakes pipeline, so drawing a scout under the nine stage boxes would be nine permanently empty boxes - an invented journey, which is a worse lie than the omission was.
+Only a ship task has a no-mistakes pipeline, so drawing a scout under the stage boxes would be a row of permanently empty ones - an invented journey, which is a worse lie than the omission was.
 The mistake was concluding from that that the worker should not be drawn at all.
 
 So kind decides the SHAPE of the row and nothing else:
 
 | | drawn as | carries |
 |---|---|---|
-| `pipeline: true` | the full nine-cell pipeline block, eight rows | the run, its steps, its GitHub checks, its testing skips |
+| `pipeline: true` | the full ten-cell pipeline block, ten rows | the run, its steps, its GitHub checks, its testing skips |
 | `pipeline: false` | a compact block, three rows: head, state, blank | the worker's kind, its window, and one `state` object |
 
 `pipeline` is a field the snapshot STATES rather than a kind string the renderer matches on, so a kind this renderer has never heard of still lands on the right side of the question.
@@ -321,7 +321,8 @@ The two states the captain sits and watches printed only a word: `running`, and 
 Those are exactly the states where the missing number - how long it has been that way - is what decides whether to keep waiting or go and look.
 
 Neither time fits beside its word in a nine-column cell, so the timer is two rows: the word on the first, its elapsed on the second, in the same `dur()` shape the finished steps print, so the whole column reads as one clock rather than three.
-The second row is drawn unconditionally and left blank where a cell has no time, so the frame height does not depend on which states happen to be on screen; `BLOCK` is therefore 8 rather than 7, and `scrollWindow()` reads that constant.
+The second row is drawn unconditionally and left blank where a cell has no time, so the frame height does not depend on which states happen to be on screen.
+Two further rows below it carry the model label, on the same unconditional terms and for the same reason; `BLOCK` is therefore 10 rather than 7, and `scrollWindow()` reads that constant.
 
 The two elapsed values come from different places, and neither is computed in the viewer.
 A parked step's is its own `duration_ms`, which the tool freezes when the step produced its findings.
@@ -361,7 +362,6 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
       "endpoint_alive": true,
       "skips": { "local": false, "ci": false },
       "worker": { "harness": "claude", "model": "claude-opus-5", "effort": "high" },
-      "gate": { "model": "claude-opus-5", "effort": "high", "source": "transcript" },
       "pr": { "url": "https://github.com/kirangathani/firstmate/pull/25", "number": 25 },
       "collection": { "ok": true, "reason": "", "at": "2026-08-08T16:30:00Z", "epoch": 1786000000 },
       "run": {
@@ -374,6 +374,7 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
         "db_age_seconds": 1000
       },
       "steps": [
+        { "step": "building", "status": "completed", "findings": 0, "duration_ms": 1740000 },
         { "step": "intent", "status": "completed", "findings": 0, "duration_ms": 22 }
       ],
       "active_steps": [
@@ -384,6 +385,16 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
           "active_ms": 66720000,
           "last_activity": "37s ago: log: warning: could not check CI",
           "round": "starting"
+        },
+        {
+          "step": "review",
+          "status": "running",
+          "active_for": "12m",
+          "active_ms": 720000,
+          "last_activity": "",
+          "round": "1",
+          "model": "claude-opus-5",
+          "effort": "high"
         }
       ],
       "ci": {
@@ -418,7 +429,6 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
       "endpoint_alive": true,
       "skips": { "local": false, "ci": false },
       "worker": { "harness": "claude", "model": null, "effort": "xhigh" },
-      "gate": null,
       "pr": { "url": null, "number": null },
       "collection": { "ok": true, "reason": "this worker runs no pipeline", "at": "2026-08-08T16:30:00Z", "epoch": 1786000000 },
       "run": { "present": false, "id": "", "status": "", "db_updated_epoch": 0, "db_age_seconds": null },
@@ -445,8 +455,12 @@ Guarantees the renderer is entitled to rely on:
   When it is false the agent carries `state` and empty `steps`, `active_steps` and `ci.checks`; when it is true it carries `state: null` and the pipeline fields below.
 - `state` is `bin/fm-crew-state.sh`'s answer, split into its own stated fields and otherwise passed through verbatim.
   `state.ok` false means that read failed or timed out, with `state.reason` saying which; it never falls back to the status log's last line, which is a wake event and not a current state.
-- `steps` carries all nine no-mistakes steps in pipeline order whenever `collection.ok` is true AND `pipeline` is true, using the tool's own step names.
+- `steps` carries all nine no-mistakes steps in pipeline order whenever `collection.ok` is true AND `pipeline` is true, using the tool's own step names, preceded by the synthetic `building` step described below.
   Folding `push` and `pr` into one box is a rendering decision and is not done here.
+- `building` is the worker's own implementation phase and is the only step this collector states rather than reads: the tool has no record of the time before its own run existed.
+  Its start is the earliest of the modification time of `state/<id>.meta` and the birth time of `state/<id>.status`, and its end is the run's own `created_at` from the run index.
+  It reports `completed` with that interval once a run exists, `running` with an `active_steps` entry while none does, and `unknown` when no record yields a start - never `pending`, which would claim the worker has not begun.
+  Its `active_for` is empty because that string is the tool's own humanising of a step it owns; `active_ms`, which is the only elapsed the renderer reads, is computed from the two epochs directly.
 - `active_ms` is `active_for` parsed to milliseconds, and it is the only elapsed a RUNNING step has: that step's `steps[]` `duration_ms` stays `0` until it ends.
   The parse happens here because the renderer performs no outside reads and may not invent a time of its own, and it is a number rather than the tool's own string so the viewer can print a live step through the same `dur()` a finished step already prints.
   A shape the parser does not recognise emits `null`, and the viewer then says nothing rather than guessing.
@@ -464,32 +478,71 @@ Guarantees the renderer is entitled to rely on:
   It is a report of what the record says, never an authorization: the flag line alone is reachable by a worker, and the signature beside it is what grants anything.
 - `worker` is on every agent and names which LLM the worker itself runs on, from the `harness=`, `model=` and `effort=` fields `bin/fm-spawn.sh` wrote into that task's own `state/<id>.meta` at dispatch.
   A missing field, and the recorded word `default` - which says the harness picked, and is not the name of any model - both reach the wire as `null`, which the renderer draws as a dash.
-- `gate` is on every agent too, and is `null` for a `pipeline: false` agent: that worker has no gate agents, which is a different claim from a gate whose model is unknown.
-  For a `pipeline: true` agent it names which LLM the pipeline's own review, test, document and fix agents are running on, and `source` says where that came from - `transcript`, or `none` with two nulls when nothing machine-recorded answers it yet.
+- An `active_steps` entry for a step that launches an agent carries `model` and `effort`: which LLM the run launched for that step.
+  A step that launches none carries NEITHER FIELD, which is a different claim from a null - the question is not asked of the pipeline's own shell work, and the renderer draws no label there rather than a dash.
+  A null `model` on a step that does carry the field means the attribution below found no answer, and the renderer draws a dash.
 - Raw model ids reach the wire; mapping one to the captain's short form is the renderer's job, and an id this repo has never seen still reaches the screen as itself.
 
-### Which LLM is doing the work, and the two records that say so
+### Which LLM is doing the work, and where each cell's answer comes from
 
-The row's title answers two different questions, and they have two different machine records behind them.
+The label rides the CELL, not the row, and only the cell that is currently active.
+That is the captain's own placement, and it follows from what the question is for: "which model is doing this" is asked about work in progress.
+A label on every finished box would be six answers beside the one that matters, so a finished cell keeps its duration and nothing more.
 
-The worker's own model and effort are recorded at dispatch, in that task's `state/<id>.meta`, and are simply read back.
+It is two rows rather than one, one axis on each.
+A step cell's text field is eleven columns and the widest pair - `fable 5.1` and `xhigh` - is fifteen, so a single row would have to shorten one half, and `opus` is a different claim from `opus 5`.
+Both rows are drawn unconditionally and left blank where a cell has no label, for the same reason the timer rows are: the frame height must not depend on which states happen to be on screen.
+
+Three different questions sit behind those rows, with three different machine records.
+
+**`building` is the worker's own model**, from the `model=` and `effort=` fields `bin/fm-spawn.sh` wrote into that task's `state/<id>.meta` at dispatch.
 The recorded word `default` means the harness chose, so it is emitted as absent: a dash is honest and `default` is not the name of anything the captain can reason about.
 
-The pipeline's GATE agents are a separate question, because nothing in the task's own record says what the pipeline launched them as.
+**A pipeline step's model is the one the run launched for that step**, because nothing in the task's own record says what the pipeline launched its agents as.
 The pipeline runs the `claude` CLI from the run's own worktree, and the only machine record of what actually ran is the transcript Claude Code writes under `$HOME/.claude/projects/`, in a directory whose name ends in that run's ULID.
-The newest session file in it is read from the end, and the last record with `"type":"assistant"` and a real `.message.model` gives the model; the sibling `.effort` field on that same record gives the effort when it carries one.
+A session is attributed to a step by its own start time - the timestamp of the transcript's first record - falling inside that step's active window, which is the last `active_ms` of it.
+Several sessions matching is the ordinary case, not a fault: a step's agent and any subagent it spawned all start inside that window.
+They are one answer while they agree; where they disagree the attribution is genuinely ambiguous and the model is null, which draws as a dash.
+No session in the window is null for the same reason - the run-level value would be an answer about a different step.
+
+The last record with `"type":"assistant"` and a real `.message.model` in the newest chunk of a session file gives the model, and the sibling `.effort` field on that same record gives the effort when it carries one.
 A `"model":"<synthetic>"` record is skipped: it is Claude Code's own placeholder for a turn no model produced, and it is frequently the newest assistant record in the file.
+Reading is bounded - only the last 256KB of a file are parsed, and the whole file only when that chunk holds no assistant record at all - because these files reach tens of megabytes and the collector runs on a cadence.
 
-`~/.no-mistakes/config.yaml` is deliberately not consulted.
-It states what the NEXT run will use, so a run already under way on a different model would be labelled with a model it is not using - which is exactly the guess this field exists to replace.
-A run that has not yet reached an agent step has no transcript, and that reports `source: "none"` and draws as a dash rather than borrowing the config's intention.
+**A step that launches no agent is not asked the question at all.**
+`rebase`, `lint`, `push`, `pr` and `ci` are the pipeline's own shell work, and a dash under one of them would read as "nobody recorded which model" where the truth is that no model is involved.
+So the collector puts the fields only on the steps that do launch one, and the renderer draws a label only where the fields are present.
+That distinction is load-bearing rather than cosmetic: `ci` runs for hours, so its window contains sessions belonging to every agent step before it, and attributing by window alone would have labelled it with whichever of them ran last.
 
-Reading the transcript is bounded: only the newest session file is opened, only its last 256KB are parsed, and the whole file is parsed only when that chunk holds no assistant record at all.
-These files reach tens of megabytes, and the collector runs on a cadence.
+Which steps those are is read from the pipeline's own behaviour rather than assumed.
+Evidence, run `01M1VAGQM160X68A8GQS5YND1Z` on this host, 2026-09-07: it completed all nine steps and left exactly five session transcripts behind - one per agent it launched, which is `intent`, `review`, `test` and `document` plus a fix round, and a fix round reuses its own step's name rather than adding a tenth.
+
+`~/.no-mistakes/config.yaml` is deliberately not consulted for any of this.
+It states what the NEXT run will use, so a run already under way on a different model would be labelled with a model it is not using - which is exactly the guess these fields exist to replace.
 
 The label is not carried into `bin/fm-nm-flow.sh`, the single-task detail view, and that is a decision rather than an omission.
 Its header runs on a hard 80-column budget with a stated drop order - the title shortens first, then the `no-mistakes flow: ` prefix is sacrificed to keep more of it, and the branch and run id are never shortened at all - so a fourth segment would need its own tier in that order and its own tests to prove it.
 The fleet view is where the captain compares one worker against another, which is where the question "which of these is on which model" is actually asked; the detail view already names the one run the captain drilled into.
+
+A worker with no pipeline has no step cells to hang a label on, so its own model rides its facts row instead, beside its state.
+It is painted cyan there, never one of this view's alarm slots: a label naming which model is working is an identity, never a fault, and a healthy idle second mate's row must carry no alarm colour at all.
+
+### The row starts where the work does
+
+The row used to begin at `intent`, the pipeline's first gate.
+Most of a task's life happens before that: the worker reads the brief, writes the change, and commits it, and only then starts a run.
+For all of that time the row drew nine pending boxes and nothing else - a frame that says a task exists and nothing whatever is happening to it.
+
+`building` is that phase, and both of its ends are machine records rather than reports.
+It starts at the earliest durable trace dispatch left behind, and ends when the daemon created the run for that branch.
+The start needs two files because neither alone survives the task's life: `bin/fm-pr-check.sh` rewrites `state/<id>.meta` whole when a PR is recorded, moving its modification time to long after the phase being measured, while `state/<id>.status` is only ever appended to, so its birth time survives that rewrite.
+The earliest of the two is the answer, and a start later than the run it is supposed to precede is treated as no start at all - the cell reports unknown rather than presenting a negative interval as a plausible short one.
+
+No testing skip removes it.
+Under `local_skip` there is never a run to end the phase, so it simply keeps counting, which is true: the worker still implements the change by hand.
+Drawing it as skipped would say the work itself did not happen.
+
+Ten cells at full spacing need 161 columns, and the tightened arrow gutter fits all ten into 125.
 
 ### Five check classes, because three folded two facts away
 
