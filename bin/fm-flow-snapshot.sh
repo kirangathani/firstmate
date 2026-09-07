@@ -100,8 +100,7 @@ ONLY_TASK=
 INCLUDE_DEAD=0
 
 usage() {
-  sed -n '2,74p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
-  sed -n '2,80p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,82p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
