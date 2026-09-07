@@ -117,6 +117,8 @@ The worker-liveness path could not help either: a worker blocked in a synchronou
 
 This reason is unlike the first three in one respect: it adds NEW detection rather than giving an existing warning a consequence, because there was no existing warning.
 The root cause is upstream and deliberately not ours to fix - no-mistakes' CI step shells out to `gh pr checks`, the command `bin/fm-pr-merge.sh`'s own header documents as unsuitable, since it conflates pending with failing and fails outright from the detached HEAD every task worktree is.
+Since 2026-09-07 a ship worker no longer waits on that step at all: `bin/fm-pr-green.sh` reads the PR's own head commit and that commit's checks by URL, through the classification table `bin/fm-pr-lib.sh` shares with the merge gate, so the worker learns CI is green on its own evidence and reports done.
+That removes the wait; it does not remove this alarm, because a run left parked at that step still needs someone to notice and abort it.
 Firstmate therefore needs its own detection, and the alarm detects only: it never restarts, aborts or steers a frozen run, because that decision stays with firstmate and the captain.
 
 The observation and the report are deliberately split across two paths:
