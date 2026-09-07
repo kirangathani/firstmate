@@ -717,7 +717,7 @@ BOTHSKIP=$(jq -n --argjson ci "$(ci_result 11 5 0 0 5 1)" '$ci * {
 CISKIP=$(jq -n --argjson ci "$(ci_result 11 5 0 0 5 1)" '$ci * {skips:{local:false,ci:true}}')
 
 cat >"$TMP_ROOT/skips.mjs" <<'JS'
-const { render, layout, CELL_WIDTHS, LOCAL_SKIP_STAGES, STEPS } =
+const { render, layout, CELL_WIDTHS, LOCAL_SKIP_STAGES, STEPS, gutterWidth } =
   await import(process.argv[2]);
 const base = JSON.parse(process.argv[3]);
 const COLS = 200, ROWS = 80;
@@ -734,7 +734,11 @@ if (lay.first !== 0 || lay.count !== CELL_WIDTHS.length) {
 const offsets = [];
 {
   let x = 2;  // agentBlock indents every box row by two columns
-  for (const w of CELL_WIDTHS) { offsets.push(x); x += w + lay.gap; }
+  CELL_WIDTHS.forEach((w, i) => {
+    x += i === 0 ? 0 : gutterWidth(i, lay.gap);
+    offsets.push(x);
+    x += w;
+  });
 }
 
 // One agent per frame: the row indices stay trivial and a failure names the
@@ -1201,3 +1205,92 @@ for slot in '\x1b[91m' '\x1b[95m' '\x1b[93m'; do
     "a healthy pipeline-less worker's row was painted in an alarm colour"
 done
 pass "a worker with no pipeline carries its own label on its facts row"
+
+# --- the PR number rides the connector leaving push+PR -----------------------
+#
+# The number comes from the snapshot's `pr.number`, which
+# bin/fm-flow-snapshot.sh derives from the recorded link through the one owner
+# of that grammar. A task with no PR recorded gets a dash there, never blank:
+# not evaluated and absent are different answers and blank says neither.
+
+pr_connector_label() {  # <snapshot-json> [render args...]
+  local doc=$1; shift
+  printf '%s' "$doc" | node "$TUI" --cols "${1:-200}" --rows 60 --tick 0 |
+    sed 's/\x1b\[[0-9;]*m//g' |
+    awk '/push\+PR/ {
+      getline
+      # The box row splits into whitespace-separated cells, so the label under
+      # the eighth arrow is the field after the eighth box. Reading it this way
+      # rather than by column number means a width change moves the assertion
+      # with the renderer instead of leaving it reading empty space.
+      print $(NF - 2)
+      exit
+    }'
+}
+
+WITHPR=$(agent_with pr1 "$(steps_all completed)" \
+  '{"pr":{"url":"https://github.com/kirangathani/eln/pull/29","number":29}}')
+got=$(pr_connector_label "$(snap "[$WITHPR]")")
+[ "$got" = "#29" ] || fail "the PR number is not under the arrow leaving push+PR: '$got'"
+pass "the PR number is drawn under the arrow leaving push+PR"
+
+got=$(pr_connector_label "$(snap "[$(agent_with pr0 "$(steps_all completed)")]")")
+[ "$got" = "-" ] || fail "a task with no PR left the connector blank instead of a dash: '$got'"
+pass "a task with no PR recorded reads as a dash under that arrow, never blank"
+
+# The label rides a gutter of its own width, so tightening the arrow spacing
+# must not squeeze it out. 130 columns is the width that drops the frame to the
+# tightest ordinary gutter.
+for cols in 200 130; do
+  got=$(pr_connector_label "$(snap "[$WITHPR]")" "$cols")
+  [ "$got" = "#29" ] || fail "at $cols columns the PR number was lost: '$got'"
+done
+pass "the PR number survives every arrow spacing the frame is drawn at"
+
+# --- a direct-PR project draws the journey its delivery mode actually takes ---
+#
+# `direct-PR` means the project never enters the pipeline: the worker pushes
+# and opens the PR itself. That is a delivery-mode consequence read from the
+# task's own record, not a captain-authorised testing skip, and the title says
+# which of the two it is.
+
+DIRECT=$(agent_with dp1 '[]' \
+  '{"mode":"direct-PR","pr":{"url":"https://github.com/o/r/pull/29","number":29}}')
+out=$(render "$(snap "[$DIRECT]")" | sed 's/\x1b\[[0-9;]*m//g')
+head=$(printf '%s' "$out" | grep -F 'Agent 1  dp1')
+assert_contains "$head" "direct-PR" "the direct-PR row does not name what authorised its short journey"
+case "$head" in
+  *--local-skip*|*--ci-skip*) fail "a delivery-mode skip was reported as a testing-skip flag: $head" ;;
+esac
+timers=$(printf '%s' "$out" | awk '/push\+PR/ { getline; getline; print; exit }')
+assert_contains "$timers" "skipped" "a direct-PR row drew no stage as skipped"
+pass "a direct-PR row draws its pipeline stages as skipped and names the mode that authorised it"
+
+# The flag is a SEPARATE axis and is named by the flag the captain passed,
+# taken from the record rather than inferred from the missing run.
+BOTH=$(agent_with dp2 '[]' \
+  '{"mode":"direct-PR","skips":{"local":false,"ci":true},"pr":{"url":"https://github.com/o/r/pull/30","number":30}}')
+head=$(render "$(snap "[$BOTH]")" | sed 's/\x1b\[[0-9;]*m//g' | grep -F 'Agent 1  dp2')
+assert_contains "$head" "direct-PR --ci-skip" \
+  "a direct-PR task carrying a testing skip did not name both authorities"
+pass "a testing skip beside the delivery mode is named by its own flag"
+
+# The legend appears exactly when a skipped cell is on screen, and never
+# otherwise: a legend for a colour nothing is wearing is noise.
+hdr=$(render "$(snap "[$DIRECT]")" | sed 's/\x1b\[[0-9;]*m//g' | head -1)
+assert_contains "$hdr" "skipped" "the skipped legend is missing while skipped cells are drawn"
+hdr=$(render "$(snap "[$(agent_with ok1 "$(steps_all completed)")]")" |
+  sed 's/\x1b\[[0-9;]*m//g' | head -1)
+case "$hdr" in
+  *skipped*) fail "the skipped legend appeared with no skipped cell on screen: $hdr" ;;
+esac
+pass "the skipped legend is shown when a skipped cell is drawn, and only then"
+
+# The colour is the one already reserved for a skipped stage, not a new one, so
+# the legend and the cells cannot drift apart.
+coloured=$(render "$(snap "[$DIRECT]")" | head -1)
+case "$coloured" in
+  *$'\x1b'"[94mskipped"*) ;;
+  *) fail "the skipped legend is not drawn in the skipped stage's own colour" ;;
+esac
+pass "the legend wears the same colour as the cells it names"

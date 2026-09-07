@@ -212,6 +212,37 @@ const PAINT = {
 // merge's only test evidence.
 export const LOCAL_SKIP_STAGES = new Set(["intent", "rebase", "review", "test", "document", "lint"]);
 
+// A `direct-PR` PROJECT never enters the pipeline at all: its delivery mode
+// says the worker pushes and opens the PR itself. That removes exactly the
+// stages local_skip removes, for a different reason - a delivery-mode
+// consequence, not a captain-authorised testing skip - so the two share the
+// drawing and are named apart in the title.
+// The mode is READ from the task's own record: bin/fm-fleet-snapshot.sh takes
+// `mode=` out of state/<id>.meta and the collector carries it through. It is
+// never inferred from an absent run, because an absent run is also what a
+// wedged worker and a pipeline that has not started yet look like.
+export const isDirectPR = (agent) => agent?.mode === "direct-PR";
+
+// What authorised the short journey this row draws, named in the title so the
+// skipped cells are never a mystery. The delivery mode comes first because it
+// is the reason the stages are gone; a testing skip is a separate axis and is
+// named by the FLAG the captain actually passed, from the record, so the
+// captain can match what is on screen against what they signed.
+export function skipAuthority(agent) {
+  const parts = [];
+  if (isDirectPR(agent)) parts.push("direct-PR");
+  const s = skipsOf(agent);
+  if (s.local) parts.push("--local-skip");
+  if (s.ci) parts.push("--ci-skip");
+  return parts.join(" ");
+}
+
+// Whether this agent draws any stage cell as skipped, which is what the
+// header's `skipped` legend is shown for.
+export const drawsSkippedStages = (agent) =>
+  (isDirectPR(agent) || skipsOf(agent).local) &&
+  STEPS.some((spec) => LOCAL_SKIP_STAGES.has(spec.key));
+
 export function skipsOf(agent) {
   return { local: agent?.skips?.local === true, ci: agent?.skips?.ci === true };
 }
@@ -432,9 +463,27 @@ const GAPS = [5, 3, 1];
 export const CELL_WIDTHS = [...STEPS.map(() => W + 2), CIW + 2, MW + 2];
 const INDENT = 2;
 
-const span = (first, count, gap) =>
-  CELL_WIDTHS.slice(first, first + count).reduce((a, b) => a + b, 0) +
-  gap * Math.max(0, count - 1);
+// The PR number is drawn under the arrow leaving push+PR, so that ONE gutter is
+// never narrower than the label it carries. Five columns holds `#9999`; a wider
+// number is clipped there rather than allowed to widen the gutter, because a
+// gutter whose width came from a value would put two agents' cells in different
+// columns on the same frame. The widest ordinary spacing is already five, so at
+// full width nothing moves at all.
+const PR_LABEL_W = 5;
+const PR_CONNECTOR = STEPS.length;
+// The width of the gutter drawn BEFORE cell `i`. Exported for the same reason
+// CELL_WIDTHS is: a test addressing a cell by arithmetic has to use the
+// renderer's own spacing rather than a number copied out of one frame.
+export const gutterWidth = (i, gap) =>
+  (i === PR_CONNECTOR ? Math.max(gap, PR_LABEL_W) : gap);
+
+const span = (first, count, gap) => {
+  let total = 0;
+  for (let i = first; i < first + count; i++) {
+    total += CELL_WIDTHS[i] + (i > first ? gutterWidth(i, gap) : 0);
+  }
+  return total;
+};
 
 export function layout(cols, focus = 0) {
   const avail = Math.max(1, Math.floor(cols) - INDENT);
@@ -450,7 +499,7 @@ export function layout(cols, focus = 0) {
     let used = 0;
     let count = 0;
     for (let i = first; i < n; i++) {
-      const add = (count === 0 ? 0 : gap) + CELL_WIDTHS[i];
+      const add = (count === 0 ? 0 : gutterWidth(i, gap)) + CELL_WIDTHS[i];
       if (used + add > avail) break;
       used += add;
       count++;
@@ -501,7 +550,7 @@ function stepFor(agent, spec) {
 // nothing to it. Read from the task's own state/<id>.meta by the collector, so
 // this never guesses from a status log, a brief, or the absence of a run.
 function skipOverride(agent, spec) {
-  if (!skipsOf(agent).local) return null;
+  if (!skipsOf(agent).local && !isDirectPR(agent)) return null;
   if (LOCAL_SKIP_STAGES.has(spec.key)) return { state: "skipped", timer: "skipped" };
   if (spec.key === "pr") {
     // The pipeline did not push or open this PR, but somebody did: the brief
@@ -714,6 +763,14 @@ function premergeBox() {
   return box("pre-merge", "pending", MW);
 }
 
+// The number the snapshot derived from the recorded PR link, which
+// bin/fm-flow-snapshot.sh parses through the one owner of that grammar. A task
+// with no PR recorded reads as a dash, never as empty space.
+export function prLabel(agent) {
+  const n = agent?.pr?.number;
+  return n === null || n === undefined || n === "" ? "-" : `#${n}`;
+}
+
 const DEFAULT_OPEN_HINT = "enter: open this worker's window";
 const DEFAULT_DETAIL_HINT = "d pipeline detail, ctrl-c back";
 
@@ -734,14 +791,21 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   }
 
   const shown = cells.slice(lay.first, lay.first + lay.count);
-  const arrowGlyph = "─".repeat(Math.max(0, lay.gap - 1)) + "→";
-  const arrow = dim(arrowGlyph);
-  const gap = " ".repeat(lay.gap);
   const top = [], mid = [], bot = [], tim = [], tim2 = [], mod = [], eff = [];
   shown.forEach((c, i) => {
+    const idx = lay.first + i;
     if (i > 0) {
-      top.push(gap); mid.push(arrow); bot.push(gap);
-      tim.push(gap); tim2.push(gap); mod.push(gap); eff.push(gap);
+      const g = gutterWidth(idx, lay.gap);
+      const blank = " ".repeat(g);
+      top.push(blank);
+      mid.push(dim("─".repeat(Math.max(0, g - 1)) + "→"));
+      // The one labelled gutter. It rides the row UNDER the arrow so it reads
+      // as belonging to the connector rather than to either box, and it is
+      // drawn on every frame a PR cell is on: a task with no PR gets a dash,
+      // because not evaluated and absent are different answers and a blank
+      // says neither.
+      bot.push(idx === PR_CONNECTOR ? dim(pad(prLabel(agent), g)) : blank);
+      tim.push(blank); tim2.push(blank); mod.push(blank); eff.push(blank);
     }
     top.push(c.top); mid.push(c.mid); bot.push(c.bot);
     tim.push(c.timer); tim2.push(c.timer2);
@@ -753,7 +817,9 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   const name = onHead
     ? `${ESC}7m Agent ${n}  ${agent.id} ${R}`
     : `${cyan(`Agent ${n}`)}  ${white(agent.id)}`;
+  const authority = skipAuthority(agent);
   const notes = [];
+  if (authority) notes.push(blue(authority));
   if (agent.collection?.ok === false) notes.push(magenta(`unreadable: ${agent.collection.reason}`));
   else if (agent.endpoint_alive === false) notes.push(magenta("worker gone"));
   // The hint rides the SELECTED agent whatever cell is highlighted, because
@@ -1027,6 +1093,10 @@ export function render(snap, opts) {
     { s: hidden ? dim(`${hidden} hidden, worker gone`) : "", pri: 3 },
     { s: flat ? dim(`${flat} without a pipeline`) : "", pri: 3 },
     { s: wide && lay.count < NCELLS ? yellow(`stages ${lay.first + 1}-${lay.first + lay.count} of ${NCELLS}`) : "", pri: 1 },
+    // The legend for the one colour a reader cannot decode from the word
+    // alone. It appears exactly when a skipped cell is on screen, and never
+    // otherwise, so it names something the captain can actually see.
+    { s: agents.some(drawsSkippedStages) ? blue("skipped") : "", pri: 2 },
     { s: dim(`updated ${ageSec}s ago`), pri: 2 },
     // Belongs beside the age, not in the key hints: an age that keeps climbing
     // while nothing on screen changes needs its reason on the same line.
