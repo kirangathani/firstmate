@@ -1452,6 +1452,12 @@ META_WINDOW=$T
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  # The one durable record of WHEN this task was dispatched. The file's mtime
+  # used to stand in for it, but pr= and other fields are appended later, so the
+  # mtime drifts forward off the moment it is meant to mark. bin/fm-timeline.sh
+  # measures the worker's implementation phase from this, through
+  # bin/fm-spawned-at-lib.sh.
+  echo "spawned_at=$(date +%s)"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # Testing skips are written only when ON, so an unflagged task's meta stays
