@@ -368,6 +368,102 @@ test_the_attestation_check_follows_the_shared_authority() {
   pass "fm-pr-green.sh: the one excusable check follows the shared authority, never counts as evidence, and names why it was excused"
 }
 
+# The excusal covers exactly one check and nothing else on the PR. A second red
+# alongside it still refuses, so an excused attestation can never carry a branch
+# whose own tests failed.
+test_an_excused_check_does_not_carry_a_second_red() {
+  local case_dir rc
+  case_dir=$(make_green_case green-attestation-plus-red)
+  add_gh_mock "$case_dir"
+  write_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tbehaviour (shard 2)' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes'
+  mkdir -p "$case_dir/fmhome/data" "$case_dir/project"
+  printf -- '- project [direct-PR] - fixture (added 2026-09-08)\n' > "$case_dir/fmhome/data/projects.md"
+
+  run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
+  expect_code 1 "$rc" "green-attestation-plus-red: a second failing check must still refuse"
+  assert_grep 'error: PR check is failing: behaviour (shard 2)' "$case_dir/stderr" \
+    "green-attestation-plus-red: the unexcused red was not named"
+  assert_no_grep 'green:' "$case_dir/stdout" \
+    "green-attestation-plus-red: a PR with a real red printed a green line"
+  pass "fm-pr-green.sh: an excused check never carries a second red on the same PR"
+}
+
+# The other of the two authorities: a CI skip on this task carrying a signature
+# this home's own key reproduces for this task id. The token is minted through
+# the same library bin/fm-spawn.sh mints with, so this exercises the real HMAC
+# rather than a constant the test and the script agreed on. The key is a
+# throwaway generated here and never the captain's own.
+test_a_signed_ci_skip_excuses_the_attestation_check() {
+  local case_dir rc out token
+  case_dir=$(make_green_case green-attestation-ci-skip)
+  add_gh_mock "$case_dir"
+  write_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes'
+  mkdir -p "$case_dir/fmhome/config"
+  printf '%s\n' 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0 \
+    > "$case_dir/fmhome/config/ci-waiver-secret"
+  chmod 600 "$case_dir/fmhome/config/ci-waiver-secret"
+  token=$(bash -c '. "$0/bin/fm-ci-waiver-lib.sh"; fm_ci_waiver_dispatch_token "$1"' \
+    "$ROOT" task-g1 < "$case_dir/fmhome/config/ci-waiver-secret")
+  fm_write_meta "$case_dir/fmhome/state/task-g1.meta" \
+    "window=firstmate:fm-task-g1" \
+    "worktree=$case_dir/cwd" \
+    "project=$case_dir/project" \
+    "pr=$PR_URL" \
+    "ci_skip=on" \
+    "ci_skip_auth=$token"
+
+  out=$(run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" 2>"$case_dir/stderr"); rc=$?
+  expect_code 0 "$rc" "green-attestation-ci-skip: a signed CI skip must excuse that check (stderr: $(cat "$case_dir/stderr"))"
+  case "$out" in
+    *'(1 check excused: PR must be raised via no-mistakes - a captain-authorized CI skip'*) ;;
+    *) fail "green-attestation-ci-skip: the green line did not name the signing authority, got: $out" ;;
+  esac
+  pass "fm-pr-green.sh: a signed CI skip on this task excuses the attestation check"
+}
+
+# The failure this suite was extended for. Both authorities live in the task's
+# own record under FM_HOME, so a run pointed at a home that holds no such record
+# has not learned that nothing excuses the check - it has not read the answer at
+# all. That must be called out as a wrong-home reading, and the check must be
+# reported as the gate refusal it is rather than routed into the infrastructure
+# outcome, whose instruction ("report this and stop") is wrong for a real red.
+# Observed 2026-09-08 on PRs 71 and 73, run from the worker's own task worktree.
+test_an_unreadable_home_is_named_not_treated_as_a_verdict() {
+  local case_dir rc
+  case_dir=$(make_green_case green-attestation-wrong-home)
+  add_gh_mock "$case_dir"
+  write_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes'
+  mkdir -p "$case_dir/fmhome/data" "$case_dir/project"
+  printf -- '- project [direct-PR] - fixture (added 2026-09-08)\n' > "$case_dir/fmhome/data/projects.md"
+  # The one thing a task worktree does not have: the task's own record. Moved
+  # aside rather than deleted so the case still shows what it took away.
+  mv "$case_dir/fmhome/state/task-g1.meta" "$case_dir/meta-not-in-this-home"
+  # The shape that misled rule 3: a gate that refused in seconds writing nothing.
+  printf 'PR must be raised via no-mistakes\tit ended after 3s having written no report, so it may never have run; it may instead be a gate that refused fast\n' \
+    > "$case_dir/infra-hints.tsv"
+
+  run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
+  expect_code 1 "$rc" "green-attestation-wrong-home: an unreadable record must not report green"
+  assert_grep 'no local record for task-g1' "$case_dir/stderr" \
+    "green-attestation-wrong-home: the unread record was not named"
+  assert_grep 'FM_HOME=' "$case_dir/stderr" \
+    "green-attestation-wrong-home: the re-run to make was not named"
+  assert_grep 'error: PR check is failing: PR must be raised via no-mistakes' "$case_dir/stderr" \
+    "green-attestation-wrong-home: the gate refusal was not reported as a plain red"
+  assert_no_grep 'infrastructure: PR must be raised via no-mistakes' "$case_dir/stderr" \
+    "green-attestation-wrong-home: a gate that refused fast was misreported as dead machinery"
+  pass "fm-pr-green.sh: a home holding no record for the task is named as such, never read as a verdict"
+}
+
 # An excused check is an authorized red, not proof anything ran, so a rollup
 # holding nothing else is the same false-green shape as an empty one. The merge
 # gate has captain authorities that let that through; this command has none.
@@ -678,6 +774,9 @@ test_a_failed_enrichment_degrades_without_weakening_the_verdict
 test_a_red_and_an_infrastructure_check_are_both_reported
 test_the_attestation_check_follows_the_shared_authority
 test_an_excused_only_rollup_is_not_green
+test_an_excused_check_does_not_carry_a_second_red
+test_a_signed_ci_skip_excuses_the_attestation_check
+test_an_unreadable_home_is_named_not_treated_as_a_verdict
 test_unreadable_rollup_is_not_green
 test_head_moving_mid_read_is_not_green
 test_recorded_pr_is_used_when_no_url_is_given
