@@ -433,19 +433,13 @@ pause_state_class() {  # <window> <task>
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last reason
+  local win=$1 h=$2 key task last
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  task=$(window_to_task "$win" "$STATE")
-  last=$(last_status_line "$STATE/$task.status")
-  # The one surface a LIVE declared pause or captain hold gets says so, so it is
-  # not read as the wedge-shaped bare stale it used to be indistinguishable from.
-  reason="stale: $win"
-  if status_is_paused_or_captain_held "$last"; then
-    reason="stale: $win (declared pause, first check while the worker is still live - confirm the wait is real; later checks ride the long pause cadence, not a wedge timer)"
-  fi
-  fm_wake_append stale "$win" "$reason" || exit 1
+  fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
+  task=$(window_to_task "$win" "$STATE")
+  last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
@@ -453,7 +447,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   else
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   fi
-  wake "$reason"
+  wake "stale: $win"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
