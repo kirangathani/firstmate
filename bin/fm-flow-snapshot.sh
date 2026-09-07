@@ -140,6 +140,11 @@ command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; ex
 # shellcheck source=bin/fm-pr-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# When this task's worker was dispatched, which is where the `building` step
+# starts. bin/fm-timeline.sh's build_s asks the same question, so one answer is
+# shared rather than two written.
+# shellcheck source=bin/fm-spawned-at-lib.sh
+. "$SCRIPT_DIR/fm-spawned-at-lib.sh"
 
 NOW_EPOCH=${FM_FLOW_SNAPSHOT_NOW_EPOCH:-$(date -u +%s)}
 NOW_ISO=${FM_FLOW_SNAPSHOT_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
@@ -550,39 +555,6 @@ axi_error() {  # <stdout> <stderr-file>
   printf '%s' "$line" | cut -c1-160
 }
 
-# When this task's worker was dispatched, from the durable records dispatch
-# creates and to the second. There is no recorded spawn timestamp to read, so
-# the file times are the record, and the EARLIEST of them is the answer:
-#
-#   state/<id>.meta    written whole by bin/fm-spawn.sh at dispatch, and
-#                      REWRITTEN whole by bin/fm-pr-check.sh when a PR is
-#                      recorded, which moves its modification time to long after
-#                      the phase this measures. Nothing ever appends to it, so
-#                      its modification time is the only time it has.
-#   state/<id>.status  created by the worker's first status append and only ever
-#                      appended to afterwards. Its BIRTH time is therefore the
-#                      durable anchor - it survives the rewrite above and every
-#                      later append - and its modification time stands in where
-#                      the filesystem records no birth time.
-#
-# Nothing is invented: if neither file yields a time, this emits nothing and the
-# building step reports unknown rather than a guessed start.
-spawned_at() {  # <task-id> <meta-path> -> epoch seconds, or empty
-  local id=$1 meta=$2 status t best=
-  status="$STATE_DIR/$id.status"
-  if [ -e "$meta" ]; then
-    t=$(stat -c %Y "$meta" 2>/dev/null) || t=
-    [ -z "$t" ] || best=$t
-  fi
-  if [ -e "$status" ]; then
-    t=$(stat -c %W "$status" 2>/dev/null) || t=0
-    [ "${t:-0}" -gt 0 ] 2>/dev/null || t=$(stat -c %Y "$status" 2>/dev/null) || t=
-    if [ -n "$t" ] && [ "$t" -gt 0 ] 2>/dev/null; then
-      if [ -z "$best" ] || [ "$t" -lt "$best" ]; then best=$t; fi
-    fi
-  fi
-  printf '%s' "$best"
-}
 
 # The fields every agent carries whether or not it has a pipeline, resolved
 # once so the two builders below cannot drift apart in how they read the fleet
@@ -719,12 +691,13 @@ agent_json() {  # <task-json>
 
   # The worker's own implementation phase, which no pipeline record describes
   # because it happens before the pipeline exists. Both ends are machine
-  # records: it starts when dispatch wrote the task's own meta file, and it ends
-  # when the daemon created the run for that branch. A task with no run yet is
-  # still building, and that is the ordinary state of most of a task's life.
+  # records: it starts at the dispatch time bin/fm-spawned-at-lib.sh reads, and
+  # it ends when the daemon created the run for that branch. A task with no run
+  # yet is still building, and that is the ordinary state of most of a task's
+  # life.
   #
-  # No readable meta mtime means the start is not known, and the step reports a
-  # status this renderer maps to unknown rather than to pending - "not started
+  # No readable dispatch time means the start is not known, and the step reports
+  # a status this renderer maps to unknown rather than to pending - "not started
   # yet" is a claim, and it is the wrong one for a worker that is demonstrably
   # running.
   # Only when the pipeline read succeeded. `collection.ok` false means the whole
@@ -732,7 +705,7 @@ agent_json() {  # <task-json>
   # every cell unknown on the strength of it; one step slipped in beside that
   # would be a fact reported inside a frame that says nothing is known.
   local built_at build_step build_active=''
-  built_at=$(spawned_at "$id" "$meta")
+  built_at=$(fm_spawned_at "$STATE_DIR" "$id")
   # A start later than the run it is supposed to precede is not a start. It
   # means every record of the real one has been rewritten since, so the length
   # of the building phase is not known and the cell says so rather than
