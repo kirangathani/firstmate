@@ -1064,10 +1064,12 @@ checks_failing=0
 checks_pending=0
 checks_unknown=0
 checks_exempted=0
-# The names actually excused, so the zero-checks refusal below can say which
-# check(s) it discounted rather than naming only the one that used to be
-# excusable.
-checks_exempted_names=
+# How the zero-checks refusal below names what it discounted, accumulated as the
+# refusal's own words rather than as bare check names. With only the attestation
+# check excused this is byte-identical to what that refusal said when the
+# attestation exemption was the only one, which is what keeps a base's own copy
+# of tests/fm-pr-merge.test.sh passing against this branch.
+checks_exempted_label=
 # Deferred rather than decided inside the loop: the exemption's authority is
 # resolved once, after the pass, and only if that named check turned out to be
 # failing at all. Its count is kept because a re-run can leave the same name in
@@ -1132,7 +1134,7 @@ if [ "$attestation_failing" -gt 0 ]; then
   resolve_attestation_exemption
   if [ -n "$ATTESTATION_AUTHORITY" ]; then
     checks_exempted=$((checks_exempted + attestation_failing))
-    checks_exempted_names="${checks_exempted_names:+$checks_exempted_names; }$ATTESTATION_CHECK_NAME"
+    checks_exempted_label="${checks_exempted_label:+$checks_exempted_label and }the exempted attestation check"
     attestation_banner "before the remaining gates"
   else
     # One line per occurrence, so the count in the refusal below still matches
@@ -1150,7 +1152,7 @@ fi
 if [ "$base_reverify_failing" -gt 0 ]; then
   if [ -n "$BASE_REVERIFY_AUTHORITY" ]; then
     checks_exempted=$((checks_exempted + base_reverify_failing))
-    checks_exempted_names="${checks_exempted_names:+$checks_exempted_names; }$BASE_REVERIFY_CHECK_NAME"
+    checks_exempted_label="${checks_exempted_label:+$checks_exempted_label and }the exempted base re-verification check"
     base_reverify_banner "before the remaining gates"
   else
     # One line per occurrence, for the same reason the attestation path does it:
@@ -1188,7 +1190,7 @@ if [ "$checks_evidence" -eq 0 ]; then
   if [ "$checks_total" -eq 0 ]; then
     zero_reason="the PR reports no checks at all"
   else
-    zero_reason="the PR's only check(s) were excused ones ($checks_exempted_names), so nothing on this PR actually verified the branch"
+    zero_reason="the PR's only check(s) were $checks_exempted_label, so nothing on this PR actually verified the branch"
   fi
   # TWO authorities satisfy an empty rollup, and they answer the same question -
   # is CI absent BY DECISION rather than broken? - at two different scopes. The

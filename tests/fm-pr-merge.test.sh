@@ -500,7 +500,7 @@ test_signed_ci_skip_satisfies_an_exempted_only_rollup() {
     || fail "ciskip-attest-only: the PR did not merge"
   assert_grep 'ATTESTATION CHECK EXEMPTED' "$case_dir/stderr" \
     "ciskip-attest-only: the attestation exemption was not disclosed"
-  assert_grep "rollup:          the PR's only check(s) were excused ones (PR must be raised via no-mistakes)" \
+  assert_grep "rollup:          the PR's only check(s) were the exempted attestation check" \
     "$case_dir/stderr" \
     "ciskip-attest-only: the disclosure did not distinguish this from a rollup that was empty outright"
   pass "a signed CI waiver satisfies a rollup left empty by discounting the exempted check"
@@ -2119,7 +2119,7 @@ test_exempted_check_alone_is_not_evidence_of_ci() {
   set -e
 
   expect_code 1 "$rc" "attest-only-check: an exempted check must not count as CI having reported"
-  assert_grep 'only check(s) were excused ones (PR must be raised via no-mistakes)' "$case_dir/stderr" \
+  assert_grep 'only check(s) were the exempted attestation check' "$case_dir/stderr" \
     "attest-only-check: the refusal did not explain that nothing verified the branch"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "attest-only-check: a PR whose only check was exempted was merged"
@@ -2197,6 +2197,8 @@ test_exempted_check_name_matches_the_workflow_job() {
 #   (b5) a run whose only findings were ungated unexecuted ones excuses nothing -
 #        those are assertions nothing verified, not decisions anybody made
 #   (b6) the excused name still equals the workflow job name that reports it
+#   (b7) both excusable checks over an empty-otherwise rollup still take the
+#        zero-checks refusal, and it names both
 
 # Written out here rather than read back out of the script, so this file is an
 # INDEPENDENT statement of the name and (b6) catches either side drifting from
@@ -2347,6 +2349,35 @@ test_ungated_unexecuted_findings_do_not_excuse_the_red_check() {
   pass "an ungated unexecuted finding excuses nothing at the base-re-verification check"
 }
 
+# Both excusable checks at once, over a rollup holding nothing else. Neither is
+# evidence that anything ran, so the zero-checks refusal takes the PR - and it
+# has to name BOTH, because its whole job is telling the captain what it
+# discounted. The attestation-only wording is unchanged, which is what keeps a
+# base's own copy of this file passing against this branch.
+test_two_exempted_checks_alone_are_not_evidence_of_ci() {
+  local case_dir rc
+  case_dir=$(make_stub_case base-reverify-both-exempt 0)
+  write_projects_registry "$case_dir" direct-PR
+  write_pr_checks "$case_dir" \
+    "$(attestation_failed_line)" \
+    "$(base_reverify_failed_line)"
+
+  set +e
+  run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/125 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "base-reverify-both-exempt: two excused checks must not count as CI having reported"
+  assert_grep 'only check(s) were the exempted attestation check and the exempted base re-verification check' "$case_dir/stderr" \
+    "base-reverify-both-exempt: the refusal did not name both checks it discounted"
+  assert_grep 'refusing to treat absent CI as green' "$case_dir/stderr" \
+    "base-reverify-both-exempt: the zero-checks refusal did not fire"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "base-reverify-both-exempt: a PR whose only checks were excused was merged"
+  pass "two excused checks are still not evidence, so a PR reporting nothing else refuses"
+}
+
 # The drift guard the exact-name match depends on, the same shape (x11) applies
 # to the attestation check.
 test_base_reverify_check_name_matches_the_workflow_job() {
@@ -2428,6 +2459,7 @@ test_another_red_check_refuses_under_the_base_reverification_exemption
 test_clean_local_run_excuses_a_stale_red_base_reverification
 test_ungated_unexecuted_findings_do_not_excuse_the_red_check
 test_base_reverify_check_name_matches_the_workflow_job
+test_two_exempted_checks_alone_are_not_evidence_of_ci
 test_signed_ci_skip_satisfies_zero_checks
 test_unsigned_ci_skip_does_not_satisfy_zero_checks
 test_signed_local_skip_does_not_satisfy_zero_checks
