@@ -496,13 +496,27 @@ attribute_models() {  # <actives-json> <sessions-json> <now-epoch>
 # The diagnosis is on STDOUT, not stderr. Stderr carries only the version-update
 # banner, which is written on every call including the ones that work, so a
 # reader that took stderr for the error would report a bare exit code forever.
-axi_read() {  # <project-path> <run-id>
-  ( cd "$1" 2>/dev/null && run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$2" 2>/dev/null )
+#
+# The two streams stay SEPARATE. Merging them with 2>&1 would put that banner
+# into the TOON that steps_json() parses, so stderr goes to a file the caller
+# names and is consulted only on the failure path, as a fallback for a future
+# failure mode that does write there.
+axi_read() {  # <project-path> <run-id> <stderr-file>
+  ( cd "$1" 2>/dev/null &&
+    run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$2" 2>"$3" )
 }
 
-# The first line the failed read printed, which is where its own words are.
-axi_error() {  # <output>
-  printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | head -1 | cut -c1-160
+# The failed read's own words: its first line of stdout, and failing that the
+# first line of stderr that is not the version-update banner.
+axi_error() {  # <stdout> <stderr-file>
+  local line
+  line=$(printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | head -1)
+  if [ -z "$line" ] && [ -s "$2" ]; then
+    line=$(sed 's/\x1b\[[0-9;]*m//g' "$2" 2>/dev/null |
+      grep -v -e '^[[:space:]]*$' -e 'version of no-mistakes' -e '^Run "no-mistakes update"' |
+      head -1)
+  fi
+  printf '%s' "$line" | cut -c1-160
 }
 
 # When this task's worker was dispatched, from the durable records dispatch
@@ -639,7 +653,9 @@ agent_json() {  # <task-json>
     rest=${rest#*|}
     run_updated=${rest%%|*}
     run_created=${rest##*|}
-    axi=$(axi_read "$project" "$run_id")
+    local axi_err
+    axi_err="${TMPDIR:-/tmp}/fm-flow-axi-err.$$.$id"
+    axi=$(axi_read "$project" "$run_id" "$axi_err")
     rc=$?
     if [ $rc -ne 0 ] || [ -z "$axi" ]; then
       # A failed or timed-out read is reported as such. It must NOT fall back to
@@ -656,14 +672,16 @@ agent_json() {  # <task-json>
         collect_reason="axi status not run: the project directory is missing ($project)"
       else
         local why
-        why=$(axi_error "$axi")
+        why=$(axi_error "$axi" "$axi_err")
         if [ -n "$why" ]; then
           collect_reason="axi status failed (exit $rc): $why"
         else
           collect_reason="axi status failed (exit $rc)"
         fi
       fi
-    else
+    fi
+    rm -f "$axi_err"
+    if [ "$collect_ok" = true ]; then
       steps=$(steps_json "$axi")
       actives=$(active_steps_json "$axi")
       [ -n "$pr_url" ] || pr_url=$(toon_field "$axi" pr)

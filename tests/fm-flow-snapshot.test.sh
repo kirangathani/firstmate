@@ -939,3 +939,29 @@ assert_not_contains "$reason" "A new version" \
 n=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .steps | length' "$DEADOUT")
 [ "$n" = 0 ] || fail "a failed read still emitted $n steps"
 pass "a failed read stays unreadable and says why in the command's own words"
+
+# stdout is where v1.37.0 puts its diagnosis, so stdout is read first. stderr is
+# the fallback for a failure mode that writes there instead, and the banner is
+# still not a diagnosis on that path either.
+ERRBIN=$(fm_fakebin "$TMP_ROOT/onlystderr")
+cat > "$ERRBIN/no-mistakes" <<SH
+#!/usr/bin/env bash
+set -u
+printf 'A new version of no-mistakes is available\n' >&2
+printf 'error: the daemon refused the connection\n' >&2
+exit 1
+SH
+chmod 755 "$ERRBIN/no-mistakes"
+
+reason=$( ( cd "$NOTAREPO" && PATH="$ERRBIN:$PATH" FM_HOME="$MODEL_HOME" \
+  FM_FLOW_SNAPSHOT_NOW_EPOCH=10000 \
+  FM_FLOW_SNAPSHOT_DB="$NM_DB" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/fleet.json" \
+  FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT="$TRANSCRIPTS" \
+  "$SNAPSHOT" --json --no-ci ) 2>/dev/null |
+  jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.reason')
+assert_contains "$reason" "the daemon refused the connection" \
+  "a failure that wrote only to stderr was reported as a bare exit code"
+assert_not_contains "$reason" "A new version" \
+  "the version banner was reported as the reason on the stderr path"
+pass "a failure that writes only to stderr still says why, and the banner is not the why"
