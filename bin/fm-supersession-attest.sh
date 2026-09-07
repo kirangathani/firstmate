@@ -14,13 +14,21 @@
 #                                                       head and publish the line
 #                                                       into its body
 #
-# WHAT THIS IS FOR. bin/fm-pr-merge.sh honours a captain-approved entry in
-# $FM_HOME/data/supersessions/<project>.md and lets the merge proceed. The
-# required check `Base assertions re-verified` re-runs the same base assertions
-# on a GitHub runner, cannot see that record, reports the same findings and goes
-# red - permanently, because the branch is not what is wrong. This script is how
-# the approval reaches CI: bin/fm-supersession-attest-lib.sh owns the wire it
-# travels on, and bin/fm-supersession-verify.sh is what reads it there.
+# WHAT THIS IS FOR, AND WHY IT IS OPTIONAL. bin/fm-pr-merge.sh honours a
+# captain-approved entry in $FM_HOME/data/supersessions/<project>.md and lets the
+# merge proceed. The required check `Base assertions re-verified` re-runs the same
+# base assertions on a GitHub runner, cannot see that record, reports the same
+# findings and goes red - permanently, because the branch is not what is wrong.
+# That red check NO LONGER BLOCKS THE MERGE: the merge gate excuses it from its
+# own local run of those same assertions, which is the run that read the approval
+# (its base-re-verification exemption owns that contract). So the captain's
+# approval lands the merge by itself: approval, entry, merge.
+# This script is for the separate and OPTIONAL job of making the PR's own check
+# go GREEN - for anyone who wants the PR's public record to show the approval, or
+# a repository whose branch protection is enforced outside firstmate's merge
+# path. bin/fm-supersession-attest-lib.sh owns the wire the approval travels on
+# and bin/fm-supersession-verify.sh is what reads it there. Nothing here is a
+# prerequisite for a merge, and running it changes no verdict the merge reaches.
 #
 # THE SECRET is the same MASTER key the CI waiver uses, at
 # $FM_HOME/config/ci-waiver-secret (local, gitignored, mode 0600, created by
@@ -288,6 +296,10 @@ case "$cmd" in
       echo "error: $GH_CMD is required to read the PR's current head commit" >&2
       exit 1
     }
+    command -v jq >/dev/null 2>&1 || {
+      echo "error: jq is required to build the PR body update (docs/configuration.md \"Toolchain\")" >&2
+      exit 1
+    }
     # Read rather than taken from the task's record: an attestation covers ONE
     # commit, and a recorded head is only as fresh as the last time it was
     # written. gh's raw JSON is used because gh-axi's pr view renders a summary
@@ -325,7 +337,15 @@ case "$cmd" in
       # simply stops verifying, exactly as a stale CI waiver line does, so there
       # is no reason to edit anything a human wrote.
       printf '\n%s\n' "$LINE" >> "$BODY_FILE"
-      if ! gh-axi pr edit "$PR_NUMBER" --repo "$PR_REPO_SLUG" --body-file "$BODY_FILE"; then
+      # The REST endpoint directly, rather than `gh pr edit` / `gh-axi pr edit`:
+      # those take the GraphQL path, which requests the deprecated projectCards
+      # field and fails outright on a repository that has classic projects
+      # enabled ("Projects (classic) is being deprecated", observed 2026-09-07 on
+      # kirangathani/firstmate). The PATCH edits exactly the body and touches
+      # nothing else. The body goes over stdin as JSON, never through argv, so a
+      # long description cannot hit an argument-size limit.
+      if ! jq -Rs '{body: .}' < "$BODY_FILE" \
+        | "$GH_CMD" api --method PATCH "repos/$PR_REPO_SLUG/pulls/$PR_NUMBER" --input - >/dev/null; then
         echo "error: the attestation line above is valid but could not be published into $PR_URL; add it to the body by hand" >&2
         exit 1
       fi
@@ -336,8 +356,11 @@ case "$cmd" in
     # ALL jobs, never --failed: the job that reads the body is the one that
     # already succeeded, so re-running only the failed one would re-read a
     # verdict taken before this line existed.
-    echo "next: re-run ALL jobs of the base re-verification (not --failed, which would"
-    echo "      reuse the attestation verdict taken before this line existed):"
+    echo "the merge does not wait for this: bin/fm-pr-merge.sh already excuses that"
+    echo "check from its own local run of the same assertions. To turn the PR's own"
+    echo "check green as well, re-run ALL jobs of the base re-verification (not"
+    echo "--failed, which would reuse the attestation verdict taken before this line"
+    echo "existed):"
     echo "  gh run rerun \$(gh run list --repo $PR_REPO_SLUG --workflow 'Base re-verification' --branch <the PR's branch> --limit 1 --json databaseId -q '.[0].databaseId')"
     ;;
 

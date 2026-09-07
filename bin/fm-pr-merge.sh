@@ -151,13 +151,17 @@
 #   - Only the captain approves an entry. There is no mechanical guarantee of
 #     this: nothing physically prevents another writer, and the required fields
 #     exist so a fabricated entry is visible rather than silent.
-#   - CI cannot read this record, and must not: it is private by design. An
-#     approval reaches the required `Base assertions re-verified` check as a
-#     captain-signed attestation carrying each entry's matching half and nothing
-#     else, so a finding is excused there exactly when it is excused here.
-#     bin/fm-supersession-attest.sh is how one is issued and
-#     bin/fm-supersession-attest-lib.sh owns its wire; neither changes anything
-#     in this grammar or in this gate.
+#   - CI cannot read this record, and must not: it is private by design. So the
+#     required `Base assertions re-verified` check re-runs the same assertions on
+#     a runner, reports the same findings, and stays red. The base-re-verification
+#     exemption below excuses exactly that, from THIS run's own local verdict, so
+#     a captain's approval lands the merge on its own - no line published into the
+#     PR, no CI re-run, no second decision.
+#     Turning that check itself green is a separate and OPTIONAL step for anyone
+#     who wants the PR's own record to read green: bin/fm-supersession-attest.sh
+#     publishes a captain-signed line carrying each entry's matching half and
+#     nothing else, and bin/fm-supersession-attest-lib.sh owns its wire. Neither
+#     changes anything in this grammar, in this gate, or in that exemption.
 #
 # Unexecuted findings and per-project enablement: check 2 reports
 # `unexecuted: <file>::<name>` for a base assertion it could not execute at all
@@ -261,8 +265,9 @@
 #     exists to tell apart stay indistinguishable. It remains an authority for
 #     the attestation exemption below, which asks a different question.
 #
-# The attestation exemption: the ONE check whose failure this gate may excuse,
-# and the only grant anywhere in this script. That check is
+# The attestation exemption, the FIRST of exactly TWO checks whose failure this
+# gate may excuse - the other is the base-re-verification exemption below, which
+# rests on a different authority and grants nothing here. That check is
 # `PR must be raised via no-mistakes`, the `check` job of that name in
 # .github/workflows/no-mistakes-required.yml. It fails on every PR the pipeline
 # did not raise, and firstmate itself authorizes exactly two ways for a PR to be
@@ -307,7 +312,8 @@
 #
 # WHAT IT DOES NOT GRANT, all enforced below:
 #   - Any OTHER failing check still refuses, including a second failing check on
-#     an otherwise-exempted PR.
+#     an otherwise-exempted PR. The one other excusable name is excused by its
+#     own authority below, never by this one.
 #   - A pending check still refuses. Only a COMPLETED failure of that one name is
 #     excusable, because "not finished yet" and "authorized to be red" are
 #     different states with different remedies.
@@ -323,6 +329,64 @@
 # Every merge that uses the exemption prints a loud banner naming the check and
 # the authority, before the gates and again on the line before the merge, on the
 # same model as the waiver banner below.
+#
+# The base-re-verification exemption: the SECOND and last check whose failure
+# this gate may excuse. That check is `Base assertions re-verified`, the
+# reverify-base job of that name in .github/workflows/reverify-base.yml. It
+# re-runs the base's own assertions on a GitHub runner, so it reports exactly
+# what the test-keep gate above reports - except that a runner cannot read the
+# captain's private approval record, so an approved supersession leaves it
+# permanently red with nothing the branch can push to fix it.
+# Without this exemption a captain's approval landed nothing by itself: it
+# cleared the test-keep gate and was then refused by the checks-green gate below,
+# and the merge additionally needed an attestation published into the PR body and
+# a full CI re-run before it could go (measured 2026-09-07 on PR 64: six further
+# minutes spent re-deciding a decision the captain had already made). That round
+# trip is what this removes.
+#
+# MATCHED BY EXACT NAME, on the same terms and in the same safe direction as the
+# attestation exemption above: a rename stops the exemption applying, so it can
+# only ever cost a merge and never grant one, and tests/fm-pr-merge.test.sh
+# asserts the constant still equals that workflow's job name.
+#
+# ITS AUTHORITY IS THIS RUN'S OWN LOCAL VERDICT, and nothing else. The test-keep
+# gate above ran the base's assertions HERE, minutes ago, against the same
+# branch, on the captain's machine - and it is the only runner that can read the
+# private approval record at all. So it is strictly the better evidence, and it
+# is evidence the PR cannot manufacture: a worker can neither run this gate nor
+# write the record it reads, which is the same test the attestation's own
+# authority is held to. Exactly two local verdicts excuse the red check, and both
+# are read off counts the decision rule above has already produced:
+#   - EVERY COUNTED FINDING WAS EXCUSED by a captain-approved entry: excused > 0,
+#     with no unexcused finding (there cannot be one, or this run refused above).
+#     The approval is precisely the decision the red check is asking about, and
+#     the banner names each entry it covered.
+#   - THE LOCAL RUN FOUND NOTHING AT ALL: exit 0, no finding line. The two runs
+#     then disagree, and the local one is both fresher and measured against the
+#     base as it is now, which is the staleness re-running that workflow exists
+#     to clear.
+# Nothing else grants it, and that deliberately includes a run whose only
+# findings were unexecuted ones this project does not gate: those are assertions
+# nothing verified rather than decisions anybody made, so they may not excuse a
+# check that is reporting the same thing.
+#
+# WHAT IT DOES NOT GRANT is the attestation exemption's list unchanged, read
+# against this name: any other failing check still refuses, a PENDING check of
+# this name still refuses, an unclassifiable one still refuses, and an excused
+# check is not evidence that anything ran, so a rollup holding nothing else takes
+# the zero-checks refusal above. There is no override flag, and yolo is not one.
+# A red `Base assertions re-verified` with no covering local verdict refuses
+# exactly as it did before this existed.
+# Every merge that uses it prints a banner naming the check, the entries that
+# excused it, and that every other check must still be green, before the
+# remaining gates and again on the line before the merge.
+#
+# WHY IT IS NOT IN bin/fm-attestation-lib.sh with the other one: that file exists
+# so the read-only fleet pipeline view can reach the same verdict this gate does
+# without a second copy. This verdict cannot be reached without running the
+# base's own test files, which is the dominant cost of landing a PR, and a view
+# redrawn on a timer must never pay it. So this one is merge-time only, and the
+# view keeps showing the check as failing until the merge decides otherwise.
 #
 # Testing-waiver disclosure: when the task was dispatched with a testing skip
 # (bin/fm-spawn.sh's --local-skip / --ci-skip / --all-testing-skip), this script
@@ -518,6 +582,55 @@ EOF_AUTH
     echo "                   unreadable check still refuses, and the base's own test"
     echo "                   assertions still gate this merge. Only the check named"
     echo "                   above was excused, matched by its exact name."
+    echo "================================================================================"
+  } >&2
+}
+
+# --- the base-re-verification exemption (contract in this script's header) ----
+# The second and last excusable check name. It lives here rather than in
+# bin/fm-attestation-lib.sh with the other one because its authority is THIS
+# run's own test-keep verdict, which costs the base's whole test suite to
+# produce; the read-only view that shares that library is redrawn on a timer and
+# must never pay it.
+BASE_REVERIFY_CHECK_NAME='Base assertions re-verified'
+
+# Non-empty only once the test-keep gate above has produced a verdict that
+# excuses that check, which happens before the rollup is read - so unlike the
+# attestation exemption there is nothing to resolve lazily and no cost to defer.
+BASE_REVERIFY_AUTHORITY=
+# The identifiers the record actually excused, newline-delimited, so the banner
+# names the entries rather than only their count. Empty for the no-findings
+# authority, which excused no entry because there was none.
+BASE_REVERIFY_ENTRIES=
+
+base_reverify_banner() {  # <where>
+  [ -n "$BASE_REVERIFY_AUTHORITY" ] || return 0
+  local line
+  {
+    echo "================================================================================"
+    # States what was EXCUSED, not what the merge will do: this prints ahead of
+    # the remaining refusals too (same reason the attestation banner does).
+    echo "BASE RE-VERIFICATION EXEMPTED ($1): one FAILING PR check was excused."
+    echo "  task:            $ID"
+    echo "  check:           $BASE_REVERIFY_CHECK_NAME"
+    echo "  why it is red:   that check re-runs the base's own assertions on a GitHub"
+    echo "                   runner, which cannot read the captain's private approval"
+    echo "                   record, so it reports findings this merge has already"
+    echo "                   settled and nothing the branch can push would clear it."
+    echo "  authority:       $BASE_REVERIFY_AUTHORITY"
+    if [ -n "$BASE_REVERIFY_ENTRIES" ]; then
+      echo "  excused here:"
+      while IFS= read -r line; do
+        [ -n "$line" ] && echo "                   - $line"
+      done <<EOF_ENTRIES
+$BASE_REVERIFY_ENTRIES
+EOF_ENTRIES
+    fi
+    echo "  still enforced:  every OTHER check must be green, no check may be pending, an"
+    echo "                   unreadable check still refuses, and the base's own test"
+    echo "                   assertions still gate this merge - running them here is what"
+    echo "                   excused this one. Only the check named above was excused,"
+    echo "                   matched by its exact name."
     echo "================================================================================"
   } >&2
 }
@@ -884,6 +997,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   fi
   if supersession_approved "$ident" "$finding_class"; then
     excused=$((excused + 1))
+    BASE_REVERIFY_ENTRIES="$BASE_REVERIFY_ENTRIES$ident ($finding_class)"$'\n'
     echo "note: captain-approved supersession covers: $ident ($finding_class)" >&2
   else
     unexcused=$((unexcused + 1))
@@ -917,6 +1031,17 @@ if [ "$excused" -gt 0 ]; then
   echo "note: all $excused counted base assertion finding(s) are covered by captain-approved supersession entries in $SUPERSESSIONS_FILE; proceeding" >&2
 fi
 
+# The base-re-verification exemption's authority, decided here because here is
+# where the local verdict exists (header contract). Only these two verdicts, in
+# this order: a run that excused every counted finding, or a run that found none
+# at all. A run whose only findings were ungated unexecuted ones reaches neither,
+# and grants nothing.
+if [ "$excused" -gt 0 ]; then
+  BASE_REVERIFY_AUTHORITY="all $excused counted base-assertion finding(s) were covered by captain-approved entries in $SUPERSESSIONS_FILE, read and applied by this merge"
+elif [ "$kept_rc" -eq 0 ]; then
+  BASE_REVERIFY_AUTHORITY="the base's own assertions were just re-run here against this branch and reported no finding at all, so the runner's red result is the staler of the two readings"
+fi
+
 # --- checks-green gate (classification table and zero-checks contract in this
 # --- script's header) ---------------------------------------------------------
 # The rollup read and its classification live in bin/fm-pr-lib.sh so this gate
@@ -940,6 +1065,12 @@ fi
 # authority is resolved once below, after the pass, and only if that named check
 # turned out to be failing at all. The count is kept because a re-run can leave
 # the same name in the rollup more than once.
+# This gate's SECOND excusable name is diverted below instead, out of the
+# collected failing names, because that argument carries one name and its
+# diverted count is what attestation_failing is taken from. Excusal is the
+# caller's own policy either way: bin/fm-pr-lib.sh's header states that those
+# functions decide nothing and that the two callers legitimately differ about
+# what they excuse.
 fm_pr_rollup_classify "$FM_PR_ROLLUP_TSV" "$ATTESTATION_CHECK_NAME"
 checks_total=$FM_PR_ROLLUP_TOTAL
 # The classifier splits a check that reached a no verdict from one that never
@@ -952,11 +1083,34 @@ checks_failing=$((FM_PR_ROLLUP_FAILING + FM_PR_ROLLUP_INFRA))
 checks_pending=$FM_PR_ROLLUP_PENDING
 checks_unknown=$FM_PR_ROLLUP_UNKNOWN
 checks_exempted=0
+# How the zero-checks refusal below names what it discounted, accumulated as the
+# refusal's own words rather than as bare check names. With only the attestation
+# check excused this is byte-identical to what that refusal said when the
+# attestation exemption was the only one, which is what keeps a base's own copy
+# of tests/fm-pr-merge.test.sh passing against this branch.
+checks_exempted_label=
 attestation_failing=$FM_PR_ROLLUP_EXEMPT_FAILING
+# The second excusable name, diverted out of the collected names by EXACT
+# equality on the same terms - so a renamed job falls straight through to the
+# ordinary refusal, and a rename can only ever cost a merge. It is deferred the
+# same way and counted the same way, because a re-run can leave the same name in
+# the rollup more than once. Both shapes a failure can take are diverted, so an
+# excused check cannot come back as an infrastructure finding either.
+base_reverify_failing=0
 while IFS= read -r ck_name; do
+  if [ "$ck_name" = "$BASE_REVERIFY_CHECK_NAME" ]; then
+    base_reverify_failing=$((base_reverify_failing + 1))
+    checks_failing=$((checks_failing - 1))
+    continue
+  fi
   echo "error: PR check is failing: $ck_name" >&2
 done < <(fm_pr_rollup_each "$FM_PR_ROLLUP_FAILING_NAMES")
 while IFS= read -r ck_name; do
+  if [ "$ck_name" = "$BASE_REVERIFY_CHECK_NAME" ]; then
+    base_reverify_failing=$((base_reverify_failing + 1))
+    checks_failing=$((checks_failing - 1))
+    continue
+  fi
   echo "error: PR check is failing: $ck_name" >&2
 done < <(fm_pr_rollup_each "$FM_PR_ROLLUP_INFRA_NAMES")
 while IFS= read -r ck_name; do
@@ -969,7 +1123,8 @@ done < <(fm_pr_rollup_each "$FM_PR_ROLLUP_UNKNOWN_NAMES")
 if [ "$attestation_failing" -gt 0 ]; then
   resolve_attestation_exemption
   if [ -n "$ATTESTATION_AUTHORITY" ]; then
-    checks_exempted=$attestation_failing
+    checks_exempted=$((checks_exempted + attestation_failing))
+    checks_exempted_label="${checks_exempted_label:+$checks_exempted_label and }the exempted attestation check"
     attestation_banner "before the remaining gates"
   else
     # One line per occurrence, so the count in the refusal below still matches
@@ -981,6 +1136,25 @@ if [ "$attestation_failing" -gt 0 ]; then
       echo "error: PR check is failing: $ATTESTATION_CHECK_NAME" >&2
     done
     echo "error: that check can only be excused by a captain-authorized testing skip carrying this home's own signature, or by the project being registered as direct-PR; neither applies here (contract in this script's header)" >&2
+  fi
+fi
+
+if [ "$base_reverify_failing" -gt 0 ]; then
+  if [ -n "$BASE_REVERIFY_AUTHORITY" ]; then
+    checks_exempted=$((checks_exempted + base_reverify_failing))
+    checks_exempted_label="${checks_exempted_label:+$checks_exempted_label and }the exempted base re-verification check"
+    base_reverify_banner "before the remaining gates"
+  else
+    # One line per occurrence, for the same reason the attestation path does it:
+    # a re-run can leave the same name in the rollup twice, and the count in the
+    # refusal below must match the checks named above it.
+    base_reverify_seen=0
+    while [ "$base_reverify_seen" -lt "$base_reverify_failing" ]; do
+      base_reverify_seen=$((base_reverify_seen + 1))
+      checks_failing=$((checks_failing + 1))
+      echo "error: PR check is failing: $BASE_REVERIFY_CHECK_NAME" >&2
+    done
+    echo "error: that check can only be excused by this merge's own local re-run of the base's assertions, and only when that run found nothing or every counted finding it did find was covered by a captain-approved entry in $SUPERSESSIONS_FILE; neither applies here (contract in this script's header)" >&2
   fi
 fi
 
@@ -1006,7 +1180,7 @@ if [ "$checks_evidence" -eq 0 ]; then
   if [ "$checks_total" -eq 0 ]; then
     zero_reason="the PR reports no checks at all"
   else
-    zero_reason="the PR's only check(s) were the exempted attestation check, so nothing on this PR actually verified the branch"
+    zero_reason="the PR's only check(s) were $checks_exempted_label, so nothing on this PR actually verified the branch"
   fi
   # TWO authorities satisfy an empty rollup, and they answer the same question -
   # is CI absent BY DECISION rather than broken? - at two different scopes. The
@@ -1035,6 +1209,7 @@ fi
 # lost above a long gate log.
 waiver_banner "MERGING NOW"
 attestation_banner "MERGING NOW"
+base_reverify_banner "MERGING NOW"
 ci_skip_zero_check_banner "MERGING NOW"
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
