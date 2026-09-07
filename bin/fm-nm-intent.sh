@@ -11,7 +11,10 @@
 #
 # The source of truth is the `# Task` section of the task's own brief at
 # data/<task-id>/brief.md - the exact text firstmate wrote when it dispatched the
-# work. Nothing else is consulted; there is no second place to keep in sync.
+# work, plus the `## Gate decisions` subsection that bin/fm-nm-decision.sh writes
+# into that same section as decisions are made, so the goal this prints stays the
+# DECIDED goal. Nothing else is consulted; there is no second place to keep in
+# sync.
 #
 # The WHOLE Task section is emitted, acceptance criteria and constraints
 # included, not just its first paragraph. That is deliberate: no-mistakes' final

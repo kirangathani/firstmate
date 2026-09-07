@@ -1,7 +1,7 @@
 # Carrying worker context into no-mistakes gate agents
 
 This document is the authoritative human-readable contract for the three mechanisms that carry a crewmate's own context through a no-mistakes run.
-`bin/fm-fix-instructions-policy.mjs` owns the fix-round refusal decision, `bin/fm-fix-instructions-check.sh` is only its harness transport, `bin/fm-nm-intent.sh` owns the run intent string, and `bin/fm-nm-decision.sh` owns the durable gate-decision record.
+`bin/fm-fix-instructions-policy.mjs` owns the fix-round refusal decision, `bin/fm-fix-instructions-check.sh` is only its harness transport, `bin/fm-nm-intent.sh` owns the run intent string, and `bin/fm-nm-decision.sh` owns the durable gate-decision record and the amendment that carries each decision into that intent.
 `bin/fm-brief.sh` is the one place that instructs a worker to use all three.
 
 ## The problem
@@ -138,6 +138,7 @@ If the flag is ever removed or fails to apply, this section and the enforcement'
 
 `bin/fm-nm-intent.sh` is the ONE owner of the `--intent` string.
 It prints the `# Task` section of `data/<task-id>/brief.md`, whitespace-normalized to a single line.
+That section includes the `## Gate decisions` subsection Part C writes into it, so the intent tracks the decided goal rather than the goal as first dispatched.
 Nothing else is consulted, so there is no second copy to keep in sync.
 
 The generated no-mistakes ship brief instructs the worker to start every run with:
@@ -158,27 +159,45 @@ That is deliberate: the pipeline's final review step scores the diff against the
 It refuses loudly (exit 1, nothing on stdout) when the brief is missing, has no `# Task` section content, or still carries an unreplaced `{TASK}` placeholder.
 A silent empty intent would be worse than a stop.
 
-## Part C: recorded decisions must survive the run
+## Part C: a gate decision amends the pinned intent
 
 Upstream issue #591 documents this sequence on `v1.40.0`: an operator answered three ask-user findings through the supported `--action fix` path with guidance in `--instructions` and no `--yes`; the gate recorded them resolved and applied them; a later step's auto-fix in the same run reverted all three and added a contract test pinning one reversal in place; the pipeline's final review step then passed with 0 findings and reported the PR ready.
 
 The reporter's diagnosis, which firstmate takes as the design fact: decisions recorded at a gate are treated as input to the step that raised them, not as constraints on later steps, and the final review evaluates against `--intent`, which was written before any decision existed and therefore always describes the pre-decision state.
-The pipeline self-certified a state that contradicted three explicit decisions.
-It was caught only because the driving agent diffed by hand rather than trusting `checks-passed`.
 
-no-mistakes is third-party and this fleet does not own its source, and the standing captain ruling is not to change it, so the guard is firstmate-side.
+The stale `--intent` is the root cause, and it costs more than the reverted-decision case that exposed it.
+A run scored against a goal the captain has since changed can fail code that correctly matches the DECIDED goal, which is the more expensive half: the pipeline then spends fix rounds undoing a decision the captain made.
+So the fix moves the intent rather than auditing the diff after the fact.
+
 `bin/fm-nm-decision.sh` owns the durable record at `data/<task-id>/decisions.md`, alongside the task's brief and report, so it survives worktree teardown the same way they do.
+Its `record` action writes each decision into the `# Task` section of `data/<task-id>/brief.md`, under a `## Gate decisions` subsection, as one `- <finding> [<key>]: <requires>` line.
+`bin/fm-nm-intent.sh` emits that whole section and stays the one owner of the intent string, so the amendment reaches the pipeline on the very next call with no second reader and nothing to keep in sync.
+Re-recording the same key rewrites its line and its record block rather than duplicating either, so a revised decision leaves exactly one current statement of itself in both places.
+`record` refuses when the brief is missing or has no `# Task` section, and writes nothing at all in that case, because a decision recorded into the record but not into the intent is exactly the drift this removes.
 
-The generated ship brief requires the worker to:
+The subsection carries no HTML marker, unlike the machine-written regions in `bin/fm-brief.sh`.
+The heading is the anchor instead, because `bin/fm-nm-intent.sh` emits this text verbatim into `--intent`, where a marker would be noise the pipeline's own review has to read past.
+
+The generated ship brief then requires the worker to:
 
 1. `record` each decision at the moment it is submitted, with the finding id, the decision key, and what the decision required in concrete, checkable terms.
-2. `verify` each one against the FINAL diff before reporting a PR ready, with the file:line or commit that proves it still holds, and state that verification explicitly in the completion report.
-3. Mark a reverted decision `reverted` and STOP: append a blocked line naming the decision and the reverting commit, never report done, and never re-fix it alone.
-4. Pass `check` before reporting done. It exits 0 only when every recorded decision is `satisfied`, and refuses while any is `pending` or `contradicted`. A task with no recorded decisions passes, because a run with no gate decisions has nothing to survive.
+2. Start a fresh run with the same pinned-intent command once a run in which any decision was recorded reaches its outcome.
+   That run's review is the mechanical proof that the branch and the decided goal agree, and it is also the only thing that re-reviews whatever the later auto-fix steps (test, document, lint) changed.
+3. Pass `rerun-check` before reporting done.
+   It exits 0 only when every recorded decision was recorded during a run older than the most recent one, and exits 1 both when a decision is still waiting for that re-run and when the current run id cannot be read at all.
 
-The record is append-mostly: `verify` and `reverted` rewrite only the state and evidence lines of the named decision, never its `requires` text, so what a decision demanded cannot be edited after the fact to match what shipped.
+`record` stores the no-mistakes run id current at the moment of recording, read from `no-mistakes axi status`, and `rerun-check` compares it against the current one.
+Run ids are unique per run, so "the run I was recorded during is still the most recent run" is exactly "no fresh run has scored this branch since".
+No timestamp is parsed and no run ordering is inferred.
 
-The brief states explicitly that **`checks-passed` alone is not evidence that a decision survived**, because that assumption is exactly what the upstream failure exploited.
+**The exposure this leaves open.** `rerun-check` is a command the worker runs, so a worker that never runs it, or that reports done without it, is not stopped by anything here.
+Nothing else in the pipeline re-reviews what the later auto-fix steps changed either, so that gap is the same gap it always was, merely narrower.
+The residual case inside the check is a decision recorded while `no-mistakes axi status` was unreadable: it is stored as `run: unknown`, and `rerun-check` names it as unconfirmed on stderr rather than refusing, because refusing would leave the worker with nothing that could clear it.
+
+`verify`, `reverted` and `check` remain, downgraded to optional diagnostics that nothing blocks on.
+They are the earlier design, when the guard was a hand audit of the final diff before reporting a PR ready; that audit is now the fresh run's review, and the generated brief no longer asks for it.
+They are still useful when investigating a suspect run by hand, so they were kept rather than deleted.
+`verify` and `reverted` rewrite only the state and evidence lines of the named decision, never its `requires` text, so what a decision demanded cannot be edited after the fact to match what shipped.
 
 ## Validation
 
@@ -187,7 +206,7 @@ The Claude, Codex and Grok hooks are proven end to end by executing the exact co
 The OpenCode plugin and Pi extension are proven end to end by importing the generated file in Node and invoking the generated blocking callback, again both ways.
 The Grok global hook is additionally proven inert for a workspace with no token pointer and for one whose pointer names an unregistered token.
 
-`tests/fm-nm-gate-context.test.sh` owns the intent owner, the decision record lifecycle, and the generated brief's contract.
+`tests/fm-nm-gate-context.test.sh` owns the intent owner, the decision record lifecycle, the intent amendment and its re-run gate, and the generated brief's contract.
 
 No harness binary was spawned by either suite.
 **Live per-harness hook-loading was not confirmed for Codex, OpenCode, Pi, or Grok.**
