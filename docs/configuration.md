@@ -301,6 +301,15 @@ Fleet-local operational facts and gotchas live locally in `data/learnings.md`; i
 The file is created lazily on first learning and follows the same dated, evidence-backed, curated style as `data/captain.md`: inspect the current file first, then rewrite or prune stale entries instead of appending forever.
 There is no shared learnings file by captain decision.
 
+## Task timeline ledger (data/timeline.tsv)
+
+One tab-separated line per finished ship task, recording how long it took from dispatch to merged PR and how long each stage in between took; it is gitignored, append-only, and created lazily on the first teardown after this feature landed.
+`bin/fm-teardown.sh` appends the row through `bin/fm-timeline.sh record`, before it removes the records the row is made of and after every refusal gate; a failed write is reported and never blocks cleanup.
+`bin/fm-timeline.sh`'s header is the single owner of the column list, of what wall, active and parked time each column means, and of which source fills it.
+Each row also records the captain's testing skips as `local_skip`/`ci_skip` and, in `skipped_stages`, which pipeline stages did not run and by whose authority; `bin/fm-flow-tui.mjs`'s `LOCAL_SKIP_STAGES` owns which stages each authority removes, and `tests/fm-timeline.test.sh` fails if the ledger's mirror of that set ever drifts from it.
+Read it back with `bin/fm-timeline.sh report [--last N]`, which prints the ledger and, per project, the median launch-to-merge and per-stage times over two comparable windows.
+Those medians keep rows that skipped something in their own displayed bucket, so a journey that is faster because it skipped six stages is never folded in and read as an improvement.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
