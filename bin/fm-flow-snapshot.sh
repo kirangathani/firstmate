@@ -67,6 +67,14 @@
 #   FM_FLOW_SNAPSHOT_FLEET_JSON   consume this file instead of running
 #                                 bin/fm-fleet-snapshot.sh. Tests use it to feed
 #                                 a recorded fleet document.
+#   FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT  override the Claude Code transcript root
+#                                 (default $HOME/.claude/projects), which is
+#                                 where the agents the pipeline launches record
+#                                 the model they actually ran on. Tests point
+#                                 this at a fixture tree.
+#   FM_FLOW_SNAPSHOT_TRANSCRIPT_TAIL  bytes of a transcript read from the end
+#                                 before falling back to the whole file
+#                                 (default 262144)
 #
 # Exit codes: 0 snapshot emitted, 1 a dependency or the fleet read failed,
 # 2 usage error. A per-agent collection failure is NOT an error: it is reported
@@ -84,6 +92,8 @@ NM_TIMEOUT=${FM_FLOW_SNAPSHOT_NM_TIMEOUT:-10}
 GH_TIMEOUT=${FM_FLOW_SNAPSHOT_GH_TIMEOUT:-20}
 STATE_TIMEOUT=${FM_FLOW_SNAPSHOT_STATE_TIMEOUT:-15}
 NM_DB=${FM_FLOW_SNAPSHOT_DB:-$HOME/.no-mistakes/state.sqlite}
+TRANSCRIPT_ROOT=${FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT:-$HOME/.claude/projects}
+TRANSCRIPT_TAIL=${FM_FLOW_SNAPSHOT_TRANSCRIPT_TAIL:-262144}
 
 WANT_CI=1
 ONLY_TASK=
@@ -91,6 +101,7 @@ INCLUDE_DEAD=0
 
 usage() {
   sed -n '2,74p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,80p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -159,11 +170,14 @@ run_bounded() {  # <seconds> <command...>
 # The worker cannot forge this row. That is the whole point of reading it here
 # instead of having each crewmate report its own run id, which would be the
 # checked entity producing the thing being checked.
-run_index() {  # <project-path> <branch> -> "<id>|<status>|<updated_at>" or empty
+run_index() {  # <project-path> <branch> -> "<id>|<status>|<updated_at>|<created_at>" or empty
   [ -f "$NM_DB" ] || return 0
   command -v sqlite3 >/dev/null 2>&1 || return 0
+  # created_at is read as well as updated_at because it is the one machine
+  # record of WHEN the pipeline took over from the worker, which is what ends
+  # the building step. `no-mistakes axi status` states no such time.
   sqlite3 "file:$NM_DB?mode=ro" \
-    "SELECT r.id, r.status, r.updated_at
+    "SELECT r.id, r.status, r.updated_at, r.created_at
        FROM runs r JOIN repos p ON p.id = r.repo_id
       WHERE p.working_path = '$(printf '%s' "$1" | sed "s/'/''/g")'
         AND r.branch = '$(printf '%s' "$2" | sed "s/'/''/g")'
@@ -381,6 +395,196 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
       }'
 }
 
+# Which model is pushing ONE PIPELINE STEP through, which is a different
+# question from which model the task worker runs: the pipeline launches its own
+# review, test, document and fix agents, and nothing in the task's own record
+# says what it launched them as.
+#
+# The only machine record of what ACTUALLY ran is the transcript Claude Code
+# writes from the run's own worktree, under a directory whose name ends in the
+# run's ULID. `~/.no-mistakes/config.yaml` is deliberately NOT read: it states
+# what the NEXT run will use, so a run already under way on a different model
+# would be labelled with a model it is not using, which is exactly the guess
+# this field exists to replace.
+session_pick() {  # <jsonl on stdin> -> {model, effort}, or nothing
+  # A tail chunk starts mid-line, and `fromjson?` discards that partial record
+  # rather than this having to guess where the first whole line begins.
+  #
+  # A "<synthetic>" model is Claude Code's own placeholder for a turn no model
+  # produced, and it is frequently the NEWEST assistant record in a file, so a
+  # reader that simply took the last one would report it as the model.
+  jq -sR '
+    split("\n") | map(fromjson?)
+    | map(select(.type == "assistant"
+                 and (.message.model // "") != ""
+                 and .message.model != "<synthetic>"))
+    | last
+    | if . == null then empty
+      else {
+        model: .message.model,
+        effort: (if (.effort // "") == "" then null else .effort end)
+      } end'
+}
+
+# Every session transcript this run wrote, as {start, model, effort}. `start` is
+# the epoch of the file's FIRST record, which is when the pipeline launched that
+# agent; it is what attributes a session to the step that was active at the
+# time. These files reach tens of megabytes, so only the last TRANSCRIPT_TAIL
+# bytes are parsed, and the whole file only when that chunk holds no assistant
+# record at all.
+sessions_json() {  # <run-id> -> [ {start, model, effort} ]
+  local run_id=$1 dir f ts start pick out='[]'
+  [ -n "$run_id" ] || { printf '[]'; return 0; }
+  for dir in "$TRANSCRIPT_ROOT"/*-"$run_id"; do
+    [ -d "$dir" ] || continue
+    for f in "$dir"/*.jsonl; do
+      [ -f "$f" ] || continue
+      ts=$(head -1 "$f" | jq -r '.timestamp // empty' 2>/dev/null) || ts=
+      [ -n "$ts" ] || continue
+      start=$(date -u -d "$ts" +%s 2>/dev/null) || continue
+      pick=$(tail -c "$TRANSCRIPT_TAIL" "$f" | session_pick)
+      [ -n "$pick" ] || pick=$(session_pick < "$f")
+      [ -n "$pick" ] || continue
+      out=$(printf '%s' "$out" | jq -c --argjson s "$start" --argjson p "$pick" \
+        '. + [$p + {start: $s}]')
+    done
+    break
+  done
+  printf '%s' "$out"
+}
+
+# Attribute a session to a step by its start time falling inside that step's
+# active window - the step has been active for `active_ms`, so the window is
+# the last `active_ms` of it - and hang the model on the step.
+#
+# A step's own agent and any subagent it spawned all start inside that window,
+# so several sessions matching is the ordinary case rather than a fault. They
+# are one answer while they agree; where they DISAGREE the attribution is
+# genuinely ambiguous and the model is emitted as null, which the renderer draws
+# as a dash. No session in the window is null for the same reason: the run-level
+# value would be a guess about a different step.
+# Which steps launch an agent at all, which is what decides whether the model
+# question is even asked of a cell. The rest - rebase, lint, push, pr, ci - are
+# the pipeline's own shell work, and a dash under one of those would read as
+# "nobody recorded which model" where the truth is that no model is involved.
+#
+# Evidence, run 01M1VAGQM160X68A8GQS5YND1Z on this host, 2026-09-07: it
+# completed all nine steps and left exactly five session transcripts behind, one
+# per agent the pipeline launched - the four steps below plus a fix round, which
+# reuses its own step's name rather than adding a tenth.
+NM_AGENT_STEPS='["intent","review","test","document"]'
+
+attribute_models() {  # <actives-json> <sessions-json> <now-epoch>
+  printf '%s' "$1" | jq -c --argjson ss "$2" --argjson now "$3" \
+    --argjson agentsteps "$NM_AGENT_STEPS" '
+    def agreed(f): (map(f) | unique) as $u
+      | if ($u | length) == 1 then $u[0] else null end;
+    map(
+      . as $a
+      | if ($agentsteps | index($a.step)) == null then $a
+        else
+          (if ($a.active_ms // null) == null then []
+           else ($ss | map(select(.start >= ($now - (($a.active_ms / 1000) | floor)))))
+           end) as $c
+          | $a + (if ($c | length) == 0
+                  then {model: null, effort: null}
+                  else ($c | {model: agreed(.model), effort: agreed(.effort)})
+                  end)
+        end
+    )' 2>/dev/null || printf '%s' "$1"
+}
+
+# `no-mistakes axi status --run <id>` resolves the repository from the CURRENT
+# WORKING DIRECTORY, not from the run id it is handed. The run id scopes WHICH
+# run inside that repository; it does not say which repository.
+#
+# So the command inherits whatever directory the captain happened to run
+# bin/fm-flow.sh from, and from anywhere outside a git repository it fails on
+# every task that has a run at all. Verified on this host, 2026-09-07, against
+# a real completed run:
+#
+#   cd ~                          exit 1, "error: repo not initialized"
+#   cd /tmp                       exit 1, "error: not in a git repository"
+#   cd <the project>              exit 0, the run's TOON
+#
+# That is what the captain saw as `unreadable: axi status failed (exit 1)` on
+# every row at once, from a view opened in the home directory.
+#
+# The task's own recorded project path is the repository the run belongs to -
+# it is the same value the run index above is keyed on - so the read is done
+# from there. The subshell keeps the change local: this collector reads several
+# tasks in one pass and must not carry one task's directory into the next.
+#
+# The diagnosis is on STDOUT, not stderr. Stderr carries only the version-update
+# banner, which is written on every call including the ones that work, so a
+# reader that took stderr for the error would report a bare exit code forever.
+#
+# The two streams stay SEPARATE. Merging them with 2>&1 would put that banner
+# into the TOON that steps_json() parses, so stderr goes to a file the caller
+# names and is consulted only on the failure path, as a fallback for a future
+# failure mode that does write there.
+# The directory change is a precondition to satisfy, not a lookup key: the
+# daemon does not scope `--run` to the resolved repository, so a run id read
+# from any gated directory returns that run. A recorded project that no longer
+# exists is therefore not a reason to refuse the read - there is nothing better
+# to do than run where we already are, which is exactly what this did before and
+# is no worse. What it must never do is `cd` nowhere silently and call that the
+# project, so the two cases are written out rather than leaning on `cd ... ||`.
+axi_read() {  # <project-path> <run-id> <stderr-file>
+  if [ -d "$1" ]; then
+    ( cd "$1" && run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$2" 2>"$3" )
+  else
+    run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$2" 2>"$3"
+  fi
+}
+
+# The failed read's own words: its first line of stdout, and failing that the
+# first line of stderr that is not the version-update banner.
+axi_error() {  # <stdout> <stderr-file>
+  local line
+  line=$(printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | head -1)
+  if [ -z "$line" ] && [ -s "$2" ]; then
+    line=$(sed 's/\x1b\[[0-9;]*m//g' "$2" 2>/dev/null |
+      grep -v -e '^[[:space:]]*$' -e 'version of no-mistakes' -e '^Run "no-mistakes update"' |
+      head -1)
+  fi
+  printf '%s' "$line" | cut -c1-160
+}
+
+# When this task's worker was dispatched, from the durable records dispatch
+# creates and to the second. There is no recorded spawn timestamp to read, so
+# the file times are the record, and the EARLIEST of them is the answer:
+#
+#   state/<id>.meta    written whole by bin/fm-spawn.sh at dispatch, and
+#                      REWRITTEN whole by bin/fm-pr-check.sh when a PR is
+#                      recorded, which moves its modification time to long after
+#                      the phase this measures. Nothing ever appends to it, so
+#                      its modification time is the only time it has.
+#   state/<id>.status  created by the worker's first status append and only ever
+#                      appended to afterwards. Its BIRTH time is therefore the
+#                      durable anchor - it survives the rewrite above and every
+#                      later append - and its modification time stands in where
+#                      the filesystem records no birth time.
+#
+# Nothing is invented: if neither file yields a time, this emits nothing and the
+# building step reports unknown rather than a guessed start.
+spawned_at() {  # <task-id> <meta-path> -> epoch seconds, or empty
+  local id=$1 meta=$2 status t best=
+  status="$STATE_DIR/$id.status"
+  if [ -e "$meta" ]; then
+    t=$(stat -c %Y "$meta" 2>/dev/null) || t=
+    [ -z "$t" ] || best=$t
+  fi
+  if [ -e "$status" ]; then
+    t=$(stat -c %W "$status" 2>/dev/null) || t=0
+    [ "${t:-0}" -gt 0 ] 2>/dev/null || t=$(stat -c %Y "$status" 2>/dev/null) || t=
+    if [ -n "$t" ] && [ "$t" -gt 0 ] 2>/dev/null; then
+      if [ -z "$best" ] || [ "$t" -lt "$best" ]; then best=$t; fi
+    fi
+  fi
+  printf '%s' "$best"
+}
+
 # The fields every agent carries whether or not it has a pipeline, resolved
 # once so the two builders below cannot drift apart in how they read the fleet
 # document. Sets the FM_ROW_* globals rather than echoing, because several of
@@ -417,11 +621,22 @@ row_common() {  # <task-json>
   # that predates the field.
   FM_ROW_META=$(printf '%s' "$task" | jq -r '.paths.meta.path // ""')
   [ -n "$FM_ROW_META" ] || FM_ROW_META="$STATE_DIR/$FM_ROW_ID.meta"
+  # Which model and effort the WORKER itself runs on, from the one machine
+  # record of it: the fields bin/fm-spawn.sh wrote at dispatch. `default` means
+  # the harness picked, which is not a known model, so it is emitted as absent
+  # rather than as the word - a dash on screen is honest and "default" is not
+  # the name of anything.
+  FM_ROW_HARNESS=$(printf '%s' "$task" | jq -r '.harness // ""')
+  [ -n "$FM_ROW_HARNESS" ] || FM_ROW_HARNESS=$(fm_meta_get "$FM_ROW_META" harness)
+  FM_ROW_MODEL=$(fm_meta_get "$FM_ROW_META" model)
+  [ "$FM_ROW_MODEL" != default ] || FM_ROW_MODEL=
+  FM_ROW_EFFORT=$(fm_meta_get "$FM_ROW_META" effort)
+  [ "$FM_ROW_EFFORT" != default ] || FM_ROW_EFFORT=
 }
 
 agent_json() {  # <task-json>
   local task=$1 id kind mode project worktree window branch endpoint_alive agent_alive pr_url
-  local idx run_id run_status run_updated axi rc steps actives ci meta skip_local skip_ci
+  local idx run_id run_status run_updated run_created axi rc steps actives ci meta skip_local skip_ci
 
   row_common "$task"
   id=$FM_ROW_ID
@@ -457,6 +672,7 @@ agent_json() {  # <task-json>
   run_id=''
   run_status=''
   run_updated=0
+  run_created=0
   local collect_ok=true collect_reason=''
 
   idx=$(run_index "$project" "$branch")
@@ -466,20 +682,93 @@ agent_json() {  # <task-json>
     run_id=${idx%%|*}
     local rest=${idx#*|}
     run_status=${rest%%|*}
-    run_updated=${rest##*|}
-    axi=$(run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$run_id" 2>/dev/null)
+    rest=${rest#*|}
+    run_updated=${rest%%|*}
+    run_created=${rest##*|}
+    local axi_err
+    axi_err="${TMPDIR:-/tmp}/fm-flow-axi-err.$$.$id"
+    axi=$(axi_read "$project" "$run_id" "$axi_err")
     rc=$?
     if [ $rc -ne 0 ] || [ -z "$axi" ]; then
       # A failed or timed-out read is reported as such. It must NOT fall back to
       # the last known state or to pending: pending reads as "not started yet",
       # which is a different claim from "we could not find out".
+      #
+      # The reason states what went wrong, in the command's own words. An exit
+      # code alone tells the captain a read failed and nothing they can act on,
+      # and the whole of the defect above was invisible behind one.
       collect_ok=false
-      collect_reason="axi status failed (exit $rc)"
-    else
+      if [ "$rc" = 124 ]; then
+        collect_reason="axi status timed out after ${NM_TIMEOUT}s"
+      else
+        local why
+        why=$(axi_error "$axi" "$axi_err")
+        if [ -n "$why" ]; then
+          collect_reason="axi status failed (exit $rc): $why"
+        else
+          collect_reason="axi status failed (exit $rc)"
+        fi
+      fi
+    fi
+    rm -f "$axi_err"
+    if [ "$collect_ok" = true ]; then
       steps=$(steps_json "$axi")
       actives=$(active_steps_json "$axi")
       [ -n "$pr_url" ] || pr_url=$(toon_field "$axi" pr)
     fi
+  fi
+
+  # The worker's own implementation phase, which no pipeline record describes
+  # because it happens before the pipeline exists. Both ends are machine
+  # records: it starts when dispatch wrote the task's own meta file, and it ends
+  # when the daemon created the run for that branch. A task with no run yet is
+  # still building, and that is the ordinary state of most of a task's life.
+  #
+  # No readable meta mtime means the start is not known, and the step reports a
+  # status this renderer maps to unknown rather than to pending - "not started
+  # yet" is a claim, and it is the wrong one for a worker that is demonstrably
+  # running.
+  # Only when the pipeline read succeeded. `collection.ok` false means the whole
+  # of this agent's step list could not be established, and the renderer draws
+  # every cell unknown on the strength of it; one step slipped in beside that
+  # would be a fact reported inside a frame that says nothing is known.
+  local built_at build_step build_active=''
+  built_at=$(spawned_at "$id" "$meta")
+  # A start later than the run it is supposed to precede is not a start. It
+  # means every record of the real one has been rewritten since, so the length
+  # of the building phase is not known and the cell says so rather than
+  # reporting a negative interval as a plausible short one.
+  if [ -n "$built_at" ] && [ "${run_created:-0}" -gt 0 ] && [ "$built_at" -gt "$run_created" ]; then
+    built_at=
+  fi
+  if [ -z "$built_at" ]; then
+    build_step='{"step":"building","status":"unknown","findings":0,"duration_ms":0}'
+  elif [ "${run_created:-0}" -gt 0 ]; then
+    local ms=$(( (run_created - built_at) * 1000 ))
+    build_step="{\"step\":\"building\",\"status\":\"completed\",\"findings\":0,\"duration_ms\":$ms}"
+  else
+    build_step='{"step":"building","status":"running","findings":0,"duration_ms":0}'
+    # active_for is the tool's own humanised string for a step it owns; this
+    # step is not one of its own, so the field is empty and active_ms - the only
+    # value the renderer reads - is computed from the two epochs directly.
+    build_active="{\"step\":\"building\",\"status\":\"running\",\"active_for\":\"\",\"active_ms\":$(( (NOW_EPOCH - built_at) * 1000 )),\"last_activity\":\"\",\"agent_pid\":\"\",\"round\":\"\"}"
+  fi
+
+  # Which model is pushing each ACTIVE pipeline step through, attributed from
+  # the run's own session transcripts. Paid only when there is an active step to
+  # attribute, so a finished or not-yet-started run reads no transcript at all.
+  if [ "$actives" != '[]' ] && [ -n "$run_id" ]; then
+    actives=$(attribute_models "$actives" "$(sessions_json "$run_id")" "$NOW_EPOCH")
+  fi
+  # building is the WORKER's own step, so its model is the worker's own record
+  # and never a transcript. The renderer reads it from `worker` directly.
+  if [ "$collect_ok" = true ]; then
+    steps=$(printf '%s' "$steps" | jq -c --argjson b "$build_step" '[$b] + .')
+    if [ -n "$build_active" ]; then
+      actives=$(printf '%s' "$actives" | jq -c --argjson b "$build_active" '[$b] + .')
+    fi
+  else
+    actives='[]'
   fi
 
   ci=$(ci_unread "skipped")
@@ -515,6 +804,9 @@ agent_json() {  # <task-json>
     --argjson pr_num "${pr_num:-null}" \
     --argjson skip_local "$skip_local" \
     --argjson skip_ci "$skip_ci" \
+    --arg harness "$FM_ROW_HARNESS" \
+    --arg w_model "$FM_ROW_MODEL" \
+    --arg w_effort "$FM_ROW_EFFORT" \
     --argjson steps "$steps" \
     --argjson actives "$actives" \
     --argjson ci "$ci" \
@@ -526,6 +818,11 @@ agent_json() {  # <task-json>
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
       skips:{local:$skip_local, ci:$skip_ci},
+      worker:{
+        harness:(if $harness == "" then null else $harness end),
+        model:(if $w_model == "" then null else $w_model end),
+        effort:(if $w_effort == "" then null else $w_effort end)
+      },
       pr:{url:(if $pr_url == "" then null else $pr_url end), number:$pr_num},
       collection:{ok:$collect_ok, reason:$collect_reason, at:$now_iso, epoch:$now_epoch},
       run:{
@@ -605,6 +902,9 @@ compact_json() {  # <task-json>
     --arg kind "$FM_ROW_KIND" \
     --arg mode "$FM_ROW_MODE" \
     --arg agent_alive "$FM_ROW_AGENT_ALIVE" \
+    --arg harness "$FM_ROW_HARNESS" \
+    --arg w_model "$FM_ROW_MODEL" \
+    --arg w_effort "$FM_ROW_EFFORT" \
     --arg pr_url "$FM_ROW_PR_URL" \
     --arg now_iso "$NOW_ISO" \
     --argjson now_epoch "$NOW_EPOCH" \
@@ -619,6 +919,11 @@ compact_json() {  # <task-json>
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
       skips:{local:false, ci:false},
+      worker:{
+        harness:(if $harness == "" then null else $harness end),
+        model:(if $w_model == "" then null else $w_model end),
+        effort:(if $w_effort == "" then null else $w_effort end)
+      },
       pr:{url:(if $pr_url == "" then null else $pr_url end), number:null},
       collection:{ok:true, reason:"this worker runs no pipeline",
                   at:$now_iso, epoch:$now_epoch},

@@ -188,7 +188,7 @@ pass "refuses input that is not a snapshot it understands"
 
 # --- the frame fits the terminal it is drawn on -----------------------------
 #
-# The shipped renderer drew all 143 columns of the nine stages whatever --cols
+# The shipped renderer drew all 143 columns of its stages whatever --cols
 # said. On the captain's terminal the tail of every row wrapped onto the row
 # below, so the right-hand column arrived as fragments (a bare `+-----`, a bare
 # `GIT`), and the wrapped rows desynchronised the in-place repaint. Both the
@@ -237,12 +237,12 @@ bad=$(printf '%s\n' "$narrow" | grep -oE '[┌└+][─-]+[┐┘+]' | awk '{ n=
 pass "every stage box drawn at 80 columns is drawn whole"
 
 # When a stage cannot fit it is dropped from the window, and the header says so
-# rather than letting the captain believe they are seeing all nine.
+# rather than letting the captain believe they are seeing every one.
 assert_contains "$narrow" "stages 1-" "a narrowed view did not state which stages it is showing"
-assert_contains "$narrow" "of 9" "a narrowed view did not state how many stages exist"
+assert_contains "$narrow" "of 10" "a narrowed view did not state how many stages exist"
 wide=$(printf '%s' "$BIG" | node "$TUI" --cols 200 --rows 24 --tick 0 | sed 's/\x1b\[[0-9;]*m//g')
 assert_contains "$wide" "pre-merge" "the last stage is missing at a width that fits every stage"
-assert_not_contains "$wide" "of 9" "a full-width view claimed to be showing a subset"
+assert_not_contains "$wide" "of 10" "a full-width view claimed to be showing a subset"
 pass "a narrowed view names its stage window and a full one does not"
 
 # --- the visible window and the rows on screen agree ------------------------
@@ -477,10 +477,10 @@ pass "the empty-fleet line prints only when nothing at all is live"
 # untruth as the count this whole section exists for.
 out=$(printf '%s' "$(snap "[$SCOUT]")" | node "$TUI" --cols 80 --rows 24 --tick 0 |
   sed 's/\x1b\[[0-9;]*m//g')
-assert_not_contains "$out" "of 9" "a frame with no stage boxes named a stage window"
+assert_not_contains "$out" "of 10" "a frame with no stage boxes named a stage window"
 out=$(printf '%s' "$MIXED" | node "$TUI" --cols 80 --rows 40 --tick 0 |
   sed 's/\x1b\[[0-9;]*m//g')
-assert_contains "$out" "of 9" "a narrowed frame that does draw stages stopped naming its window"
+assert_contains "$out" "of 10" "a narrowed frame that does draw stages stopped naming its window"
 pass "the stage window is named only when stage boxes are on screen"
 
 # The original concern, kept honest: a worker with no pipeline must not be given
@@ -750,7 +750,11 @@ const timerCells = (agent) => {
 const withSkips = (skips) => ({
   ...base.agents[0],
   skips,
-  steps: [],
+  // What the collector emits for a local-skip task: no pipeline run exists, so
+  // the only step it can state is the worker's own building phase, which is
+  // still under way.
+  steps: [{ step: "building", status: "running", findings: 0, duration_ms: 0 }],
+  active_steps: [{ step: "building", status: "running", active_ms: 60000 }],
   pr: { url: "https://github.com/kirangathani/firstmate/pull/51", number: 51 },
   collection: { ok: true, reason: "no pipeline run for this branch", at: "t", epoch: 1 },
 });
@@ -758,9 +762,15 @@ const withSkips = (skips) => ({
 // local_skip switches the whole local pipeline off, so every validation stage
 // is skipped - but push and PR still happen, by hand, which is why that box is
 // NOT skipped and why the CI cell beside it carries real checks.
+// `building` is not a pipeline stage and no flag removes it: the worker still
+// implements the change by hand, and under local_skip there is never a run to
+// end that phase, so it stays running. Drawing it as skipped would say the
+// work itself did not happen.
 const localCells = timerCells(withSkips({ local: true, ci: false }));
 STEPS.forEach((s, i) => {
-  const want = LOCAL_SKIP_STAGES.has(s.key) ? "skipped" : "by hand";
+  const want = s.key === "building"
+    ? "running"
+    : LOCAL_SKIP_STAGES.has(s.key) ? "skipped" : "by hand";
   if (localCells[i] !== want) {
     say(`local skip: stage ${s.key} reads "${localCells[i]}", want "${want}"`);
   }
@@ -1023,3 +1033,171 @@ for f in "$ROOT"/bin/*.mjs; do
   node --check "$f" || fail "node --check failed for $f"
 done
 pass "every tracked bin/*.mjs passes node --check"
+
+# --- which LLM is doing the work --------------------------------------------
+#
+# Two facts on one line, and both must be readable at a glance and honest when
+# absent. The worker's model is what the task's own record says it was
+# dispatched on; the gate's is what the pipeline actually launched its review,
+# test, document and fix agents as.
+#
+# A dash is a fact here, not a placeholder: it says nothing machine-recorded
+# answers that axis. AGENTS.md section 9 forbids the alternatives - a blank
+# reads as "no label", and a guessed name reads as a measurement.
+
+# The pure mapping, exercised through the module rather than through a frame,
+# because every unrecognised id must survive VERBATIM and a frame can only show
+# the handful this fleet happens to run.
+map_out=$(node --input-type=module -e "
+import { modelLabel } from '$TUI';
+const cases = [
+  ['claude-opus-5', 'high'],
+  ['claude-fable-5-1', 'xhigh'],
+  ['claude-sonnet-5', 'medium'],
+  ['claude-haiku-4-5-20251001', 'low'],
+  ['claude-some-model-nobody-has-shipped-yet', 'high'],
+  ['claude-opus-5', null],
+  [null, 'high'],
+  [null, null],
+];
+for (const [m, e] of cases) console.log(modelLabel(m, e));
+")
+want='opus 5 high
+fable 5.1 xhigh
+sonnet 5 medium
+haiku 4.5 low
+claude-some-model-nobody-has-shipped-yet high
+opus 5 -
+- high
+- -'
+[ "$map_out" = "$want" ] ||
+  fail "the model label mapping drifted:
+$map_out"
+pass "each known model id maps to the captain's short form and an unknown one is printed verbatim"
+
+# The label rides the ACTIVE cell, under the timer, on two rows: one axis each,
+# because the widest pair - `fable 5.1` and `xhigh` - is fifteen columns against
+# an eleven-column cell field and shortening either half is a mid-token cut.
+#
+# The cells are addressed through the renderer's own layout, so a change to a
+# cell width or the arrow gutter moves this assertion with it.
+
+model_agent() {  # <id> <worker-json> <steps-json> <actives-json>
+  jq -n --arg id "$1" --argjson worker "$2" \
+    --argjson steps "$3" --argjson actives "$4" '{
+    id:$id, branch:("fm/"+$id), project:"/p/firstmate", worktree:"/wt",
+    window:"fm:1", kind:"ship", mode:"no-mistakes", pipeline:true, state:null,
+    endpoint_alive:true, agent_alive:"alive", skips:{local:false,ci:false},
+    worker:$worker,
+    pr:{url:null,number:null},
+    collection:{ok:true,reason:"",at:"t",epoch:1786000000},
+    run:{present:true,id:"01K",status:"running",db_updated_epoch:1786000000,db_age_seconds:0},
+    steps:$steps, active_steps:$actives,
+    ci:{collection:{ok:false,reason:"skipped"},checks:[],
+        total:0,passed:0,failed:0,pending:0,skipped:0,excused:0}
+  }'
+}
+
+# The two label rows of a frame, one string per cell, read through the
+# renderer's own layout the way the skip probe does.
+cat >"$TMP_ROOT/labels.mjs" <<'JS'
+const { render, layout, CELL_WIDTHS } = await import(process.argv[2]);
+const doc = JSON.parse(process.argv[3]);
+const cols = Number(process.argv[4]);
+const lay = layout(cols, 0);
+const frame = render(doc, { rows: 60, cols, sel: 0, cell: -1 })
+  .map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+const head = frame.findIndex((l) => l.includes(doc.agents[0].id));
+const offsets = [];
+{
+  let x = 2;
+  for (const w of CELL_WIDTHS) { offsets.push(x); x += w + lay.gap; }
+}
+// head, top, mid, bot, timer, timer2, model, effort, facts.
+const cells = (row) => CELL_WIDTHS
+  .slice(lay.first, lay.first + lay.count)
+  .map((w, i) => (frame[head + row] ?? "").slice(offsets[i], offsets[i] + w).trim());
+console.log(JSON.stringify({ model: cells(6), effort: cells(7) }));
+JS
+
+labels() {  # <agents-json> [cols]
+  node "$TMP_ROOT/labels.mjs" "$TUI" "$(snap "$1")" "${2:-200}"
+}
+
+STEP_BUILD='[{"step":"building","status":"running","findings":0,"duration_ms":0}]'
+ACT_BUILD='[{"step":"building","status":"running","active_ms":90000}]'
+
+# building is the worker's own phase, so its label is the worker's own record.
+BUILDING=$(model_agent building-a1 \
+  '{"harness":"claude","model":"claude-fable-5-1","effort":"xhigh"}' \
+  "$STEP_BUILD" "$ACT_BUILD")
+out=$(labels "[$BUILDING]")
+[ "$out" = '{"model":["fable 5.1","","","","","","","","",""],"effort":["xhigh","","","","","","","","",""]}' ] ||
+  fail "the building cell did not carry the worker's own model and effort:
+$out"
+pass "the building cell names the model the worker itself runs on"
+
+# A pipeline step's label is the model the RUN launched for it, never the
+# worker's. This agent's worker is on fable and its review agent on opus, and
+# the row must say both.
+REVIEW=$(model_agent review-b2 \
+  '{"harness":"claude","model":"claude-fable-5-1","effort":"xhigh"}' \
+  "$(jq -n '[{step:"building",status:"completed",findings:0,duration_ms:60000},
+             {step:"intent",status:"completed",findings:0,duration_ms:22},
+             {step:"rebase",status:"completed",findings:0,duration_ms:4400},
+             {step:"review",status:"running",findings:0,duration_ms:0}]')" \
+  '[{"step":"review","status":"running","active_ms":600000,"model":"claude-opus-5","effort":"high"}]')
+out=$(labels "[$REVIEW]")
+[ "$out" = '{"model":["","","","opus 5","","","","","",""],"effort":["","","","high","","","","","",""]}' ] ||
+  fail "a running review step did not carry the model the run launched for it:
+$out"
+pass "a pipeline step names the model the run launched for that step, not the worker's"
+
+# Nothing machine-recorded means a dash on both axes - never a blank, which
+# reads as "no label", and never a name, which reads as a measurement.
+UNKNOWN=$(model_agent unknown-c3 '{"harness":"claude","model":null,"effort":null}' \
+  "$STEP_BUILD" "$ACT_BUILD")
+out=$(labels "[$UNKNOWN]")
+[ "$out" = '{"model":["-","","","","","","","","",""],"effort":["-","","","","","","","","",""]}' ] ||
+  fail "an agent with nothing recorded did not render both axes as dashes:
+$out"
+pass "an axis with no machine record behind it renders as a dash"
+
+# A finished cell carries no label at all: the question is about work in
+# progress, and a label on every finished box is six answers to a question
+# nobody is asking beside the one that matters.
+DONE=$(model_agent done-d4 '{"harness":"claude","model":"claude-opus-5","effort":"high"}' \
+  "$(steps_all completed | jq '[{step:"building",status:"completed",findings:0,duration_ms:60000}] + .')" '[]')
+out=$(labels "[$DONE]")
+[ "$out" = '{"model":["","","","","","","","","",""],"effort":["","","","","","","","","",""]}' ] ||
+  fail "a row with no active cell drew a label anyway:
+$out"
+pass "a cell that is not the active one carries no model label"
+
+# The label rides the cells, so narrowing the frame moves it with the window
+# rather than cutting it: every drawn label is one whole token.
+for width in 200 161 143 130 120 100 80; do
+  out=$(labels "[$REVIEW]" "$width")
+  case $out in
+    *'"opus 5"'*|*'"model":[]'*|*'"opus'*) ;;
+    *) case $out in *opus*) fail "at $width columns a model label was cut: $out" ;; esac ;;
+  esac
+  printf '%s' "$(snap "[$REVIEW]")" | node "$TUI" --cols "$width" --rows 60 --tick 0 |
+    sed 's/\x1b\[[0-9;]*m//g' |
+    awk -v c="$width" '{ if (length($0) > c) { print "wide"; exit 1 } }' ||
+    fail "at $width columns the frame ran wider than the terminal"
+done
+pass "a narrowed frame keeps whole labels and still fits the terminal"
+
+# A worker with no pipeline has no step cells to hang a label on, so its own
+# model rides its facts row instead - and in no alarm colour, because a healthy
+# idle second mate's row carries none.
+FLAT=$(printf '%s' "$SCOUT" | jq '.worker={harness:"claude",model:"claude-opus-5",effort:"xhigh"}')
+out=$(render "$(snap "[$FLAT]")")
+assert_contains "$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')" "opus 5 xhigh" \
+  "a worker with no pipeline lost its own model label"
+for slot in '\x1b[91m' '\x1b[95m' '\x1b[93m'; do
+  assert_not_contains "$out" "$(printf '%b' "$slot")" \
+    "a healthy pipeline-less worker's row was painted in an alarm colour"
+done
+pass "a worker with no pipeline carries its own label on its facts row"
