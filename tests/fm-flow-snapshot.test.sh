@@ -1210,24 +1210,22 @@ pass "only both sources failing is unreadable, and the reason names each failure
 
 DPR_HOME="$TMP_ROOT/home-directpr"
 mkdir -p "$DPR_HOME/state"
-# Dispatch, then the PR recorded 600 seconds later. The status file's BIRTH time
-# is the start - spawned_at reads it in preference to a meta that has been
-# rewritten since - and the meta's own modification time is when the PR was
-# recorded into it.
+# Dispatch, then the PR recorded 600 seconds later. Both ends come from the one
+# file, and from the two things bin/fm-spawned-at-lib.sh distinguishes about it:
+# the `spawned_at=` bin/fm-spawn.sh records at dispatch is the START, and the
+# file's modification time - moved by bin/fm-pr-check.sh's rewrite when it
+# recorded the `pr=` - is when the PR happened.
 #
-# The base is READ back rather than set: a birth time cannot be faked with
-# `touch`, so a fixture that wrote one would be measuring its own mtime on a
-# filesystem that records births and the touched time on one that does not. The
-# two other times are then placed relative to whichever of them this filesystem
-# actually gave the file, which is the same value the script will read.
-printf 'working: under way\n' > "$DPR_HOME/state/shipped-d1.status"
-DPR_BASE=$(stat -c %W "$DPR_HOME/state/shipped-d1.status")
-[ "${DPR_BASE:-0}" -gt 0 ] 2>/dev/null ||
-  DPR_BASE=$(stat -c %Y "$DPR_HOME/state/shipped-d1.status")
+# The times are stated rather than derived from the filesystem: a birth time
+# cannot be faked with `touch`, so a fixture leaning on one would measure a real
+# creation on a filesystem that records births and a touched mtime on one that
+# does not. Every value here is a value the script actually reads.
+DPR_BASE=1780000000
 DPR_PR_AT=$((DPR_BASE + 600))
 DPR_NOW=$((DPR_BASE + 8000))
-printf 'window=fm:9\nworktree=/wt/9\nproject=%s\nkind=ship\nmode=direct-PR\npr=%s\n' \
-  "$PROJECT" "https://github.com/kirangathani/firstmate/pull/25" \
+printf 'working: under way\n' > "$DPR_HOME/state/shipped-d1.status"
+printf 'window=fm:9\nworktree=/wt/9\nproject=%s\nkind=ship\nmode=direct-PR\nspawned_at=%s\npr=%s\n' \
+  "$PROJECT" "$DPR_BASE" "https://github.com/kirangathani/firstmate/pull/25" \
   > "$DPR_HOME/state/shipped-d1.meta"
 touch -d "@$DPR_PR_AT" "$DPR_HOME/state/shipped-d1.meta"
 
