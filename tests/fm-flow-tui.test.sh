@@ -1373,3 +1373,81 @@ case "$coloured" in
   *) fail "the skipped legend is not drawn in the skipped stage's own colour" ;;
 esac
 pass "the legend wears the same colour as the cells it names"
+
+# --- detail-row alignment and the tally's spacer ----------------------------
+#
+# The rows under each box are a left-hand column, not four centred captions:
+# every non-empty detail cell starts in its box's own first column, read
+# through the renderer's own layout arithmetic so a width or gutter change
+# moves the assertion with it. And one blank row always separates the last
+# detail row from the check tally, including for an agent whose detail rows are
+# all empty, so the tally reads as the agent's summary rather than as one more
+# per-stage line.
+
+cat >"$TMP_ROOT/align.mjs" <<'JS'
+const { render, layout, CELL_WIDTHS } = await import(process.argv[2]);
+const base = JSON.parse(process.argv[3]);
+const COLS = 200, ROWS = 60;
+let bad = 0;
+const say = (m) => { console.error(m); bad++; };
+
+const lay = layout(COLS, 0);
+const offsets = [];
+{
+  let x = 2;  // agentBlock indents every box row by two columns
+  for (const w of CELL_WIDTHS) { offsets.push(x); x += w + lay.gap; }
+}
+
+const frameFor = (agents) =>
+  render({ ...base, agents }, { rows: ROWS, cols: COLS, sel: 0, cell: -1 })
+    .map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+
+// head, top, mid, bot, then the four detail rows, then the spacer, then facts.
+const DETAIL_ROWS = [4, 5, 6, 7];
+
+const checkAlign = (frame, id) => {
+  const head = frame.findIndex((l) => l.includes(id));
+  for (const r of DETAIL_ROWS) {
+    const line = frame[head + r] ?? "";
+    CELL_WIDTHS.forEach((w, i) => {
+      const cell = line.slice(offsets[i], offsets[i] + w);
+      if (cell.trim() === "") return;
+      if (cell[0] === " ") {
+        say(`${id} row ${r} cell ${i} is not left-aligned to its box: "${cell}"`);
+      }
+    });
+  }
+};
+
+const checkSpacer = (frame, id) => {
+  const head = frame.findIndex((l) => l.includes(id));
+  const tally = frame.findIndex((l, i) => i > head && l.includes("checks:"));
+  if (tally < 0) return say(`${id} rendered no check tally`);
+  if ((frame[tally - 1] ?? "x").trim() !== "") {
+    say(`${id} has no blank row before its tally: "${frame[tally - 1]}"`);
+  }
+};
+
+// An agent with something to say on every detail row.
+const busy = base.agents[0];
+const f1 = frameFor([busy]);
+checkAlign(f1, busy.id);
+checkSpacer(f1, busy.id);
+
+// And one whose detail rows are entirely blank: the spacer is unconditional.
+const quiet = {
+  ...busy,
+  steps: busy.steps.map((s) => ({ ...s, status: "pending", duration_ms: 0 })),
+  active_steps: [],
+};
+checkSpacer(frameFor([{ ...quiet, id: "quiet1" }]), "quiet1");
+
+process.exit(bad ? 1 : 0);
+JS
+
+ALIGN=$(snap "[$(agent_with al1 "$(steps_all completed)" \
+  '{"active_steps":[{"step":"test","status":"running","active_for":"2m59s","active_ms":179000,"last_activity":"","agent_pid":"","round":"1"}],"pr":{"url":"https://github.com/o/r/pull/51","number":51},"ci":{"collection":{"ok":true,"reason":""},"checks":[],"total":11,"passed":11,"failed":0,"pending":0,"skipped":0,"excused":0}}')]")
+node "$TMP_ROOT/align.mjs" "$TUI" "$ALIGN" ||
+  fail "a detail line did not start at its box's left column"
+pass "every detail line starts in its box's own first column"
+pass "a blank row always precedes the check tally"
