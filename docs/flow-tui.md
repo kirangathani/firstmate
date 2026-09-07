@@ -507,6 +507,13 @@ Verified 2026-08-09 against seven real PRs on this repository, comparing the col
 | 33 | 11 total, 7 pass, 3 fail, 1 pending | 11 total, 8 pass, 3 fail, 1 pending | 11 total, 7 pass, 3 fail, 1 pending |
 | 39, 38, 37, 36, 35 | 11 total, 10 pass, 1 fail | - | 11 total, 10 pass, 1 fail |
 
+### The checks must come from the PR's own repository
+
+`gh pr view <n>` with no `--repo` resolves the repository from the working directory, and the collector runs from the firstmate root while a task's PR belongs to that task's project.
+Measured 2026-09-07: ELN PR 28, which carries four checks (`ci` passing, a pending review gate, and two Vercel checks), rendered as `11/11` because firstmate PR 28 is a merged, green, eleven-check PR of the same number, and ELN PR 29 rendered `10/11 FAIL` from firstmate PR 29.
+The recorded link is therefore read through `fm_pr_url_parse` in `bin/fm-pr-lib.sh`, the one owner of that grammar, and every `gh pr view` is qualified with `--repo <owner>/<repo>` from it.
+A link that parser refuses is reported as an unread CI cell carrying the reason, never as a number guessed off the end of the string.
+
 ## Cost
 
 Measured 2026-08-08 on this host, no-mistakes v1.37.0.

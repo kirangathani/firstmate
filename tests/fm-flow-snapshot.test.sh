@@ -660,3 +660,68 @@ got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$ATT_HOME" \
 [ "$got" = "gated-b2:false/false shipped-a1:true/true " ] ||
   fail "the recorded testing skips did not reach the view: $got"
 pass "a task's recorded testing skips reach the view, and an unflagged task's do not"
+
+# --- the CI read must name the PR's OWN repository ---------------------------
+#
+# `gh pr view <n>` with no --repo resolves the repository from the process's
+# working directory, and this view runs from the firstmate root while a task's
+# PR belongs to that task's project. Measured 2026-09-07: an ELN PR 28 carrying
+# four checks rendered as 11/11 because firstmate PR 28 is a merged, green,
+# eleven-check PR of the same number.
+
+cat > "$FAKEBIN/gh" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "\$*" >> "$TMP_ROOT/gh-args.txt"
+cat "\${FM_TEST_ROLLUP:-$TMP_ROOT/ci-rollup.json}"
+SH
+chmod +x "$FAKEBIN/gh"
+
+jq -n --arg h "$ATT_HOME" '{tasks:[
+  {id:"shipped-a1",kind:"ship",mode:"direct-PR",project:"/p/shipped",
+   paths:{worktree:{path:"/wt/1"},meta:{path:($h+"/state/shipped-a1.meta"),present:true}},
+   endpoint:{target:"fm:1",exists:true},
+   pr:{url:"https://github.com/kirangathani/eln/pull/28"}}
+]}' > "$TMP_ROOT/repo-fleet.json"
+
+REPOOUT="$TMP_ROOT/repo-out.json"
+: > "$TMP_ROOT/gh-args.txt"
+PATH="$FAKEBIN:$PATH" FM_HOME="$ATT_HOME" \
+  FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/repo-fleet.json" \
+  "$SNAPSHOT" --json > "$REPOOUT" 2>/dev/null
+expect_code 0 $? "the cross-repository snapshot exits clean"
+got=$(cat "$TMP_ROOT/gh-args.txt")
+assert_contains "$got" "--repo kirangathani/eln" \
+  "the CI read did not name the recorded link's own repository"
+assert_contains "$got" "pr view 28" "the CI read did not ask for the recorded PR number"
+pass "a PR link naming another repository is queried with --repo, not against the cwd repo"
+
+got=$(jq -r '.agents[] | select(.id=="shipped-a1") | .pr.number' "$REPOOUT")
+[ "$got" = 28 ] || fail "the PR number was not taken from the parsed link: $got"
+pass "the PR number comes from the parsed link"
+
+# A link the one parser refuses is NOT EVALUATED. Guessing a number off it is
+# exactly how a query landed on another repository's PR of that number.
+jq -n --arg h "$ATT_HOME" '{tasks:[
+  {id:"shipped-a1",kind:"ship",mode:"direct-PR",project:"/p/shipped",
+   paths:{worktree:{path:"/wt/1"},meta:{path:($h+"/state/shipped-a1.meta"),present:true}},
+   endpoint:{target:"fm:1",exists:true},
+   pr:{url:"https://example.invalid/kirangathani/eln/pull/28"}}
+]}' > "$TMP_ROOT/badlink-fleet.json"
+
+BADOUT="$TMP_ROOT/badlink-out.json"
+: > "$TMP_ROOT/gh-args.txt"
+PATH="$FAKEBIN:$PATH" FM_HOME="$ATT_HOME" \
+  FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/badlink-fleet.json" \
+  "$SNAPSHOT" --json > "$BADOUT" 2>/dev/null
+expect_code 0 $? "the unparseable-link snapshot exits clean"
+got=$(jq -r '.agents[] | select(.id=="shipped-a1")
+  | "\(.ci.collection.ok)/\(.ci.total)/\(.pr.number)"' "$BADOUT")
+[ "$got" = "false/0/null" ] ||
+  fail "an unparseable PR link was evaluated instead of reported unread: $got"
+got=$(jq -r '.agents[] | select(.id=="shipped-a1") | .ci.collection.reason' "$BADOUT")
+[ -n "$got" ] || fail "an unread CI cell carried no reason"
+[ ! -s "$TMP_ROOT/gh-args.txt" ] || fail "an unparseable PR link still cost a gh query"
+pass "an unparseable PR link yields an unread CI cell with a reason and no query"
