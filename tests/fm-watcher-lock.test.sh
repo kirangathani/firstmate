@@ -200,19 +200,6 @@ lock_pid_replaced() {  # <lockdir> <old pid> - a live successor took the lock
   [ -n "$now" ] && [ "$now" != "$2" ] && kill -0 "$now" 2>/dev/null
 }
 
-# Stop whatever watcher this fixture's lock currently names. A confirmed watcher
-# now survives its arm's death on purpose, so a case that needs a genuinely empty
-# home for its NEXT arm has to say so rather than assume the arm took it down.
-stop_watcher() {  # <state>
-  local pid
-  pid=$(cat "$1/.watch.lock/pid" 2>/dev/null || true)
-  case "$pid" in
-    ''|*[!0-9]*) return 0 ;;
-  esac
-  kill -TERM "$pid" 2>/dev/null || true
-  wait_for pid_gone "$pid" || fail "watcher $pid would not stop"
-}
-
 seed_watcher_ready() {  # <state> <pid> - holds the singleton AND has beaten once
   lock_pid_is "$1/.watch.lock" "$2" && [ -e "$1/.last-watcher-beat" ]
 }
@@ -1104,12 +1091,13 @@ test_arm_starts_and_self_heals() {
   pass "arm starts+confirms a fresh watcher on a clean lock and self-heals a dead-pid lock (never healthy off a dead pid)"
 }
 
-# HUP after confirmation cleans the arm's own temp output and NOTHING else. This
-# case used to assert the opposite - that HUP tore the watcher down with the arm -
-# and that was the defect: the arm is the harness's task, the harness kills it for
-# reasons that have nothing to do with supervision, and a confirmed watcher must
-# outlive that. See the detach paragraph in bin/fm-watch-arm.sh's header.
-test_arm_hup_leaves_confirmed_watcher_and_cleans_temp_output() {
+# HUP is the one interrupt that still reaps this arm's OWN child after
+# confirmation, so this base assertion is preserved verbatim. TERM and INT are
+# the harness stopping the task and now leave the watcher running; HUP means the
+# session that owned this arm is gone, and a detached watcher in its own session
+# would never receive that hangup itself, so nothing would follow it. The ledger
+# evidence for that split is in bin/fm-watch-arm.sh's handle_arm_signal.
+test_arm_hup_cleans_child_and_temp_output() {
   local dir state fakebin armout armpid lock_pid status
   dir=$(make_case arm-hup-cleanup)
   state="$dir/state"
@@ -1124,10 +1112,10 @@ test_arm_hup_leaves_confirmed_watcher_and_cleans_temp_output() {
   wait_for_exit "$armpid" "$WAIT_TICKS"
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
-  is_live_non_zombie "$lock_pid" || fail "HUP took the confirmed watcher down with the arm"
+  wait_for pid_gone "$lock_pid" || true
+  ! is_live_non_zombie "$lock_pid" || fail "HUP cleanup left watcher child running"
   ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
-  kill "$lock_pid" 2>/dev/null || true
-  pass "arm HUP cleans its temp output and leaves the confirmed watcher running"
+  pass "arm cleans child watcher and temp output on HUP"
 }
 
 # --- the harness kills the arm task ------------------------------------------
@@ -1411,10 +1399,6 @@ SH
     || fail "predecessor ledger record was not linked to its verified successor"
   kill -HUP "$successor_arm" 2>/dev/null || true
   wait "$successor_arm" 2>/dev/null || true
-  # The watcher outlives its arm by design, so the arm's HUP alone no longer
-  # clears the way for the next cycle: without this the bounded arms below would
-  # ATTACH to this survivor and never write a `started` record to cap.
-  stop_watcher "$state"
 
   # Cross a deliberately small cap. The cap is applied by the arm layer itself:
   # it keeps the last FM_WATCH_CYCLE_LOG_KEEP_LINES records, cuts that to
@@ -1446,7 +1430,6 @@ SH
     grep -qF 'watcher: started pid=' "$armout" || fail "bounded ledger cycle $iteration did not start"
     kill -HUP "$successor_arm" 2>/dev/null || true
     wait "$successor_arm" 2>/dev/null || true
-    stop_watcher "$state"
     iteration=$((iteration + 1))
   done
   size=$(wc -c < "$state/.watch-cycle-exits.log" | tr -d '[:space:]')
@@ -1726,7 +1709,7 @@ test_arm_reports_a_stale_beacon_as_a_supervision_lapse
 test_arm_reports_a_missing_beacon_without_a_sentinel_age
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
-test_arm_hup_leaves_confirmed_watcher_and_cleans_temp_output
+test_arm_hup_cleans_child_and_temp_output
 test_group_killed_arm_leaves_the_watcher_alive
 test_arm_attaches_to_a_watcher_that_outlived_its_arm
 test_arm_starts_fresh_when_the_surviving_watcher_is_genuinely_dead
