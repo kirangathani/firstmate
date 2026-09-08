@@ -359,13 +359,39 @@ test_the_attestation_check_follows_the_shared_authority() {
   expect_code 0 "$rc" "green-attestation: a direct-PR project's PR must not be red for that check alone (stderr: $(cat "$case_dir/stderr2"))"
   assert_grep 'PR check excused' "$case_dir/stderr2" \
     "green-attestation: the excusal was not disclosed"
-  # The count is what proves the excused check was not counted as evidence; the
-  # trailing clause is what carries the reason into the worker's done line and
-  # firstmate's confirmation, so a green with one excused red is auditable
-  # rather than bare.
-  [ "$out" = "green: $PR_URL $GREEN_SHA 1 checks (1 check excused: PR must be raised via no-mistakes - project is registered as a direct-PR project, whose PRs are raised without the pipeline by design)" ] \
-    || fail "green-attestation: an excused check must not count as evidence and the green line must name why, got: $out"
+  # The count is what proves the excused check was not counted as evidence. The
+  # line is byte-identical to the one a green with nothing excused prints: it is
+  # captured whole and compared by exact equality, so the excusal may not ride
+  # on it (captain's decision, 2026-09-08) and is asserted separately below.
+  [ "$out" = "green: $PR_URL $GREEN_SHA 1 checks" ] \
+    || fail "green-attestation: an excused check must not count as evidence, got: $out"
   pass "fm-pr-green.sh: the one excusable check follows the shared authority, and never counts as evidence"
+}
+
+# The excusal is disclosed twice: a sentence for a human, and a liftable
+# `excused: <name> - <authority>` line a reader can put straight into a done
+# report. It is on stderr because the stdout green line is captured whole and
+# compared by exact equality, so nothing may be appended to it or printed after
+# it (captain's decision, 2026-09-08).
+test_an_excusal_prints_a_liftable_reason_line() {
+  local case_dir rc out
+  case_dir=$(make_green_case green-attestation-reason)
+  add_gh_mock "$case_dir"
+  write_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes'
+  mkdir -p "$case_dir/fmhome/data" "$case_dir/project"
+  printf -- '- project [direct-PR] - fixture (added 2026-09-08)\n' > "$case_dir/fmhome/data/projects.md"
+
+  out=$(run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" 2>"$case_dir/stderr"); rc=$?
+  expect_code 0 "$rc" "green-attestation-reason: an excused check must still be green (stderr: $(cat "$case_dir/stderr"))"
+  assert_grep 'excused: PR must be raised via no-mistakes - project is registered as a direct-PR project' \
+    "$case_dir/stderr" "green-attestation-reason: the liftable excusal line was not printed"
+  # The whole point of putting it on stderr: stdout stays exactly what a caller
+  # comparing the green line by equality already expects.
+  [ "$out" = "green: $PR_URL $GREEN_SHA 1 checks" ] \
+    || fail "green-attestation-reason: the excusal leaked onto stdout, got: $out"
+  pass "fm-pr-green.sh: an excusal prints a liftable reason line and leaves the green line byte-identical"
 }
 
 # The excusal covers exactly one check and nothing else on the PR. A second red
@@ -420,10 +446,8 @@ test_a_signed_ci_skip_excuses_the_attestation_check() {
 
   out=$(run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" 2>"$case_dir/stderr"); rc=$?
   expect_code 0 "$rc" "green-attestation-ci-skip: a signed CI skip must excuse that check (stderr: $(cat "$case_dir/stderr"))"
-  case "$out" in
-    *'(1 check excused: PR must be raised via no-mistakes - a captain-authorized CI skip'*) ;;
-    *) fail "green-attestation-ci-skip: the green line did not name the signing authority, got: $out" ;;
-  esac
+  assert_grep 'excused: PR must be raised via no-mistakes - a captain-authorized CI skip' \
+    "$case_dir/stderr" "green-attestation-ci-skip: the excusal did not name the signing authority"
   pass "fm-pr-green.sh: a signed CI skip on this task excuses the attestation check"
 }
 
@@ -774,6 +798,7 @@ test_a_failed_enrichment_degrades_without_weakening_the_verdict
 test_a_red_and_an_infrastructure_check_are_both_reported
 test_the_attestation_check_follows_the_shared_authority
 test_an_excused_only_rollup_is_not_green
+test_an_excusal_prints_a_liftable_reason_line
 test_an_excused_check_does_not_carry_a_second_red
 test_a_signed_ci_skip_excuses_the_attestation_check
 test_an_unreadable_home_is_named_not_treated_as_a_verdict

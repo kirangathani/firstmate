@@ -28,9 +28,15 @@
 # indicator that library's header records being fixed for the pipeline view on
 # 2026-08-09). An excused check is still not EVIDENCE that anything ran, so it
 # is subtracted before asking whether this PR reported any checks at all,
-# exactly as the merge gate subtracts it. When it excuses, the green line names
-# the check and the authority, so the worker's done report and firstmate's
-# confirmation both carry the reason rather than a bare green.
+# exactly as the merge gate subtracts it. When it excuses, the check and the
+# authority are named on stderr twice over: a sentence for a human, and an
+# `excused: <name> - <authority>` line a reader can lift straight into a done
+# report or a captain-facing confirmation.
+# THE STDOUT GREEN LINE STAYS BYTE-IDENTICAL whether or not a check was excused
+# (captain's decision, 2026-09-08). It is an asserted contract of this command,
+# captured whole and compared by exact equality, so neither a suffix on it nor a
+# second stdout line may carry the excusal - both break every caller that reads
+# it. That is why the machine-readable line above is on stderr.
 #
 # BOTH AUTHORITIES LIVE IN THE TASK'S OWN RECORD under FM_HOME, so this command
 # is only as right as the home it was pointed at. A worker runs it from its task
@@ -105,8 +111,9 @@
 #   recorded it. With no URL the task's recorded pr= is used, which is
 #   firstmate's case after bin/fm-pr-check.sh has run.
 # Exit 0 prints one line on stdout:  green: <url> <sha> <n> checks
-#   With the one excusable check excused it carries the reason too:
-#   green: <url> <sha> <n> checks (1 check excused: <name> - <authority>)
+#   Identical whether or not a check was excused; an excusal is disclosed on
+#   stderr, as a sentence (`note: PR check excused: <name> (<authority>)`) and
+#   as a liftable `excused: <name> - <authority>` line.
 # Exit 1 names every failing, infrastructure, unfinished, or unreadable check on
 #   stderr. An infrastructure line is printed as
 #   `infrastructure: <check name> - <reason>`.
@@ -201,16 +208,17 @@ ATTESTATION_CHECK_NAME=$(fm_attestation_check_name)
 fm_pr_rollup_classify "$FM_PR_ROLLUP_TSV" "$ATTESTATION_CHECK_NAME"
 
 checks_exempted=0
-# The authority's own first line, kept so the green report can say WHY it is
-# green with one excused check rather than leaving the worker's done line and
-# firstmate's confirmation to assert a bare green nobody can audit.
-excused_because=
 if [ "$FM_PR_ROLLUP_EXEMPT_FAILING" -gt 0 ]; then
   if authority=$(fm_attestation_authority "$ID" "$STATE/$ID.meta" \
       "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_HOME" "$SCRIPT_DIR"); then
     checks_exempted=$FM_PR_ROLLUP_EXEMPT_FAILING
-    excused_because=$(printf '%s' "$authority" | head -1)
-    echo "note: PR check excused: $ATTESTATION_CHECK_NAME ($excused_because)" >&2
+    echo "note: PR check excused: $ATTESTATION_CHECK_NAME ($(printf '%s' "$authority" | head -1))" >&2
+    # The machine-readable half, on its own line so a reader can lift the reason
+    # into a done report or a captain-facing confirmation without parsing the
+    # sentence above. On STDERR, not stdout: the stdout green line is captured
+    # whole and compared by exact equality, so a second stdout line would break
+    # that contract exactly as a suffix on the line itself would.
+    echo "excused: $ATTESTATION_CHECK_NAME - $(printf '%s' "$authority" | head -1)" >&2
   else
     # BOTH authorities are read out of the task's own record under FM_HOME, so
     # an absent record is not "nothing excuses this check" - it is "this run is
@@ -360,10 +368,4 @@ if [ "$checks_evidence" -eq 0 ]; then
   exit 1
 fi
 
-if [ "$checks_exempted" -gt 0 ]; then
-  printf 'green: %s %s %s checks (%s check excused: %s - %s)\n' \
-    "$URL" "$HEAD_BEFORE" "$checks_evidence" "$checks_exempted" \
-    "$ATTESTATION_CHECK_NAME" "$excused_because"
-else
-  printf 'green: %s %s %s checks\n' "$URL" "$HEAD_BEFORE" "$checks_evidence"
-fi
+printf 'green: %s %s %s checks\n' "$URL" "$HEAD_BEFORE" "$checks_evidence"
