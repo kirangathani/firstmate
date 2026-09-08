@@ -8,11 +8,10 @@
 # documented by bin/fm-pr-merge.sh's header; this file is its single
 # implementation, extracted so a second reader of the record cannot drift from
 # the gate that enforces it. bin/fm-pr-merge.sh decides whether a merge
-# proceeds; bin/fm-nm-flow.sh only classifies findings for display; the CI-side
-# attestation (bin/fm-supersession-attest-lib.sh) carries the same approvals to
-# a GitHub runner that cannot read the private record at all. All three must
-# answer "is this identifier covered?" identically, which is why there is one
-# matcher and not three.
+# proceeds; the CI-side attestation (bin/fm-supersession-attest-lib.sh) carries
+# the same approvals to a GitHub runner that cannot read the private record at
+# all. Both must answer "is this identifier covered?" identically, which is why
+# there is one matcher and not two.
 #
 # THREE FUNCTIONS, one parse and one match between them:
 #

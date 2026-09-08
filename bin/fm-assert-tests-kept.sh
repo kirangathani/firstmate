@@ -73,9 +73,9 @@
 #     as `assumed-covered:`, its own class, so a green-but-empty result can never
 #     read as verified - the same reason `unexecuted:` exists.
 # WITHOUT the flag, nothing is skipped and check 2 behaves exactly as it always
-# has. The flag is not defaulted on, because explicit --worktree callers (an
-# operator, bin/fm-nm-flow.sh's read-only merge-gate preview) hold no CI premise
-# at all, and a check that assumed one nobody established is the precise failure
+# has. The flag is not defaulted on, because an explicit --worktree caller (an
+# operator) holds no CI premise at all, and a check that assumed one nobody
+# established is the precise failure
 # this script exists to prevent. bin/fm-pr-merge.sh is the caller that DOES hold
 # it: its own checks-green gate refuses to merge a PR whose checks are failing,
 # pending, or unreadable, so within one merge command a skip made under this flag
@@ -164,9 +164,8 @@
 #       (`gh pr view <url> --json baseRefName`, the same raw-gh JSON read
 #       fm-pr-check.sh uses, because gh-axi exposes no baseRefName field). That
 #       read is owned by bin/fm-pr-lib.sh's fm_pr_base_branch_read rather than
-#       written here, because bin/fm-nm-flow.sh's merge-gate box previews this
-#       verdict and a preview that resolves its own base would preview a
-#       different gate. The library reads; the policy below is this script's:
+#       written here, so no second reader of "which base" can resolve a
+#       different one. The library reads; the policy below is this script's:
 #       the check REFUSES with exit 2 when that name cannot be read. Falling
 #       back to the default branch there would silently compare a stacked PR
 #       against a tree it was never built on, which is exactly the class of
@@ -342,8 +341,8 @@ if [ "${1:-}" = "--worktree" ]; then
   esac
   COMPARE_LABEL=$COMPARE_REF
   # Explicit mode takes the caller's ref verbatim and never consults GitHub:
-  # its caller (bin/fm-nm-flow.sh --tests-gate, an operator) already knows the
-  # base it means, and a lookup here would only be able to disagree with it.
+  # its caller (an operator) already knows the base it means, and a lookup here
+  # would only be able to disagree with it.
   BASE_ORIGIN='explicit --base'
   [ -d "$WT" ] || { echo "error: worktree is missing: $WT" >&2; exit 2; }
 else
@@ -459,8 +458,8 @@ else
   # The base is the branch the PR TARGETS whenever a PR is recorded, and only
   # the project's default branch when none is. The branch name comes from
   # bin/fm-pr-lib.sh's fm_pr_base_branch_read, which is the one owner of that
-  # question, so this gate and the merge-gate preview in bin/fm-nm-flow.sh
-  # cannot resolve two different bases. That reader decides nothing on failure;
+  # question, so no two readers can resolve different bases. That reader decides
+  # nothing on failure;
   # refusing rather than falling back is THIS script's policy, because it blocks
   # a merge: see this script's header.
   if [ -n "$PR_URL" ]; then

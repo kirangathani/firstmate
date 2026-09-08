@@ -53,7 +53,7 @@
 #
 # Environment knobs:
 #   FM_FLOW_SNAPSHOT_NM_TIMEOUT   seconds bounding one `no-mistakes axi status`
-#                                 (default 10, matching fm-nm-flow.sh's budget)
+#                                 (default 10)
 #   FM_FLOW_SNAPSHOT_GH_TIMEOUT   seconds bounding one `gh pr view` (default 20).
 #                                 Every such read is qualified with --repo from
 #                                 the recorded link, parsed by bin/fm-pr-lib.sh.

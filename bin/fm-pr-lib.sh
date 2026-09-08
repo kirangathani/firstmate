@@ -229,12 +229,10 @@ fm_pr_repo_matches_origin() {
 
 # fm_pr_base_branch_read <worktree> <pr-url> <diagnostic-file>: the sole reader
 # of which BRANCH a pull request targets, printed on stdout.
-# Two callers ask that question and must never answer it differently: the merge
-# gate (bin/fm-assert-tests-kept.sh) measures its verdict against this branch,
-# and the merge-gate preview (bin/fm-nm-flow.sh) shows the captain what that
-# verdict will be. A second reading of "which base" would put the preview and
-# the gate it previews on different trees, which is the same wrong-base class
-# both were written to eliminate.
+# The merge gate (bin/fm-assert-tests-kept.sh) measures its verdict against this
+# branch, so every reader of "which base" goes through this one function: a
+# second reading would put two readers on different trees, which is the
+# wrong-base class this was written to eliminate.
 # gh-axi is this repo's GitHub interface for ACTIONS, but its `pr view` exposes
 # no baseRefName field, so this is a raw-gh JSON read exactly as
 # bin/fm-pr-check.sh's headRefOid lookup is. The URL fully qualifies the repo;

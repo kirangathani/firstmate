@@ -740,9 +740,8 @@ ci_skip_zero_check_banner() {  # <where>
 # supersession record holds a fully-formed captain-approved entry that covers
 # that identifier for that finding class (grammar in this script's header,
 # which stays this file's to own). The matcher itself lives in
-# bin/fm-supersession-lib.sh so the read-only viewer that shows a captain what
-# this gate will excuse (bin/fm-nm-flow.sh) reads the record through the exact
-# same parser rather than a second one that could drift from it.
+# bin/fm-supersession-lib.sh so every other reader of the record goes through
+# the exact same parser rather than a second one that could drift from it.
 supersession_approved() {
   fm_supersession_approved "$SUPERSESSIONS_FILE" "$PROJ_NAME" "$1" "$2"
 }
