@@ -19,3 +19,4 @@ config/cmux-socket-password
 config/wedge-alarm
 config/ci-waiver-secret
 config/statusline-base
+config/merge-green

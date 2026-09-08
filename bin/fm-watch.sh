@@ -817,7 +817,10 @@ while :; do
           owner=$FM_PR_DATA_OWNER
           repo=$FM_PR_DATA_REPO
           number=$FM_PR_DATA_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated "$url" "$owner" "$repo" "$number" || exit 1
+          # FM_HOME is forwarded because the poll reads the captain's standing
+          # merge rule ($FM_HOME/config/merge-green) from it, exactly as the
+          # X-mode shim above is given the same home for the same reason.
+          FM_HOME="$FM_HOME" run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated "$id" "$url" "$owner" "$repo" "$number" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
