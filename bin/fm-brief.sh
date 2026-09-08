@@ -189,6 +189,11 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 FM_HOME_ENV="FM_HOME=$(shell_quote "$FM_HOME")"
 NM_INTENT_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-nm-intent.sh")"
 NM_DECISION_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-nm-decision.sh")"
+# The follow-up a capped fix round files belongs in THIS home's backlog, and
+# the worker's cwd is a project worktree where a bare `tasks-axi` would resolve
+# some other workspace or none at all, so the backlog file is named outright.
+# The path is .tasks.toml's markdown-backend path resolved against the home.
+TASKS_ADD_CMD="tasks-axi add --file $(shell_quote "$FM_HOME/data/backlog.md")"
 PR_GREEN_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-pr-green.sh")"
 
 # --- the three machine-owned regions of a ship brief ------------------------
@@ -325,11 +330,14 @@ You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
-Four firstmate-specific rules layer on top of that guidance:
+Five firstmate-specific rules layer on top of that guidance:
 
-- ask-user findings are not yours to answer: escalate to firstmate (rule 6) and stop.
+- **An ask-user finding of severity \`info\` or \`suggestion\` is YOURS to answer.** Answer it yourself, choosing the option that keeps the decisions already recorded for this task and this brief's own \`# Task\` section true, record it under your own name with \`record --outcome <change|no-change>\` (see below), and list it in the PR description under a \`Decisions taken by the worker (info severity)\` heading with the finding id, the option you took, and the one-line reason.
+  An info finding that RE-RAISES a decision already in this brief's \`## Gate decisions\` subsection is answered by citing that key, and recorded \`--outcome no-change\`; do not re-open a settled question.
+  A finding about a security, credential, or data-loss risk escalates no matter what severity it carries.
+- **Ask-user findings of severity \`warning\` or \`error\` are not yours to answer**: escalate to firstmate (rule 6) and stop.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
+- Avoid \`--yes\`: it silently auto-resolves EVERY ask-user finding, including the warning and error ones the captain owns.
 - **Start every run with the pinned intent, never a paraphrase.** \`--intent\` is required to start a run and the pipeline's final review scores the diff against it, so it must be the goal as actually stated, not your restatement of it. Take it from its one owner:
   \`no-mistakes axi run --intent "\$($NM_INTENT_CMD $ID)"\`
   That prints the \`# Task\` section of this brief verbatim. Use the identical command on every re-run in this task.
@@ -340,10 +348,17 @@ A decision you submit at a gate changes what this branch is supposed to be, but 
 
 1. Record every decision the moment you submit it, not later from memory:
    \`$NM_DECISION_CMD record $ID --finding <finding-id> --key <decision-key> --requires "<what the decision requires, in concrete checkable terms>" --step <step>\`
-2. When a run in which you recorded ANY decision reaches its outcome, start a fresh run with the same pinned-intent command.
+   Pass \`--outcome no-change\` when the answer leaves the branch exactly as it is - "no change needed", "already decided at \`<key>\`", a documentation wording accepted as written - and \`--outcome change\` (the default) when it changes what the branch must contain.
+   Add \`--fixed "<finding ids>"\` naming the findings this round submitted a fix for; recording one of those as \`no-change\` is refused, because a round that changed code owes the re-run that re-scores it.
+2. When a run in which you recorded any \`change\` decision reaches its outcome, start a fresh run with the same pinned-intent command.
    That run's review is what proves the branch and the decided goal agree, and it is also the only thing that re-reviews whatever the later auto-fix steps (test, document, lint) changed.
-   Repeat this for every round: a gate round that produced a decision always ends with a re-run.
-3. \`$NM_DECISION_CMD rerun-check $ID\` must exit 0 before you report done. It refuses while any decision was recorded during the run that is still the most recent one, which is exactly the case where nothing has yet scored the branch against the decided goal.
+   A round whose decisions were all \`no-change\` needs no fresh run: nothing on the branch moved, so a fresh 25-35 minute run would re-score exactly what the last one already scored.
+3. \`$NM_DECISION_CMD rerun-check $ID\` must exit 0 before you report done. It refuses while any \`change\` decision was recorded during the run that is still the most recent one, which is exactly the case where nothing has yet scored the branch against the decided goal.
+
+# At most two fix rounds per run on the same findings
+After the first review of a run, you get at most TWO further fix rounds on the same set of findings.
+A finding that comes back a third time, or any finding still open after that second fix round, becomes a follow-up instead of a third attempt: file it with \`$TASKS_ADD_CMD "<title from the finding>" --mint --blocked-by $ID\`, which prints the id it minted; name it in the PR description under a \`Deferred to follow-up\` heading with its finding id and the new task id, and carry on with the run.
+This is a normal outcome, not a failure: do not append \`failed:\` or \`blocked:\` for a capped finding, and do not abort the run over one.
 
 # Reporting done: verify CI green yourself, on the PR
 Do NOT wait for the pipeline to report CI green. Its \`ci\` step cannot see your PR go green: it polls \`gh pr checks\` with no PR number from a detached-HEAD worktree, so gh exits 1 on every poll with \`could not determine current branch\` and the step loops on \`warning: could not check CI: gh pr checks: exit status 1\` for up to 168 hours while the PR is green on GitHub. Reproduced 2026-09-07 on two separate PRs.
