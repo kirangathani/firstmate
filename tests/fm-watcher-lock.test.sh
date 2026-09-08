@@ -31,8 +31,43 @@ TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 # genuinely un-reaped ones. The ppid guard is what makes killing safe on a loaded
 # box: a pid that exited and was recycled onto an unrelated process no longer
 # reports this shell as its parent, so it is skipped rather than signalled.
+#
+# The job table is no longer sufficient on its own. A watcher is now started
+# DETACHED from its arm's process group and session, and a confirmed one
+# deliberately survives its arm's death, so killing the arm job leaves a real
+# watcher running - which is the whole point of bin/fm-watch-arm.sh's detach and
+# would otherwise reintroduce the orphan class this function exists to stop. Every
+# fixture's own recorded watcher pid is therefore reaped as well, guarded by the
+# process actually being one of this run's watchers rather than a recycled pid.
+reap_fixture_watchers() {
+  local pidfile pid args i
+  for pidfile in "$TMP_ROOT"/*/state/.watch.lock/pid; do
+    [ -f "$pidfile" ] || continue
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+    case "$args" in
+      *"$WATCH"*) ;;
+      *) continue ;;
+    esac
+    kill -TERM "$pid" 2>/dev/null || true
+    # Bounded like the job-table pass below, and for the same reason: a watcher
+    # answers TERM only after its current poll sleep returns, but a cleanup that
+    # can hang is a second way to leave the box worse than it found it.
+    i=0
+    while [ "$i" -lt 50 ] && kill -0 "$pid" 2>/dev/null; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+}
+
 reap_background_jobs() {
   local pid ppid i alive
+  reap_fixture_watchers
   for pid in $(jobs -p 2>/dev/null); do
     ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
     [ "$ppid" = "$$" ] || continue
@@ -1056,6 +1091,12 @@ test_arm_starts_and_self_heals() {
   pass "arm starts+confirms a fresh watcher on a clean lock and self-heals a dead-pid lock (never healthy off a dead pid)"
 }
 
+# HUP is the one interrupt that still reaps this arm's OWN child after
+# confirmation, so this base assertion is preserved verbatim. TERM and INT are
+# the harness stopping the task and now leave the watcher running; HUP means the
+# session that owned this arm is gone, and a detached watcher in its own session
+# would never receive that hangup itself, so nothing would follow it. The ledger
+# evidence for that split is in bin/fm-watch-arm.sh's handle_arm_signal.
 test_arm_hup_cleans_child_and_temp_output() {
   local dir state fakebin armout armpid lock_pid status
   dir=$(make_case arm-hup-cleanup)
@@ -1075,6 +1116,145 @@ test_arm_hup_cleans_child_and_temp_output() {
   ! is_live_non_zombie "$lock_pid" || fail "HUP cleanup left watcher child running"
   ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
   pass "arm cleans child watcher and temp output on HUP"
+}
+
+# --- the harness kills the arm task ------------------------------------------
+#
+# Claude Code's low-memory protection stopped this exact background task at least
+# NINE times in the night of 2026-09-07/08, and each kill took the watcher with it
+# because the watcher was an ordinary child in the arm's process group. These
+# three cases pin the fix end to end: the watcher survives a group kill, the next
+# arm attaches to it instead of starting a rival, and a genuinely dead watcher
+# still gets a fresh start.
+#
+# The arm is launched through setsid HERE so it is its own process-group leader
+# and the group kill below reproduces the harness's kill without signalling this
+# test's own group. That is also what makes the assertion mean something: without
+# the arm's detach, a group kill reaches the watcher, so surviving one is proof of
+# the detach rather than merely proof that a trap was removed.
+# Sets ARM_IN_OWN_GROUP_PID rather than echoing it: a command substitution would
+# run the launch in a SUBSHELL, leaving the arm parented to a shell that exits
+# immediately, out of this file's job table and beyond `wait`.
+ARM_IN_OWN_GROUP_PID=
+arm_in_own_group() {  # <dir> <state> <fakebin> <armout>
+  local dir=$1 state=$2 fakebin=$3 armout=$4
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT="$ARM_CONFIRM_START" setsid "$WATCH_ARM" > "$armout" &
+  ARM_IN_OWN_GROUP_PID=$!
+}
+
+beacon_newer_than() {  # <state> <mtime>
+  local now
+  now=$(stat -c %Y "$1/.last-watcher-beat" 2>/dev/null || stat -f %m "$1/.last-watcher-beat" 2>/dev/null || true)
+  [ -n "$now" ] && [ "$now" -gt "$2" ]
+}
+
+test_group_killed_arm_leaves_the_watcher_alive() {
+  local row dir state fakebin armout armpid lock_pid pgid beat_before
+  for row in TERM KILL; do
+    dir=$(make_case "arm-group-kill-$row")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    armout="$dir/arm.out"
+    arm_in_own_group "$dir" "$state" "$fakebin" "$armout"
+    armpid=$ARM_IN_OWN_GROUP_PID
+    wait_for have_line "$armout" 'watcher: started pid=' || true
+    grep -qF 'watcher: started pid=' "$armout" || fail "arm ($row) did not start a watcher to kill it out from under"
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    kill -0 "$lock_pid" 2>/dev/null || fail "test setup ($row): the started watcher is not alive"
+    # The group kill is only a faithful reproduction if the arm really is its own
+    # group leader; if setsid forked, signalling this pgid would hit the wrong
+    # processes, so that is a named setup failure rather than a silent pass.
+    pgid=$(ps -o pgid= -p "$armpid" 2>/dev/null | tr -d '[:space:]')
+    [ "$pgid" = "$armpid" ] \
+      || fail "test setup ($row): arm $armpid is not its own process-group leader (pgid '$pgid')"
+    [ "$(ps -o pgid= -p "$lock_pid" 2>/dev/null | tr -d '[:space:]')" != "$pgid" ] \
+      || fail "arm ($row) left the watcher in its own process group; a group kill will still reach it"
+    beat_before=$(stat -c %Y "$state/.last-watcher-beat" 2>/dev/null || stat -f %m "$state/.last-watcher-beat" 2>/dev/null || true)
+    [ -n "$beat_before" ] || fail "test setup ($row): the started watcher published no beacon to compare against"
+    kill -"$row" -"$pgid" 2>/dev/null || fail "could not signal the arm's process group ($row)"
+    wait_for_exit "$armpid" "$WAIT_TICKS"
+    is_live_non_zombie "$lock_pid" || fail "a $row group kill of the arm task also killed the watcher"
+    # Alive is not enough: the watcher has to still be CYCLING, so wait for the
+    # beacon it publishes every poll to move past the one taken before the kill.
+    wait_for beacon_newer_than "$state" "$beat_before" \
+      || fail "the watcher survived the $row group kill but stopped beating"
+    kill "$lock_pid" 2>/dev/null || true
+    wait_for pid_gone "$lock_pid" || true
+  done
+  pass "a group kill of the arm task leaves the detached watcher alive and still beating"
+}
+
+test_arm_attaches_to_a_watcher_that_outlived_its_arm() {
+  local dir state fakebin armout armout2 armpid armpid2 lock_pid pgid
+  dir=$(make_case arm-reattach-after-kill)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  armout2="$dir/arm2.out"
+  arm_in_own_group "$dir" "$state" "$fakebin" "$armout"
+  armpid=$ARM_IN_OWN_GROUP_PID
+  wait_for have_line "$armout" 'watcher: started pid=' || true
+  grep -qF 'watcher: started pid=' "$armout" || fail "first arm did not start a watcher"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  pgid=$(ps -o pgid= -p "$armpid" 2>/dev/null | tr -d '[:space:]')
+  [ "$pgid" = "$armpid" ] || fail "test setup: arm $armpid is not its own process-group leader (pgid '$pgid')"
+  kill -KILL -"$pgid" 2>/dev/null || fail "could not kill the first arm's process group"
+  wait_for_exit "$armpid" "$WAIT_TICKS"
+  is_live_non_zombie "$lock_pid" || fail "test setup: the watcher did not survive its arm, so there is nothing to re-attach to"
+  # The re-arm must recognise the survivor through the ordinary singleton path -
+  # live pid, identity match, fresh beacon - and follow it rather than start a
+  # rival. ARM_CONFIRM_ATTACH is safe here because the peer is verified healthy
+  # above, so the attach lands on the arm's first confirmation poll.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT="$ARM_CONFIRM_ATTACH" "$WATCH_ARM" > "$armout2" &
+  armpid2=$!
+  wait_for have_line "$armout2" "watcher: attached pid=$lock_pid" || true
+  grep -qF "watcher: attached pid=$lock_pid" "$armout2" \
+    || fail "re-arm did not attach to the watcher that outlived its arm: $(cat "$armout2")"
+  ! grep -qF 'watcher: started' "$armout2" || fail "re-arm started a second watcher behind the survivor"
+  ! grep -qF 'watcher: FAILED' "$armout2" || fail "re-arm reported FAILED for a healthy surviving watcher"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$lock_pid" ] || fail "re-arm disturbed the survivor's lock"
+  kill "$armpid2" 2>/dev/null || true
+  wait_for_exit "$armpid2" "$WAIT_TICKS"
+  kill "$lock_pid" 2>/dev/null || true
+  wait_for pid_gone "$lock_pid" || true
+  pass "a re-arm attaches to the watcher that outlived its killed arm instead of starting a second one"
+}
+
+test_arm_starts_fresh_when_the_surviving_watcher_is_genuinely_dead() {
+  local dir state fakebin armout armout2 armpid lock_pid pgid new_pid
+  dir=$(make_case arm-restart-after-dead-survivor)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  armout2="$dir/arm2.out"
+  arm_in_own_group "$dir" "$state" "$fakebin" "$armout"
+  armpid=$ARM_IN_OWN_GROUP_PID
+  wait_for have_line "$armout" 'watcher: started pid=' || true
+  grep -qF 'watcher: started pid=' "$armout" || fail "first arm did not start a watcher"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  pgid=$(ps -o pgid= -p "$armpid" 2>/dev/null | tr -d '[:space:]')
+  [ "$pgid" = "$armpid" ] || fail "test setup: arm $armpid is not its own process-group leader (pgid '$pgid')"
+  kill -KILL -"$pgid" 2>/dev/null || fail "could not kill the first arm's process group"
+  wait_for_exit "$armpid" "$WAIT_TICKS"
+  # Now kill the survivor the same hard way, so its EXIT trap never releases the
+  # lock: the lock still names it and the beacon it left behind is backdated past
+  # the grace. That is the state a truly dead watcher leaves, and it must not be
+  # mistaken for something to attach to.
+  kill -KILL "$lock_pid" 2>/dev/null || true
+  wait_for pid_gone "$lock_pid" || fail "test setup: the survivor did not die"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT="$ARM_CONFIRM_START" "$WATCH_ARM" > "$armout2" &
+  armpid=$!
+  wait_for have_line "$armout2" 'watcher: started pid=' || true
+  grep -qF 'watcher: started pid=' "$armout2" || fail "arm did not start a fresh watcher over a dead one: $(cat "$armout2")"
+  ! grep -qF 'watcher: attached' "$armout2" || fail "arm attached to a dead watcher with a lapsed beacon"
+  new_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ "$new_pid" != "$lock_pid" ] || fail "arm did not replace the dead watcher's lock"
+  is_live_non_zombie "$new_pid" || fail "arm reported started for a watcher that is not alive"
+  kill "$armpid" "$new_pid" 2>/dev/null || true
+  wait_for_exit "$armpid" "$WAIT_TICKS"
+  wait_for pid_gone "$new_pid" || true
+  pass "a dead watcher with a lapsed beacon still gets a fresh start, never an attach"
 }
 
 test_arm_propagates_immediate_wake_before_confirmation() {
@@ -1530,6 +1710,9 @@ test_arm_reports_a_missing_beacon_without_a_sentinel_age
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
+test_group_killed_arm_leaves_the_watcher_alive
+test_arm_attaches_to_a_watcher_that_outlived_its_arm
+test_arm_starts_fresh_when_the_surviving_watcher_is_genuinely_dead
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
