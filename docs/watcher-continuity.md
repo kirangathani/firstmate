@@ -27,6 +27,24 @@ No adapter starts a replacement with shell `&`.
 The existing turn-end guard implementation and adapters are unchanged.
 They remain the final backstop rather than the normal continuity mechanism.
 
+## The watcher outlives its arm
+
+The arm is the harness's own background task, and a harness kills it for reasons that have nothing to do with supervision.
+Claude Code's low-memory protection stopped it at least nine times between 23:30 and 11:00 on 2026-09-07/08, every time while `MemAvailable` still read 7-12 GB of a 20 GB box and only page-cache-excluded `MemFree` had dipped; nothing in the arm uses memory, so the arm cannot avoid being picked.
+Each of those kills took the watcher down with it - the next arm reported `watcher: started ...` rather than `attached` - cost a full turn to notice, drain and re-arm, and left the fleet unsupervised for minutes.
+
+`bin/fm-watch-arm.sh` now starts the watcher through `setsid(1)`, in its own session and process group with stdio off the task's pipe, and stops killing it once it is confirmed, so a kill aimed at the arm task does not reach it.
+The arm still follows it exactly as before: `setsid` does not fork when the child is not already a process-group leader, which the arm guarantees by switching job control off, so the watcher stays the arm's direct child, `wait` still returns its exit, and the arm's own exit is still the harness's wake signal.
+That script's header owns the mechanics.
+Nothing about the wake contract, the beacon, the singleton lock, `state/.wake-queue`, or the continuity gate changes.
+
+A killed arm therefore means "re-run the arm to re-attach", not "the watcher is gone", and the next arm reports `watcher: attached ...` through the ordinary singleton path with no change to the identity or beacon checks.
+An unconfirmed child is still reaped on an interrupt, because a watcher that never proved itself live and fresh would only contend for the singleton with the next arm's child.
+
+The cost is deliberate and bounded in two ways.
+A watcher that outlives every arm is still one-shot: it exits on the next actionable wake, a heartbeat at the latest, and a beacon that lapses without one is what `bin/fm-guard.sh` alarms on.
+The arm also cannot tell a memory kill from a clean harness exit, so a deliberate quit now leaves the watcher until that same next cycle rather than removing it immediately; `tests/fm-pi-primary-live-e2e.test.sh` asserts that direction explicitly and reaps it in its own cleanup.
+
 ## Arm-layer cycle contract
 
 `bin/fm-watch-arm.sh` has exactly five outcomes, and none of them is a clean empty success.
@@ -67,7 +85,10 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 
 `tests/fm-pi-watch-extension.test.sh` simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, proves an in-flight `read-only` refusal is not served to a request made after the lock was acquired, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination, and both cycle-end directions: a cycle that delivers a real wake through the real registered-check path is reported complete with exit 0 and its wake is drained to prove the claim, while a dead watcher whose beacon is backdated past the production grace still fails loudly with the lapse wording.
+It also covers the detach directly: a `TERM` and a `KILL` of the arm task's whole process group each leave the watcher alive and still publishing beacons, the next arm attaches to that survivor instead of starting a rival, a hard-killed watcher with a lapsed beacon still gets a fresh start rather than an attach, and an arm's own `HUP` clears only its temp output.
+Those cases launch the arm through `setsid` themselves so it is its own process-group leader, which both reproduces the harness's kill without signalling the test run and makes surviving it proof of the detach rather than proof that a trap was removed.
 That file reaps its own background processes from the shell's job table on EXIT, because `fail()` exits the whole file and any failing assertion previously orphaned a real watcher.
+It now also reaps each fixture's recorded watcher pid, because a watcher that deliberately survives its arm is no longer covered by the job table alone.
 `tests/fm-pi-watch-extension.test.sh` covers the adapter half of the same contract for Pi and OpenCode, using the exact captured `watcher: cycle-complete` bytes and a guard that fails if `bin/fm-watch-arm.sh` stops emitting that line.
 `tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state and preserves the existing Stop registration.
 `tests/fm-session-lock-gate.test.sh` owns the session-lock gate itself: the `bin/fm-lock.sh ownership` verdicts and their read-only contract, the arm and checkpoint refusing for a live rival owner while still arming for an absent, dead, or pid-reused holder, ownership recognized several process levels down, the status line, and an assertion that only `bin/fm-session-lock-lib.sh` implements the walk.

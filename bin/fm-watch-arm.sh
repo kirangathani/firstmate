@@ -57,6 +57,32 @@
 # do next. On FAILED it exits non-zero so the failure is loud. A live cycle already
 # present means re-arm attaches - do not start a second watcher.
 #
+# THE WATCHER IS DETACHED FROM THIS ARM'S PROCESS GROUP AND SESSION.
+# The arm task is the harness's, and a harness kills it: Claude Code's low-memory
+# protection stopped this task at least NINE times in the night of 2026-09-07/08
+# ("was stopped because the system is running low on memory"), every time while
+# MemAvailable still read 7-12 GB of a 20 GB box and only MemFree had dipped.
+# Nothing in the arm uses memory; the dips came from other work on the box, so the
+# arm cannot avoid being picked. What it CAN avoid is taking supervision down with
+# it. The watcher used to be an ordinary background child in the arm's process
+# group, so a group kill of the task killed the watcher too, and every one of
+# those nine kills cost a full turn to notice and left the fleet unsupervised for
+# minutes. It is now started through setsid(1), in its own session and process
+# group, so a group signal aimed at the arm task does not reach it.
+# The arm still FOLLOWS it exactly as before: setsid does not fork when the child
+# is not already a process-group leader (job control is switched off below so that
+# is guaranteed), so the watcher remains this arm's direct child, `wait` still
+# returns its exit, and the arm's own exit is still the harness's wake signal.
+# Once a fresh watcher is CONFIRMED, the arm's signal handlers stop killing it,
+# for the same reason: an arm dying must not take a healthy watcher with it. Only
+# an unconfirmed child is still reaped, because a watcher that never proved itself
+# is not supervision worth preserving. A killed arm therefore means "re-run the
+# arm to re-attach", not "the watcher is gone", and the next arm reports
+# `watcher: attached ...` through the ordinary singleton path.
+# A watcher that outlives every arm is still bounded by its own one-shot cycle: it
+# exits on the next actionable wake (a heartbeat at the latest), and a beacon that
+# lapses without one is what fm-guard.sh alarms on.
+#
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
@@ -84,6 +110,13 @@
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings.
 set -u
+# Job control OFF, deliberately and explicitly. With it on, bash puts each
+# background job in its own process group, which makes the watcher a process-group
+# leader, which makes setsid(1) fork: `$!` would then be the short-lived setsid
+# process rather than the watcher, `wait` would return immediately, and a correct
+# fresh start would be misreported. Non-interactive bash already defaults to this,
+# but an exported SHELLOPTS carrying `monitor` would otherwise turn it back on.
+set +m
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -92,6 +125,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
+# Detach primitive. Absent on macOS, where the arm keeps its pre-detach behaviour
+# rather than failing to arm at all; the harness memory-kill this defends against
+# is a Linux observation.
+SETSID=$(command -v setsid 2>/dev/null || true)
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
@@ -495,10 +532,11 @@ if [ "$mode" = arm ] && healthy_watcher; then
   exit $?
 fi
 
-# Start a watcher as a tracked child and confirm it before settling in. The child
-# stays our child for its whole life: we wait on it, so killing this arm (the
-# harness-tracked task) tears the watcher down too, and the watcher's eventual
-# wake exit propagates out so the harness re-notifies firstmate.
+# Start a watcher as a tracked but DETACHED child and confirm it before settling
+# in. It stays our child for its whole life - we wait on it, and its eventual wake
+# exit propagates out so the harness re-notifies firstmate - but it lives in its
+# own session and process group, so a signal aimed at this arm task's group does
+# not reach it. See the detach paragraph in the header for why that matters.
 child=
 child_out=
 cleanup_child() {
@@ -510,6 +548,31 @@ cleanup_child() {
   fi
 }
 
+# After the fresh watcher is CONFIRMED, an interrupt must leave it running: it is
+# detached precisely so this arm dying is survivable, and killing it here would
+# hand the group-kill back through the front door. Only the arm's own temp output
+# goes, because nothing reads it once this arm is gone - the wake itself is durable
+# in state/.wake-queue, and the next arm attaches and reports that cycle.
+# shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
+handle_following_signal() {
+  local signal=$1 rc=$2
+  trap - HUP TERM INT
+  cycle_log_append "$rc" "$signal" arm-interrupted none
+  if [ -n "$child_out" ]; then
+    rm -f "$child_out" 2>/dev/null || true
+  fi
+  exit "$rc"
+}
+
+follow_confirmed_watcher() {
+  trap 'handle_following_signal HUP 129' HUP
+  trap 'handle_following_signal TERM 143' TERM
+  trap 'handle_following_signal INT 130' INT
+}
+
+# Before confirmation the child is still reaped on an interrupt: a watcher that
+# never proved itself live and fresh is not supervision worth preserving, and
+# leaving it behind would only contend for the singleton with the next arm's child.
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 handle_arm_signal() {
   local signal=$1 rc=$2
@@ -531,7 +594,15 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
-"$WATCH" >"$child_out" &
+# stdio is fully off the harness task's pipe: stdout and stderr both land in the
+# arm's own output file and stdin is closed. A surviving watcher writing to a pipe
+# whose reader the harness has already killed would take SIGPIPE and die, which is
+# exactly the death the detach exists to prevent.
+if [ -n "$SETSID" ]; then
+  "$SETSID" "$WATCH" >"$child_out" 2>&1 </dev/null &
+else
+  "$WATCH" >"$child_out" 2>&1 </dev/null &
+fi
 child=$!
 cycle_begin "$child" started
 child_done=0
@@ -595,6 +666,7 @@ while :; do
     if [ "$HEALTHY_PID" = "$child" ]; then
       cycle_refresh_lock_before
       cycle_mark_predecessor_successor "started:$child"
+      follow_confirmed_watcher
       echo "watcher: started pid=$child (beacon fresh)"
       wait "$child"
       rc=$?
