@@ -217,6 +217,25 @@ When the checked-out base predates the waiver and carries no verifier at all, bo
 A repository that never publishes the secret leaves that `check` job permanently red for every PR the pipeline did not raise, which firstmate itself authorizes in two ordinary cases, so the remedy for the merge is firstmate-side rather than CI-side.
 `bin/fm-pr-merge.sh` excuses that one check by exact name when the task carries a signed testing skip or the project is registered as `direct-PR`, refuses every other failing or unfinished check unchanged, and discloses each such merge loudly; that script's header owns the full contract, including why a rename of the job fails towards refusing.
 
+## The pipeline-reviewed attestation (no second secret)
+
+A ship task's PR has already been reviewed by the no-mistakes pipeline, repeatedly, before it is ever opened.
+A project that also runs an AI review job on its PRs therefore reviews the same diff again, and on the ELN those jobs timed out or could not run at all on PRs the pipeline had reviewed five times.
+`bin/fm-review-attest.sh` publishes the evidence that lets such a job stand down, and that script's header owns the signed payload, the published line's grammar, the evidence check, and the limits.
+
+It needs nothing configured beyond what the CI waiver already needs.
+The signing key is the repository's existing waiver key, `HMAC(master, "fm-ci-waiver-repo.v1", <owner/repo>)`, which is the same value `bin/fm-ci-waiver.sh publish <owner/repo>` already set as the Actions secret `FM_CI_WAIVER_SECRET`, so an enrolled repository needs no second `publish` and no second secret.
+Sharing the key is safe because the payload does not: it opens with the domain string `review-attest`, so a line minted here can never verify as a waiver and a waiver can never verify as one of these, whichever PR body either is pasted into.
+That separation is what makes sharing acceptable at all, since the two grants are not comparable - a waiver skips a PR's entire test suite, this skips one duplicate code review.
+
+`bin/fm-review-attest.sh attest <task-id>` reads the PR's current head commit from GitHub, refuses unless the pipeline's own database holds a run for that task's branch at exactly that commit whose `review` step completed, signs it, and appends the line to the PR body through a REST `PATCH` rather than `gh pr edit`, which fails outright on a repository with classic projects enabled.
+The database is opened read-only and the shared daemon's state is never written.
+A run whose `review` step was `skipped` is attestable only when `data/<task-id>/decisions.md` carries the captain's decision under the key `review-skip`, and the decision's own text is printed at signing time so firstmate reads what it is endorsing.
+
+The line covers exactly one commit, so any later push invalidates it - including a merge of the base branch, which is a commit the pipeline never reviewed.
+That is deliberate rather than a limitation to route around: the review runs on every commit the pipeline did not review, and a task that pushes after being attested needs a fresh attestation before its PR is covered again.
+Until a repository holds the secret, or while a PR carries no line, the review simply runs, which is exactly the behaviour without this feature at all.
+
 ## The supersession attestation secret (FM_SUPERSESSION_SECRET)
 
 A captain-approved test-assertion supersession lives in `data/supersessions/<project>.md`, which is captain-private and gitignored, so `bin/fm-pr-merge.sh` can honour it and CI cannot see it at all.

@@ -355,6 +355,13 @@ Once the pipeline's \`pr\` step has opened the PR, you verify CI yourself:
    **An \`infrastructure:\` line is not a red and is never re-run.** It means a check never delivered a verdict about your branch at all - it timed out, was cancelled, could not run, or died having written nothing. A timed-out review is an alarm, not a retry. Stop polling, append \`blocked: infrastructure - {the infrastructure line verbatim}\` to the status file, and stop. Do not re-run that check, do not push an empty commit to retrigger it, and do not keep waiting for it to pass on its own.
 3. When it exits 0 it prints \`green: {url} {sha} {n} checks\`. Run that \`rerun-check\`, then append \`done: PR {url} checks green at {sha}\` quoting the exact sha it printed, and stop. You are finished.
 4. If the run is still parked at its \`ci\` step looping on that warning once you have verified green, abort it with \`no-mistakes axi abort\` - a between-runs action, so it is yours to take - and say in your \`done:\` line that every prior step completed and only the stuck CI-monitor step was aborted.
+
+# The pipeline's review is worth telling the PR about
+The moment the pipeline's \`pr\` step has opened the PR, append \`review-attest needed for {full-40-char-sha} on {owner}/{repo}\` to the status file, with the PR's head commit and the owner/repo, and carry straight on driving the run - this is a note to firstmate, not a stop.
+Firstmate replies by publishing a signed line into the PR body recording that this pipeline already reviewed that exact commit, so the project's own AI review job can stand down instead of reviewing the same diff again.
+Write that sentence exactly, with the full 40-character commit and the owner/repo: firstmate issues the attestation straight from this line, and a reworded or abbreviated one cannot be read.
+Ask as early as you can, because a review job that has already started reads the body as it was when it started.
+The line covers one commit, so if anything pushes to the branch afterwards - including the pipeline's own later steps - ask again for the new head; an uncovered commit is simply reviewed in full, which is the safe outcome and nothing to work around.
 EOF
 )
       fi
