@@ -163,13 +163,15 @@ sleep 1
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" Enter
 wait_for_text "PI_EXIT=0" 60 || fail "Pi did not exit cleanly"
 wait_pid_dead "$arm_pid" || fail "arm child survived clean Pi exit"
-# The watcher deliberately outlives the arm now. It is started detached from the
-# arm's process group and session so a harness that kills the arm task - Claude
-# Code's low-memory protection killed it nine times in one night on 2026-09-07/08 -
-# cannot take supervision down with it, and that protection cannot tell a memory
-# kill from a clean quit. It remains bounded by its own one-shot cycle: it exits on
-# the next actionable wake, a heartbeat at the latest. The cleanup handler above
-# reaps it, so this exit path still leaves nothing behind.
-kill -0 "$watcher_pid" 2>/dev/null || fail "watcher did not survive the arm's exit"
+# The watcher deliberately outlives the arm on this path now. It is started
+# detached from the arm's process group and session so a harness that kills the
+# arm task - Claude Code's low-memory protection killed it nine times in one night
+# on 2026-09-07/08, always with TERM - cannot take supervision down with it, and
+# TERM cannot distinguish that kill from Pi's own clean-exit cleanup, which sends
+# TERM too (tests/fm-pi-watch-extension.test.sh). Only HUP still reaps the arm's
+# own child. It remains bounded by its own one-shot cycle: it exits on the next
+# actionable wake, a heartbeat at the latest, and the cleanup handler above reaps
+# it, so this exit path still leaves nothing behind.
+kill -0 "$watcher_pid" 2>/dev/null || fail "watcher did not survive the arm's TERM exit"
 
 printf 'ok - Pi %s live E2E used shared Codex auth, auto-started one successor before turn end, and cleaned up\n' "$PI_VERSION"

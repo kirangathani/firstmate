@@ -73,12 +73,16 @@
 # is not already a process-group leader (job control is switched off below so that
 # is guaranteed), so the watcher remains this arm's direct child, `wait` still
 # returns its exit, and the arm's own exit is still the harness's wake signal.
-# Once a fresh watcher is CONFIRMED, the arm's signal handlers stop killing it,
-# for the same reason: an arm dying must not take a healthy watcher with it. Only
-# an unconfirmed child is still reaped, because a watcher that never proved itself
-# is not supervision worth preserving. A killed arm therefore means "re-run the
-# arm to re-attach", not "the watcher is gone", and the next arm reports
-# `watcher: attached ...` through the ordinary singleton path.
+# Once a fresh watcher is CONFIRMED, TERM and INT stop killing it, for the same
+# reason: an arm dying must not take a healthy watcher with it. A killed arm
+# therefore means "re-run the arm to re-attach", not "the watcher is gone", and
+# the next arm reports `watcher: attached ...` through the ordinary singleton path.
+# Two cases deliberately still reap: an UNCONFIRMED child, because a watcher that
+# never proved itself is not supervision worth preserving and would only contend
+# for the singleton with the next arm's child; and HUP on this arm's own child,
+# because HUP means the session that owned the arm is gone rather than that the
+# task was stopped. See handle_arm_signal for the ledger evidence behind that
+# split - every catchable interrupt this home has ever recorded is TERM.
 # A watcher that outlives every arm is still bounded by its own one-shot cycle: it
 # exits on the next actionable wake (a heartbeat at the latest), and a beacon that
 # lapses without one is what fm-guard.sh alarms on.
@@ -457,13 +461,15 @@ handle_following_signal() {
   exit "$rc"
 }
 
-follow_confirmed_watcher() {
+# The ATTACH posture: this arm did not start the watcher it is following, so it
+# reaps nothing on any signal, HUP included. Unchanged from before the detach.
+attach_signal_traps() {
   trap 'handle_following_signal HUP 129' HUP
   trap 'handle_following_signal TERM 143' TERM
   trap 'handle_following_signal INT 130' INT
 }
 
-follow_confirmed_watcher
+attach_signal_traps
 
 watch_output_has_wake() {
   local out=$1
@@ -565,6 +571,22 @@ cleanup_child() {
 # Before confirmation the child is still reaped on an interrupt: a watcher that
 # never proved itself live and fresh is not supervision worth preserving, and
 # leaving it behind would only contend for the singleton with the next arm's child.
+#
+# HUP keeps reaping this arm's OWN child even after confirmation, and that split
+# is measured rather than assumed. In the captain's live home the cycle ledger
+# holds 778 records, 37 of them a catchable arm interrupt, and every single one is
+# `signal=TERM` - including the five overnight kills on 2026-09-08 at 01:02, 01:32,
+# 01:36, 01:46 and 01:58. `signal=HUP` has never been recorded once. So the
+# harness kill this whole change exists to survive is TERM, and keeping HUP lethal
+# costs the fix nothing.
+# It also means something different. TERM says someone is stopping this task while
+# the session lives on, so a re-arm will follow; HUP says the session that owned
+# this arm is gone, and the watcher now sits in its own session where a real
+# hangup can never reach it, so nothing would ever follow it. Reaping the child
+# this arm started is the honest close there, and it is exactly what the arm did
+# before the detach.
+# If a harness kill ever arrives as HUP, this is the branch to revisit: the fix
+# depends on it, and the ledger's `signal=` field is where that shows up.
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 handle_arm_signal() {
   local signal=$1 rc=$2
@@ -581,6 +603,14 @@ handle_arm_signal() {
 trap 'handle_arm_signal HUP 129' HUP
 trap 'handle_arm_signal TERM 143' TERM
 trap 'handle_arm_signal INT 130' INT
+
+# The FOLLOWING posture, entered once this arm's own child is confirmed. TERM and
+# INT stop reaping it, because those are the harness stopping the task and the
+# watcher must outlive that. HUP deliberately stays on handle_arm_signal above.
+follow_own_confirmed_watcher() {
+  trap 'handle_following_signal TERM 143' TERM
+  trap 'handle_following_signal INT 130' INT
+}
 
 child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
@@ -658,7 +688,7 @@ while :; do
     if [ "$HEALTHY_PID" = "$child" ]; then
       cycle_refresh_lock_before
       cycle_mark_predecessor_successor "started:$child"
-      follow_confirmed_watcher
+      follow_own_confirmed_watcher
       echo "watcher: started pid=$child (beacon fresh)"
       wait "$child"
       rc=$?
