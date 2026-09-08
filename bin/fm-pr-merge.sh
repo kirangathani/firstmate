@@ -31,6 +31,31 @@
 # that ate the base's asserted BEHAVIOR by running the base's own tests; this one
 # catches deleted CONTENT no test asserts, which is what a suite is blind to.
 #
+# Up-to-date gate: after the PR and head are resolved and before the expensive
+# test-keep and checks-green gates, the PR's head must already CONTAIN the
+# current tip of the branch the PR targets. The base branch is read through
+# bin/fm-pr-lib.sh's fm_pr_base_branch_read - the one owner of that question, so
+# this gate, the test-keep gate, and the merge-gate preview never resolve
+# different bases - fetched fresh from origin, and the verdict is
+# `git merge-base --is-ancestor <base> <head>`. It is a hard refusal with no
+# override flag, and yolo is not one.
+# WHY: a branch whose CI passed against a base that has since moved carries no
+# verdict about what would actually land. Firstmate already steers a worker to
+# merge the moved base forward and re-verify when a merge lands under it
+# (AGENTS.md section 8); that steer is advisory, and this makes it mechanical at
+# the one place every task PR merge goes through (captain decision 2026-09-07).
+# The remedy the refusal names is that same steer: merge the base into the
+# branch, NEVER rebase, push, let CI re-run, then re-run this command.
+# GitHub's own mergeable_state is NOT a substitute and is deliberately unused:
+# it is frequently `unknown` and it lags the branch, so it can report either
+# answer wrongly. The head is GitHub's recorded pr_head when this local copy has
+# that object and the local branch tip otherwise, which is the same resolution
+# the attribution gate above makes, reused rather than re-derived.
+# A PR living in a repository other than this local copy's origin is already
+# refused by fm_pr_base_branch_read itself, so this gate does not repeat it, and
+# a local copy that does not resolve is noted rather than refused because the
+# test-keep gate below refuses that condition outright.
+#
 # Test-keep gate: after recording and before merging, bin/fm-assert-tests-kept.sh
 # must confirm every test assertion present on the authoritative base is still
 # present (check 1, by name) and still passing against the branch's code
@@ -932,6 +957,93 @@ EOF_RES_SHAS
   fi
 else
   echo "note: task $ID has no resolvable local copy, so the merge-resolution gate did not run; the kept-tests gate below refuses that same condition, so this merge cannot proceed on it" >&2
+fi
+
+# --- up-to-date gate (contract in this script's header) -----------------------
+# A branch whose CI passed against a base that has since moved carries no
+# verdict about what would actually land, so it must not land unverified. The
+# existing "stale base" steer said the same thing advisorily; this makes it
+# mechanical, at the one place every task PR merge goes through.
+#
+# It sits here, ahead of the kept-tests and checks-green gates, because it is a
+# fetch and one ancestry query: a stale branch is refused before the 20-35
+# minutes the kept-tests gate costs, and before any rollup read.
+#
+# The base is read through bin/fm-pr-lib.sh's fm_pr_base_branch_read, the one
+# owner of which branch a PR targets, so this gate, the kept-tests gate below,
+# and the merge-gate preview cannot resolve three different bases. That reader
+# also refuses a PR living in a repository other than this local copy's origin,
+# so this gate does not repeat that check.
+# GitHub's own mergeable_state is deliberately NOT used: it is frequently
+# `unknown` and it lags the branch, so it can report either answer wrongly. A
+# freshly fetched origin/<base> and `git merge-base --is-ancestor` is the
+# authority, measured on the captain's machine over refs git itself resolves.
+# The head is the recorded PR head when this local copy has it and the local
+# branch tip otherwise - the same resolution the attribution gate above made,
+# reused rather than re-derived so the two verdicts are never about different
+# commits.
+# There is no override flag and yolo is not one: an unverified merge is exactly
+# what this refuses, and a captain who wants it merged still wants CI to have
+# seen the base it lands on.
+# A local copy that does not resolve is noted rather than refused, the same
+# reasoned exception the two gates above make and for the same reason: the
+# kept-tests gate below refuses that condition outright.
+if [ -n "$ATTR_WT" ] && [ -n "${attr_compare:-}" ]; then
+  UTD_DIAG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-pr-merge-utdbase.XXXXXX") || {
+    echo "error: cannot create a private scratch directory to record why the PR base could not be read; refusing to merge unverified" >&2
+    exit 1
+  }
+  utd_base_branch=$(fm_pr_base_branch_read "$ATTR_WT" "$URL" "$UTD_DIAG_DIR/cause") || {
+    echo "error: cannot read the base branch of $URL from GitHub, so whether this branch is up to date with it cannot be established; refusing to merge unverified" >&2
+    if [ -s "$UTD_DIAG_DIR/cause" ]; then
+      echo "error: cause:" >&2
+      sed 's/^/error:   /' "$UTD_DIAG_DIR/cause" >&2
+    fi
+    rm -rf "$UTD_DIAG_DIR"
+    exit 1
+  }
+  rm -rf "$UTD_DIAG_DIR"
+
+  # Fetched fresh, and into the remote-tracking ref itself, exactly as
+  # bin/fm-assert-tests-kept.sh does it and for the same two reasons: a bare
+  # single-branch fetch can leave origin/<branch> stale on some Git versions,
+  # and git's own failure lines print the remote address as configured, which
+  # can carry an embedded credential this script's stderr would publish.
+  # A local copy with no origin compares against the local base branch, which is
+  # the only reading available there and the one the kept-tests gate takes too.
+  UTD_FETCH_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-utdfetch.XXXXXX") || {
+    echo "error: cannot create a scratch file to capture the base fetch's output; refusing to merge unverified" >&2
+    exit 1
+  }
+  if git -C "$ATTR_WT" remote get-url origin >/dev/null 2>&1; then
+    if ! git -C "$ATTR_WT" fetch origin \
+      "+refs/heads/$utd_base_branch:refs/remotes/origin/$utd_base_branch" \
+      --quiet 2>"$UTD_FETCH_ERR"; then
+      echo "error: cannot fetch base branch $utd_base_branch from origin, so whether this branch is up to date with it cannot be established; refusing to merge unverified" >&2
+      sed -E 's#(://)[^/@[:space:]]*@#\1<redacted>@#g' "$UTD_FETCH_ERR" >&2
+      rm -f "$UTD_FETCH_ERR"
+      exit 1
+    fi
+    utd_base_ref="origin/$utd_base_branch"
+  else
+    utd_base_ref=$utd_base_branch
+  fi
+  rm -f "$UTD_FETCH_ERR"
+
+  if ! git -C "$ATTR_WT" rev-parse --verify --quiet "$utd_base_ref^{commit}" >/dev/null; then
+    echo "error: base $utd_base_ref does not resolve in this local copy, so whether this branch is up to date with it cannot be established; refusing to merge unverified" >&2
+    exit 1
+  fi
+  if ! git -C "$ATTR_WT" merge-base --is-ancestor "$utd_base_ref" "$attr_compare" >/dev/null 2>&1; then
+    {
+      echo "error: this PR's head does not contain the current $utd_base_ref, so its checks were measured against a base that has since moved; refusing to merge unverified"
+      echo "error: have the worker merge $utd_base_ref into the branch (never rebase - a rebased branch cannot be pushed at all), push, let CI re-run, then re-run fm-pr-merge.sh"
+      echo "error: there is no override flag for this gate and yolo is not one: nothing has verified this branch against the base it would land on."
+    } >&2
+    exit 1
+  fi
+else
+  echo "note: task $ID has no resolvable local copy, so the up-to-date gate did not run; the kept-tests gate below refuses that same condition, so this merge cannot proceed on it" >&2
 fi
 
 # --- the premise behind check 2's identical-file skip (contract in this

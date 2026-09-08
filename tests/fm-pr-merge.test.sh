@@ -114,6 +114,17 @@
 #        grants one)
 #   (x11) the excused name still equals the workflow job name that reports it
 #
+# The up-to-date gate (contract in bin/fm-pr-merge.sh's header): a PR whose head
+# does not already contain the current tip of the branch it targets was verified
+# against a base that has since moved, so it may not land.
+#   (u1) a head BEHIND the base refuses, names the merge-the-base-forward remedy,
+#        and merges nothing
+#   (u2) a head that CONTAINS the moved base passes the gate and merges
+#   (u3) yolo does not bypass it: the same stale head refuses with the project
+#        registered +yolo
+#   (u4) it refuses BEFORE the checks-green gate, proven on a case whose rollup
+#        query would fail: the run never reaches that read
+#
 # A signed CI waiver over an empty rollup (contract in bin/fm-pr-merge.sh's
 # header): the zero-checks refusal asks whether absent CI was a captain's
 # decision, and a signed ci_skip is that decision at task scope. (z5) above is
@@ -2679,6 +2690,128 @@ test_attribution_runs_before_the_kept_tests_gate
 test_unreadable_pr_body_refuses_unverified
 test_a_deleting_merge_resolution_refuses
 test_an_additive_merge_resolution_merges
+
+# --- up-to-date gate (contract in bin/fm-pr-merge.sh's header) ----------------
+#
+# The fixture project has no origin remote, so the gate compares against the
+# LOCAL base branch, which is the same reading bin/fm-assert-tests-kept.sh takes
+# there. Moving main after the worktree is cut is what leaves the branch behind.
+
+# make_stale_case <name>: a case whose base branch has advanced past the branch
+# the PR head sits on. Echoes the case dir.
+make_stale_case() {
+  local case_dir
+  case_dir=$(make_case "$1")
+  printf 'a later line on the base\n' > "$case_dir/project/BASE.md"
+  git -C "$case_dir/project" add BASE.md
+  git -C "$case_dir/project" commit -qm 'base: moves on after the branch was cut'
+  printf '%s\n' "$case_dir"
+}
+
+test_head_behind_the_base_refuses() {
+  local case_dir rc
+  case_dir=$(make_stale_case up-to-date-behind)
+  add_gh_mocks "$case_dir" b111111111111111111111111111111111111111
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/91 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "up-to-date-behind: a head behind its base must refuse"
+  assert_grep 'does not contain the current main' "$case_dir/stderr" \
+    "up-to-date-behind: the refusal did not name the base the head is missing"
+  assert_grep 'merge main into the branch (never rebase' "$case_dir/stderr" \
+    "up-to-date-behind: the refusal did not name the merge-forward remedy"
+  assert_grep 'let CI re-run' "$case_dir/stderr" \
+    "up-to-date-behind: the refusal did not say CI must re-run"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "up-to-date-behind: gh-axi pr merge ran on a branch verified against a moved base"
+  pass "fm-pr-merge refuses a PR head that does not contain the current base"
+}
+
+test_head_containing_the_moved_base_merges() {
+  local case_dir rc
+  case_dir=$(make_stale_case up-to-date-merged-forward)
+  add_gh_mocks "$case_dir" b111111111111111111111111111111111111111
+  : > "$case_dir/gh-axi.log"
+  # The remedy the refusal names, applied: merge the moved base forward.
+  git -C "$case_dir/wt" merge -q --no-edit main
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/92 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "up-to-date-merged-forward: a head containing the base must merge"
+  assert_no_grep 'does not contain the current' "$case_dir/stderr" \
+    "up-to-date-merged-forward: the gate refused a branch that had merged the base forward"
+  assert_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "up-to-date-merged-forward: the merge never reached gh-axi"
+  pass "fm-pr-merge merges a PR head that already contains the moved base"
+}
+
+test_yolo_does_not_bypass_the_up_to_date_gate() {
+  local case_dir rc
+  case_dir=$(make_stale_case up-to-date-yolo)
+  add_gh_mocks "$case_dir" b111111111111111111111111111111111111111
+  : > "$case_dir/gh-axi.log"
+  # The project's own registry entry, read from the case's private FM_HOME, with
+  # yolo ON. yolo relaxes the captain's ROUTINE approvals; it is not an override
+  # for a gate that says nothing verified this branch.
+  mkdir -p "$case_dir/fmhome/data"
+  printf -- '- project [no-mistakes +yolo] - the fixture project (added 2026-09-07)\n' \
+    > "$case_dir/fmhome/data/projects.md"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/93 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "up-to-date-yolo: yolo must not bypass the up-to-date gate"
+  assert_grep 'does not contain the current main' "$case_dir/stderr" \
+    "up-to-date-yolo: the refusal did not name the base the head is missing"
+  assert_grep 'yolo is not one' "$case_dir/stderr" \
+    "up-to-date-yolo: the refusal did not say yolo is not an override"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "up-to-date-yolo: gh-axi pr merge ran under yolo on a stale branch"
+  pass "yolo does not bypass the up-to-date gate"
+}
+
+test_up_to_date_gate_refuses_before_the_checks_gate() {
+  local case_dir rc
+  case_dir=$(make_stale_case up-to-date-before-checks)
+  add_gh_mocks "$case_dir" b111111111111111111111111111111111111111
+  : > "$case_dir/gh-axi.log"
+  # The rollup query FAILS in this case, so a run that reached the checks-green
+  # gate would refuse with that gate's own words. It must refuse with this
+  # gate's instead, which is only possible if the rollup was never read.
+  : > "$case_dir/pr-checks-unreadable"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/94 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "up-to-date-before-checks: the stale head must refuse"
+  assert_grep 'does not contain the current main' "$case_dir/stderr" \
+    "up-to-date-before-checks: the refusal did not come from the up-to-date gate"
+  assert_no_grep "could not read the PR's check status" "$case_dir/stderr" \
+    "up-to-date-before-checks: the run reached the checks-green gate's rollup read"
+  assert_no_grep 'base assertion' "$case_dir/stderr" \
+    "up-to-date-before-checks: the run spent the kept-tests gate before refusing"
+  pass "the up-to-date gate refuses before the checks-green gate reads anything"
+}
+
+test_head_behind_the_base_refuses
+test_head_containing_the_moved_base_merges
+test_yolo_does_not_bypass_the_up_to_date_gate
+test_up_to_date_gate_refuses_before_the_checks_gate
 
 # --- mock-completeness canary ------------------------------------------------
 #
