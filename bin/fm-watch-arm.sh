@@ -439,17 +439,31 @@ attach_and_wait() {
   done
 }
 
+# An arm that is FOLLOWING a verified watcher - one it attached to, or its own
+# once that watcher is confirmed - records the interrupt and leaves the watcher
+# running. That is the whole point of the detach: the arm is the harness's task
+# and the harness kills it, so an arm dying must not take supervision with it.
+# Only the arm's own temp output goes, because nothing reads it once this arm is
+# gone; the wake itself is durable in state/.wake-queue and the next arm attaches
+# and reports that cycle. The attach path never allocates one, hence the default.
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
-handle_attached_signal() {
+handle_following_signal() {
   local signal=$1 rc=$2
   trap - HUP TERM INT
   cycle_log_append "$rc" "$signal" arm-interrupted none
+  if [ -n "${child_out:-}" ]; then
+    rm -f "$child_out" 2>/dev/null || true
+  fi
   exit "$rc"
 }
 
-trap 'handle_attached_signal HUP 129' HUP
-trap 'handle_attached_signal TERM 143' TERM
-trap 'handle_attached_signal INT 130' INT
+follow_confirmed_watcher() {
+  trap 'handle_following_signal HUP 129' HUP
+  trap 'handle_following_signal TERM 143' TERM
+  trap 'handle_following_signal INT 130' INT
+}
+
+follow_confirmed_watcher
 
 watch_output_has_wake() {
   local out=$1
@@ -546,28 +560,6 @@ cleanup_child() {
   if [ -n "$child_out" ]; then
     rm -f "$child_out" 2>/dev/null || true
   fi
-}
-
-# After the fresh watcher is CONFIRMED, an interrupt must leave it running: it is
-# detached precisely so this arm dying is survivable, and killing it here would
-# hand the group-kill back through the front door. Only the arm's own temp output
-# goes, because nothing reads it once this arm is gone - the wake itself is durable
-# in state/.wake-queue, and the next arm attaches and reports that cycle.
-# shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
-handle_following_signal() {
-  local signal=$1 rc=$2
-  trap - HUP TERM INT
-  cycle_log_append "$rc" "$signal" arm-interrupted none
-  if [ -n "$child_out" ]; then
-    rm -f "$child_out" 2>/dev/null || true
-  fi
-  exit "$rc"
-}
-
-follow_confirmed_watcher() {
-  trap 'handle_following_signal HUP 129' HUP
-  trap 'handle_following_signal TERM 143' TERM
-  trap 'handle_following_signal INT 130' INT
 }
 
 # Before confirmation the child is still reaped on an interrupt: a watcher that
