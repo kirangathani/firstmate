@@ -775,13 +775,64 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
 }
 
+# --- a LIVE crew's declared pause survives pane-hash churn --------------------
+# The 2026-09-07 case (plated-readme-play-store-live-r2): firstmate appended a
+# `paused:` line for a worker whose PR was open, green, and awaiting a merge
+# decision, and the watcher still delivered a BARE `stale: <window>` wake. The
+# live-agent probe in pause_state_class made every FIRST SIGHTING of a stale hash
+# classify a declared pause as `none`, and an idle pane's hash churns (a clock, a
+# token counter, a redrawn composer), so the "surface a live pause once" rule
+# fired once per hash instead of once per pause, so the pause never suppressed
+# anything.
+# Contract: a live declared pause surfaces AT MOST ONCE, and every later hash
+# rides the bounded pause cadence instead of re-probing agent liveness.
+test_live_declared_pause_survives_pane_hash_churn() {
+  local dir state fakebin out capture_file statusf window key sig pid round wakes bare
+  dir=$(make_case live-pause-hash-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/churn.status"
+  window="test:fm-churn"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/churn.meta"
+  # The exact shape of the live line: a firstmate-recorded pause whose reason
+  # mentions a PR, a merge decision, and the word "wedged".
+  printf 'paused: firstmate-recorded, not a worker report - PR https://github.com/o/r/pull/161 open and green awaiting the captain'"'"'s merge decision; merge poll armed, pane quiet by design, do not escalate as wedged\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-churn_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # Six rounds, each with a DIFFERENT idle pane (the hash churn), each already
+  # stably stale. A live grok agent sits at its composer the whole time.
+  round=1
+  while [ "$round" -le 6 ]; do
+    printf 'idle at composer (token %s)\n' "$round" > "$capture_file"
+    printf '%s' "$(hash_text "idle at composer (token $round)")" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+      FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the captain merge decision' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    if wait_cycle "$pid" "$state" 20; then reap "$pid"; else wait "$pid" || true; fi
+    round=$((round + 1))
+  done
+
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null)
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null)
+  [ "$wakes" -le 1 ] || fail "a live declared pause flooded $wakes stale wakes across six churning pane hashes"
+  [ "$bare" -le 1 ] || fail "a live declared pause surfaced $bare bare stale wakes (its one check must not repeat per hash)"
+  grep -F "possible wedge" "$state/.wake-queue" >/dev/null && fail "a declared pause was wedge-escalated"
+  [ -e "$state/.paused-$key" ] || fail "a live declared pause never entered the bounded pause cadence"
+  pass "a live crew's declared pause survives pane-hash churn: one labeled surface, then the bounded cadence"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
 # bounded pause handling.
 # A still-live agent at an external-decision gate is the disconfirming case: it
-# must surface once, while the unchanged hash must not append the same wake on
-# every watcher re-arm.
+# must surface once, while later polls must not append the same wake on every
+# watcher re-arm or on every fresh pane hash.
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1421,6 +1472,7 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_live_declared_pause_survives_pane_hash_churn
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking

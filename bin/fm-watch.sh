@@ -151,7 +151,9 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once.
+# bounded cadence, while a live or ambiguously read agent surfaces once PER
+# DECLARATION (not per pane hash - see pause_state_class) so a churning idle pane
+# cannot turn that one check into an endless bare stale flood.
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -381,15 +383,30 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
+  # .paused-<key> means THIS declaration already had its one live-agent surface
+  # (surface_nonterminal_stale and handle_paused_stale both set it; the poll loop
+  # clears it the moment the last status line stops being a pause or captain
+  # hold). Once it exists the live-agent probe below must not force another
+  # surface: a stale hash is classified on FIRST SIGHTING, and an idle pane's
+  # hash churns on its own (a clock, a token counter, a redrawn composer), so a
+  # per-hash probe re-surfaces a declared pause forever instead of once
+  # (2026-09-07 plated-readme-play-store-live-r2: six bare wedge-shaped stale
+  # wakes for a worker whose PR was open, green, and awaiting a merge decision).
+  # The bounded PAUSE_RESURFACE_SECS recheck, not this probe, is what keeps a
+  # forgotten pause from rotting invisibly. An authoritative active run still
+  # outranks the declaration here, exactly as on the first-sighting path below.
+  if [ -e "$STATE/.paused-$key" ]; then
+    if [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+      printf 'paused'
+      return
     fi
+    class=$(crew_absorb_class "$task")
+    if [ "$class" = working ]; then
+      rm -f "$recheck_file"
+      printf 'working'
+      return
+    fi
+    date +%s > "$recheck_file"
     printf 'paused'
     return
   fi
@@ -407,7 +424,7 @@ pause_state_class() {  # <window> <task>
       return
     fi
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
+  [ "$class" = none ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
     *) rm -f "$recheck_file" ;;
