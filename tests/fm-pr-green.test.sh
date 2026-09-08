@@ -365,7 +365,7 @@ test_the_attestation_check_follows_the_shared_authority() {
   # rather than bare.
   [ "$out" = "green: $PR_URL $GREEN_SHA 1 checks (1 check excused: PR must be raised via no-mistakes - project is registered as a direct-PR project, whose PRs are raised without the pipeline by design)" ] \
     || fail "green-attestation: an excused check must not count as evidence and the green line must name why, got: $out"
-  pass "fm-pr-green.sh: the one excusable check follows the shared authority, never counts as evidence, and names why it was excused"
+  pass "fm-pr-green.sh: the one excusable check follows the shared authority, and never counts as evidence"
 }
 
 # The excusal covers exactly one check and nothing else on the PR. A second red
