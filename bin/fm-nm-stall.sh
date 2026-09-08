@@ -478,7 +478,7 @@ done <<< "$RECORDS"
 # footer, for the reason bin/fm-stale-base.sh's own footer states: a relay that
 # allowlists lines by marker must not be able to strip the remedy off a finding.
 printf '%s' "$REPORT"
-printf 'NM STALL REMEDY: read that step before deciding anything - bin/fm-nm-flow.sh <task-id> renders the run, and no-mistakes axi logs --step <step> --run <id> shows the step itself.\n'
+printf 'NM STALL REMEDY: read that step before deciding anything - bin/fm-flow.sh --task <task-id> renders the run, and no-mistakes axi logs --step <step> --run <id> shows the step itself.\n'
 printf 'NM STALL REMEDY: a PR that is already green and only waiting on a merge decision can look like this too; read the PR with gh pr view <url> --json statusCheckRollup before treating it as broken.\n'
 printf "NM STALL REMEDY: never restart or abort the run on this alarm alone - detection is all this is, and stopping a run is the captain's decision.\n"
 printf 'NM STALL REMEDY: once acted on, including relaying it to the captain, silence it with bin/fm-nm-stall.sh --ack <task-id>; it re-arms by itself if the validation freezes again later.\n'

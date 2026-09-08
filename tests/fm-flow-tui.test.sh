@@ -1023,23 +1023,6 @@ assert_not_contains "$plainoff" "by hand" "an unflagged task's push and PR was r
 assert_not_contains "$plainoff" "skipped stage" "an unflagged task grew a skipped stage"
 pass "a task carrying no testing skip renders exactly as it does without the field"
 
-# --- the drill-in, and the way back, are stated on screen --------------------
-
-assert_contains "$plainoff" "pipeline detail" "the key line does not offer the pipeline drill-in"
-assert_contains "$plainoff" "ctrl-c back" "the key line does not say how to come back from the drill-in"
-out=$(setsid node "$TUI" --watch --cols 200 --rows 60 --tick 0 \
-  --detail-hint 'd: the pipeline, esc to return' <<<"$WITHOFF" 2>/dev/null |
-  sed 's/\x1b\[[0-9;]*m//g')
-assert_contains "$out" "esc to return" "--detail-hint did not survive the flag path"
-assert_not_contains "$out" "ctrl-c back" "--detail-hint did not replace the default"
-pass "the drill-in key and its way back are on screen, and the caller owns the wording"
-
-out=$(node "$TUI" --detail-cmd 'true' <<<"$WITHOFF" 2>&1); rc=$?
-expect_code 2 $rc "--detail-cmd outside --watch must be a usage error"
-assert_contains "$out" "--watch" "the usage error did not name the flag it needs"
-out=$(node "$TUI" --detail-hint 'x' <<<"$WITHOFF" 2>&1); rc=$?
-expect_code 2 $rc "--detail-hint outside --watch must be a usage error"
-pass "the drill-in flags are refused outside watch mode, like the others"
 
 # --- every tracked .mjs stays syntactically valid ---------------------------
 #

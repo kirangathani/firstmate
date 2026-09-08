@@ -3,8 +3,6 @@
 A captain-facing instrument that renders every live worker as one row: a full horizontal no-mistakes pipeline for a ship task, and a compact identity-and-state row for a worker that runs no pipeline.
 It is not part of the supervision loop: the captain runs it as a plain command, and firstmate never opens it.
 
-`bin/fm-nm-flow.sh` remains the single-task detail view, unchanged; the fleet view now has a key that drills into it rather than leaving the captain to know its name.
-
 The view is split across two programs so that neither can drift into the other's job.
 
 - `bin/fm-flow-snapshot.sh` owns data.
@@ -296,24 +294,6 @@ Finally, the footer reports what the command SAID it did, not what its exit code
 `--open` prints its own outcome line - `switched to <window>`, `back from <window>`, or the error - and the viewer flashes that.
 A message reporting an action that did not occur is worse than an error, so an exit code alone is never enough to claim one.
 
-## `d` drills into one agent's pipeline
-
-The row states a CI verdict per agent, so the obvious next move from it is that agent's own pipeline.
-Enter is not that move - it hands over the worker's terminal, which is a different and equally useful thing - so the drill-in has its own key, and enter's behaviour and its per-terminal sentence are untouched.
-
-`bin/fm-flow.sh --detail <id>` runs `bin/fm-nm-flow.sh <id> --watch`, the read-only detailed view of one task's delivery flow that already existed and that the captain previously had to know by name and type.
-It is deliberately that command rather than a second renderer, because a copy would drift from it.
-The viewer suspends for it exactly as it does for enter, through the same shared hand-over.
-
-Ctrl-C is the way back, and it is stated on the key line beside the key that goes in.
-Two mechanics make it work:
-
-- The viewer does not quit on `SIGINT`, and that follows from raw mode rather than from preference.
-  With `ISIG` off, ctrl-c reaches the viewer as the byte `0x03` on its keyboard stream, never as a signal.
-  So the only way the process can receive `SIGINT` is while a child owns the terminal, which is the captain closing that child - quitting on it would tear the fleet view down every time they came back.
-- `--detail` traps `INT` and reports the return itself, so the footer flashes the outcome rather than an interrupt.
-  That trap is a function call, not an inline string: a trap body is re-parsed when the signal arrives, so an apostrophe in it has to survive two rounds of quoting, and the first cut of this flashed `unexpected EOF while looking for matching '` at the captain instead of the outcome (observed 2026-08-09, in a live terminal).
-
 ## The timer is two rows, because two states had a word and no time
 
 A finished step has always printed its duration.
@@ -533,9 +513,7 @@ Evidence, run `01M1VAGQM160X68A8GQS5YND1Z` on this host, 2026-09-07: it complete
 `~/.no-mistakes/config.yaml` is deliberately not consulted for any of this.
 It states what the NEXT run will use, so a run already under way on a different model would be labelled with a model it is not using - which is exactly the guess these fields exist to replace.
 
-The label is not carried into `bin/fm-nm-flow.sh`, the single-task detail view, and that is a decision rather than an omission.
-Its header runs on a hard 80-column budget with a stated drop order - the title shortens first, then the `no-mistakes flow: ` prefix is sacrificed to keep more of it, and the branch and run id are never shortened at all - so a fourth segment would need its own tier in that order and its own tests to prove it.
-The fleet view is where the captain compares one worker against another, which is where the question "which of these is on which model" is actually asked; the detail view already names the one run the captain drilled into.
+The fleet view is where the captain compares one worker against another, which is where the question "which of these is on which model" is actually asked.
 
 A worker with no pipeline has no step cells to hang a label on, so its own model rides its facts row instead, beside its state.
 It is painted cyan there, never one of this view's alarm slots: a label naming which model is working is an identity, never a fault, and a healthy idle second mate's row must carry no alarm colour at all.
@@ -723,7 +701,7 @@ Measured 2026-08-08 on this host, no-mistakes v1.37.0.
 
 The state read is paid only by workers that have no pipeline, and a pipeline agent pays none of it: a ship task's row is already the run it is on, so a second reconciliation would buy nothing.
 
-The local reads are roughly two orders of magnitude cheaper than the 10s worst-case timeout `bin/fm-nm-flow.sh` budgets for them, so the two-cadence split exists to spare GitHub rather than to spare the daemon.
+The local reads are roughly two orders of magnitude cheaper than the 10s worst-case timeout they are bounded by, so the two-cadence split exists to spare GitHub rather than to spare the daemon.
 
 The cost of `bin/fm-fleet-snapshot.sh` at real fleet size is not yet recorded here.
 At the captain's fleet size that command currently fails outright, tracked separately; the 664ms above is a one-task fixture home and is not a fleet-scale figure.
@@ -773,9 +751,7 @@ The single red check was `PR must be raised via no-mistakes`, and the authority 
 The other direction was measured too: the same rollup with that job renamed leaves `failed 1, excused 0`, and the same red check on a `no-mistakes` project with no signed skip stays `failed 1, excused 0`.
 
 **The drill-in.**
-Driven end to end in a detached 150x45 tmux session running the real `bin/fm-flow.sh` against the captain's live home, with `tmux send-keys` and `tmux capture-pane`.
-`d` on the selected agent handed the terminal to `bin/fm-nm-flow.sh --watch`, which drew that task's full pipeline; ctrl-c returned to the fleet view with the footer flashing `back from the pipeline detail for fm-no-attribution-reach-a2`, and the fleet view survived the interrupt.
-Enter still reported honestly in the same session: from a session with no attached client it flashed `open failed: error: this tmux session has no attached terminal to switch` rather than claiming an open.
+Removed on 2026-09-08 with the single-task viewer it opened; the evidence recorded here described `d` handing the terminal to `bin/fm-nm-flow.sh --watch` and returning on ctrl-c.
 
 **The skip rendering.**
 Verified in the same kind of session against a home whose `state/<id>.meta` was written by a real `bin/fm-spawn.sh --all-testing-skip` dispatch rather than by hand; only the recorded endpoint was rewritten afterwards, so the flag lines the view reads are the bytes that spawn wrote.

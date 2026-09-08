@@ -35,14 +35,6 @@
 //                     --open-cmd, and only it knows what that command does to
 //                     the captain's terminal or how to get back. Default:
 //                     "enter: open this worker's window".
-//   --detail-cmd C    watch only. Shell command run when the captain presses d
-//                     on an agent, suspending the view exactly as --open-cmd
-//                     does and with the same FM_FLOW_* environment. Meant for a
-//                     read-only per-task pipeline view; a non-zero exit is the
-//                     ordinary way back, not a failure. OPT-IN, no default.
-//   --detail-hint T   watch only. What the key line says d does and how to come
-//                     back. Caller-owned for the same reason --open-hint is.
-//                     Default: "d pipeline detail, ctrl-c back".
 //
 // THE TWO CHANNELS ARE SEPARATE, AND THAT IS THE WHOLE POINT.
 // The snapshot arrives on stdin, so stdin is a PIPE and can never be a
@@ -52,7 +44,7 @@
 // false for every invocation that has data, so no key ever reached it.
 //
 // This program shells out to NOTHING unless the operator hands it an explicit
-// command with --refresh-cmd, --open-cmd or --detail-cmd, and never in one-shot
+// command with --refresh-cmd or --open-cmd, and never in one-shot
 // mode. That is what keeps byte-exact frame tests possible: `render()` is a
 // pure function of the snapshot plus the frame options, and the default
 // renderer cannot reach past its input to change what it draws.
@@ -813,7 +805,6 @@ export function prLabel(agent) {
 }
 
 const DEFAULT_OPEN_HINT = "enter: open this worker's window";
-const DEFAULT_DETAIL_HINT = "d pipeline detail, ctrl-c back";
 
 function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   const cells = STEPS.map((s) => stepBox(agent, s, anim));
@@ -1108,7 +1099,7 @@ export function headerLine(segs, cols) {
 export function render(snap, opts) {
   const {
     rows, cols, anim = 0, sel = 0, cell = -1, top: topIn = 0,
-    flash = "", note = "", openHint = "", detailHint = "",
+    flash = "", note = "", openHint = "",
   } = opts;
   const agents = snap.agents ?? [];
   const lay = layout(cols, cell < 0 ? 0 : cell);
@@ -1182,17 +1173,11 @@ export function render(snap, opts) {
   out.push(rule);
   const more = agents.length - (win.top + shown.length);
   const scroll = (win.top > 0 ? `^${win.top} above  ` : "") + (more > 0 ? `v${more} below  ` : "");
-  // The drill-in's way BACK is stated here, beside the key that goes in. It
-  // rides the key line rather than the selected row because - unlike enter,
-  // whose effect depends on whether this terminal is already a tmux client -
-  // the detail view is the same journey from any terminal, so there is one
-  // sentence rather than one per caller's situation. It is still the caller's
-  // to word, because the caller owns the command the key runs.
   out.push(
     (scroll ? green(scroll) : "") +
       dim(
         "up/down agent   left/right stage   enter open worker   " +
-          `${detailHint || DEFAULT_DETAIL_HINT}   r refresh   q quit`,
+          "r refresh   q quit",
       ),
   );
   if (flash) out.push(yellow(flash));
@@ -1208,7 +1193,6 @@ function parseArgs(argv) {
   const o = {
     watch: false, cols: null, rows: null, tick: 0, tickGiven: false,
     refreshCmd: "", refreshMs: 10000, openCmd: "", openHint: "",
-    detailCmd: "", detailHint: "",
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -1220,8 +1204,6 @@ function parseArgs(argv) {
     else if (a === "--refresh-ms") o.refreshMs = Number(argv[++i]);
     else if (a === "--open-cmd") o.openCmd = String(argv[++i] ?? "");
     else if (a === "--open-hint") o.openHint = String(argv[++i] ?? "");
-    else if (a === "--detail-cmd") o.detailCmd = String(argv[++i] ?? "");
-    else if (a === "--detail-hint") o.detailHint = String(argv[++i] ?? "");
     else if (a === "-h" || a === "--help") o.help = true;
     else { o.bad = a; }
   }
@@ -1264,7 +1246,6 @@ async function main() {
     process.stdout.write(
       "usage: fm-flow-snapshot.sh --json | fm-flow-tui.mjs [--cols N] [--rows N] [--tick N]\n" +
         "       [--watch [--refresh-cmd CMD] [--refresh-ms N] [--open-cmd CMD] [--open-hint TEXT]\n" +
-        "               [--detail-cmd CMD] [--detail-hint TEXT]]\n" +
         "       bin/fm-flow.sh is the captain-facing entry point and wires all three up.\n",
     );
     return 0;
@@ -1273,10 +1254,9 @@ async function main() {
     process.stderr.write(`fm-flow-tui: unknown argument ${opts.bad}\n`);
     return 2;
   }
-  if (!opts.watch && (opts.refreshCmd || opts.openCmd || opts.openHint
-    || opts.detailCmd || opts.detailHint)) {
+  if (!opts.watch && (opts.refreshCmd || opts.openCmd || opts.openHint)) {
     process.stderr.write(
-      "fm-flow-tui: --refresh-cmd, --open-cmd, --open-hint, --detail-cmd and --detail-hint need --watch\n",
+      "fm-flow-tui: --refresh-cmd, --open-cmd and --open-hint need --watch\n",
     );
     return 2;
   }
@@ -1376,7 +1356,6 @@ const KEY = {
   left: new Set(["h", "\x1b[D", "\x1bOD"]),
   quit: new Set(["q", "\x03", "\x04"]),
   open: new Set(["\r", "\n"]),
-  detail: new Set(["d"]),
   refresh: new Set(["r"]),
   first: new Set(["g", "\x1b[H"]),
   last: new Set(["G", "\x1b[F"]),
@@ -1413,7 +1392,6 @@ function watch(snap0, cols0, rows0, opts) {
       ageSeconds: opts.tickGiven ? 0 : ageOf(snap),
       note,
       openHint: opts.openHint,
-      detailHint: opts.detailHint,
     });
     process.stdout.write(frame.join("\n") + "\n");
     return 0;
@@ -1440,8 +1418,8 @@ function watch(snap0, cols0, rows0, opts) {
   // never as a signal. So the only way this process can receive SIGINT is while
   // a child owns the terminal, which is the captain closing that child, not the
   // view. Quitting on it would tear the fleet view down every time the captain
-  // pressed ctrl-c to come back from the pipeline detail, which is the stated
-  // way back. A listener is still registered because the default action would
+  // pressed ctrl-c to end a handed-over command, which is the way back from
+  // one. A listener is still registered because the default action would
   // kill the process outright and leave the terminal in the alternate screen.
   process.on("SIGINT", () => { if (!suspended) paint(); });
 
@@ -1487,7 +1465,6 @@ function watch(snap0, cols0, rows0, opts) {
       flash,
       note,
       openHint: opts.openHint,
-      detailHint: opts.detailHint,
       ageSeconds: ageOf(snap),
     });
     let buf = "\x1b[?2026h";
@@ -1619,29 +1596,6 @@ function watch(snap0, cols0, rows0, opts) {
     } else setFlash(said || `${a.id}: open command exited 0 without saying what it did`);
   };
 
-  // The drill-in the CI cell invites. The row states a CI verdict per agent, so
-  // the obvious next move is to see THAT agent's pipeline in detail - and until
-  // now the only way there was to know bin/fm-nm-flow.sh existed and type it.
-  // Enter is not that move: it hands the terminal to the worker, which is a
-  // different and equally useful thing, and it keeps its key.
-  //
-  // The child is interrupted to come back, so a non-zero exit is the ordinary
-  // path here rather than a failure, and only a command that could not run at
-  // all is reported as one.
-  const detail = () => {
-    const a = (snap.agents ?? [])[sel];
-    if (!a) return;
-    if (!opts.detailCmd) {
-      setFlash(`no pipeline detail command wired up for ${a.id}`);
-      return;
-    }
-    const { res, threw } = handOver(opts.detailCmd, a);
-    if (threw) { setFlash(`pipeline detail failed: ${threw.message}`); return; }
-    const said = firstLine(res.stderr);
-    if (res.error) setFlash(`pipeline detail failed: ${res.error.message}`);
-    else setFlash(said || `back from ${a.id}'s pipeline detail`);
-  };
-
   keyboard.setRawMode(true);
   keyboard.resume();
   keyboard.on("data", (b) => {
@@ -1656,7 +1610,6 @@ function watch(snap0, cols0, rows0, opts) {
       else if (KEY.last.has(k)) sel = Math.max(0, count() - 1);
       else if (KEY.refresh.has(k)) refresh();
       else if (KEY.open.has(k)) open();
-      else if (KEY.detail.has(k)) detail();
     }
     paint();
   });
