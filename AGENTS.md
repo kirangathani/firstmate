@@ -313,10 +313,11 @@ For a no-mistakes ship, trigger validation on the same worker after its implemen
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 
-An ask-user finding returns as `needs-decision`; firstmate decides only when the configured authority permits, otherwise escalates to the captain.
+An ask-user finding of severity `info` or `suggestion` is answered by the worker itself under the generated brief's rule, so only `warning` and `error` findings, plus anything security-shaped at any severity, return as `needs-decision`; firstmate decides those only when the configured authority permits, otherwise escalates to the captain.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
-A recorded decision amends that task's pinned intent, so a gate round that produced any decision ends with a fresh run scored against the decided goal rather than a separate end-of-run check that each decision survived.
+A recorded decision amends that task's pinned intent, so a gate round that produced any decision changing the branch ends with a fresh run scored against the decided goal rather than a separate end-of-run check that each decision survived, while a decision recorded as changing nothing is listed and owes no run.
+A worker gets at most two further fix rounds per run on the same findings and then files what is left as a follow-up backlog item and carries on, which is a normal outcome and never reported as a failure.
 Resume fleet supervision immediately after the decision lands.
 
 Judge validation by the branch-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.

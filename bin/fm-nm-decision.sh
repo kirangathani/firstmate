@@ -33,7 +33,7 @@
 # (test, document, lint) changed, which nothing else in the pipeline does.
 #
 # Usage:
-#   fm-nm-decision.sh record <task-id> --finding <id> --key <key> --requires <text> [--step <step>]
+#   fm-nm-decision.sh record <task-id> --finding <id> --key <key> --requires <text> [--step <step>] [--outcome change|no-change] [--fixed "<finding ids>"]
 #   fm-nm-decision.sh rerun-check <task-id>
 #   fm-nm-decision.sh list <task-id>
 #   fm-nm-decision.sh path <task-id>
@@ -51,10 +51,24 @@
 #                decision that cannot reach the intent is the failure this exists
 #                to prevent. Also stores the no-mistakes run id current at the
 #                moment of recording, which is what rerun-check compares.
-#   rerun-check  the done gate. Exit 0 only when every recorded decision was
-#                recorded during a run OLDER than the most recent one, which is
-#                what proves a fresh run scored the branch against the amended
-#                intent. Exit 1 naming every decision still waiting for that
+#                `--outcome no-change` declares that the answer leaves the branch
+#                exactly as it is - "no change", "already decided at <key>", a
+#                documentation wording accepted as written - so no fresh run is
+#                owed for it. A no-change decision is annotated `(no-change)` in
+#                both the record and the brief line, so a reviewer can see why no
+#                re-run followed. `--outcome change` is the default and keeps the
+#                original behavior. `--fixed "<ids>"` names the finding ids this
+#                round submitted a fix for; `--outcome no-change` is REFUSED when
+#                the recorded finding is among them, because a round that changed
+#                code for a finding cannot also claim the branch is untouched.
+#   rerun-check  the done gate. Exit 0 only when every recorded CHANGE decision
+#                was recorded during a run OLDER than the most recent one, which
+#                is what proves a fresh run scored the branch against the amended
+#                intent. No-change decisions are listed but never demand a
+#                re-run: a 25-35 minute run that re-scores a branch nothing
+#                touched proves nothing, and paying it per answer is what made
+#                gate rounds expensive enough to discourage answering at all.
+#                Exit 1 naming every change decision still waiting for that
 #                re-run, and exit 1 when the current run id cannot be read at
 #                all, since an unreadable run confirms nothing either way. A task
 #                with no recorded decisions passes: an unamended intent needs no
@@ -119,6 +133,8 @@ KEY=
 REQUIRES=
 EVIDENCE=
 STEP=
+OUTCOME=change
+FIXED=
 
 need_value() {
   [ "$2" -gt 1 ] || { echo "error: $1 requires a value" >&2; exit 2; }
@@ -131,6 +147,8 @@ while [ "$#" -gt 0 ]; do
     --requires) need_value "$1" "$#"; REQUIRES=$2; shift 2 ;;
     --evidence) need_value "$1" "$#"; EVIDENCE=$2; shift 2 ;;
     --step) need_value "$1" "$#"; STEP=$2; shift 2 ;;
+    --outcome) need_value "$1" "$#"; OUTCOME=$2; shift 2 ;;
+    --fixed) need_value "$1" "$#"; FIXED=$2; shift 2 ;;
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -161,9 +179,34 @@ case "$ACTION" in
     [ -n "$FINDING" ] || { echo "error: record requires --finding <id>" >&2; exit 2; }
     [ -n "$KEY" ] || { echo "error: record requires --key <decision-key>" >&2; exit 2; }
     [ -n "$REQUIRES" ] || { echo "error: record requires --requires <what the decision required, in concrete checkable terms>" >&2; exit 2; }
+    case "$OUTCOME" in
+      change|no-change) ;;
+      *) echo "error: --outcome must be change or no-change, got: $OUTCOME" >&2; exit 2 ;;
+    esac
     FINDING=$(one_line "$FINDING")
     KEY=$(one_line "$KEY")
     REQUIRES=$(one_line "$REQUIRES")
+
+    # A round that submitted a fix for this finding changed the branch, so it
+    # cannot also be recorded as leaving the branch alone. Refusing here is what
+    # stops --outcome no-change from laundering a code change past the re-run.
+    if [ "$OUTCOME" = no-change ] && [ -n "$FIXED" ]; then
+      for fixed_id in $(printf '%s' "$FIXED" | tr ',' ' '); do
+        [ "$fixed_id" = "$FINDING" ] || continue
+        echo "error: $FINDING is in this round's fixed set, so it cannot be recorded --outcome no-change; a round that changed code for a finding owes the fresh run that re-scores it" >&2
+        exit 2
+      done
+    fi
+
+    # The brief line carries the outcome only when it is no-change: that is the
+    # case a reviewer has to be able to explain (why no re-run followed), and the
+    # line is emitted verbatim into --intent, where a "(change)" on every other
+    # line would be noise the pipeline's own review reads past.
+    if [ "$OUTCOME" = no-change ]; then
+      BRIEF_LINE="- $FINDING [$KEY] (no-change): $REQUIRES"
+    else
+      BRIEF_LINE="- $FINDING [$KEY]: $REQUIRES"
+    fi
 
     # Refuse before writing anything. A decision recorded into a record but not
     # into the intent is exactly the drift this script exists to remove, so half
@@ -173,20 +216,25 @@ case "$ACTION" in
 
     BRIEF_TMP="$BRIEF.tmp.$$"
     awk -v heading="$GATE_HEADING" -v lead="$GATE_LEAD" -v key="$KEY" \
-        -v newline="- $FINDING [$KEY]: $REQUIRES" '
+        -v newline="$BRIEF_LINE" '
       function out(s) { print s; blank = (s == "") }
       # Blank lines inside the Task section are held back and re-emitted only
       # when a further line follows, so a trailing blank never lands between the
       # existing decision lines and the one being appended.
       function emit(s) { while (pending > 0) { out(""); pending-- } out(s) }
-      # True only for a line this subsection owns: "- <finding-id> [<key>]: ...",
-      # with nothing but the finding id before the bracket, so a `[<key>]:` that
+      # True only for a line this subsection owns:
+      # "- <finding-id> [<key>]: ..." or "- <finding-id> [<key>] (no-change): ...",
+      # with nothing but the finding id before the bracket, so a `[<key>]` that
       # appears inside some other decision'"'"'s requires text is never rewritten.
-      function is_key_line(s,   p) {
+      # Matching both shapes is what lets a decision be re-recorded with a
+      # different outcome and still leave exactly one line behind.
+      function is_key_line(s,   p, rest) {
         if (substr(s, 1, 2) != "- ") return 0
-        p = index(s, " [" key "]: ")
+        p = index(s, " [" key "]")
         if (p == 0) return 0
-        return index(substr(s, 3, p - 3), " ") == 0
+        if (index(substr(s, 3, p - 3), " ") != 0) return 0
+        rest = substr(s, p + length(key) + 3)
+        return (substr(rest, 1, 2) == ": " || substr(rest, 1, 2) == " (")
       }
       function flush() {
         if (emitted) return
@@ -245,6 +293,7 @@ EOF
       printf '\n## %s\n' "$FINDING"
       printf -- '- finding: %s\n' "$FINDING"
       printf -- '- key: %s\n' "$KEY"
+      printf -- '- outcome: %s\n' "$OUTCOME"
       printf -- '- step: %s\n' "$(one_line "${STEP:-unrecorded}")"
       printf -- '- recorded: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
       printf -- '- run: %s\n' "${RUN_ID:-unknown}"
@@ -252,7 +301,7 @@ EOF
       printf -- '- state: pending\n'
       printf -- '- evidence: (none yet)\n'
     } >> "$RECORD"
-    printf 'recorded: %s (%s) in %s and in the pinned intent at %s\n' "$FINDING" "$KEY" "$RECORD" "$BRIEF"
+    printf 'recorded: %s (%s, %s) in %s and in the pinned intent at %s\n' "$FINDING" "$KEY" "$OUTCOME" "$RECORD" "$BRIEF"
     ;;
 
   rerun-check)
@@ -266,14 +315,29 @@ EOF
       echo "Run this from the task worktree. If the run really is unreadable, say so when you report, rather than reporting done on an unchecked re-run." >&2
       exit 1
     fi
+    # A block written before --outcome existed has no outcome line, so the
+    # per-block default is `change` and an old record keeps its old meaning.
     STALE=$(awk -v cur="$CURRENT" '
+      /^## / { outcome = "change" }
       /^- finding: / { finding = substr($0, 12) }
-      /^- run: / { if (substr($0, 8) == cur) print finding }
+      /^- outcome: / { outcome = substr($0, 12) }
+      /^- run: / { if (substr($0, 8) == cur && outcome != "no-change") print finding }
     ' "$RECORD")
     UNKNOWN=$(awk '
+      /^## / { outcome = "change" }
       /^- finding: / { finding = substr($0, 12) }
-      /^- run: unknown$/ { print finding }
+      /^- outcome: / { outcome = substr($0, 12) }
+      /^- run: unknown$/ { if (outcome != "no-change") print finding }
     ' "$RECORD")
+    NO_CHANGE=$(awk '
+      /^## / { outcome = "change" }
+      /^- finding: / { finding = substr($0, 12) }
+      /^- outcome: no-change$/ { print finding }
+    ' "$RECORD")
+    if [ -n "$NO_CHANGE" ]; then
+      printf 'rerun-check: these decisions changed nothing on the branch, so no fresh run is owed for them: %s\n' \
+        "$(printf '%s' "$NO_CHANGE" | tr '\n' ' ')"
+    fi
     if [ -n "$STALE" ]; then
       echo "rerun-check: REFUSED - these decisions were recorded during run $CURRENT, which is still the most recent run:" >&2
       printf '%s\n' "$STALE" >&2
@@ -286,7 +350,7 @@ EOF
       printf '%s\n' "$UNKNOWN" >&2
     fi
     COUNT=$(grep -c '^- finding: ' "$RECORD" || true)
-    printf 'rerun-check: all %s recorded gate decisions predate run %s, the most recent run\n' "$COUNT" "$CURRENT"
+    printf 'rerun-check: all %s recorded gate decisions predate run %s, the most recent run, or changed nothing\n' "$COUNT" "$CURRENT"
     ;;
 
   verify|reverted)

@@ -181,10 +181,44 @@ The heading is the anchor instead, because `bin/fm-nm-intent.sh` emits this text
 The generated ship brief then requires the worker to:
 
 1. `record` each decision at the moment it is submitted, with the finding id, the decision key, and what the decision required in concrete, checkable terms.
-2. Start a fresh run with the same pinned-intent command once a run in which any decision was recorded reaches its outcome.
+2. Start a fresh run with the same pinned-intent command once a run in which any `change` decision was recorded reaches its outcome.
    That run's review is the mechanical proof that the branch and the decided goal agree, and it is also the only thing that re-reviews whatever the later auto-fix steps (test, document, lint) changed.
 3. Pass `rerun-check` before reporting done.
-   It exits 0 only when every recorded decision was recorded during a run older than the most recent one, and exits 1 both when a decision is still waiting for that re-run and when the current run id cannot be read at all.
+   It exits 0 only when every recorded `change` decision was recorded during a run older than the most recent one, and exits 1 both when such a decision is still waiting for that re-run and when the current run id cannot be read at all.
+
+## The outcome class: a decision that changes nothing owes no run
+
+A re-run costs 25-35 minutes, and the rule above charged that to every answer, including answers that leave the branch byte-for-byte as it was.
+Measured on `plated-rating-viewers-ship-w6` on 2026-09-08: six runs, six decisions, and three of the last four runs ended in a decision that changed nothing (a count that stayed as it was, a question already decided at an earlier key and re-raised, a wording in `ISSUES.md` accepted as written).
+Each of those runs was owed to this rule, not to the tool.
+
+So `record` takes an explicit outcome class.
+`--outcome change`, the default, keeps the original behavior in full.
+`--outcome no-change` declares that the answer keeps the branch exactly as it is, and `rerun-check` then lists that decision without counting it as a decision owed a re-run.
+A block written before the flag existed carries no outcome line and is read as `change`, so an old record keeps its old meaning.
+
+Both the record block and the brief's `## Gate decisions` line carry the annotation, as `- <finding> [<key>] (no-change): <requires>`, so a reviewer reading the PR can see why no re-run followed that round.
+Only the no-change case is annotated: the line is emitted verbatim into `--intent`, where a `(change)` on every other line would be noise the pipeline's own review has to read past.
+
+The flag cannot launder a code change.
+`record` takes `--fixed "<finding ids>"`, the findings that round submitted a fix for, and REFUSES `--outcome no-change` for a finding named there, writing nothing at all in that case.
+
+**The exposure this leaves open.** `--fixed` is supplied by the worker, so a worker that omits a finding from its own fixed set can still record a changed finding as no-change.
+Nothing here reads the diff.
+The guard is against the ordinary mistake, not against a worker that misreports what it did, and the fresh run every `change` decision still forces is unchanged.
+
+## Info-severity findings, and the fix-round cap
+
+The generated ship brief hands the worker two further rules, both aimed at the same cost:
+
+- An ask-user finding of severity `info` or `suggestion` is the worker's own to answer, choosing the option that keeps the recorded decisions and the brief's `# Task` section true, recorded under its own name with the outcome class above, and listed in the PR description under `Decisions taken by the worker (info severity)`.
+  An info finding that re-raises a decision already in `## Gate decisions` is answered by citing that key and recorded `--outcome no-change`.
+  Security, credential, and data-loss findings escalate at any severity, and `warning` and `error` findings still reach firstmate.
+- After the first review of a run, at most two further fix rounds on the same set of findings.
+  A finding returning a third time, or left open after that second round, is filed as a follow-up backlog item blocked by the current task, named in the PR description under `Deferred to follow-up`, and the run proceeds.
+
+A capped round is a normal outcome, and the brief forbids reporting it as `failed:` or `blocked:`.
+Nothing on firstmate's side had to change for that: `bin/fm-nm-stall.sh`'s predicate is whether the run's STEP is still advancing, and a capped round advances it, while `bin/fm-classify-lib.sh` reads the status verbs the worker writes and a capped round writes none.
 
 `record` stores the no-mistakes run id current at the moment of recording, read from `no-mistakes axi status`, and `rerun-check` compares it against the current one.
 Run ids are unique per run, so "the run I was recorded during is still the most recent run" is exactly "no fresh run has scored this branch since".
