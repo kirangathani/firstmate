@@ -444,6 +444,21 @@
 #     that reason: it is then the merge's only test evidence, so it has no green
 #     branch suite to lean on and must not behave as though it had one.
 #
+# Machine-readable refusal code: every gate refusal above prints, as its LAST
+# stderr line, `fm-pr-merge-refusal: <code>` with one of these codes:
+#   attribution       the AI-attribution gate
+#   merge-resolution  the merge-resolution gate
+#   up-to-date        the up-to-date gate
+#   tests-kept        the test-keep gate
+#   checks-green      the checks-green gate, zero-checks refusal included
+# It exists so bin/fm-merge-green.sh - the captain's mechanical switch, which
+# runs THIS script per candidate and adds no gate of its own - can tell a branch
+# that main moved under (up-to-date) from a PR that is genuinely not green
+# (checks-green), without a second reader parsing these English sentences and
+# drifting from them. The codes are additive: the human sentences above each one
+# are unchanged, and a refusal that prints NO code is an unclassified machinery
+# failure the caller must treat as unverified rather than as a named gate.
+#
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -506,6 +521,16 @@ reject_repo_overrides() {
 }
 
 reject_repo_overrides "$@" || exit 1
+
+# refuse <code>: print the machine-readable half of a gate refusal and exit 1.
+# The English diagnosis is printed by the gate itself, immediately above; this
+# adds only the code that names WHICH gate refused (contract in this script's
+# header). Used at gate refusals only, never for a usage error or a machinery
+# failure, because those are not a gate's verdict about the branch.
+refuse() {  # <code>
+  printf 'fm-pr-merge-refusal: %s\n' "$1" >&2
+  exit 1
+}
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -860,7 +885,7 @@ if [ "$attr_dirty" -ne 0 ]; then
     echo "finding is already public on GitHub; editing it is damage control, not"
     echo "prevention (docs/attribution-gate.md)."
   } >&2
-  exit 1
+  refuse attribution
 fi
 
 # --- merge-resolution gate (contract in docs/merge-resolution-gate.md) --------
@@ -953,7 +978,7 @@ EOF_RES_SHAS
       echo "burying it in a resolution nobody reviews. Never rebase to escape the"
       echo "refusal: a rebased branch cannot be pushed at all."
     } >&2
-    exit 1
+    refuse merge-resolution
   fi
 else
   echo "note: task $ID has no resolvable local copy, so the merge-resolution gate did not run; the kept-tests gate below refuses that same condition, so this merge cannot proceed on it" >&2
@@ -1040,7 +1065,7 @@ if [ -n "$ATTR_WT" ] && [ -n "${attr_compare:-}" ]; then
       echo "error: have the worker merge $utd_base_ref into the branch (never rebase - a rebased branch cannot be pushed at all), push, let CI re-run, then re-run fm-pr-merge.sh"
       echo "error: there is no override flag for this gate and yolo is not one: nothing has verified this branch against the base it would land on."
     } >&2
-    exit 1
+    refuse up-to-date
   fi
 else
   echo "note: task $ID has no resolvable local copy, so the up-to-date gate did not run; the kept-tests gate below refuses that same condition, so this merge cannot proceed on it" >&2
@@ -1133,7 +1158,7 @@ if [ "$unexcused" -gt 0 ]; then
     echo "error: an unstable finding is a defect in the BASE's test, not in this branch: that test names its own assertion with a runtime value, so two runs of the identical file report two different names and nothing can be compared. Fix the test to use a constant assertion name (put the runtime value in its fail message), land that, then re-run fm-pr-merge.sh" >&2
   fi
   echo "error: if the branch deliberately supersedes the base's behavior, that is the captain's decision - escalate needs-decision naming each assertion; only a captain-approved entry in $SUPERSESSIONS_FILE (entry format in this script's header) lets the merge proceed" >&2
-  exit 1
+  refuse tests-kept
 fi
 if [ "$kept_rc" -eq 1 ] && [ "$parsed" -eq 0 ]; then
   echo "error: fm-assert-tests-kept.sh reported findings (exit 1) but none of its output parsed as a missing:/failing:/unexecuted:/unstable: line (see above); refusing to merge unverified" >&2
@@ -1273,15 +1298,15 @@ fi
 if [ "$checks_failing" -gt 0 ]; then
   echo "error: $checks_failing failing PR check(s) (named above); refusing to merge a red PR" >&2
   echo "error: fix the failure(s) on the PR branch until every check is green, then re-run fm-pr-merge.sh" >&2
-  exit 1
+  refuse checks-green
 fi
 if [ "$checks_unknown" -gt 0 ]; then
   echo "error: $checks_unknown PR check(s) could not be classified (named above); refusing to merge unverified" >&2
-  exit 1
+  refuse checks-green
 fi
 if [ "$checks_pending" -gt 0 ]; then
   echo "error: $checks_pending PR check(s) have not finished (named above); this PR is not red, it is unfinished - wait for the checks to complete, then re-run fm-pr-merge.sh" >&2
-  exit 1
+  refuse checks-green
 fi
 # An exempted check is an authorized RED, not evidence that anything ran, so it
 # is subtracted before asking whether this PR reported any checks at all. A PR
@@ -1308,7 +1333,7 @@ if [ "$checks_evidence" -eq 0 ]; then
   else
     echo "error: $zero_reason; refusing to treat absent CI as green" >&2
     echo "error: either CI has not reported yet (wait, then re-run fm-pr-merge.sh), or this project runs no PR CI - only a captain-created marker at $NO_PR_CI_FILE (contract in this script's header) lets a zero-check PR merge - or this task's CI was waived at dispatch, which needs the signature this home's key reproduces for $ID and not merely a ci_skip=on line" >&2
-    exit 1
+    refuse checks-green
   fi
 fi
 

@@ -145,6 +145,27 @@ Every mode requires `tmux` on `PATH` and prints `tmux -V`.
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs that same script as `--shard K/N` across parallel jobs instead of delegating the test step to an agent, and stays exhaustive with no change-based selection, because CI is the authority that catches the host-dependence class of bug a local run passes by construction.
 `tests/fm-test.test.sh` asserts both that the shards' union is exactly this whole set and that the selected, sharded local path returns the whole set's verdict for every file it runs, so the gate and CI cannot diverge.
 
+## The standing merge rule (config/merge-green)
+
+`config/merge-green` is a local, gitignored marker file - any file or directory - and its presence is the whole configuration.
+It is the captain's standing instruction that a PR going green on work they already asked for should land without a separate word, and it is the one standing routine merge authority besides a project's `yolo` posture.
+It is absent by default, and absent means today's behaviour: a green PR waits to be mentioned.
+
+Present, it changes exactly one thing.
+The watcher's existing merge poll (`bin/fm-pr-poll.sh`, armed per task by `bin/fm-pr-check.sh`) already wakes firstmate when a PR is merged; with this file present it also wakes firstmate when an open PR has gone green, and firstmate then runs `bin/fm-merge-green.sh`.
+
+The poll never merges anything and never decides what green means.
+It reads greenness from `bin/fm-pr-green.sh`, the same owner a ship worker reports its own green from, so it cannot wake firstmate on a definition the merge gate would then refuse; and the merge itself still goes through `bin/fm-pr-merge.sh` and every gate in its header, including the attribution, merge-resolution, up-to-date, kept-tests, and checks-green gates.
+So this file buys one thing only: firstmate is told, rather than asked.
+It grants no authority over destructive, irreversible, or security-sensitive choices, and it does not weaken a single gate.
+
+Create it with `touch "$FM_HOME/config/merge-green"` and remove the file to revoke it.
+The rule is read fresh on every poll, so both take effect immediately.
+It is a per-home file and is not inherited by secondmate homes.
+
+Changing `bin/fm-pr-poll.sh` changes the bytes every armed `state/<id>.check.sh` is compared against, so already-armed polls stop validating until `bin/fm-pr-check-migrate.sh` rebuilds them, which `bin/fm-bootstrap.sh` runs at the next session start.
+That is the designed self-healing path for a poll-template change, not a fault, and it reports `PR_CHECK_MIGRATION: canonical polls rebuilt and armed`.
+
 ## The CI testing waiver secret (config/ci-waiver-secret)
 
 A repository's expensive CI jobs can be waived for one commit, but only by a keyed signature the captain issues, never by a marker string anyone can type into a PR body.
