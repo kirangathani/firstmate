@@ -95,6 +95,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supersession-attest.sh` | Publish a repository's attestation key, and sign the captain's approvals for one commit so CI can honour them; refuses without an approval record, without this home's key, or for a repository the task does not push to |
 | `fm-supersession-verify.sh` | Decide in CI which approvals a PR's body carries a valid signature for, reading that body live because an approval always arrives after the check first ran |
 | `fm-supersession-attest-lib.sh` | Own the attestation's signed payload, entry token, and published line grammar, shared by signer and verifier; its HMAC domain and published key are separate from the CI waiver's |
+| `fm-review-attest.sh`   | Prove from the pipeline's own database that its review step completed on a PR's exact head commit, then sign that fact under its own payload domain and publish one line into the PR body so a project's own AI review can skip it |
 | `fm-ci-waiver.sh`        | Generate, publish, sign, and (as `waive`) issue from the worker's own request the CI testing waiver, refusing to sign for a task the captain did not dispatch with a CI skip or for a repository that task does not push to |
 | `fm-ci-waiver-verify.sh` | Decide in CI whether a published waiver line covers the pull request's current head commit |
 | `fm-ci-waiver-lib.sh`    | Own the waiver's signed payload, per-repository key derivation, published line grammar, and constant-time comparison, shared by signer and verifier |
