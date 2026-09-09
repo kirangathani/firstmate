@@ -169,8 +169,9 @@ run_bounded() {  # <seconds> <command...>
   fi
 }
 
-# The run index, and the ONLY read of the no-mistakes database. Three columns,
-# keyed on the primary checkout path and the task's own fm/<id> branch.
+# The run index, and the ONLY read of the no-mistakes database. Four columns
+# plus the branch's run count, keyed on the primary checkout path and the
+# task's own fm/<id> branch.
 #
 # Every fact that reaches the screen is read afterwards through
 # `no-mistakes axi status --run <id>`, the tool's documented CLI. step_results
@@ -181,14 +182,21 @@ run_bounded() {  # <seconds> <command...>
 # The worker cannot forge this row. That is the whole point of reading it here
 # instead of having each crewmate report its own run id, which would be the
 # checked entity producing the thing being checked.
-run_index() {  # <project-path> <branch> -> "<id>|<status>|<updated_at>|<created_at>" or empty
+run_index() {  # <project-path> <branch> -> "<id>|<status>|<updated_at>|<created_at>|<count>" or empty
   [ -f "$NM_DB" ] || return 0
   command -v sqlite3 >/dev/null 2>&1 || return 0
   # created_at is read as well as updated_at because it is the one machine
   # record of WHEN the pipeline took over from the worker, which is what ends
   # the building step. `no-mistakes axi status` states no such time.
+  #
+  # The fifth column is how many runs this branch has had, which is the run
+  # number the view puts beside the agent. It is counted in the SAME statement,
+  # scoped by r.repo_id rather than by the branch name alone, so two projects
+  # holding an identically named branch never share a count.
   sqlite3 "file:$NM_DB?mode=ro" \
-    "SELECT r.id, r.status, r.updated_at, r.created_at
+    "SELECT r.id, r.status, r.updated_at, r.created_at,
+            (SELECT COUNT(*) FROM runs c
+              WHERE c.repo_id = r.repo_id AND c.branch = r.branch)
        FROM runs r JOIN repos p ON p.id = r.repo_id
       WHERE p.working_path = '$(printf '%s' "$1" | sed "s/'/''/g")'
         AND r.branch = '$(printf '%s' "$2" | sed "s/'/''/g")'
@@ -640,7 +648,7 @@ row_common() {  # <task-json>
 
 agent_json() {  # <task-json>
   local task=$1 id kind mode project worktree window branch endpoint_alive agent_alive pr_url
-  local idx run_id run_status run_updated run_created axi rc steps actives ci meta skip_local skip_ci
+  local idx run_id run_status run_updated run_created run_number axi rc steps actives ci meta skip_local skip_ci
 
   row_common "$task"
   id=$FM_ROW_ID
@@ -677,6 +685,7 @@ agent_json() {  # <task-json>
   run_status=''
   run_updated=0
   run_created=0
+  run_number=null
   local collect_ok=true collect_reason='' collect_source=axi
 
   idx=$(run_index "$project" "$branch")
@@ -688,7 +697,14 @@ agent_json() {  # <task-json>
     run_status=${rest%%|*}
     rest=${rest#*|}
     run_updated=${rest%%|*}
-    run_created=${rest##*|}
+    rest=${rest#*|}
+    run_created=${rest%%|*}
+    # Never 0: a branch with a run always has at least one, so a zero here would
+    # mean the read went wrong, and blank is the honest answer for that.
+    case ${rest##*|} in
+      ''|0|*[!0-9]*) run_number=null ;;
+      *) run_number=${rest##*|} ;;
+    esac
     local axi_err
     axi_err="${TMPDIR:-/tmp}/fm-flow-axi-err.$$.$id"
     axi=$(axi_read "$project" "$run_id" "$axi_err")
@@ -859,6 +875,7 @@ agent_json() {  # <task-json>
     --argjson rework "$rework" \
     --argjson skip_local "$skip_local" \
     --argjson skip_ci "$skip_ci" \
+    --argjson run_number "$run_number" \
     --arg harness "$FM_ROW_HARNESS" \
     --arg w_model "$FM_ROW_MODEL" \
     --arg w_effort "$FM_ROW_EFFORT" \
@@ -870,6 +887,7 @@ agent_json() {  # <task-json>
       window:$window, kind:$kind, mode:$mode,
       pipeline:true,
       state:null,
+      run_number:$run_number,
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
       skips:{local:$skip_local, ci:$skip_ci},
@@ -972,6 +990,7 @@ compact_json() {  # <task-json>
       id:$id, branch:$branch, project:$project, worktree:$worktree,
       window:$window, kind:$kind, mode:$mode,
       pipeline:false,
+      run_number:null,
       state:$state,
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,

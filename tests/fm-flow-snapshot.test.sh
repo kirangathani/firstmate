@@ -1285,3 +1285,91 @@ got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$DPR_HOME" \
   jq -r '.agents[] | select(.id=="shipped-d1") | .rework')
 [ "$got" = "null" ] || fail "a gone worker was reported as reworking: $got"
 pass "a gone worker is not counted as reworking its PR"
+
+# --- how many runs this branch has had ---------------------------------------
+#
+# The captain's ask: the number of runs through the pipeline so far, beside the
+# agent id. A run is one row in the daemon's `runs` table for the branch - one
+# `no-mistakes axi run` - so a run that fails and is restarted from building is
+# the next number, and the auto-fix rounds inside one run are not.
+#
+# The count is scoped by repository, not by branch name, because `fm/<id>` is
+# only unique within a project: two clones can hold an identically named branch
+# and their runs must never be added together.
+
+RC_DB="$TMP_ROOT/runcount.sqlite"
+RC_P1="$TMP_ROOT/rc-project-1"
+RC_P2="$TMP_ROOT/rc-project-2"
+mkdir -p "$RC_P1" "$RC_P2"
+RC_P1=$(cd "$RC_P1" && pwd -P)
+RC_P2=$(cd "$RC_P2" && pwd -P)
+sqlite3 "$RC_DB" <<SQL
+CREATE TABLE repos (
+  id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE, upstream_url TEXT NOT NULL,
+  fork_url TEXT, default_branch TEXT NOT NULL DEFAULT 'main', created_at INTEGER NOT NULL);
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repos(id), branch TEXT NOT NULL,
+  head_sha TEXT NOT NULL, base_sha TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+  pr_url TEXT, error TEXT, awaiting_agent_since INTEGER,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+INSERT INTO repos VALUES ('rc1','$RC_P1','git@github.com:x/one.git',NULL,'main',1000);
+INSERT INTO repos VALUES ('rc2','$RC_P2','git@github.com:x/two.git',NULL,'main',1000);
+INSERT INTO runs VALUES
+  ('RCA1','rc1','fm/run-count-r3','h1','base','failed',NULL,NULL,NULL,1000,1100),
+  ('RCA2','rc1','fm/run-count-r3','h2','base','cancelled',NULL,NULL,NULL,2000,2100),
+  ('RCA3','rc1','fm/run-count-r3','h3','base','running',NULL,NULL,NULL,3000,3100),
+  ('RCB1','rc2','fm/run-count-r3','h4','base','running',NULL,NULL,NULL,3500,3600),
+  ('RCA9','rc1','fm/other-branch-z1','h5','base','running',NULL,NULL,NULL,4000,4100);
+SQL
+
+RC_HOME="$TMP_ROOT/home-runcount"
+mkdir -p "$RC_HOME/state"
+
+rc_run_number() {  # <project-path>
+  jq -n --arg p "$1" '{tasks:[
+    {id:"run-count-r3",kind:"ship",mode:"no-mistakes",project:$p,
+     paths:{worktree:{path:"/wt/20"}},endpoint:{target:"fm:20",exists:true},pr:{url:null}}
+  ]}' > "$TMP_ROOT/fleet-runcount.json"
+  PATH="$FAKEBIN:$PATH" FM_HOME="$RC_HOME" \
+    FM_FLOW_SNAPSHOT_DB="$RC_DB" \
+    FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/fleet-runcount.json" \
+    FM_FLOW_SNAPSHOT_NOW_EPOCH=10000 \
+    "$SNAPSHOT" --json --no-ci 2>/dev/null |
+    jq -r '.agents[] | select(.id=="run-count-r3") | .run_number'
+}
+
+got=$(rc_run_number "$RC_P1")
+[ "$got" = "3" ] || fail "three runs on the branch did not report Run #3: $got"
+got=$(rc_run_number "$RC_P2")
+[ "$got" = "1" ] ||
+  fail "an identically named branch in another project did not count on its own: $got"
+pass "run_number counts this branch's runs, scoped to its own repository"
+
+# A branch the daemon has no run for gets no number at all. Never 0: zero is a
+# count, and the snapshot has no count to state here.
+jq -n --arg p "$RC_P1" '{tasks:[
+  {id:"never-validated-n0",kind:"ship",mode:"no-mistakes",project:$p,
+   paths:{worktree:{path:"/wt/21"}},endpoint:{target:"fm:21",exists:true},pr:{url:null}}
+]}' > "$TMP_ROOT/fleet-runcount-none.json"
+got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$RC_HOME" \
+  FM_FLOW_SNAPSHOT_DB="$RC_DB" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/fleet-runcount-none.json" \
+  FM_FLOW_SNAPSHOT_NOW_EPOCH=10000 \
+  "$SNAPSHOT" --json --no-ci 2>/dev/null |
+  jq -r '.agents[] | select(.id=="never-validated-n0") | .run_number')
+[ "$got" = "null" ] || fail "a branch with no run was given a run number: $got"
+
+# An unreadable database is the same answer, for the same reason.
+got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$RC_HOME" \
+  FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/fleet-runcount.json" \
+  FM_FLOW_SNAPSHOT_NOW_EPOCH=10000 \
+  "$SNAPSHOT" --json --no-ci 2>/dev/null |
+  jq -r '.agents[] | select(.id=="run-count-r3") | .run_number')
+[ "$got" = "null" ] || fail "an unreadable database still produced a run number: $got"
+pass "a branch with no run, and an unreadable database, carry no run number rather than zero"
+
+# A worker that runs no pipeline has no runs to count.
+got=$(jq -r '.agents[] | select(.pipeline == false) | .run_number' "$OUT" | sort -u | tr '\n' ' ')
+[ "$got" = "null " ] || fail "a worker with no pipeline was given a run number: $got"
+pass "a worker that runs no pipeline carries no run number"
