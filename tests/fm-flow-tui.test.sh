@@ -1434,3 +1434,55 @@ node "$TMP_ROOT/align.mjs" "$TUI" "$ALIGN" ||
   fail "a detail line did not start at its box's left column"
 pass "every detail line starts in its box's own first column"
 pass "a blank row always precedes the check tally"
+
+# --- the run counter, in red, beside the agent id ----------------------------
+#
+# The captain asked for the number of runs this branch has been through the
+# pipeline, next to the agent id, in red. Both header variants carry it - the
+# inverse one drawn on the selected row and the ordinary one on every other -
+# because a row losing the count the moment it is selected is a count that
+# disappears exactly when the captain is looking at it.
+#
+# Asserted against the escape the renderer actually emits, not against the
+# plain text, because "in red" is the whole of the request: a counter rendered
+# in the default foreground would pass a plain-text assertion.
+
+cat >"$TMP_ROOT/runcount.mjs" <<'JS'
+const { render } = await import(process.argv[2]);
+const snap = JSON.parse(process.argv[3]);
+let bad = 0;
+const say = (m) => { console.error(m); bad++; };
+// The renderer's own red slot, read from the file rather than written down
+// here, so a palette change moves the assertion with it.
+const RED = "\x1b[91m";
+
+const headFor = (frame, id) => frame.find((l) => l.includes(id)) ?? "";
+
+// sel 0 puts the FIRST agent on the inverse header and leaves the second on
+// the ordinary one, so one frame exercises both variants.
+const frame = render(snap, { rows: 60, cols: 200, sel: 0, cell: -1 });
+for (const [id, variant] of [["run3a", "inverse"], ["run3b", "ordinary"]]) {
+  const head = headFor(frame, id);
+  if (!head.includes(`${RED}Run #3`)) say(`${variant} header carries no red run counter: ${JSON.stringify(head)}`);
+  const idAt = head.indexOf(id);
+  const runAt = head.indexOf("Run #3");
+  if (idAt < 0 || runAt < idAt) say(`${variant} header did not put the counter after the id: ${JSON.stringify(head)}`);
+}
+
+// A worker the snapshot states no number for gets nothing at all - no zero, no
+// placeholder - on either variant.
+const none = JSON.parse(process.argv[3]);
+none.agents = none.agents.map((a) => ({ ...a, run_number: null }));
+const blank = render(none, { rows: 60, cols: 200, sel: 0, cell: -1 });
+for (const id of ["run3a", "run3b"]) {
+  const head = headFor(blank, id);
+  if (/Run #/.test(head)) say(`a null run number still drew a counter: ${JSON.stringify(head)}`);
+}
+process.exit(bad ? 1 : 0);
+JS
+
+RUNDOC=$(snap "[$(agent_with run3a "$(steps_all completed)" '{"run_number":3}'),
+                $(agent_with run3b "$(steps_all completed)" '{"run_number":3}')]")
+node "$TMP_ROOT/runcount.mjs" "$TUI" "$RUNDOC" ||
+  fail "the run counter is missing, mispositioned, uncoloured, or drawn from nothing"
+pass "the run counter renders in red after the agent id on both header variants"

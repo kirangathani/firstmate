@@ -806,6 +806,22 @@ export function prLabel(agent) {
 
 const DEFAULT_OPEN_HINT = "enter: open this worker's window";
 
+// How many times this branch has been through the pipeline, INCLUDING the run
+// on screen. A run is one `no-mistakes axi run` - one row in the daemon's own
+// `runs` table for the branch - so a run that fails and is restarted from
+// building is the next number, while the auto-fix rounds INSIDE one run are not
+// (the row already states those as `auto-fix n/3`). Red, from the same palette
+// slot every other colour on this view comes from, so it re-skins with the
+// terminal theme rather than staying neon against it.
+//
+// Nothing at all when the collector states no number: a worker that runs no
+// pipeline, a branch with no run yet, or a database that could not be read.
+// A placeholder there would be a claim the snapshot did not make.
+function runCounter(agent) {
+  const nRuns = agent.run_number;
+  return Number.isInteger(nRuns) && nRuns > 0 ? `  ${red(`Run #${nRuns}`)}` : "";
+}
+
 function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   const cells = STEPS.map((s) => stepBox(agent, s, anim));
   cells.push(ciBox(agent, anim));
@@ -846,9 +862,9 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
 
   const onHead = selected && cell < 0;
   const marker = selected ? greenBold("▸") : " ";
-  const name = onHead
+  const name = (onHead
     ? `${ESC}7m Agent ${n}  ${agent.id} ${R}`
-    : `${cyan(`Agent ${n}`)}  ${white(agent.id)}`;
+    : `${cyan(`Agent ${n}`)}  ${white(agent.id)}`) + runCounter(agent);
   const authority = skipAuthority(agent);
   const notes = [];
   if (authority) notes.push(blue(authority));
@@ -979,9 +995,9 @@ export function compactState(agent) {
 // boxes - is exactly what this worker does not have.
 function compactBlock(agent, n, selected, openHint) {
   const marker = selected ? greenBold("▸") : " ";
-  const name = selected
+  const name = (selected
     ? `${ESC}7m Agent ${n}  ${agent.id} ${R}`
-    : `${cyan(`Agent ${n}`)}  ${white(agent.id)}`;
+    : `${cyan(`Agent ${n}`)}  ${white(agent.id)}`) + runCounter(agent);
   const notes = [];
   // Only reachable under the collector's --include-dead; the live view holds
   // these back. Drawn the same way the pipeline block draws it, so the captain

@@ -147,14 +147,17 @@ So `bin/fm-flow-snapshot.sh` resolves the run id from the daemon's own database,
 That file is local to the host, holds one row per repository in `repos`, and is opened **read-only**.
 `repos.working_path` records the primary checkout, so worktrees do not fragment it, and it matches the `project=` value already present in `state/<id>.meta` without any transformation.
 
-The read is deliberately confined to a run index, three columns wide:
+The read is deliberately confined to a run index - the latest run for the branch, plus how many runs that branch has had:
 
 ```sql
-SELECT r.id, r.status, r.updated_at
+SELECT r.id, r.status, r.updated_at, r.created_at,
+       (SELECT COUNT(*) FROM runs c WHERE c.repo_id = r.repo_id AND c.branch = r.branch)
   FROM runs r JOIN repos p ON p.id = r.repo_id
  WHERE p.working_path = ?1 AND r.branch = ?2
  ORDER BY r.created_at DESC LIMIT 1;
 ```
+
+That count is the `run_number` the viewer draws beside the agent id, and it is scoped by `repo_id` rather than by the branch name alone, so two projects holding an identically named branch never share a count.
 
 Every fact that reaches the screen - step names, statuses, finding counts, durations - is then read through `no-mistakes axi status --run <id>`, the documented CLI, run from the task's own project directory for the reason below.
 `step_results` is never read.
@@ -342,6 +345,7 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
       "mode": "no-mistakes",
       "pipeline": true,
       "state": null,
+      "run_number": 5,
       "endpoint_alive": true,
       "skips": { "local": false, "ci": false },
       "rework": null,
@@ -406,6 +410,7 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
       "kind": "scout",
       "mode": "local-only",
       "pipeline": false,
+      "run_number": null,
       "state": {
         "ok": true, "value": "working", "source": "pane",
         "detail": "harness busy", "reason": ""
@@ -464,6 +469,10 @@ Guarantees the renderer is entitled to rely on:
   When the database fallback also failed, its own reason follows as `; db: <error>`, so the row says which source failed how rather than naming only the first.
 - `ci.collection` is separate from the agent's `collection`, because a GitHub read can fail while the local read succeeds.
 - `run.present` false means no pipeline run exists for that branch, which is the ordinary state of a task that has not yet started validating.
+- `run_number` is how many distinct pipeline runs that branch has had, counted in the daemon's own `runs` table and INCLUDING the run the document describes, so the current run is `Run #N` where N is that count.
+  One `no-mistakes axi run` is one run, so a run that fails or is cancelled and is restarted from building is the next number; the auto-fix rounds INSIDE a single run are not, and the view already states those as `auto-fix n/3`.
+  It is `null` - never `0` - for a worker that runs no pipeline, for a branch with no run yet, and when the database could not be read, and the renderer then draws nothing rather than a placeholder.
+  It is an additive field: a `v2` consumer that does not know it is unaffected, so it carries no version bump.
 - Every entry of `agents` has a recorded endpoint that resolved at collection time, unless `--include-dead` was passed.
   `omitted` names every task held back for that reason, of any kind, and is always present and empty when there is nothing to report.
 - `ci.passed`, `ci.failed`, `ci.pending`, `ci.skipped` and `ci.excused` partition `ci.checks`, and their sum is always `ci.total`.
