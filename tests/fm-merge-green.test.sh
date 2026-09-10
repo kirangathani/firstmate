@@ -435,7 +435,7 @@ test_present_merge_green_wakes_on_a_handed_over_green_pr() {
   out=$(run_poll "$case_dir" 1)
   assert_contains "$out" "green" "poll-on: a green open PR should wake firstmate to run the switch"
   assert_contains "$out" "mg-e1" "poll-on: the wake should name the task to land"
-  pass "with the standing merge rule set, a handed-over green PR wakes firstmate too"
+  pass "with the standing merge rule set, a green open PR wakes firstmate too"
 }
 
 test_a_still_working_task_does_not_wake_on_green() {
