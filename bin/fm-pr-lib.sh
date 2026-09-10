@@ -328,7 +328,12 @@ FM_PR_ROLLUP_UNKNOWN_NAMES=
 # The jq the rollup is read through. Empty fields are mapped to "-" because tab
 # is IFS whitespace to `read`, so consecutive tabs would collapse and shift
 # every later field over.
-FM_PR_ROLLUP_JQ='.statusCheckRollup // [] | .[] | [.__typename, .status, .conclusion, .state, (.name // .context // "unnamed")] | map(if . == null or . == "" then "-" else . end) | @tsv'
+# startedAt and completedAt are carried because a rollup can hold the same check
+# NAME more than once and the entries have to be ordered to tell a superseded
+# run from the run that replaced it; fm_pr_rollup_classify's header owns that
+# rule. The name stays LAST so that a name carrying a tab spills into the
+# read's final variable instead of shifting the ordering fields.
+FM_PR_ROLLUP_JQ='.statusCheckRollup // [] | .[] | [.__typename, .status, .conclusion, .state, .startedAt, .completedAt, (.name // .context // "unnamed")] | map(if . == null or . == "" then "-" else . end) | @tsv'
 
 # fm_pr_rollup_read <pr-url> <err-file>: read the PR's current check rollup into
 # FM_PR_ROLLUP_TSV, returning gh's own exit status and leaving gh's stderr in
@@ -375,9 +380,31 @@ fm_pr_rollup_read() {
 # only changes which remedy the reader is pointed at. A caller that has no use
 # for the distinction adds the two counts, which is exactly what
 # bin/fm-pr-merge.sh does, leaving its refusal unchanged.
+#
+# SUPERSEDED RUNS ARE DROPPED FIRST, and this is the ONE statement of that rule.
+# A rollup can carry the same check NAME more than once, because GitHub keeps
+# every check run of that name on the head commit rather than collapsing them.
+# The shape that matters is a workflow with `concurrency: cancel-in-progress`:
+# a re-trigger on the same head commit cancels the in-flight run, so a CANCELLED
+# entry sits in the rollup beside the SUCCESS entry of the same name that
+# replaced it. Classified independently, that CANCELLED entry is infrastructure
+# forever, and a genuinely green PR can never be merged or reported green.
+# So, grouping entries by [__typename, name] and taking the LATEST of each group
+# by startedAt, ties broken by rollup order:
+#   - a NON-LATEST entry whose conclusion is CANCELLED or STALE is dropped,
+#     because a later run of that name exists and is the real answer;
+#   - every other entry is classified exactly as it is today, so a superseded
+#     FAILURE, TIMED_OUT or STARTUP_FAILURE stays visible while its re-run is
+#     still pending - a re-run that has not reached a verdict must never hide an
+#     earlier red;
+#   - an entry that is the only one of its name is never dropped, so a lone
+#     CANCELLED is still infrastructure.
+# completedAt is carried on the wire but is deliberately NOT an ordering key: a
+# cancelled run completes early by construction, so ordering on it would rank
+# the cancellation before the run it actually superseded.
 fm_pr_rollup_classify() {
   local tsv=${1-} exempt=${2-}
-  local ck_type ck_status ck_conclusion ck_state ck_name verdict
+  local ck_type ck_status ck_conclusion ck_state ck_started ck_completed ck_name verdict
   FM_PR_ROLLUP_TOTAL=0
   FM_PR_ROLLUP_FAILING=0
   FM_PR_ROLLUP_INFRA=0
@@ -388,7 +415,24 @@ fm_pr_rollup_classify() {
   FM_PR_ROLLUP_INFRA_NAMES=
   FM_PR_ROLLUP_PENDING_NAMES=
   FM_PR_ROLLUP_UNKNOWN_NAMES=
-  while IFS=$'\t' read -r ck_type ck_status ck_conclusion ck_state ck_name; do
+  # ponytail: O(n^2) name scan, fine for the dozens of checks a rollup holds.
+  tsv=$(printf '%s\n' "$tsv" | awk -F'\t' '
+    function ts(v) { gsub(/[^0-9]/, "", v); return v + 0 }
+    { line[NR] = $0; typ[NR] = $1; concl[NR] = $3; start[NR] = ts($5); nm[NR] = $7 }
+    END {
+      for (i = 1; i <= NR; i++) {
+        drop = 0
+        if (concl[i] == "CANCELLED" || concl[i] == "STALE") {
+          for (j = 1; j <= NR; j++) {
+            if (j == i || typ[j] != typ[i] || nm[j] != nm[i]) continue
+            if (start[j] > start[i] || (start[j] == start[i] && j > i)) { drop = 1; break }
+          }
+        }
+        if (!drop) print line[i]
+      }
+    }')
+  # shellcheck disable=SC2034  # ck_started/ck_completed are read only so ck_name lands in the last field; the awk pass above is what orders on them.
+  while IFS=$'\t' read -r ck_type ck_status ck_conclusion ck_state ck_started ck_completed ck_name; do
     [ -n "$ck_type$ck_status$ck_conclusion$ck_state$ck_name" ] || continue
     FM_PR_ROLLUP_TOTAL=$((FM_PR_ROLLUP_TOTAL + 1))
     verdict=unknown

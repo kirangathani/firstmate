@@ -229,7 +229,7 @@ case "\${1:-} \${2:-}" in
         if [ -f '$case_dir/pr-checks.tsv' ]; then
           cat '$case_dir/pr-checks.tsv'
         else
-          printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tmock-default-ci\n'
+          printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tmock-default-ci\n'
         fi
         exit 0
         ;;
@@ -258,7 +258,7 @@ SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
-  *statusCheckRollup*) printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tmock-default-ci\n' ;;
+  *statusCheckRollup*) printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tmock-default-ci\n' ;;
   *baseRefName*) printf 'main\n' ;;
   *" body "*) ;;
 esac
@@ -457,7 +457,7 @@ test_signed_ci_skip_does_not_excuse_a_failing_check() {
   local case_dir rc
   case_dir=$(make_ci_skip_case ciskip-red f000000000000000000000000000000000000014)
   sign_ci_skip "$case_dir"
-  write_pr_checks "$case_dir" $'CheckRun\tCOMPLETED\tFAILURE\t-\tinvariants'
+  write_pr_checks "$case_dir" $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tinvariants'
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/123 \
@@ -477,7 +477,7 @@ test_signed_ci_skip_does_not_excuse_a_pending_check() {
   local case_dir rc
   case_dir=$(make_ci_skip_case ciskip-pending f000000000000000000000000000000000000015)
   sign_ci_skip "$case_dir"
-  write_pr_checks "$case_dir" $'CheckRun\tIN_PROGRESS\t-\t-\tbehaviour tests'
+  write_pr_checks "$case_dir" $'CheckRun\tIN_PROGRESS\t-\t-\t2026-09-09T15:26:32Z\t-\tbehaviour tests'
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/124 \
@@ -1457,8 +1457,8 @@ test_red_pr_refused_with_failing_check_named() {
   add_gh_mocks "$case_dir" f000000000000000000000000000000000000001
   : > "$case_dir/gh-axi.log"
   write_pr_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint'
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tlint'
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
@@ -1484,9 +1484,9 @@ test_pending_pr_refused_distinct_from_red() {
   add_gh_mocks "$case_dir" f000000000000000000000000000000000000002
   : > "$case_dir/gh-axi.log"
   write_pr_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
-    $'CheckRun\tIN_PROGRESS\t-\t-\tslow-suite' \
-    $'StatusContext\t-\t-\tPENDING\texternal-gate'
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests' \
+    $'CheckRun\tIN_PROGRESS\t-\t-\t2026-09-09T15:26:32Z\t-\tslow-suite' \
+    $'StatusContext\t-\t-\tPENDING\t-\t-\texternal-gate'
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/72 \
@@ -1514,8 +1514,8 @@ test_red_outranks_pending_in_refusal() {
   add_gh_mocks "$case_dir" f000000000000000000000000000000000000003
   : > "$case_dir/gh-axi.log"
   write_pr_checks "$case_dir" \
-    $'CheckRun\tIN_PROGRESS\t-\t-\tslow-suite' \
-    $'CheckRun\tCOMPLETED\tTIMED_OUT\t-\tintegration'
+    $'CheckRun\tIN_PROGRESS\t-\t-\t2026-09-09T15:26:32Z\t-\tslow-suite' \
+    $'CheckRun\tCOMPLETED\tTIMED_OUT\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tintegration'
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/73 \
@@ -1539,10 +1539,10 @@ test_green_pr_merges_unchanged() {
   add_gh_mocks "$case_dir" f000000000000000000000000000000000000004
   : > "$case_dir/gh-axi.log"
   write_pr_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
-    $'CheckRun\tCOMPLETED\tNEUTRAL\t-\toptional-scan' \
-    $'CheckRun\tCOMPLETED\tSKIPPED\t-\tpath-filtered' \
-    $'StatusContext\t-\t-\tSUCCESS\texternal-gate'
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tNEUTRAL\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\toptional-scan' \
+    $'CheckRun\tCOMPLETED\tSKIPPED\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tpath-filtered' \
+    $'StatusContext\t-\t-\tSUCCESS\t-\t-\texternal-gate'
 
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/74 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "checks-green: fm-pr-merge failed"
@@ -1623,7 +1623,7 @@ test_unclassifiable_check_refuses_unverified() {
   add_gh_mocks "$case_dir" f000000000000000000000000000000000000008
   : > "$case_dir/gh-axi.log"
   write_pr_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSOMETHING_NEW\t-\tweird-check'
+    $'CheckRun\tCOMPLETED\tSOMETHING_NEW\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tweird-check'
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/78 \
@@ -1703,7 +1703,7 @@ test_waiver_does_not_excuse_a_red_pr() {
   add_gh_mocks "$case_dir" a100000000000000000000000000000000000003
   : > "$case_dir/gh-axi.log"
   add_skip_flags "$case_dir" 'local_skip=on' 'ci_skip=on'
-  write_pr_checks "$case_dir" $'CheckRun\tCOMPLETED\tFAILURE\t-\tinvariants'
+  write_pr_checks "$case_dir" $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tinvariants'
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
@@ -1872,7 +1872,7 @@ ATTESTATION_CHECK='PR must be raised via no-mistakes'
 # A rollup line for that check, failed exactly as CI reports it when a PR was not
 # raised through the pipeline.
 attestation_failed_line() {
-  printf 'CheckRun\tCOMPLETED\tFAILURE\t-\t%s\n' "$ATTESTATION_CHECK"
+  printf 'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\t%s\n' "$ATTESTATION_CHECK"
 }
 
 # give_case_a_signing_key <case_dir>: a throwaway key for this case alone.
@@ -1922,7 +1922,7 @@ make_attestation_case() {
   : > "$case_dir/gh-axi.log"
   write_projects_registry "$case_dir" "$mode"
   write_pr_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts' \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts' \
     "$(attestation_failed_line)" \
     "$@"
   printf '%s\n' "$case_dir"
@@ -1955,7 +1955,7 @@ test_direct_pr_project_merges_past_a_failed_attestation() {
 test_another_failing_check_refuses_under_the_exemption() {
   local case_dir rc
   case_dir=$(make_attestation_case attest-other-red direct-PR \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tBehavior tests (shard 1)')
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tBehavior tests (shard 1)')
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/102 \
@@ -1976,7 +1976,7 @@ test_another_failing_check_refuses_under_the_exemption() {
 test_pending_check_refuses_under_the_exemption() {
   local case_dir rc
   case_dir=$(make_attestation_case attest-pending direct-PR \
-    $'CheckRun\tIN_PROGRESS\t-\t-\tBehavior tests (shard 2)')
+    $'CheckRun\tIN_PROGRESS\t-\t-\t2026-09-09T15:26:32Z\t-\tBehavior tests (shard 2)')
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/103 \
@@ -2147,8 +2147,8 @@ test_renamed_attestation_check_is_not_excused() {
   : > "$case_dir/gh-axi.log"
   write_projects_registry "$case_dir" direct-PR
   write_pr_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via the pipeline'
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tPR must be raised via the pipeline'
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/110 \
@@ -2217,7 +2217,7 @@ test_exempted_check_name_matches_the_workflow_job() {
 BASE_REVERIFY_CHECK='Base assertions re-verified'
 
 base_reverify_failed_line() {
-  printf 'CheckRun\tCOMPLETED\tFAILURE\t-\t%s\n' "$BASE_REVERIFY_CHECK"
+  printf 'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\t%s\n' "$BASE_REVERIFY_CHECK"
 }
 
 test_approved_supersession_merges_past_a_red_base_reverification() {
@@ -2228,7 +2228,7 @@ test_approved_supersession_merges_past_a_red_base_reverification() {
   write_supersessions "$case_dir" \
     '- ids: tests/x.test.sh::* | project: project | kind: failing | date: 2026-09-07 | reason: captain approved the 9-step to 10-step change'
   write_pr_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts' \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts' \
     "$(base_reverify_failed_line)"
 
   run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/120 \
@@ -2262,7 +2262,7 @@ test_red_base_reverification_without_approval_refuses() {
   case_dir=$(make_stub_case base-reverify-unapproved 1 \
     'failing: tests/x.test.sh::X behaves')
   write_pr_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts' \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts' \
     "$(base_reverify_failed_line)"
 
   set +e
@@ -2291,7 +2291,7 @@ test_another_red_check_refuses_under_the_base_reverification_exemption() {
     '- id: tests/x.test.sh::X behaves | project: project | date: 2026-09-07 | reason: captain approved the behavior change'
   write_pr_checks "$case_dir" \
     "$(base_reverify_failed_line)" \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tBehavior tests (shard 1)'
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tBehavior tests (shard 1)'
 
   set +e
   run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/122 \
@@ -2313,7 +2313,7 @@ test_clean_local_run_excuses_a_stale_red_base_reverification() {
   local case_dir
   case_dir=$(make_stub_case base-reverify-stale 0)
   write_pr_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts' \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts' \
     "$(base_reverify_failed_line)"
 
   run_pr_merge_stub "$case_dir" task-x1 https://github.com/example/repo/pull/123 \
@@ -2339,7 +2339,7 @@ test_ungated_unexecuted_findings_do_not_excuse_the_red_check() {
   case_dir=$(make_stub_case base-reverify-unexecuted 1 \
     'unexecuted: tests/x.test.sh::X behaves')
   write_pr_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts' \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts' \
     "$(base_reverify_failed_line)"
 
   set +e

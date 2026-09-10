@@ -151,7 +151,7 @@ case "\${1:-} \${2:-}" in
         if [ -f "$case_dir/pr-checks-\$number.tsv" ]; then
           cat "$case_dir/pr-checks-\$number.tsv"
         else
-          printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tmock-default-ci\n'
+          printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tmock-default-ci\n'
         fi
         exit 0 ;;
     esac
@@ -284,8 +284,8 @@ test_direct_pr_with_only_the_attestation_red_merges() {
   pr_is "$case_dir" 1 fm/mg-w1
   write_projects_registry "$case_dir" direct-PR
   write_pr_checks "$case_dir" 1 \
-    "$(printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts')" \
-    "$(printf 'CheckRun\tCOMPLETED\tFAILURE\t-\t%s' "$ATTESTATION_CHECK")"
+    "$(printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts')" \
+    "$(printf 'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\t%s' "$ATTESTATION_CHECK")"
 
   set +e
   run_switch "$case_dir"
@@ -309,8 +309,8 @@ test_a_red_check_is_not_merged_and_exits_non_zero() {
   add_mocks "$case_dir"
   pr_is "$case_dir" 1 fm/mg-r1
   write_pr_checks "$case_dir" 1 \
-    "$(printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts')" \
-    "$(printf 'CheckRun\tCOMPLETED\tFAILURE\t-\tBehavior tests')"
+    "$(printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts')" \
+    "$(printf 'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tBehavior tests')"
 
   set +e
   run_switch "$case_dir"
@@ -330,8 +330,8 @@ test_a_pending_check_is_not_merged_and_exits_non_zero() {
   add_mocks "$case_dir"
   pr_is "$case_dir" 1 fm/mg-p1
   write_pr_checks "$case_dir" 1 \
-    "$(printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tLint shell scripts')" \
-    "$(printf 'CheckRun\tIN_PROGRESS\t-\t-\tBehavior tests')"
+    "$(printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts')" \
+    "$(printf 'CheckRun\tIN_PROGRESS\t-\t-\t2026-09-09T15:26:32Z\t-\tBehavior tests')"
 
   set +e
   run_switch "$case_dir"
