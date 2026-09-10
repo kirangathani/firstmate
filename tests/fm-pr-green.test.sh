@@ -221,6 +221,27 @@ test_classify_a_lone_cancelled_run_is_still_infrastructure() {
   pass "classification: a lone cancelled run is still infrastructure"
 }
 
+# The gate that re-verifies origin/main's assertions runs MAIN's copies of this
+# suite against the branch's bin/, and main's fixtures predate the two ordering
+# columns. So the five-column shape has to keep classifying, ordered by rollup
+# position alone; this case pins that and is the reason for the NF == 5 branch
+# in fm_pr_rollup_classify's awk pass.
+test_classify_accepts_the_pre_ordering_five_column_shape() {
+  local out
+  out=$(classify '' \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint' \
+    $'CheckRun\tCOMPLETED\tCANCELLED\t-\tintegration' \
+    $'StatusContext\t-\t-\tPENDING\texternal-gate')
+  assert_contains "$out" 'total=4 failing=1 infra=1 pending=1 unknown=0 exempt=0' \
+    "a five-column row still carries its name in the last field and must classify exactly as before"
+  assert_contains "$out" 'failing: lint' \
+    "a five-column failing row must still be named"
+  assert_contains "$out" 'infra: integration' \
+    "a five-column cancelled row with no later run of its name must still be infrastructure"
+  pass "classification: the pre-ordering five-column shape still classifies"
+}
+
 test_classify_empty_rollup_counts_nothing() {
   local out
   out=$(classify '')
@@ -851,6 +872,7 @@ test_classify_exemption_covers_an_infrastructure_shape
 test_classify_pending_states
 test_classify_unclassifiable_entry_is_unknown
 test_classify_exempt_name_is_exact_and_diverts_only_failures
+test_classify_accepts_the_pre_ordering_five_column_shape
 test_classify_empty_rollup_counts_nothing
 test_classify_a_cancelled_run_replaced_by_a_success_is_dropped
 test_classify_a_cancellation_that_is_the_latest_run_still_counts

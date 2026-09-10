@@ -416,8 +416,13 @@ fm_pr_rollup_classify() {
   FM_PR_ROLLUP_PENDING_NAMES=
   FM_PR_ROLLUP_UNKNOWN_NAMES=
   # ponytail: O(n^2) name scan, fine for the dozens of checks a rollup holds.
-  tsv=$(printf '%s\n' "$tsv" | awk -F'\t' '
+  tsv=$(printf '%s\n' "$tsv" | awk 'BEGIN { FS = OFS = "\t" }
     function ts(v) { gsub(/[^0-9]/, "", v); return v + 0 }
+    # A five-column row is the pre-ordering wire shape, still emitted by any
+    # caller or fixture built against the older FM_PR_ROLLUP_JQ. Its last field
+    # is the name, so it is widened here with both ordering fields absent, which
+    # leaves every row of that shape ordered by rollup position alone.
+    NF == 5 { $7 = $5; $5 = "-"; $6 = "-" }
     { line[NR] = $0; typ[NR] = $1; concl[NR] = $3; start[NR] = ts($5); nm[NR] = $7 }
     END {
       for (i = 1; i <= NR; i++) {
