@@ -3,6 +3,9 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
+# That poll's header owns when an armed poll wakes firstmate, including the
+# standing merge rule's extra requirement that a task still reporting work in
+# progress does not wake anything on green.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 

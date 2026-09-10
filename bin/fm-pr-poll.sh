@@ -12,6 +12,18 @@
 # bin/fm-merge-green.sh, which runs every gate. That separation is the point:
 # the trigger is cheap and revocable, the decision stays in the one place that
 # owns it.
+# A STILL-WORKING TASK DOES NOT WAKE ON GREEN. GitHub's green reads stale while
+# a worker is still running: a merge-forward gets the new head verified by CI
+# long before the worker has handed the PR over, and waking on that costs
+# firstmate a supervision cycle every poll for hours (measured 2026-09-10 on
+# three PRs firing every ~5 minutes for a morning). The wake exists so work the
+# captain already asked for lands without a separate word; a PR whose worker has
+# not finished is not that. So a task whose status file's last non-empty line is
+# anything other than done: stays silent. A MISSING, unreadable or empty status
+# file is NOT a silencer and green wakes as it always did: the churn comes from
+# workers mid-run, which always have a status file, and a task that has reported
+# nothing at all is not evidence of work in flight. Only the green branch is
+# gated - a MERGED PR still wakes firstmate whatever the worker last said.
 # GREEN IS NOT DECIDED HERE EITHER. It is read from bin/fm-pr-green.sh, the same
 # owner a ship worker reports its own green from, so this poll cannot wake
 # firstmate on a definition of green the merge gate would then refuse. That
@@ -80,6 +92,20 @@ fi
 home=${FM_HOME:-}
 [ -n "$home" ] && [ -d "$home" ] || exit 0
 [ -e "$home/config/merge-green" ] || exit 0
+# The still-working gate (this file's header owns the rule).
+status="$home/state/$id.status"
+last=
+if [ -f "$status" ] && { exec 3< "$status"; } 2>/dev/null; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] && last=$line
+  done <&3
+  exec 3<&-
+fi
+case "$last" in
+  ''|done:*) ;;
+  *) exit 0 ;;
+esac
+
 green=$(dirname -- "$0")/fm-pr-green.sh
 [ -f "$green" ] && [ ! -L "$green" ] && [ -x "$green" ] || exit 0
 if FM_HOME="$home" "$green" "$id" "$url" >/dev/null 2>&1; then

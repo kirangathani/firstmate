@@ -17,7 +17,11 @@
 #   (d) --dry-run merges nothing, steers nobody, and prints the same table
 #   (e) with config/merge-green ABSENT the merge poll behaves exactly as before
 #       (silent on an open PR, `merged` on a merged one); present, an open green
-#       PR also wakes firstmate
+#       PR wakes firstmate unless the task is still reporting work in progress
+#       - a still-working task stays silent however green GitHub reads, while a
+#       task with no status file at all wakes as it always did, a merged PR
+#       still wakes whatever the worker last said, and a copy of the poll with
+#       no bin/fm-pr-green.sh sibling still wakes on nothing but a merge
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -379,6 +383,30 @@ run_poll() {  # <case_dir> <number>
     "$POLL" --validated "mg-e$number" "https://github.com/o/r/pull/$number" o r "$number"
 }
 
+# arm_standing_rule <case_dir> <task>: the captain's marker, plus the task
+# record bin/fm-pr-green.sh reads from FM_HOME exactly as a real home holds it.
+arm_standing_rule() {
+  local case_dir=$1 task=$2
+  mkdir -p "$case_dir/fmhome/config" "$case_dir/fmhome/state"
+  touch "$case_dir/fmhome/config/merge-green"
+  cp "$case_dir/state/$task.meta" "$case_dir/fmhome/state/$task.meta"
+}
+
+# The status fixtures below are exact bytes copied from this home's real
+# state/<id>.status files on 2026-09-10: the done: line from
+# gate-pr-base-ref-b6.status, and the two working: lines from
+# eln-migration-history-repair-r1.status and eln-pdf-comments-p2.status.
+STATUS_DONE='done: base-ref fix committed on fm/gate-pr-base-ref-b6; 4 new regression tests verified failing pre-fix and passing after; assert-tests-kept, pr-merge, pr-check-security, nm-flow suites and fm-lint.sh all green'
+STATUS_WORKING='working: branch pushed at 8d2bb8b26d9ae03fd2670cb284c3d9817ecbd76b; run still parked awaiting the captain'
+STATUS_ATTEST='working: review-attest needed for 17916c79b1efdd36ff481e7218a784b7a43669c0 on kirangathani/eln'
+
+write_status() {  # <case_dir> <task> <line...>
+  local case_dir=$1 task=$2
+  shift 2
+  mkdir -p "$case_dir/fmhome/state"
+  printf '%s\n' "$@" > "$case_dir/fmhome/state/$task.status"
+}
+
 test_absent_merge_green_leaves_the_poll_unchanged() {
   local case_dir out
   case_dir=$(make_fleet poll-off mg-e1)
@@ -396,22 +424,96 @@ test_absent_merge_green_leaves_the_poll_unchanged() {
   pass "with no standing merge rule the merge poll behaves exactly as it did before"
 }
 
-test_present_merge_green_wakes_on_a_green_open_pr() {
+test_present_merge_green_wakes_on_a_handed_over_green_pr() {
   local case_dir out
   case_dir=$(make_fleet poll-on mg-e1)
   add_mocks "$case_dir"
   pr_is "$case_dir" 1 fm/mg-e1 OPEN
-  mkdir -p "$case_dir/fmhome/config"
-  touch "$case_dir/fmhome/config/merge-green"
-  # bin/fm-pr-green.sh reads the task's record from FM_HOME, so the poll's home
-  # must hold it exactly as a real home does.
-  mkdir -p "$case_dir/fmhome/state"
-  cp "$case_dir/state/mg-e1.meta" "$case_dir/fmhome/state/mg-e1.meta"
+  arm_standing_rule "$case_dir" mg-e1
+  write_status "$case_dir" mg-e1 "$STATUS_WORKING" "$STATUS_DONE"
 
   out=$(run_poll "$case_dir" 1)
   assert_contains "$out" "green" "poll-on: a green open PR should wake firstmate to run the switch"
   assert_contains "$out" "mg-e1" "poll-on: the wake should name the task to land"
   pass "with the standing merge rule set, a green open PR wakes firstmate too"
+}
+
+test_a_still_working_task_does_not_wake_on_green() {
+  local case_dir out
+  case_dir=$(make_fleet poll-working mg-e1)
+  add_mocks "$case_dir"
+  pr_is "$case_dir" 1 fm/mg-e1 OPEN
+  arm_standing_rule "$case_dir" mg-e1
+  # The measured churn: a merge-forward gets the head verified by CI while the
+  # worker is still mid-run, so GitHub reads green before the hand-over.
+  write_status "$case_dir" mg-e1 "$STATUS_DONE" "$STATUS_ATTEST"
+
+  out=$(run_poll "$case_dir" 1)
+  [ -z "$out" ] || fail "poll-working: a green PR whose worker is still running must not wake firstmate"$'\n'"$out"
+
+  write_status "$case_dir" mg-e1 "$STATUS_WORKING"
+  out=$(run_poll "$case_dir" 1)
+  [ -z "$out" ] || fail "poll-working: a working: last line must keep the poll silent"$'\n'"$out"
+  pass "a green PR whose last status event is not done: wakes nothing"
+}
+
+test_a_task_with_no_status_file_wakes_exactly_as_it_always_did() {
+  local case_dir out
+  case_dir=$(make_fleet poll-nostatus mg-e1)
+  add_mocks "$case_dir"
+  pr_is "$case_dir" 1 fm/mg-e1 OPEN
+  arm_standing_rule "$case_dir" mg-e1
+  assert_absent "$case_dir/fmhome/state/mg-e1.status" \
+    "poll-nostatus: the task must have reported nothing at all"
+
+  # The measured churn comes from workers mid-run, which always have a status
+  # file. Silence is the evidence of work in flight; its absence is not.
+  out=$(run_poll "$case_dir" 1)
+  assert_contains "$out" "green" "poll-nostatus: a task that has reported nothing must wake as it always did"
+
+  : > "$case_dir/fmhome/state/mg-e1.status"
+  out=$(run_poll "$case_dir" 1)
+  assert_contains "$out" "green" "poll-nostatus: an empty status file must not silence the wake either"
+  pass "a green PR for a task with no reported status wakes firstmate as it always did"
+}
+
+test_a_merged_pr_wakes_whatever_the_worker_last_said() {
+  local case_dir out
+  case_dir=$(make_fleet poll-merged mg-e1)
+  add_mocks "$case_dir"
+  pr_is "$case_dir" 1 fm/mg-e1 MERGED
+  arm_standing_rule "$case_dir" mg-e1
+  write_status "$case_dir" mg-e1 "$STATUS_WORKING"
+
+  out=$(run_poll "$case_dir" 1)
+  [ "$out" = merged ] || fail "poll-merged: a merged PR must wake firstmate regardless of status, got: $out"
+  pass "the done: requirement gates only the green wake, never a merged PR"
+}
+
+test_a_check_copy_with_no_green_sibling_still_wakes_on_nothing_but_a_merge() {
+  local case_dir copy out
+  case_dir=$(make_fleet poll-copy mg-e1)
+  add_mocks "$case_dir"
+  pr_is "$case_dir" 1 fm/mg-e1 OPEN
+  arm_standing_rule "$case_dir" mg-e1
+  write_status "$case_dir" mg-e1 "$STATUS_DONE"
+
+  # Exactly how the watcher holds it: byte-for-byte the poll, beside its
+  # sidecar, in a directory with no bin/ sibling to reach.
+  copy="$case_dir/armed"
+  mkdir -p "$copy"
+  cp "$POLL" "$copy/mg-e1.check.sh"
+  printf '%s\n%s\n%s\n%s\n' https://github.com/o/r/pull/1 o r 1 > "$copy/mg-e1.pr-poll"
+  chmod 0700 "$copy/mg-e1.check.sh"
+  assert_absent "$copy/fm-pr-green.sh" "poll-copy: the copy must have no green sibling"
+
+  out=$(FM_HOME="$case_dir/fmhome" PATH="$case_dir/fakebin:$PATH" "$copy/mg-e1.check.sh")
+  [ -z "$out" ] || fail "poll-copy: with no green sibling an open PR must wake nothing"$'\n'"$out"
+
+  pr_is "$case_dir" 1 fm/mg-e1 MERGED
+  out=$(FM_HOME="$case_dir/fmhome" PATH="$case_dir/fakebin:$PATH" "$copy/mg-e1.check.sh")
+  [ "$out" = merged ] || fail "poll-copy: a merged PR must still wake firstmate, got: $out"
+  pass "an armed copy with no green sibling behaves exactly as it always has"
 }
 
 test_second_candidate_behind_the_new_main_is_not_merged
@@ -420,4 +522,8 @@ test_a_red_check_is_not_merged_and_exits_non_zero
 test_a_pending_check_is_not_merged_and_exits_non_zero
 test_dry_run_merges_nothing_and_prints_the_same_table
 test_absent_merge_green_leaves_the_poll_unchanged
-test_present_merge_green_wakes_on_a_green_open_pr
+test_present_merge_green_wakes_on_a_handed_over_green_pr
+test_a_still_working_task_does_not_wake_on_green
+test_a_task_with_no_status_file_wakes_exactly_as_it_always_did
+test_a_merged_pr_wakes_whatever_the_worker_last_said
+test_a_check_copy_with_no_green_sibling_still_wakes_on_nothing_but_a_merge
