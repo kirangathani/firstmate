@@ -93,7 +93,7 @@ case " $* " in
     # Green rollup so fm-pr-merge.sh's checks-green gate passes; this suite
     # exercises URL/ID safety, not check classification (tests/fm-pr-merge.test.sh
     # owns that).
-    printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\tmock-default-ci\n'
+    printf 'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tmock-default-ci\n'
     ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1

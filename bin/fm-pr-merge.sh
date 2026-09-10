@@ -241,6 +241,10 @@
 #   - pending: a CheckRun still queued or running (status QUEUED, IN_PROGRESS,
 #     PENDING, WAITING, or REQUESTED), or a StatusContext in state PENDING or
 #     EXPECTED.
+# Before the table is applied, a run that a later run of the same check name
+# superseded is dropped, so a cancelled run left behind by a re-trigger on the
+# same head commit cannot block a PR its replacement turned green;
+# fm_pr_rollup_classify (bin/fm-pr-lib.sh) owns that rule in full.
 # Any failing check refuses with the check named (a red PR). Otherwise any
 # pending check refuses with a DISTINCT message, because the remedy differs:
 # a red PR needs fixing, a pending one needs waiting. An entry the table

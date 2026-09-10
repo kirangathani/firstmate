@@ -49,10 +49,10 @@ classify() {
 test_classify_passing_conclusions() {
   local out
   out=$(classify '' \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
-    $'CheckRun\tCOMPLETED\tNEUTRAL\t-\toptional-scan' \
-    $'CheckRun\tCOMPLETED\tSKIPPED\t-\tpath-filtered' \
-    $'StatusContext\t-\t-\tSUCCESS\texternal-gate')
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tNEUTRAL\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\toptional-scan' \
+    $'CheckRun\tCOMPLETED\tSKIPPED\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tpath-filtered' \
+    $'StatusContext\t-\t-\tSUCCESS\t-\t-\texternal-gate')
   assert_contains "$out" 'total=4 failing=0 infra=0 pending=0 unknown=0 exempt=0' \
     "SUCCESS/NEUTRAL/SKIPPED conclusions and a SUCCESS status context must all classify as passing"
   pass "classification: every passing shape counts as passing and nothing else"
@@ -63,13 +63,13 @@ test_classify_passing_conclusions() {
 test_classify_failing_conclusions() {
   local out conclusion
   for conclusion in FAILURE ACTION_REQUIRED; do
-    out=$(classify '' "$(printf 'CheckRun\tCOMPLETED\t%s\t-\tlint' "$conclusion")")
+    out=$(classify '' "$(printf 'CheckRun\tCOMPLETED\t%s\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tlint' "$conclusion")")
     assert_contains "$out" 'total=1 failing=1 infra=0 pending=0 unknown=0 exempt=0' \
       "a COMPLETED CheckRun with conclusion $conclusion must classify as failing"
     assert_contains "$out" 'failing: lint' "the $conclusion check was not named"
   done
   for conclusion in FAILURE ERROR; do
-    out=$(classify '' "$(printf 'StatusContext\t-\t-\t%s\texternal-gate' "$conclusion")")
+    out=$(classify '' "$(printf 'StatusContext\t-\t-\t%s\t-\t-\texternal-gate' "$conclusion")")
     assert_contains "$out" 'total=1 failing=1 infra=0 pending=0 unknown=0 exempt=0' \
       "a StatusContext in state $conclusion must classify as failing"
   done
@@ -82,15 +82,15 @@ test_classify_failing_conclusions() {
 test_classify_infrastructure_conclusions() {
   local out conclusion
   for conclusion in CANCELLED TIMED_OUT STALE STARTUP_FAILURE; do
-    out=$(classify '' "$(printf 'CheckRun\tCOMPLETED\t%s\t-\tslow-suite' "$conclusion")")
+    out=$(classify '' "$(printf 'CheckRun\tCOMPLETED\t%s\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tslow-suite' "$conclusion")")
     assert_contains "$out" 'total=1 failing=0 infra=1 pending=0 unknown=0 exempt=0' \
       "a COMPLETED CheckRun with conclusion $conclusion must classify as infrastructure, not as a red"
     assert_contains "$out" 'infra: slow-suite' "the $conclusion check was not named as infrastructure"
   done
   # The split must never make a non-green PR green: both classes are counted.
   out=$(classify '' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint' \
-    $'CheckRun\tCOMPLETED\tTIMED_OUT\t-\tslow-suite')
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tlint' \
+    $'CheckRun\tCOMPLETED\tTIMED_OUT\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tslow-suite')
   assert_contains "$out" 'total=2 failing=1 infra=1 pending=0 unknown=0 exempt=0' \
     "a PR carrying both a red and an infrastructure check must count both"
   pass "classification: a check that never reached a verdict counts as infrastructure, separately from a red"
@@ -101,7 +101,7 @@ test_classify_infrastructure_conclusions() {
 test_classify_exemption_covers_an_infrastructure_shape() {
   local out
   out=$(classify 'PR must be raised via no-mistakes' \
-    $'CheckRun\tCOMPLETED\tTIMED_OUT\t-\tPR must be raised via no-mistakes')
+    $'CheckRun\tCOMPLETED\tTIMED_OUT\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tPR must be raised via no-mistakes')
   assert_contains "$out" 'total=1 failing=0 infra=0 pending=0 unknown=0 exempt=1' \
     "an exempt check that timed out must divert, not surface as an infrastructure finding"
   pass "classification: the exemption covers an infrastructure-shaped failure too"
@@ -110,12 +110,12 @@ test_classify_exemption_covers_an_infrastructure_shape() {
 test_classify_pending_states() {
   local out status
   for status in QUEUED IN_PROGRESS PENDING WAITING REQUESTED; do
-    out=$(classify '' "$(printf 'CheckRun\t%s\t-\t-\tslow-suite' "$status")")
+    out=$(classify '' "$(printf 'CheckRun\t%s\t-\t-\t2026-09-09T15:26:32Z\t-\tslow-suite' "$status")")
     assert_contains "$out" 'total=1 failing=0 infra=0 pending=1 unknown=0 exempt=0' \
       "a CheckRun with status $status must classify as pending"
   done
   for status in PENDING EXPECTED; do
-    out=$(classify '' "$(printf 'StatusContext\t-\t-\t%s\texternal-gate' "$status")")
+    out=$(classify '' "$(printf 'StatusContext\t-\t-\t%s\t-\t-\texternal-gate' "$status")")
     assert_contains "$out" 'total=1 failing=0 infra=0 pending=1 unknown=0 exempt=0' \
       "a StatusContext in state $status must classify as pending"
   done
@@ -127,7 +127,7 @@ test_classify_pending_states() {
 test_classify_unclassifiable_entry_is_unknown() {
   local out
   out=$(classify '' \
-    $'CheckRun\tCOMPLETED\tMYSTERY\t-\tnovel-conclusion' \
+    $'CheckRun\tCOMPLETED\tMYSTERY\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tnovel-conclusion' \
     $'Wormhole\t-\t-\t-\tnovel-typename')
   assert_contains "$out" 'total=2 failing=0 infra=0 pending=0 unknown=2 exempt=0' \
     "an unrecognized conclusion or typename must count as unknown, not passing"
@@ -141,19 +141,105 @@ test_classify_unclassifiable_entry_is_unknown() {
 test_classify_exempt_name_is_exact_and_diverts_only_failures() {
   local out
   out=$(classify 'PR must be raised via no-mistakes' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint')
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tPR must be raised via no-mistakes' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tPR must be raised via no-mistakes' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tlint')
   assert_contains "$out" 'total=3 failing=1 infra=0 pending=0 unknown=0 exempt=2' \
     "each occurrence of the exempt name must divert, and every other failure must still count"
   assert_contains "$out" 'failing: lint' "a failure with another name was diverted by the exemption"
 
   out=$(classify 'PR must be raised via no-mistakes' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes (renamed)' \
-    $'CheckRun\tIN_PROGRESS\t-\t-\tPR must be raised via no-mistakes')
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tPR must be raised via no-mistakes (renamed)' \
+    $'CheckRun\tIN_PROGRESS\t-\t-\t2026-09-09T15:26:32Z\t-\tPR must be raised via no-mistakes')
   assert_contains "$out" 'total=2 failing=1 infra=0 pending=1 unknown=0 exempt=0' \
     "the exemption must match by exact name and must divert only a FAILING check"
   pass "classification: the exempt name is matched exactly and diverts only failures"
+}
+
+# --- superseded runs of the same check name ---------------------------------
+#
+# A rollup can hold the same check NAME more than once, so these cases pin the
+# supersession rule owned by fm_pr_rollup_classify's header. The observed
+# failure they exist for: this repo's workflows use `concurrency:` with
+# `cancel-in-progress`, a re-trigger on the same head commit cancels the
+# in-flight run, and the CANCELLED entry then sat in the rollup beside the
+# SUCCESS entry that replaced it, counting as infrastructure and making a
+# genuinely green PR unmergeable.
+#
+# The rows below are the exact TSV bytes FM_PR_ROLLUP_JQ emits for a real
+# rollup, captured 2026-09-09 with
+#   gh pr view 80 --json statusCheckRollup -q "$FM_PR_ROLLUP_JQ"
+# on kirangathani/firstmate, whose head commit genuinely carried the same check
+# name ("CI testing waiver") twice. Only the conclusions and timestamps are
+# varied per case; the column shape and the timestamp format are as captured.
+
+test_classify_a_cancelled_run_replaced_by_a_success_is_dropped() {
+  local out
+  out=$(classify '' \
+    $'CheckRun\tCOMPLETED\tCANCELLED\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:26:39Z\tCI testing waiver' \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:28:11Z\t2026-09-09T15:28:18Z\tCI testing waiver')
+  assert_contains "$out" 'total=1 failing=0 infra=0 pending=0 unknown=0 exempt=0' \
+    "a cancelled run superseded by a later success of the same name must be dropped, not counted as infrastructure"
+  assert_not_contains "$out" 'infra: CI testing waiver' \
+    "the superseded cancellation must not be named as an infrastructure finding"
+  pass "classification: a cancelled run replaced by a later success is dropped"
+}
+
+test_classify_a_cancellation_that_is_the_latest_run_still_counts() {
+  local out
+  out=$(classify '' \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:26:39Z\tCI testing waiver' \
+    $'CheckRun\tCOMPLETED\tCANCELLED\t-\t2026-09-09T15:28:11Z\t2026-09-09T15:28:18Z\tCI testing waiver')
+  assert_contains "$out" 'total=2 failing=0 infra=1 pending=0 unknown=0 exempt=0' \
+    "a cancellation that is the LATEST run of its name is the real answer and must stay infrastructure"
+  assert_contains "$out" 'infra: CI testing waiver' \
+    "the latest cancellation must still be named"
+  pass "classification: a cancellation that is the latest run of its name still counts"
+}
+
+test_classify_a_pending_rerun_does_not_hide_an_earlier_red() {
+  local out
+  out=$(classify '' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:26:47Z\tBehavior tests (shard 1)' \
+    $'CheckRun\tIN_PROGRESS\t-\t-\t2026-09-09T15:28:11Z\t-\tBehavior tests (shard 1)')
+  assert_contains "$out" 'total=2 failing=1 infra=0 pending=1 unknown=0 exempt=0' \
+    "a re-run that has not reached a verdict must not hide the earlier red of the same name"
+  assert_contains "$out" 'failing: Behavior tests (shard 1)' \
+    "the superseded failure must still be named"
+  pass "classification: a pending re-run does not hide an earlier red of the same name"
+}
+
+test_classify_a_lone_cancelled_run_is_still_infrastructure() {
+  local out
+  out=$(classify '' \
+    $'CheckRun\tCOMPLETED\tCANCELLED\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:26:39Z\tCI testing waiver' \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:30:27Z\tLint shell scripts')
+  assert_contains "$out" 'total=2 failing=0 infra=1 pending=0 unknown=0 exempt=0' \
+    "a cancelled run that is the only entry of its name has nothing superseding it and stays infrastructure"
+  assert_contains "$out" 'infra: CI testing waiver' \
+    "the lone cancellation must be named"
+  pass "classification: a lone cancelled run is still infrastructure"
+}
+
+# The gate that re-verifies origin/main's assertions runs MAIN's copies of this
+# suite against the branch's bin/, and main's fixtures predate the two ordering
+# columns. So the five-column shape has to keep classifying, ordered by rollup
+# position alone; this case pins that and is the reason for the NF == 5 branch
+# in fm_pr_rollup_classify's awk pass.
+test_classify_accepts_the_pre_ordering_five_column_shape() {
+  local out
+  out=$(classify '' \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint' \
+    $'CheckRun\tCOMPLETED\tCANCELLED\t-\tintegration' \
+    $'StatusContext\t-\t-\tPENDING\texternal-gate')
+  assert_contains "$out" 'total=4 failing=1 infra=1 pending=1 unknown=0 exempt=0' \
+    "a five-column row still carries its name in the last field and must classify exactly as before"
+  assert_contains "$out" 'failing: lint' \
+    "a five-column failing row must still be named"
+  assert_contains "$out" 'infra: integration' \
+    "a five-column cancelled row with no later run of its name must still be infrastructure"
+  pass "classification: the pre-ordering five-column shape still classifies"
 }
 
 test_classify_empty_rollup_counts_nothing() {
@@ -264,9 +350,9 @@ test_green_pr_reports_green_with_the_verified_head() {
   case_dir=$(make_green_case green-ok)
   add_gh_mock "$case_dir"
   write_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
-    $'CheckRun\tCOMPLETED\tSKIPPED\t-\tpath-filtered' \
-    $'StatusContext\t-\t-\tSUCCESS\texternal-gate'
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tSKIPPED\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tpath-filtered' \
+    $'StatusContext\t-\t-\tSUCCESS\t-\t-\texternal-gate'
 
   out=$(run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" 2>"$case_dir/stderr"); rc=$?
   expect_code 0 "$rc" "green-ok: a green PR must exit 0 (stderr: $(cat "$case_dir/stderr"))"
@@ -280,8 +366,8 @@ test_failing_check_is_named_and_not_green() {
   case_dir=$(make_green_case green-red)
   add_gh_mock "$case_dir"
   write_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint'
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tlint'
 
   run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
@@ -297,8 +383,8 @@ test_pending_check_is_distinct_from_red() {
   case_dir=$(make_green_case green-pending)
   add_gh_mock "$case_dir"
   write_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
-    $'CheckRun\tIN_PROGRESS\t-\t-\tslow-suite'
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests' \
+    $'CheckRun\tIN_PROGRESS\t-\t-\t2026-09-09T15:26:32Z\t-\tslow-suite'
 
   run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
@@ -341,8 +427,8 @@ test_the_attestation_check_follows_the_shared_authority() {
   case_dir=$(make_green_case green-attestation)
   add_gh_mock "$case_dir"
   write_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes'
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tPR must be raised via no-mistakes'
 
   # No registry, no signed skip: nothing excuses it, so it is an ordinary red.
   run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
@@ -378,8 +464,8 @@ test_an_excusal_prints_a_liftable_reason_line() {
   case_dir=$(make_green_case green-attestation-reason)
   add_gh_mock "$case_dir"
   write_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes'
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tPR must be raised via no-mistakes'
   mkdir -p "$case_dir/fmhome/data" "$case_dir/project"
   printf -- '- project [direct-PR] - fixture (added 2026-09-08)\n' > "$case_dir/fmhome/data/projects.md"
 
@@ -402,9 +488,9 @@ test_an_excused_check_does_not_carry_a_second_red() {
   case_dir=$(make_green_case green-attestation-plus-red)
   add_gh_mock "$case_dir"
   write_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tbehaviour (shard 2)' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes'
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tbehaviour (shard 2)' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tPR must be raised via no-mistakes'
   mkdir -p "$case_dir/fmhome/data" "$case_dir/project"
   printf -- '- project [direct-PR] - fixture (added 2026-09-08)\n' > "$case_dir/fmhome/data/projects.md"
 
@@ -428,8 +514,8 @@ test_a_signed_ci_skip_excuses_the_attestation_check() {
   case_dir=$(make_green_case green-attestation-ci-skip)
   add_gh_mock "$case_dir"
   write_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes'
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tPR must be raised via no-mistakes'
   mkdir -p "$case_dir/fmhome/config"
   printf '%s\n' 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0 \
     > "$case_dir/fmhome/config/ci-waiver-secret"
@@ -463,8 +549,8 @@ test_an_unreadable_home_is_named_not_treated_as_a_verdict() {
   case_dir=$(make_green_case green-attestation-wrong-home)
   add_gh_mock "$case_dir"
   write_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes'
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tPR must be raised via no-mistakes'
   mkdir -p "$case_dir/fmhome/data" "$case_dir/project"
   printf -- '- project [direct-PR] - fixture (added 2026-09-08)\n' > "$case_dir/fmhome/data/projects.md"
   # The one thing a task worktree does not have: the task's own record. Moved
@@ -495,7 +581,7 @@ test_an_excused_only_rollup_is_not_green() {
   local case_dir rc
   case_dir=$(make_green_case green-attestation-only)
   add_gh_mock "$case_dir"
-  write_checks "$case_dir" $'CheckRun\tCOMPLETED\tFAILURE\t-\tPR must be raised via no-mistakes'
+  write_checks "$case_dir" $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tPR must be raised via no-mistakes'
   mkdir -p "$case_dir/fmhome/data" "$case_dir/project"
   printf -- '- project [direct-PR] - fixture (added 2026-09-07)\n' > "$case_dir/fmhome/data/projects.md"
 
@@ -532,7 +618,7 @@ test_head_moving_mid_read_is_not_green() {
   case_dir=$(make_green_case green-head-moved)
   add_gh_mock "$case_dir"
   printf '%s\n' 0000000000000000000000000000000000000abc > "$case_dir/head-next.txt"
-  write_checks "$case_dir" $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests'
+  write_checks "$case_dir" $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests'
 
   run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
@@ -549,7 +635,7 @@ test_recorded_pr_is_used_when_no_url_is_given() {
   local case_dir out rc
   case_dir=$(make_green_case green-recorded)
   add_gh_mock "$case_dir"
-  write_checks "$case_dir" $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests'
+  write_checks "$case_dir" $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests'
 
   out=$(run_green "$case_dir" "$case_dir/cwd" task-g1 2>"$case_dir/stderr"); rc=$?
   expect_code 0 "$rc" "green-recorded: the recorded pr= must be used (stderr: $(cat "$case_dir/stderr"))"
@@ -587,7 +673,7 @@ test_answers_from_a_detached_head_and_from_no_repository() {
   local case_dir out rc
   case_dir=$(make_green_case green-detached)
   add_gh_mock "$case_dir"
-  write_checks "$case_dir" $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests'
+  write_checks "$case_dir" $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests'
 
   fm_git_init_commit "$case_dir/detached"
   git -C "$case_dir/detached" checkout -q --detach HEAD
@@ -632,8 +718,8 @@ test_a_timed_out_check_is_an_infrastructure_outcome_not_a_red() {
   case_dir=$(make_green_case green-infra-conclusion)
   add_gh_mock "$case_dir"
   write_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tSUCCESS\t-\tunit-tests' \
-    $'CheckRun\tCOMPLETED\tTIMED_OUT\t-\tbehaviour tests'
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tunit-tests' \
+    $'CheckRun\tCOMPLETED\tTIMED_OUT\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tbehaviour tests'
 
   run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
@@ -656,7 +742,7 @@ test_a_check_reporting_it_could_not_run_is_infrastructure() {
   local case_dir rc
   case_dir=$(make_green_case green-infra-text)
   add_gh_mock "$case_dir"
-  write_checks "$case_dir" $'CheckRun\tCOMPLETED\tFAILURE\t-\tintegration'
+  write_checks "$case_dir" $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tintegration'
   printf 'integration\tits report says the job did not run to a verdict\n' \
     > "$case_dir/infra-hints.tsv"
 
@@ -679,8 +765,8 @@ test_a_failed_enrichment_degrades_without_weakening_the_verdict() {
   add_gh_mock "$case_dir"
   touch "$case_dir/infra-unreadable"
   write_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint' \
-    $'CheckRun\tCOMPLETED\tSTARTUP_FAILURE\t-\tbehaviour tests'
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tlint' \
+    $'CheckRun\tCOMPLETED\tSTARTUP_FAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tbehaviour tests'
 
   run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
@@ -700,8 +786,8 @@ test_a_red_and_an_infrastructure_check_are_both_reported() {
   case_dir=$(make_green_case green-infra-and-red)
   add_gh_mock "$case_dir"
   write_checks "$case_dir" \
-    $'CheckRun\tCOMPLETED\tFAILURE\t-\tlint' \
-    $'CheckRun\tCOMPLETED\tCANCELLED\t-\tslow-suite'
+    $'CheckRun\tCOMPLETED\tFAILURE\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tlint' \
+    $'CheckRun\tCOMPLETED\tCANCELLED\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tslow-suite'
 
   run_green "$case_dir" "$case_dir/cwd" task-g1 "$PR_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
@@ -786,7 +872,12 @@ test_classify_exemption_covers_an_infrastructure_shape
 test_classify_pending_states
 test_classify_unclassifiable_entry_is_unknown
 test_classify_exempt_name_is_exact_and_diverts_only_failures
+test_classify_accepts_the_pre_ordering_five_column_shape
 test_classify_empty_rollup_counts_nothing
+test_classify_a_cancelled_run_replaced_by_a_success_is_dropped
+test_classify_a_cancellation_that_is_the_latest_run_still_counts
+test_classify_a_pending_rerun_does_not_hide_an_earlier_red
+test_classify_a_lone_cancelled_run_is_still_infrastructure
 test_green_pr_reports_green_with_the_verified_head
 test_failing_check_is_named_and_not_green
 test_pending_check_is_distinct_from_red
