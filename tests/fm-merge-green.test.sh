@@ -17,11 +17,11 @@
 #   (d) --dry-run merges nothing, steers nobody, and prints the same table
 #   (e) with config/merge-green ABSENT the merge poll behaves exactly as before
 #       (silent on an open PR, `merged` on a merged one); present, an open green
-#       PR wakes firstmate ONLY once the task's last status event is a done:
-#       line - a still-working task stays silent however green GitHub reads,
-#       a merged PR still wakes whatever the worker last said, and a copy of
-#       the poll with no bin/fm-pr-green.sh sibling still wakes on nothing but
-#       a merge
+#       PR wakes firstmate unless the task is still reporting work in progress
+#       - a still-working task stays silent however green GitHub reads, while a
+#       task with no status file at all wakes as it always did, a merged PR
+#       still wakes whatever the worker last said, and a copy of the poll with
+#       no bin/fm-pr-green.sh sibling still wakes on nothing but a merge
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -457,7 +457,7 @@ test_a_still_working_task_does_not_wake_on_green() {
   pass "a green PR whose last status event is not done: wakes nothing"
 }
 
-test_a_task_with_no_status_file_does_not_wake_on_green() {
+test_a_task_with_no_status_file_wakes_exactly_as_it_always_did() {
   local case_dir out
   case_dir=$(make_fleet poll-nostatus mg-e1)
   add_mocks "$case_dir"
@@ -466,9 +466,15 @@ test_a_task_with_no_status_file_does_not_wake_on_green() {
   assert_absent "$case_dir/fmhome/state/mg-e1.status" \
     "poll-nostatus: the task must have reported nothing at all"
 
+  # The measured churn comes from workers mid-run, which always have a status
+  # file. Silence is the evidence of work in flight; its absence is not.
   out=$(run_poll "$case_dir" 1)
-  [ -z "$out" ] || fail "poll-nostatus: a task that has reported nothing must not wake firstmate"$'\n'"$out"
-  pass "a green PR for a task with no reported status wakes nothing"
+  assert_contains "$out" "green" "poll-nostatus: a task that has reported nothing must wake as it always did"
+
+  : > "$case_dir/fmhome/state/mg-e1.status"
+  out=$(run_poll "$case_dir" 1)
+  assert_contains "$out" "green" "poll-nostatus: an empty status file must not silence the wake either"
+  pass "a green PR for a task with no reported status wakes firstmate as it always did"
 }
 
 test_a_merged_pr_wakes_whatever_the_worker_last_said() {
@@ -518,6 +524,6 @@ test_dry_run_merges_nothing_and_prints_the_same_table
 test_absent_merge_green_leaves_the_poll_unchanged
 test_present_merge_green_wakes_on_a_handed_over_green_pr
 test_a_still_working_task_does_not_wake_on_green
-test_a_task_with_no_status_file_does_not_wake_on_green
+test_a_task_with_no_status_file_wakes_exactly_as_it_always_did
 test_a_merged_pr_wakes_whatever_the_worker_last_said
 test_a_check_copy_with_no_green_sibling_still_wakes_on_nothing_but_a_merge
