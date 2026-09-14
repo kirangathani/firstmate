@@ -293,7 +293,7 @@ EOF
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+Keep your branch able to fast-forward onto the current default branch. If \`main\` advances under you, merge it forward only when firstmate tells you to - NEVER rebase - and resolve conflicts additively, keeping both sides. Firstmate lands one branch at a time, so a branch waits its turn rather than merging \`main\` every time another one lands.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF

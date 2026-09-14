@@ -39,6 +39,13 @@
 #     resolution that deleted content) does not stop the queue: it is reported
 #     and the run moves to the next candidate. It is not waiting on main.
 #
+# ONLY A RECORDED PR IS IN THE QUEUE. A task whose branch is pushed but has no
+# `pr=` has never been validated and nothing is waiting on it to land, so it is
+# not a candidate here and bin/fm-stale-base.sh parks it behind every branch that
+# is. It merges the base forward when it reaches the head of that queue, and
+# never once per sibling landing: that is the same one-merge-forward-per-landing-
+# cycle rule this loop applies, seen from the sweep's side.
+#
 # THE RE-VERIFICATION AFTER A MAIN MERGE is the push itself, and no third path
 # is invented: .github/workflows/reverify-base.yml triggers on `pull_request`,
 # so pushing the merge commit re-runs both the branch's own CI and the
@@ -227,6 +234,8 @@ steer_worker() {
   fi
   if "$SCRIPT_DIR/fm-send.sh" "$id" "$(steer_text "$id" "$url")" >/dev/null 2>&1; then
     rounds_record "$id"
+    # Only this one branch is acknowledged, and only this one needs to be: the
+    # sweep reports every branch behind it as parked, which asks for nothing.
     "$SCRIPT_DIR/fm-stale-base.sh" --ack "$id" >/dev/null 2>&1 || true
     printf '    worker: steered to merge main forward and re-verify (update round %s)\n' "$(rounds_count "$id")"
     return 0
@@ -242,6 +251,7 @@ trap 'rm -f "$ROWS" "$MERGE_ERR"' EXIT
 
 merged_count=0
 halted=0
+halted_on=
 refused_own=0
 
 record() {  # <outcome> <id> <url>
@@ -306,6 +316,7 @@ while IFS="$TAB" read -r _at id <&9; do
       record needs-main-merge "$id" "$url"
       steer_worker "$id" "$url" || true
       halted=1
+      halted_on=$id
       ;;
     tests-kept)
       # A kept-tests refusal AFTER something merged in this run is main having
@@ -317,6 +328,7 @@ while IFS="$TAB" read -r _at id <&9; do
         record needs-main-merge "$id" "$url"
         steer_worker "$id" "$url" || true
         halted=1
+        halted_on=$id
       else
         record refused-tests-kept "$id" "$url"
         refused_own=1
@@ -358,8 +370,16 @@ while IFS="$TAB" read -r outcome row_id row_url; do
 done < "$ROWS"
 
 if [ "$halted" -eq 1 ]; then
+  # Named, not just counted: the captain asked to be told which branches are
+  # parked and behind what, every time a PR lands.
+  PARKED=$(awk -F"$TAB" '$1 == "queued-behind" { printf "%s%s", sep, $2; sep = ", " }' "$ROWS")
   echo
-  echo "the queue stopped after one branch was steered to merge main forward: every branch below it is one main behind too, and steering them together is what makes a branch pay two update rounds. Re-run this once that branch reports green."
+  printf 'next to land: %s - its worker was steered to merge main forward, and the queue stopped there.\n' "$halted_on"
+  if [ -n "$PARKED" ]; then
+    printf 'parked behind %s: %s - each is one main behind too, and steering them together is what makes a branch pay two update rounds. None was steered and none owes anything until it is next.\n' \
+      "$halted_on" "$PARKED"
+  fi
+  printf 'Re-run this once %s reports green.\n' "$halted_on"
 fi
 
 [ "$refused_own" -eq 0 ] || exit 1
