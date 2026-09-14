@@ -94,6 +94,29 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
+# No generated brief may tell a worker to rebase. bin/fm-pr-merge.sh refuses a
+# landing whose head does not contain the current base tip and a global settings
+# rule denies `git push --force*`, so a rebased branch cannot even be published:
+# the local-only DOD carried that instruction until 2026-09-14 anyway.
+test_no_generated_brief_tells_a_worker_to_rebase() {
+  local home id_proj id proj brief
+  home="$TMP_ROOT/no-rebase-home"
+  write_registry "$home"
+  for id_proj in "brief-norebase-nm:no-registry-proj" "brief-norebase-pr:direct-proj" "brief-norebase-lo:local-proj"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_no_grep "rebase onto" "$brief" "$id: brief told the worker to rebase"
+  done
+  brief="$home/data/brief-norebase-lo/brief.md"
+  assert_grep "NEVER rebase" "$brief" \
+    "local-only brief lost the never-rebase rule it used to contradict"
+  assert_grep "merge it forward only when firstmate tells you to" "$brief" \
+    "local-only brief must defer the merge-forward to firstmate's landing queue"
+  pass "fm-brief.sh: no generated brief tells a worker to rebase"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -651,6 +674,7 @@ test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
+test_no_generated_brief_tells_a_worker_to_rebase
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_verifies_ci_on_the_pr_itself
 test_scaffold_refuses_every_testing_skip_flag

@@ -53,6 +53,26 @@
 # its own commits, or a git comparison that errors - is reported as
 # undeterminable, never folded into silence.
 #
+# THE LANDING QUEUE (captain's ruling, 2026-09-14). A branch that is behind is
+# not automatically a branch that should merge the base forward NOW. Landing one
+# PR moves main under every sibling, so steering all of them at once makes each
+# sibling pay one merge-forward and one full re-run per LANDING rather than one
+# per landing cycle: on 2026-09-14 four ELN PRs landed in an afternoon and one
+# feature branch was driven through five full pipeline runs, three of them caused
+# purely by main moving. So this sweep splits its findings per project:
+#   NEXT   - the one branch at the head of that project's landing queue. Reported
+#            as `STALE BASE:`, blocks a turn end, takes the merge-forward steer.
+#   PARKED - every other behind branch in the same project. Reported as
+#            `PARKED BASE:`, blocks nothing and asks for nothing; it becomes NEXT
+#            on its own once the branch ahead of it lands and moves the base
+#            again, and merges forward exactly once at that point.
+# The order is the one bin/fm-merge-green.sh lands in, from the same owner of
+# dispatch time (bin/fm-spawned-at-lib.sh): a branch carrying a recorded PR is in
+# the landing queue and sorts ahead of one that is not, and within each group the
+# oldest dispatch is first, ties broken by id, so the order is total and
+# repeatable. A branch with no PR has never been validated and nothing is waiting
+# on it, so it sorts last and is NEXT only when no PR of that project is behind.
+#
 # ACKNOWLEDGEMENT. A finding is silenced by `--ack <id>`, which records the
 # finding's situation key in state/<id>.stale-base-ack. The key embeds the base
 # commit, so the same finding stays quiet while firstmate's steer is in flight
@@ -64,7 +84,9 @@
 #   fm-stale-base.sh [--project <dir>] [--all]   report; exit 1 if anything to report
 #   fm-stale-base.sh --ack <task-id> [<id>...]   silence those findings at the current base
 #   fm-stale-base.sh --ack-all                   silence every current finding
-# Exit: 0 nothing to report, 1 at least one unacknowledged finding, 2 bad usage.
+# Exit: 0 nothing that needs acting on (a PARKED-only report still prints and
+#   still exits 0), 1 at least one unacknowledged NEXT or undeterminable
+#   finding, 2 bad usage.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,6 +97,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # default_branch() - the one owner of "which branch is this clone's default".
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+
+# fm_spawned_at() - the one owner of "when was this task dispatched", which is
+# the order bin/fm-merge-green.sh lands in and therefore the order this sweep
+# queues in.
+# shellcheck source=bin/fm-spawned-at-lib.sh
+. "$SCRIPT_DIR/fm-spawned-at-lib.sh"
 
 TAB=$'\t'
 # A project path can never equal this, so the first task always opens a group.
@@ -164,8 +192,14 @@ read_meta() {  # <meta-file>
   done < "$1"
 }
 
-emit() {  # <status> <id> <situation-key> <sentence>
-  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"
+# emit <status> <id> <situation-key> <field>...: one record, tab-separated.
+# An `unknown` carries its finished sentence; a `behind` carries the fields the
+# queue pass needs. Trailing fields a reader does not use simply read as empty.
+emit() {
+  local rec=$1 f
+  shift
+  for f in "$@"; do rec=$rec$TAB$f; done
+  printf '%s\n' "$rec"
 }
 
 ack_path() {  # <task-id>
@@ -228,10 +262,13 @@ lookup_worktree() {  # <porcelain-file> <path> [<resolved-path>]
 # --- the scan ---------------------------------------------------------------
 #
 # Emits one tab-separated record per REPORTABLE task:
-#   <status><TAB><id><TAB><situation-key><TAB><sentence>
-# status is `behind` or `unknown`; a determinate all-clear emits nothing. The
-# situation key is what an acknowledgement is recorded against, so it embeds the
-# base commit and a base that moves again re-alarms.
+#   unknown<TAB><id><TAB><situation-key><TAB><sentence>
+#   behind<TAB><id><TAB><situation-key><TAB><project><TAB><label><TAB><branch><TAB><default><TAB><behind-by>
+# A determinate all-clear emits nothing. The situation key is what an
+# acknowledgement is recorded against, so it embeds the base commit and a base
+# that moves again re-alarms. A `behind` record carries fields rather than a
+# finished sentence because what that finding READS as - NEXT or PARKED - is a
+# property of the project's whole queue, which no single task's scan can see.
 scan() {
   local meta id tasks only_real
   local cur_project=$NO_PROJECT_YET proj_state=ok label='' default='' base='' wt_list=''
@@ -373,13 +410,7 @@ scan() {
     fi
 
     behind_by=$(git -C "$proj_dir" rev-list --count "$pushed..$base" 2>/dev/null) || behind_by=
-    if [ -n "$behind_by" ]; then
-      emit behind "$id" "behind:$base" \
-        "$id ($label) is on $WT_BRANCH, $behind_by commit(s) behind origin/$default - every CI result on it was measured against a base that no longer exists; merge origin/$default into $WT_BRANCH and re-verify"
-    else
-      emit behind "$id" "behind:$base" \
-        "$id ($label) is on $WT_BRANCH, behind origin/$default - every CI result on it was measured against a base that no longer exists; merge origin/$default into $WT_BRANCH and re-verify"
-    fi
+    emit behind "$id" "behind:$base" "$proj_dir" "$label" "$WT_BRANCH" "$default" "$behind_by"
   done < <(sort "$tasks")
 }
 
@@ -411,15 +442,67 @@ if [ "$MODE" = ack ] || [ "$MODE" = ack-all ]; then
   exit 0
 fi
 
+# --- the landing queue ------------------------------------------------------
+#
+# Per project, exactly one behind branch is NEXT and every other is PARKED
+# behind it. The rank puts a branch with a recorded PR ahead of one without,
+# because only a PR-bearing branch is queued to land; within a rank the order is
+# dispatch time, ties broken by id, so one branch is always the head.
+queue_sort_key() {  # <task-id> -> "<rank>:<zero-padded dispatch epoch>"
+  local id=$1 rank=1 at=
+  local meta=$STATE/$id.meta
+  if [ -f "$meta" ] && grep -q '^pr=' "$meta" 2>/dev/null; then
+    rank=0
+  fi
+  at=$(fm_spawned_at "$STATE" "$id")
+  case "${at:-}" in ''|*[!0-9]*) at=0 ;; esac
+  printf '%s:%010d' "$rank" "$at"
+}
+
+# One `<project><TAB><task-id>` line per project that has a behind branch,
+# naming that project's NEXT.
+NEXT_MAP=$(
+  while IFS=$TAB read -r q_status q_id _q_key q_proj _q_rest; do
+    [ "$q_status" = behind ] || continue
+    printf '%s\t%s\t%s\n' "$q_proj" "$(queue_sort_key "$q_id")" "$q_id"
+  done <<< "$RECORDS" | sort -t"$TAB" -k1,1 -k2,2 -k3,3 | awk -F'\t' '!seen[$1]++ { print $1 "\t" $3 }'
+)
+
+next_of_project() {  # <project> -> the task id at the head of its queue
+  printf '%s\n' "$NEXT_MAP" | awk -F'\t' -v p="$1" '$1 == p { print $2; exit }'
+}
+
 REPORT=
 UNACKED=0
 HAS_BEHIND=0
 HAS_UNKNOWN=0
-while IFS=$TAB read -r status id key text; do
+# f4 is the finished sentence on an `unknown` record and the project on a
+# `behind` one; the fields after it are set on `behind` records only.
+while IFS=$TAB read -r status id key f4 label branch default behind_by; do
   [ -n "$status" ] || continue
+  marker='STALE BASE'
+  if [ "$status" = behind ]; then
+    gap="behind origin/$default"
+    [ -z "$behind_by" ] || gap="$behind_by commit(s) behind origin/$default"
+    next_id=$(next_of_project "$f4")
+    if [ "$next_id" = "$id" ]; then
+      text="$id ($label) is on $branch, $gap - every CI result on it was measured against a base that no longer exists; merge origin/$default into $branch and re-verify"
+    else
+      marker='PARKED BASE'
+      text="$id ($label) is on $branch, $gap - parked behind $next_id, which is next to land for $label; it merges the base forward once, when it is next, so nothing is owed here now"
+    fi
+  else
+    text=$f4
+  fi
   if acked "$id" "$key"; then
     [ "$SHOW_ACKED" = 1 ] || continue
-    REPORT="${REPORT}STALE BASE (acknowledged): ${text}"$'\n'
+    REPORT="${REPORT}${marker} (acknowledged): ${text}"$'\n'
+    continue
+  fi
+  # A parked finding asks for nothing, so it is reported without being counted:
+  # it must not fail this sweep, block a turn end, or repeat as an alarm.
+  if [ "$marker" = 'PARKED BASE' ]; then
+    REPORT="${REPORT}PARKED BASE: ${text}"$'\n'
     continue
   fi
   UNACKED=1
@@ -437,14 +520,17 @@ done <<< "$RECORDS"
 
 [ -n "$REPORT" ] || exit 0
 
-# EVERY line this script prints starts with "STALE BASE", including the remedy
-# footer. bin/fm-bootstrap.sh's session-start relay is an allowlist that drops
-# any fleet-sync line it does not recognise, so a report whose lines did not
-# share one stable marker would have its remedy silently stripped, or the whole
-# finding dropped, at exactly the moment firstmate is building its picture.
+# EVERY line this script prints starts with "STALE BASE" or "PARKED BASE",
+# including the remedy footer. bin/fm-bootstrap.sh's session-start relay is an
+# allowlist that drops any fleet-sync line it does not recognise, so a report
+# whose lines did not share one stable marker would have its remedy silently
+# stripped, or the whole finding dropped, at exactly the moment firstmate is
+# building its picture. bin/fm-turnend-guard.sh splits on the same two markers to
+# decide what blocks a turn end, so neither may appear as a bare prefix of the
+# other's text.
 printf '%s' "$REPORT"
 if [ "$HAS_BEHIND" = 1 ]; then
-  printf 'STALE BASE REMEDY: steer each worker above to do exactly the merge named on its line, then re-verify that branch.\n'
+  printf 'STALE BASE REMEDY: steer the worker on each STALE BASE line above to do exactly the merge named on its line, then re-verify that branch. A PARKED BASE line is not one of them: that branch is not next to land and is owed nothing until it is.\n'
   # shellcheck disable=SC2016 # The backticked flag is literal text, not an expansion.
   printf 'STALE BASE REMEDY: Never rebase - a global settings rule denies `git push --force*`, so a rebased branch cannot be pushed at all.\n'
   # A fast read BEFORE that merge, never instead of it: the CI check re-runs the
@@ -456,7 +542,12 @@ fi
 if [ "$HAS_UNKNOWN" = 1 ]; then
   printf 'STALE BASE REMEDY: undeterminable is not clean - resolve each one above before treating any CI result on that branch as a verdict on the branch.\n'
 fi
-printf 'STALE BASE REMEDY: once acted on, silence a finding with bin/fm-stale-base.sh --ack <task-id>\n'
+# Only when something is actually owed. A report of nothing but parked branches
+# asks for no action, so a remedy footer on it would carry the blocking marker
+# and re-arm the very alarm the queue exists to silence.
+if [ "$HAS_BEHIND" = 1 ] || [ "$HAS_UNKNOWN" = 1 ]; then
+  printf 'STALE BASE REMEDY: once acted on, silence a finding with bin/fm-stale-base.sh --ack <task-id>\n'
+fi
 
 [ "$UNACKED" = 1 ] && exit 1
 exit 0

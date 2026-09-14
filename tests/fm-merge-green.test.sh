@@ -240,10 +240,11 @@ run_switch() {
 
 test_second_candidate_behind_the_new_main_is_not_merged() {
   local case_dir rc out
-  case_dir=$(make_fleet serial mg-a1 mg-b1)
+  case_dir=$(make_fleet serial mg-a1 mg-b1 mg-c1)
   add_mocks "$case_dir"
   pr_is "$case_dir" 1 fm/mg-a1
   pr_is "$case_dir" 2 fm/mg-b1
+  pr_is "$case_dir" 3 fm/mg-c1
 
   set +e
   run_switch "$case_dir"
@@ -259,6 +260,12 @@ test_second_candidate_behind_the_new_main_is_not_merged() {
   assert_contains "$out" "https://github.com/o/r/pull/2" "serial: the table names the second PR in full"
   assert_contains "$out" "(update rounds: 1)" \
     "serial: the summary reports how many update rounds that branch has needed"
+  assert_contains "$out" "queued-behind" \
+    "serial: the third candidate is parked behind the one that was steered"
+  assert_contains "$out" "next to land: mg-b1" \
+    "serial: the summary must name the branch it steered as the one next to land"
+  assert_contains "$out" "parked behind mg-b1: mg-c1" \
+    "serial: the summary must name every parked branch and what it waits on"
 
   # Exactly one merge call, and it is the first PR's.
   assert_grep 'pr merge 1 ' "$case_dir/gh-axi.log" "serial: the first PR should have been merged"
@@ -274,6 +281,10 @@ test_second_candidate_behind_the_new_main_is_not_merged() {
     "serial: the steer must forbid a rebase"
   assert_no_grep 'target=sess:fm-mg-a1' "$case_dir/tmux.log" \
     "serial: the merged branch's worker must not be steered"
+  assert_no_grep 'target=sess:fm-mg-c1' "$case_dir/tmux.log" \
+    "serial: a parked branch's worker must not be steered"
+  assert_no_grep 'pr merge 3 ' "$case_dir/gh-axi.log" \
+    "serial: a parked branch must not be merged"
   assert_present "$case_dir/state/mg-b1.stale-base-ack" \
     "serial: the stale-base finding should be recorded as acted on"
   pass "the switch merges one PR, then reports the branch it left behind rather than merging it"

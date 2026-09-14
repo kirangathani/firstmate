@@ -31,7 +31,7 @@ There is no judgement step in this skill: the gates decide, and this reports wha
    - `merged` - landed on main.
    - `already-merged` - was already landed before this run.
    - `needs-main-merge` - main moved under it, so its checks measured a base that no longer exists; its worker was told to bring the branch onto the new main and re-verify. Say which worker, and that the run stopped there deliberately so no other branch pays a second update cycle.
-   - `queued-behind` - waiting for the branch above it; nothing was asked of it.
+   - `queued-behind` - parked behind the branch above it; nothing was asked of it, and it merges the new main forward once, when it is the one next to land. Name these branches and what each is waiting on: the captain asked to be told that every time a PR lands.
    - `not-green` - a check on the PR is failing, unfinished, or unreadable, so it is not ready.
    - `refused-tests-kept` - a test the base already had is missing or failing on the branch. If the branch is deliberately changing that behaviour, that is the captain's decision to make; say so and give the assertion names from the run's output.
    - `refused-attribution`, `refused-merge-resolution`, `refused-unverified`, `closed`, `unreadable` - name the concrete problem from the run's output; none of these is something to retry.

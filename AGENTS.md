@@ -383,8 +383,10 @@ A high context reading together with uncommitted changes in the task worktree is
 `bin/fm-peek.sh` reports the uncommitted half alongside every peek, and a stale wake carrying a visible usage-limit dialog means the worker is frozen at a provider prompt, never a benign quiet pane to dismiss.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
-That refresh names every other in-flight branch the merge just left behind, whose CI results were measured against a base that no longer exists, and the turn-end guard blocks while one is unaddressed.
-Steer each named worker to merge the moved base into its own branch and re-verify, never to rebase, then record it with `bin/fm-stale-base.sh --ack <id>`.
+That refresh names every other in-flight branch the merge just left behind, whose CI results were measured against a base that no longer exists.
+Only the one branch next to land in that project is owed anything: steer that worker to merge the moved base into its own branch and re-verify, never to rebase, then record it with `bin/fm-stale-base.sh --ack <id>`, and the turn-end guard blocks while that one is unaddressed.
+Every other branch is reported as parked behind it, owes nothing, and becomes next on its own once the branch ahead of it lands, so each branch merges the base forward once per landing cycle rather than once per sibling landing.
+Tell the captain which branches are parked and what they are waiting on.
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, always post the final completion follow-up so the link clears even if earlier follow-ups were spent.
 
 A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.
@@ -394,7 +396,7 @@ A forced repair must use the home-scoped owner path emitted by supervision instr
 
 Guard warnings do not replace the contract.
 Queued wakes must be drained before other action, stale liveness must be repaired through the emitted protocol, and the worktree-tangle warning must be resolved without touching unlanded work.
-An unactioned-direct-report warning is answered by doing what the reported state owes, then recording it with `bin/fm-ack.sh <id> "<what you did>"` when the action leaves no other trace, above all a relay to the captain; `bin/fm-ack-lib.sh` owns the predicate, owed states, grace, and silencers.
+An unactioned-direct-report warning is answered by doing what that state or still-open decision owes, then recording it with `bin/fm-ack.sh <id> "<what you did>"` when the action leaves no other trace, above all a relay to the captain; `bin/fm-ack-lib.sh` owns the predicate, owed states, still-open decisions, grace, and silencers.
 That same predicate blocks a turn end, so a reported state cannot survive a turn unanswered; only a captain-signed per-task exemption stops it, and every standing exemption is announced at session start.
 When the captain invokes `/monitor`, or asks whether every task has been gone over, load the `monitor` skill for the forced per-task sweep and the exemption verbs.
 A stalled-validation warning reports a task whose no-mistakes step has stopped advancing while its worker is still busy, which no liveness path can see; `bin/fm-nm-stall.sh` owns the predicate, the threshold, and the durable record, and it blocks a turn end the same way.
