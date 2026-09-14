@@ -22,6 +22,18 @@
 # log, `unknown` NOT clearing, and the auto-ack points that keep firstmate from
 # having to remember a second command.
 #
+# A SECOND incident, measured twice on 2026-09-14, is guarded by the
+# open-decision cases at the end: a worker appended a needs-decision and then
+# immediately a resolved closing a DIFFERENT, earlier key. The predicate read
+# only the last line's verb, `resolved` owes nothing, and both captain requests
+# sat 50 minutes until the worker re-sent them by hand. Those cases run on the
+# real captured bytes (tests/fixtures/open-decisions/, copied verbatim from this
+# home's state/eln-location-no-project-l3.status and
+# state/eln-live-comments-a1.status), never on a hand-written approximation of
+# them - a hand-written line would have used the documented "verb [key=x]:"
+# spelling, while both real workers wrote "verb: [key=x]", which is precisely
+# what the old parser could not read.
+#
 # Hermetic: a temp firstmate home, a stub crew-state reader, and FM_ACK_NOW to
 # move the clock instead of sleeping.
 set -u
@@ -64,6 +76,34 @@ SH
 # Append one status line, exactly as a crewmate does.
 crew_reports() {  # <home> <task-id> <line>
   printf '%s\n' "$3" >> "$1/state/$2.status"
+}
+
+# The captured status logs, byte for byte. Copied from this home's own
+# state/<id>.status on 2026-09-14; see the header.
+FIXTURES="$(dirname "${BASH_SOURCE[0]}")/fixtures/open-decisions"
+
+# Lay a captured log down as <task-id>'s status log, optionally only its first
+# <lines> lines so a case can sit at the exact moment the incident happened
+# rather than after the worker had recovered by hand.
+crew_reported_fixture() {  # <home> <task-id> <fixture> [lines]
+  local dst="$1/state/$2.status" src="$FIXTURES/$3" n=${4:-0}
+  [ -f "$src" ] || fail "missing captured fixture: $src"
+  if [ "$n" -gt 0 ]; then
+    head -n "$n" "$src" > "$dst"
+  else
+    cat "$src" > "$dst"
+  fi
+}
+
+# Append lines <from>..<to> of a captured log, exactly as the worker did.
+crew_reports_fixture_lines() {  # <home> <task-id> <fixture> <from> <to>
+  sed -n "$4,$5p" "$FIXTURES/$3" >> "$1/state/$2.status"
+}
+
+# The last non-blank line's verb, so a case can PROVE it is exercising the
+# open-decision rule and not the last-verb rule it would otherwise be a retest of.
+last_verb_of() {  # <home> <task-id>
+  status_line_verb "$(last_status_line "$1/state/$2.status")"
 }
 
 # Run fm-guard.sh with the clock advanced <age> seconds past now.
@@ -744,8 +784,250 @@ test_exemption_record_is_torn_down_with_the_task() {
   pass "fm-teardown: a finished task's exemption is cleaned up with its other state"
 }
 
+# --- the second incident: a decision hidden behind a later status line -------
+
+# 2026-09-14, reproduced on the captured bytes. At line 8 of that log the worker
+# had opened key=picker-props (line 6) and then closed the UNRELATED, earlier
+# key=sweep-dimensions (line 8). The request was still open, the last verb was
+# `resolved`, and nothing alarmed for 50 minutes.
+test_an_open_decision_alarms_behind_a_later_resolved_line() {
+  local home id out parked
+  id=eln-location-no-project-l3
+  home=$(make_home open-decision "$id")
+  crew_reported_fixture "$home" "$id" "$id.status" 8
+  parked='state: parked · source: run-step · parked at fix_review: 1 finding(s) (ask-user: captain decision)'
+
+  # The precondition that makes this case worth having: the LAST verb owes
+  # nothing, so the original rule cannot see this and nothing else in this suite
+  # covers it.
+  [ "$(last_verb_of "$home" "$id")" = resolved ] \
+    || fail "fixture no longer ends on a resolved line - this case would be a retest of the last-verb rule"
+
+  out=$(FM_TEST_CREW_STATE="$parked" run_guard "$home" "$INCIDENT_SECS")
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "a still-open decision did not alarm because a later resolved line for a DIFFERENT key followed it"
+  assert_contains "$out" "$id" "the banner did not name the task"
+  assert_contains "$out" "picker-props" \
+    "the banner did not name the decision key that is actually unanswered"
+  assert_not_contains "$out" 'reported "resolved"' \
+    "the banner blamed the last line's verb, which is the line that is NOT unanswered"
+
+  # And the predicate that BLOCKS a turn end, not only the banner that prints:
+  # bin/fm-turnend-guard.sh refuses on exactly this row being non-empty.
+  out=$(FM_ACK_NOW="$(( $(date +%s) + INCIDENT_SECS ))" \
+    FM_CREW_STATE_BIN="$home/crew-state-stub" FM_TEST_CREW_STATE="$parked" \
+    bash -c '. "$1"; fm_ack_unactioned "$2"' _ "$ROOT/bin/fm-ack-lib.sh" "$home/state")
+  assert_contains "$out" "$id" "the turn-end predicate did not report the task, so a turn could end on it"
+  assert_contains "$out" "picker-props" "the alarm row did not carry the open decision key"
+  pass "fm-guard: a decision left open alarms even when a later status line for another key follows it"
+}
+
+# The same fold's other half: a resolution of the SAME key really does close it,
+# so this rule cannot become a guard that never goes quiet.
+test_resolving_the_same_key_clears_it() {
+  local home id out
+  id=eln-location-no-project-l3
+  home=$(make_home same-key "$id")
+  # The whole captured log: by its end the worker had answered picker-props under
+  # its own key (line 10) and moved on.
+  crew_reported_fixture "$home" "$id" "$id.status"
+  out=$(FM_TEST_CREW_STATE='state: working · source: run-step · running' \
+    run_guard "$home" "$INCIDENT_SECS")
+  assert_not_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "a decision answered under its own key still alarmed - this rule would never go quiet"
+
+  # Per-key, not per-task: the second captured log ends with key=a1-review-r7
+  # resolved, but its line 6 opened an UNKEYED decision that was never closed, so
+  # that one is still owed.
+  id=eln-live-comments-a1
+  home=$(make_home same-key-partial "$id")
+  crew_reported_fixture "$home" "$id" "$id.status"
+  out=$(FM_TEST_CREW_STATE='state: parked · source: run-step · parked at review: 3 finding(s) (ask-user: captain decision)' \
+    run_guard "$home" "$INCIDENT_SECS")
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "closing one key silenced a different decision that was never answered"
+  # Only the unanswered key is named as open. a1-review-r7 still appears further
+  # down, but only inside the quoted last line - which is its own resolution.
+  assert_contains "$out" "waiting on a decision (default)" \
+    "the banner named a key other than the one still open"
+  pass "fm-guard: a resolution closes its own key and only its own key"
+}
+
+# Rule 2's own false-alarm twin, and the case that decides whether it is worth
+# having at all. Once firstmate has relayed the hidden decision, the ball is with
+# the captain and this must go quiet for as long as they take - otherwise it
+# becomes the banner data/learnings.md records being learned past.
+test_a_relayed_hidden_decision_never_alarms() {
+  local home id out age parked
+  id=eln-location-no-project-l3
+  home=$(make_home relayed-hidden "$id")
+  crew_reported_fixture "$home" "$id" "$id.status" 8
+  parked='state: parked · source: run-step · parked at fix_review: 1 finding(s) (ask-user: captain decision)'
+
+  out=$(FM_TEST_CREW_STATE="$parked" run_guard "$home" "$INCIDENT_SECS")
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" "precondition: the hidden decision must alarm before it is relayed"
+
+  run_ack "$home" "$id" "relayed the picker-props decision to the captain" >/dev/null
+  for age in "$INCIDENT_SECS" 3600 86400; do
+    out=$(FM_TEST_CREW_STATE="$parked" run_guard "$home" "$age")
+    assert_not_contains "$out" "UNACTIONED DIRECT REPORT" \
+      "guard alarmed after ${age}s on a hidden decision already relayed to the captain"
+  done
+  pass "fm-ack: a hidden decision already relayed to the captain goes quiet like any other"
+}
+
+# A worker that resumed past the decision on its own is not an alarm either: the
+# authoritative current-state read still clears it, exactly as it does for rule 1.
+test_a_worker_that_resumed_clears_a_hidden_decision() {
+  local home id out
+  id=eln-location-no-project-l3
+  home=$(make_home resumed-hidden "$id")
+  crew_reported_fixture "$home" "$id" "$id.status" 8
+  out=$(FM_TEST_CREW_STATE='state: working · source: run-step · running' \
+    run_guard "$home" "$INCIDENT_SECS")
+  assert_not_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "guard alarmed on a stale open decision the worker has provably moved past"
+  pass "fm-guard: a worker provably past its own open decision clears it, the same as any other owed state"
+}
+
+# An ack covers one situation. A key opened after it must not inherit it.
+test_an_ack_does_not_cover_a_key_opened_after_it() {
+  local home id out parked
+  id=eln-live-comments-a1
+  home=$(make_home ack-new-key "$id")
+  parked='state: parked · source: run-step · parked at review: 3 finding(s) (ask-user: captain decision)'
+  # Lines 1-6: one decision open, and it is also the last line, so firstmate
+  # relays it and records that.
+  crew_reported_fixture "$home" "$id" "$id.status" 6
+  run_ack "$home" "$id" "relayed the review gate to the captain" >/dev/null
+  out=$(FM_TEST_CREW_STATE="$parked" run_guard "$home" "$INCIDENT_SECS")
+  assert_not_contains "$out" "UNACTIONED DIRECT REPORT" "precondition: the relay must silence the decision it covered"
+
+  # Lines 7-8 are what the worker actually appended next: a SECOND decision
+  # (key=a1-review-r7), then a resolved for an earlier key. The ack predates the
+  # new key and cannot cover it.
+  crew_reports_fixture_lines "$home" "$id" "$id.status" 7 8
+  [ "$(last_verb_of "$home" "$id")" = resolved ] \
+    || fail "fixture no longer ends on a resolved line - the ack would be re-armed by the last verb instead"
+  out=$(FM_TEST_CREW_STATE="$parked" run_guard "$home" "$INCIDENT_SECS")
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "an ack recorded before a new decision opened silenced that new decision too"
+  assert_contains "$out" "a1-review-r7" "the re-armed banner did not name the newly opened decision"
+  pass "fm-ack: an ack covers the decisions that were open when it was recorded, never one opened after it"
+}
+
+# An ack covers the whole task, not one line of it. So a task alarming for what
+# its LAST line reported must also name any decision still open behind it, or
+# acting on the last line silently buries the decision with nothing left to
+# re-arm the alarm - the same permanent silence this whole rule exists to close.
+test_an_owed_last_line_still_names_a_decision_open_behind_it() {
+  local home id out parked
+  id=eln-location-no-project-l3
+  home=$(make_home owed-plus-open "$id")
+  parked='state: parked · source: run-step · parked at fix_review: 1 finding(s) (ask-user: captain decision)'
+  # Lines 1-6 leave key=picker-props open, and line 6 IS that decision. Then the
+  # worker finishes something else: the last line owes an action under the
+  # original rule, and the decision is still open behind it.
+  crew_reported_fixture "$home" "$id" "$id.status" 6
+  crew_reports "$home" "$id" "done: PR https://github.com/o/r/pull/9 checks green"
+
+  out=$(FM_TEST_CREW_STATE="$parked" run_guard "$home" "$INCIDENT_SECS")
+  assert_contains "$out" 'reported "done"' \
+    "the banner must still lead with what the last line reported, which is what firstmate acts on first"
+  assert_contains "$out" "ALSO still unanswered here: decision(s) picker-props" \
+    "the banner hid a decision that the coming ack would have silenced for good"
+
+  # And after acting on the done and recording it, the alarm is quiet - which is
+  # correct only BECAUSE the banner named the decision before it was recorded.
+  run_ack "$home" "$id" "relayed the PR and the picker-props decision to the captain" >/dev/null
+  out=$(FM_TEST_CREW_STATE="$parked" run_guard "$home" "$INCIDENT_SECS")
+  assert_not_contains "$out" "UNACTIONED DIRECT REPORT" "the ack did not cover the situation it was recorded for"
+  pass "fm-guard: a row owed by its last line still names every decision open behind it"
+}
+
+# The two READ surfaces. A reader who only sees the latest event cannot be
+# expected to notice an earlier unanswered request, so both places firstmate
+# actually reads a status log must name the open keys themselves.
+test_the_drain_annotation_names_an_open_decision() {
+  local home id out raw
+  id=eln-location-no-project-l3
+  home=$(make_home drain-annotation "$id")
+  crew_reported_fixture "$home" "$id" "$id.status" 8
+
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append signal "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$id.status" "signal: $home/state/$id.status" \
+    || fail "could not queue the wake this drain is meant to annotate"
+
+  out=$(FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-wake-drain.sh" 2>/dev/null) || fail "drain failed"
+  assert_contains "$out" "OPEN DECISIONS: $id.status: picker-props" \
+    "the drain printed the latest event but not the earlier request still waiting behind it"
+
+  # One line per task, and the authoritative raw rows are untouched by it.
+  [ "$(printf '%s\n' "$out" | grep -c '^OPEN DECISIONS: ')" -eq 1 ] \
+    || fail "the open-decision annotation printed more than one line for one task"
+  raw=$(printf '%s\n' "$out" | awk -F '\t' 'NF == 5' | wc -l)
+  [ "$raw" -eq 1 ] || fail "the annotation changed the drained raw rows (got $raw)"
+  pass "fm-wake-drain: the drain names a still-open decision beside the latest event"
+}
+
+test_the_session_start_tail_names_an_open_decision() {
+  local home id out
+  id=eln-location-no-project-l3
+  home=$(make_home session-start-tail "$id")
+  crew_reported_fixture "$home" "$id" "$id.status" 8
+
+  out=$(FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_SESSION_START_STATUS_TAIL=2 "$ROOT/bin/fm-session-start.sh" 2>/dev/null || true)
+  assert_contains "$out" "OPEN DECISIONS: picker-props" \
+    "the session-start tail showed only the last events, hiding a request opened before them"
+  pass "fm-session-start: the status tail names a decision opened before the lines it shows"
+}
+
+# Both row formats are read with `IFS=$'\t' read`, and bash collapses runs of IFS
+# WHITESPACE - which tab is - into one delimiter. An empty interior field would
+# therefore not be read as empty but skipped entirely, shifting every later field
+# left with no error anywhere: a reader asking for the confirm verdict would be
+# handed the crew's status line. So no optional field may ever be emitted empty.
+test_no_row_field_is_ever_emitted_empty() {
+  local home id rows fields
+  id='fields-f1'
+  home=$(make_home row-fields "$id")
+  crew_reports "$home" "$id" "working: nothing owed here, so verb is the only field with content"
+
+  # The confirm budget is what empties the verdict field on a real fleet; force it
+  # to zero so this case produces the row shape that used to shift.
+  rows=$(FM_ACK_NOW="$(date +%s)" FM_ACK_CONFIRM_MAX=0 FM_CREW_STATE_BIN="$home/crew-state-stub" \
+    bash -c '. "$1"; fm_ack_sweep "$2"' _ "$ROOT/bin/fm-ack-lib.sh" "$home/state")
+  fields=$(printf '%s\n' "$rows" | awk -F '\t' 'NR == 1 { print NF }')
+  [ "$fields" -eq 7 ] || fail "the sweep row lost a field to the tab-collapse trap (got $fields of 7)"
+  printf '%s\n' "$rows" | awk -F '\t' 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "") exit 1 }' \
+    || fail "the sweep emitted an empty field, which a tab-separated reader cannot read back as empty"
+
+  # And the reader really does get the right value in the right variable.
+  printf '%s\n' "$rows" | while IFS=$'\t' read -r r_id r_class r_verb r_age r_verdict r_open r_detail; do
+    [ "$r_id" = "$id" ] || fail "row id read back as '$r_id'"
+    [ "$r_class" = quiet ] || fail "row class read back as '$r_class'"
+    [ "$r_verb" = working ] || fail "row verb read back as '$r_verb'"
+    case "$r_age" in ''|*[!0-9]*) fail "row age read back as '$r_age'" ;; esac
+    [ "$r_verdict" = - ] || fail "an unconfirmed verdict must be the empty placeholder, got '$r_verdict'"
+    [ "$r_open" = - ] || fail "no open decisions must be the empty placeholder, got '$r_open'"
+    case "$r_detail" in "working: nothing owed here"*) ;; *) fail "the detail field shifted: '$r_detail'" ;; esac
+  done
+  pass "fm-ack-lib: no row field is emitted empty, so a tab-separated reader cannot shift the columns"
+}
+
 test_incident_reproduction
 test_captain_wait_never_alarms
+test_no_row_field_is_ever_emitted_empty
+test_an_open_decision_alarms_behind_a_later_resolved_line
+test_resolving_the_same_key_clears_it
+test_a_relayed_hidden_decision_never_alarms
+test_a_worker_that_resumed_clears_a_hidden_decision
+test_an_ack_does_not_cover_a_key_opened_after_it
+test_an_owed_last_line_still_names_a_decision_open_behind_it
+test_the_drain_annotation_names_an_open_decision
+test_the_session_start_tail_names_an_open_decision
 test_ack_rearms_on_new_status
 test_confirm_clears_a_resumed_crew
 test_unknown_state_does_not_clear

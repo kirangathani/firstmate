@@ -21,8 +21,9 @@
 # on every run, counts included.
 #
 # THE SIX CLASSES, all named on every render:
-#   unactioned  reported a state that owes firstmate an action, past the grace
-#               window, not acted on. This is what blocks a turn end.
+#   unactioned  reported a state that owes firstmate an action, or left a keyed
+#               decision open behind later status lines, past the grace window
+#               and not acted on. This is what blocks a turn end.
 #   pending     owes an action but is still inside the grace window.
 #   acked       firstmate did its part; the ball is with the captain, a worker,
 #               or an external wait.
@@ -241,9 +242,15 @@ say_worker() {  # <verdict>
   esac
 }
 
-describe() {  # <class> <verb> <age> <verdict> <detail>
+describe() {  # <class> <verb> <age> <verdict> <detail> <open-keys>
   case "$1" in
-    unactioned) printf 'NEEDS ACTION - reported "%s" %ss ago and firstmate has not acted (worker: %s)' "$2" "$3" "$(say_worker "$4")" ;;
+    unactioned)
+      if [ -n "$6" ]; then
+        printf 'NEEDS ACTION - waiting on a decision (%s) firstmate has not answered; a later status line does not close it (worker: %s)' "$6" "$(say_worker "$4")"
+      else
+        printf 'NEEDS ACTION - reported "%s" %ss ago and firstmate has not acted (worker: %s)' "$2" "$3" "$(say_worker "$4")"
+      fi
+      ;;
     pending)    printf 'just reported "%s" - not acted on yet, still inside the %ss window' "$2" "$(fm_ack_resolve_grace)" ;;
     acked)      printf 'reported "%s"; firstmate has acted, now waiting on someone else' "$2" ;;
     moved-on)   printf 'log still shows "%s" but the worker has moved past it' "$2" ;;
@@ -252,9 +259,13 @@ describe() {  # <class> <verb> <age> <verdict> <detail>
   esac
 }
 
-while IFS=$TAB read -r id class verb age verdict detail; do
+while IFS=$TAB read -r id class verb age verdict open_keys detail; do
   [ -n "$id" ] || continue
-  line="$id  $(describe "$class" "$verb" "$age" "$verdict" "$detail")"
+  # "-" is this row format's empty; see bin/fm-ack-lib.sh's fm_ack_unactioned.
+  [ "$open_keys" != - ] || open_keys=
+  [ "$verb" != - ] || verb=
+  [ "$verdict" != - ] || verdict=
+  line="$id  $(describe "$class" "$verb" "$age" "$verdict" "$detail" "$open_keys")"
   case "$class" in
     unactioned)
       N_UNACTIONED=$((N_UNACTIONED + 1))

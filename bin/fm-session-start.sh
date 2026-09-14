@@ -111,6 +111,9 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -221,8 +224,18 @@ print_backlog_compact() {
   fi
 }
 
+# The tail is the last few EVENTS, and a decision opened before them is invisible
+# in it however carefully it is read - the 2026-09-14 incident bin/fm-ack-lib.sh's
+# header records. So the whole log is folded for still-open decision keys
+# (fm-classify-lib.sh's status_open_decisions is the one owner of that fold) and
+# they are named on one labelled line above the tail.
 print_status_tail() {
-  local status=$1
+  local status=$1 open_keys
+  open_keys=$(status_open_decisions "$status" \
+    | LC_ALL=C awk -F '\t' '$1 != "" { printf "%s%s", (n++ ? " " : ""), $1 }')
+  if [ -n "$open_keys" ]; then
+    printf 'OPEN DECISIONS: %s (still unanswered; a later status line does not close them)\n' "$open_keys"
+  fi
   printf 'status tail (last %s line(s), wake-EVENT history, not current state; full log: %s):\n' "$STATUS_TAIL" "$status"
   tail -n "$STATUS_TAIL" "$status"
 }

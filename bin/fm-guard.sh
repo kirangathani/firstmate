@@ -233,11 +233,26 @@ if [ -n "$unactioned" ]; then
   {
     printf '●%s\n' "$urule"
     printf '●  UNACTIONED DIRECT REPORT - A REPORTED STATE IS SITTING UNANSWERED\n'
-    while IFS=$'\t' read -r u_id u_verb u_age u_verdict u_last; do
+    while IFS=$'\t' read -r u_id u_verb u_age u_verdict u_open u_last; do
       [ -n "$u_id" ] || continue
-      printf '●  %s reported "%s" %ss ago and firstmate has not acted (state: %s).\n' \
-        "$u_id" "$u_verb" "$u_age" "$u_verdict"
-      printf '●      %s\n' "$u_last"
+      # "-" is this row format's empty; see bin/fm-ack-lib.sh's fm_ack_unactioned.
+      [ "$u_open" != - ] || u_open=
+      [ "$u_verb" != - ] || u_verb=
+      [ "$u_verdict" != - ] || u_verdict=
+      if [ -n "$u_open" ] && ! fm_ack_verb_is_owed "$u_verb"; then
+        # Owed only under the open-decision rule, so the LAST verb is not what is
+        # unanswered - naming it here would point at the wrong line entirely.
+        printf '●  %s is waiting on a decision (%s) that firstmate has not answered (state: %s).\n' \
+          "$u_id" "$u_open" "$u_verdict"
+        printf '●      a later status line does NOT close it; latest line was: %s\n' "$u_last"
+      else
+        printf '●  %s reported "%s" %ss ago and firstmate has not acted (state: %s).\n' \
+          "$u_id" "$u_verb" "$u_age" "$u_verdict"
+        printf '●      %s\n' "$u_last"
+        # Acking this row covers the whole task, so the decision it would also
+        # silence has to be named before anyone records having acted.
+        [ -z "$u_open" ] || printf '●      ALSO still unanswered here: decision(s) %s\n' "$u_open"
+      fi
     done <<EOF
 $unactioned
 EOF

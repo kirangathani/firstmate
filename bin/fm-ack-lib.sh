@@ -25,6 +25,47 @@
 #   done: does NOT mask the later "done: PR ... checks green" that owes a
 #   different action, and acking a needs-decision: does not mask the next gate.
 #
+#   The byte count is ALSO what covers the open-decision set below, and that is
+#   the whole reason no digest of the open keys is folded in: a key can only be
+#   opened, or closed, by APPENDING a line to an append-only log, so every change
+#   to the open set has already changed the byte count. An ack recorded while
+#   key=a was the only open decision therefore cannot cover the later key=b, and
+#   a smaller honest fingerprint does not exist. Were the log ever to stop being
+#   append-only, this reasoning fails and the open keys would have to be hashed
+#   into the fingerprint directly.
+#
+# TWO WAYS A TASK IS OWED, not one
+#   1. The LAST status line carries an owed verb (done/failed/needs-decision/
+#      blocked). This is the original rule and still applies unchanged.
+#   2. The task has a STILL-OPEN keyed decision, whatever the last line says.
+#      fm-classify-lib.sh's status_open_decisions is the one owner of that fold
+#      (a needs-decision/blocked line opens a key; only an explicit resolution or
+#      a verified captain-held transfer of that same key closes it), and this
+#      library consults it rather than re-deriving any of it.
+#
+#   Rule 2 exists because rule 1 alone is defeated by the very next append.
+#   Measured, twice, on 2026-09-14: a worker appended
+#   "needs-decision: [key=picker-props] ..." and immediately after it
+#   "resolved: [key=sweep-dimensions] ..." closing an EARLIER, unrelated
+#   decision. The last verb was then `resolved`, which owes nothing, so the cheap
+#   filter never even reached the crew-state confirm that would have read
+#   "parked ... ask-user: captain decision". Both requests sat 50 minutes until
+#   the worker re-sent them by hand
+#   (state/eln-location-no-project-l3.status, state/eln-live-comments-a1.status).
+#
+#   The two rules are not exclusive, and the open keys are reported on EVERY
+#   owed row rather than only on rule 2's own. An ack covers the whole task, so a
+#   row alarming under rule 1 that did not name a decision open behind it would
+#   be acted on, recorded, and take that decision into permanent silence with
+#   nothing left to re-arm it. A surface tells the rules apart with
+#   fm_ack_verb_is_owed on the row's verb rather than a second copy of the list.
+#
+#   KNOWN CEILING: the grace window is still aged from the log's mtime, i.e. from
+#   the LAST append, because status lines carry no timestamps to age an
+#   individual decision from. A worker that keeps appending unrelated lines
+#   faster than the grace window therefore keeps resetting the clock on its own
+#   open decision. Closing that needs a timestamped status line, not a change here.
+#
 # WHY THE GRACE CANNOT BE RAW ELAPSED TIME
 #   A needs-decision legitimately sits for as long as the captain takes to
 #   answer. Alarming on elapsed time alone would fire on every captain decision
@@ -173,6 +214,17 @@ fm_ack_file() {  # <state-dir> <id>
 
 fm_ack_cache_file() {  # <state-dir> <id>
   printf '%s' "$1/.unactioned-$2"
+}
+
+# The still-open keyed decisions for <id>, space separated, or nothing.
+# fm-classify-lib.sh's status_open_decisions stays the one owner of what "open"
+# means; this only asks it and flattens the answer to the keys. That fold skips
+# every line it cannot act on without forking, so a quiet task with a long status
+# log costs a read loop and one awk here, not two subprocesses per line.
+fm_ack_open_keys() {  # <state-dir> <id>
+  status_open_decisions "$1/$2.status" | LC_ALL=C awk -F '\t' '
+    $1 != "" { printf "%s%s", (n++ ? " " : ""), $1 }
+  '
 }
 
 # The situation an ack covers: the crew's last status verb plus the append-only
@@ -331,6 +383,7 @@ fm_ack_is_exempt() {  # <state-dir> <id>
 #   FM_ACK_VERDICT  the crew-state confirm's answer, or '' when none was made
 #   FM_ACK_LAST     the crew's own last status line, as evidence
 #   FM_ACK_REASON   the signed exemption reason, for class `exempt`
+#   FM_ACK_OPEN_KEYS the still-open decision keys, space separated ('' when none)
 # It also increments FM_ACK_CONFIRMS, the caller's per-invocation confirm budget.
 #
 # Two modes, because the two consumers pay different costs for the same verdict:
@@ -345,6 +398,7 @@ FM_ACK_AGE=-1
 FM_ACK_VERDICT=
 FM_ACK_LAST=
 FM_ACK_REASON=
+FM_ACK_OPEN_KEYS=
 FM_ACK_CONFIRMS=0
 fm_ack_classify() {  # <state-dir> <id> <grace> <now> [alarm|render]
   local state=$1 id=$2 grace=$3 now=$4 mode=${5:-alarm}
@@ -358,6 +412,7 @@ fm_ack_classify() {  # <state-dir> <id> <grace> <now> [alarm|render]
   FM_ACK_VERDICT=
   FM_ACK_LAST=
   FM_ACK_REASON=
+  FM_ACK_OPEN_KEYS=
 
   log="$state/$id.status"
   if [ -f "$log" ]; then
@@ -370,6 +425,15 @@ fm_ack_classify() {  # <state-dir> <id> <grace> <now> [alarm|render]
       m=$(fm_ack_stat_mtime "$log")
       case "$m" in ''|*[!0-9]*) ;; *) age=$((now - m)); FM_ACK_AGE=$age ;; esac
     fi
+    # Rule 2 (see THE TWO WAYS A TASK IS OWED above). Read for EVERY task, not
+    # only one the last verb left un-owed. A task owed under rule 1 whose open
+    # keys went unreported would be acked for what its last line said, and that
+    # ack covers the whole task, so an unrelated decision opened earlier would be
+    # silenced permanently with nothing left to re-arm it - the very failure this
+    # rule exists to close. Reporting the keys on every owed row is what makes
+    # the ack an informed assertion rather than an accident.
+    FM_ACK_OPEN_KEYS=$(fm_ack_open_keys "$state" "$id")
+    [ -n "$FM_ACK_OPEN_KEYS" ] && owed=1
   fi
 
   # An exemption outranks every other class, so the render always names it and
@@ -448,7 +512,22 @@ fm_ack_resolve_grace() {  # [grace]
 
 # The ALARM surface's view. Prints one TAB-separated row per direct report
 # sitting in a terminal or firstmate-owed state that firstmate has not acted on:
-#   <id>\t<verb>\t<age-seconds>\t<confirm-verdict>\t<last-status-line>
+#   <id>\t<verb>\t<age-seconds>\t<confirm-verdict>\t<open-keys>\t<last-status-line>
+# <open-keys> is every still-open decision key, "-" when there are none, and
+# <verb> remains the LAST line's verb, which under rule 2 is routinely something
+# that owes nothing. A surface tells the two apart with fm_ack_verb_is_owed on
+# <verb>: owed means rule 1 fired and any open keys are ADDITIONAL, not owed
+# means the open keys are the whole reason the row is here.
+#
+# EVERY OPTIONAL FIELD IS "-" WHEN EMPTY, never an empty string, and a reader
+# turns "-" back into empty. This is not cosmetic. Bash's `read` collapses runs
+# of IFS WHITESPACE into one delimiter, and TAB is IFS whitespace, so an empty
+# interior field in a tab-separated row is not read as empty - it is not read at
+# all, and every later field silently shifts left by one. A reader would then
+# hand the crew's status line to a caller expecting the confirm verdict with no
+# error anywhere. The verdict field has always been able to be empty (a task
+# over the per-invocation confirm budget), so this was already latent; the
+# open-keys field is empty on most rows, which would have made it routine.
 # Prints nothing when the fleet is clean, which is what lets bin/fm-guard.sh and
 # bin/fm-turnend-guard.sh stay byte-silent. Always returns 0.
 fm_ack_unactioned() {  # <state-dir> [grace-seconds]
@@ -462,16 +541,19 @@ fm_ack_unactioned() {  # <state-dir> [grace-seconds]
     id=$(basename "$meta" .meta)
     fm_ack_classify "$state" "$id" "$grace" "$now" alarm
     [ "$FM_ACK_CLASS" = unactioned ] || continue
-    printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$FM_ACK_VERB" "$FM_ACK_AGE" "$FM_ACK_VERDICT" "$FM_ACK_LAST"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$id" "${FM_ACK_VERB:--}" "$FM_ACK_AGE" "${FM_ACK_VERDICT:--}" \
+      "${FM_ACK_OPEN_KEYS:--}" "$FM_ACK_LAST"
   done
   return 0
 }
 
 # The RENDER surface's view: every direct report, in every class, including the
 # ones that owe nothing. Prints one TAB-separated row per task:
-#   <id>\t<class>\t<verb>\t<age-seconds>\t<confirm-verdict>\t<detail>
+#   <id>\t<class>\t<verb>\t<age-seconds>\t<confirm-verdict>\t<open-keys>\t<detail>
 # <detail> is the signed reason for class `exempt` and the crew's own last status
-# line otherwise. Always returns 0; bin/fm-monitor.sh owns the render itself.
+# line otherwise; <open-keys> is the still-open decision keys, space separated.
+# Optional fields are "-" when empty, for the reason fm_ack_unactioned states. Always returns 0; bin/fm-monitor.sh owns the render itself.
 fm_ack_sweep() {  # <state-dir> [grace-seconds]
   local state=$1 grace meta id now detail
   grace=$(fm_ack_resolve_grace "${2:-}")
@@ -483,8 +565,9 @@ fm_ack_sweep() {  # <state-dir> [grace-seconds]
     id=$(basename "$meta" .meta)
     fm_ack_classify "$state" "$id" "$grace" "$now" render
     if [ "$FM_ACK_CLASS" = exempt ]; then detail=$FM_ACK_REASON; else detail=$FM_ACK_LAST; fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$id" "$FM_ACK_CLASS" "$FM_ACK_VERB" "$FM_ACK_AGE" "$FM_ACK_VERDICT" "$detail"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$id" "$FM_ACK_CLASS" "${FM_ACK_VERB:--}" "$FM_ACK_AGE" "${FM_ACK_VERDICT:--}" \
+      "${FM_ACK_OPEN_KEYS:--}" "$detail"
   done
   return 0
 }

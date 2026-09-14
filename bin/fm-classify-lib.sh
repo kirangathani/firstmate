@@ -131,6 +131,19 @@ status_is_paused_or_captain_held() {  # <status-line>
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
 # The three parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly.
+#
+# THE TOKEN IS ALSO ACCEPTED IMMEDIATELY AFTER THE COLON,
+#   needs-decision: [key=api-shape] <summary>
+# because that is the form real workers emit. bin/fm-brief.sh's status protocol
+# shows the line as "resolved: {how it was decided}" and then says to "add the
+# same [key=<slug>]" without naming a position, so both spellings are in the
+# wild. Measured consequence of parsing only the pre-colon form (2026-09-14,
+# state/eln-location-no-project-l3.status and state/eln-live-comments-a1.status):
+# every keyed line in both logs collapsed to "default", so a resolution of one
+# decision closed an unrelated open one, status_open_decisions folded to EMPTY,
+# and two captain requests sat unanswered for 50 minutes with no alarm. Only the
+# token at the very start of the note is read, so a key-shaped string deeper in a
+# summary cannot re-key the line.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
   v=${v%%\[key=*}
@@ -145,17 +158,29 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   esac
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
+  local prefix=${1%%:*} note k
   case "$prefix" in
     *\[key=*\]*)
       k=${prefix#*\[key=}
       k=${k%%\]*}
-      case "$k" in
-        ''|*[!A-Za-z0-9._-]*) return 1 ;;
-        *) printf '%s' "$k" ;;
+      ;;
+    *)
+      case "$1" in
+        *:*) note=${1#*:}; note=${note#"${note%%[![:space:]]*}"} ;;
+        *) note= ;;
+      esac
+      case "$note" in
+        \[key=*\]*)
+          k=${note#\[key=}
+          k=${k%%\]*}
+          ;;
+        *) printf 'default'; return 0 ;;
       esac
       ;;
-    *) printf 'default' ;;
+  esac
+  case "$k" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) printf '%s' "$k" ;;
   esac
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
@@ -179,14 +204,38 @@ EOF
 # the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
 # is the durable open-set the fleet snapshot and any point-in-time consumer must use
 # instead of trusting the last status line.
-status_open_decisions() {  # <status-file>
-  local f=$1 line verb key note resolve held open='' stripped
+status_open_decisions() {  # <status-file-or-dash>
+  local f=$1
+  if [ "$f" = - ]; then
+    _fm_status_open_decisions_stream
+    return 0
+  fi
   [ -f "$f" ] || return 0
+  _fm_status_open_decisions_stream < "$f"
+}
+
+# The fold itself, over stdin. Split out so a caller that has ALREADY read the
+# log - bin/fm-wake-lib.sh's annotation phase reads it once, bounded and with
+# O_NOFOLLOW - can fold that same text with `status_open_decisions -` instead of
+# opening the file a second time on a deliberately hardened path.
+_fm_status_open_decisions_stream() {
+  local line verb key note resolve held open='' trimmed
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    stripped=${line//[[:space:]]/}
-    [ -n "$stripped" ] || continue
+    trimmed=${line#"${line%%[![:space:]]*}"}
+    [ -n "$trimmed" ] || continue
+    # Skip every line the fold below cannot act on, WITHOUT forking. The two
+    # parsers are command substitutions, so an unfiltered fold pays two
+    # subprocesses for every working: note a long-running task ever wrote:
+    # measured 270ms for one 60-line log, and this predicate is on the turn-end
+    # path (bin/fm-ack-lib.sh), where per-task cost is multiplied by the fleet.
+    # Exact, not a heuristic: status_line_verb takes the leading word, so a line
+    # the case below acts on must begin with that verb once indented.
+    case "$trimmed" in
+      needs-decision*|blocked*|"$resolve"*|"$held"*) ;;
+      *) continue ;;
+    esac
     verb=$(status_line_verb "$line")
     key=$(_fm_decision_key "$line") || continue
     case "$verb" in
@@ -201,7 +250,7 @@ status_open_decisions() {  # <status-file>
         [ -n "$open" ] && open="${open}"$'\n'
         ;;
     esac
-  done < "$f"
+  done
   printf '%s' "$open"
 }
 

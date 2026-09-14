@@ -548,7 +548,9 @@ Use this only for material phase changes, a captain decision, a real blocker, a 
 This is also how you return the answer to a marked from-firstmate request above.
 Give every routed-work phase a stable key: open it with \`working [key=<work-slug>]: {material phase}\`, and use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
-When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved: {how it was decided or unblocked}\` (keyed with \`[key=<slug>]\` if you opened it with one) so it is durably closed instead of resurfacing behind later unrelated events.
+When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved [key=<slug>]: {how it was decided or unblocked}\` with the SAME key you opened it under, so it is durably closed instead of resurfacing behind later unrelated events.
+The key token goes before the colon, exactly as written here: \`resolved [key=api-shape]: ...\`, never \`resolved: [key=api-shape] ...\`.
+A \`resolved:\` with no key closes only the unkeyed decision, so a mismatched or missing key leaves the real one open and firstmate keeps chasing it.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
 # Definition of done
@@ -633,7 +635,10 @@ Write findings into the report file as you go rather than composing it at the en
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
-   When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
+   If you may have more than one decision or blocker open at once, give each a key when you OPEN it - \`needs-decision [key=<slug>]: {summary}\`, \`blocked [key=<slug>]: {why}\` - so they can be closed independently.
+   When firstmate replies or a blocker clears and you resume, append \`resolved [key=<slug>]: {how it was decided or unblocked}\` with the SAME key, so that decision or blocker is durably closed and does not keep resurfacing.
+   The key token goes before the colon, exactly as written here: \`resolved [key=api-shape]: ...\`, never \`resolved: [key=api-shape] ...\`.
+   A \`resolved:\` with no key closes only the unkeyed decision, so closing the wrong key leaves the real request open and firstmate keeps chasing it.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
@@ -700,7 +705,10 @@ $BRIEF_REGION_RULE_END
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
-   When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
+   If you may have more than one decision or blocker open at once, give each a key when you OPEN it - \`needs-decision [key=<slug>]: {summary}\`, \`blocked [key=<slug>]: {why}\` - so they can be closed independently.
+   When firstmate replies or a blocker clears and you resume, append \`resolved [key=<slug>]: {how it was decided or unblocked}\` with the SAME key, so that decision or blocker is durably closed and does not keep resurfacing.
+   The key token goes before the colon, exactly as written here: \`resolved [key=api-shape]: ...\`, never \`resolved: [key=api-shape] ...\`.
+   A \`resolved:\` with no key closes only the unkeyed decision, so closing the wrong key leaves the real request open and firstmate keeps chasing it.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
