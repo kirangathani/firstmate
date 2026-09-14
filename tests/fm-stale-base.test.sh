@@ -126,6 +126,28 @@ push_branch() {
   git -C "$wt" push -q -u origin "$branch"
 }
 
+# queue_task <world> <id> <branch> <dispatch-epoch> [pr]: a task whose landing
+# order is pinned. `spawned_at` is what bin/fm-spawned-at-lib.sh reads, and a
+# recorded `pr=` is what puts a branch in the landing queue at all, so both are
+# written explicitly rather than left to file mtimes that tie within one second.
+queue_task() {
+  local w=$1 id=$2 branch=$3 at=$4 pr=${5:-} proj wt
+  proj="$w/projects/proj"
+  wt="$w/wt-$id"
+  git -C "$proj" worktree add -q -b "$branch" "$wt" origin/main
+  fm_write_meta "$w/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$wt" \
+    "project=$proj" \
+    "harness=echo" \
+    "kind=ship" \
+    "mode=direct-PR" \
+    "yolo=off" \
+    "spawned_at=$at"
+  [ -z "$pr" ] || printf 'pr=%s\n' "$pr" >> "$w/state/$id.meta"
+  printf '%s\n' "$wt"
+}
+
 run_sweep() {  # <world> [args...]
   local w=$1
   shift
@@ -330,9 +352,9 @@ test_worktree_outside_the_project_is_undeterminable() {
 
 # --- the incident: base moves, three of four branches behind ----------------
 
-test_multi_task_incident_names_exactly_the_behind_branches() {
+test_multi_task_incident_queues_the_behind_branches() {
   local w out status
-  w=$(new_world multi-task-incident-names-exactly-the-behind-branches)
+  w=$(new_world multi-task-incident-queues-the-behind-branches)
   push_branch "$(add_task "$w" pr41 fm/pr41)" fm/pr41
   push_branch "$(add_task "$w" pr42 fm/pr42)" fm/pr42
   push_branch "$(add_task "$w" pr45 fm/pr45)" fm/pr45
@@ -342,12 +364,106 @@ test_multi_task_incident_names_exactly_the_behind_branches() {
 
   out=$(run_sweep "$w"); status=$?
 
-  expect_code 1 "$status" "three behind branches must report"
-  assert_contains "$out" "STALE BASE: pr41" "pr41 was behind and must be named"
-  assert_contains "$out" "STALE BASE: pr42" "pr42 was behind and must be named"
-  assert_contains "$out" "STALE BASE: pr45" "pr45 was behind and must be named"
+  expect_code 1 "$status" "the branch at the head of the queue must still report"
+  assert_contains "$out" "STALE BASE: pr41" "the oldest behind branch is next to land and must be named"
+  assert_contains "$out" "PARKED BASE: pr42" "a branch that is not next must be reported as parked"
+  assert_contains "$out" "PARKED BASE: pr45" "a branch that is not next must be reported as parked"
+  assert_not_contains "$out" "STALE BASE: pr42" "a parked branch must not be asked to merge forward"
+  assert_not_contains "$out" "STALE BASE: pr45" "a parked branch must not be asked to merge forward"
   assert_not_contains "$out" "pr43" "the branch already on the new base must not be named"
-  pass "fm-stale-base: base moves, three of four branches named, the fourth not"
+  pass "fm-stale-base: base moves, the head of the queue reports and the rest park"
+}
+
+# --- the landing queue ------------------------------------------------------
+#
+# The 2026-09-14 case this exists for: four ELN PRs landed in one afternoon, and
+# every landing steered every other branch to merge main forward and re-run its
+# whole pipeline. One feature branch paid five full runs for one feature. Under
+# the queue a branch merges the base forward once per landing cycle, when it is
+# the one next to land.
+
+test_only_the_next_branch_to_land_is_asked_to_merge_forward() {
+  local w out status
+  w=$(new_world only-the-next-branch-to-land-is-asked-to-merge-forward)
+  push_branch "$(queue_task "$w" eln1 fm/eln1 1000 https://example.invalid/pull/1)" fm/eln1
+  push_branch "$(queue_task "$w" eln2 fm/eln2 2000 https://example.invalid/pull/2)" fm/eln2
+  push_branch "$(queue_task "$w" eln3 fm/eln3 3000 https://example.invalid/pull/3)" fm/eln3
+  advance_origin "$w"
+
+  out=$(run_sweep "$w"); status=$?
+
+  expect_code 1 "$status" "the branch next to land must still report"
+  assert_contains "$out" "STALE BASE: eln1" "the oldest dispatch is next to land"
+  assert_contains "$out" "merge origin/main into fm/eln1 and re-verify" \
+    "the branch next to land must still be given the merge-forward remedy"
+  assert_contains "$out" "PARKED BASE: eln2" "the second branch must be parked, not steered"
+  assert_contains "$out" "PARKED BASE: eln3" "the third branch must be parked, not steered"
+  assert_contains "$out" "parked behind eln1" "a parked branch must name what it is waiting on"
+  assert_not_contains "$out" "merge origin/main into fm/eln2" \
+    "a parked branch must not be told to merge the base forward"
+  assert_not_contains "$out" "merge origin/main into fm/eln3" \
+    "a parked branch must not be told to merge the base forward"
+  pass "fm-stale-base: only the branch next to land is asked to merge the base forward"
+}
+
+test_parked_findings_alone_do_not_fail_the_sweep() {
+  local w out status
+  w=$(new_world parked-findings-alone-do-not-fail-the-sweep)
+  push_branch "$(queue_task "$w" q1 fm/q1 1000 https://example.invalid/pull/1)" fm/q1
+  push_branch "$(queue_task "$w" q2 fm/q2 2000 https://example.invalid/pull/2)" fm/q2
+  advance_origin "$w"
+  run_sweep "$w" --ack q1 >/dev/null || fail "--ack must succeed"
+
+  out=$(run_sweep "$w"); status=$?
+
+  # The turn-end guard blocks on a non-zero sweep, and a parked branch owes
+  # nothing, so once the head of the queue is acknowledged the sweep must pass.
+  expect_code 0 "$status" "a report of nothing but parked branches must not fail"
+  assert_contains "$out" "PARKED BASE: q2" "the parked branch must still be visible"
+  assert_not_contains "$out" "STALE BASE REMEDY: steer each worker" \
+    "a parked-only report must not carry a steer instruction"
+  pass "fm-stale-base: parked findings are reported without failing the sweep"
+}
+
+test_next_flips_to_the_sibling_once_the_head_of_the_queue_lands() {
+  local w wt2 out status
+  w=$(new_world next-flips-once-the-head-of-the-queue-lands)
+  push_branch "$(queue_task "$w" f1 fm/f1 1000 https://example.invalid/pull/1)" fm/f1
+  wt2=$(queue_task "$w" f2 fm/f2 2000 https://example.invalid/pull/2)
+  push_branch "$wt2" fm/f2
+  advance_origin "$w"
+  out=$(run_sweep "$w")
+  assert_contains "$out" "PARKED BASE: f2" "f2 must start parked behind f1"
+
+  # f1 lands: it merges the base forward, its PR goes in, and cleanup removes its
+  # record. That is the moment f2 becomes the branch next to land.
+  find "$w/state" -name 'f1.meta' -delete
+  advance_origin "$w"
+
+  out=$(run_sweep "$w"); status=$?
+  expect_code 1 "$status" "the branch that is now next to land must report"
+  assert_contains "$out" "STALE BASE: f2" "f2 must become the branch next to land"
+  assert_contains "$out" "merge origin/main into fm/f2 and re-verify" \
+    "f2 must now be given the merge-forward remedy - its one per landing cycle"
+  assert_not_contains "$out" "PARKED BASE" "with nothing ahead of it, f2 is not parked"
+  pass "fm-stale-base: the next branch to land takes over once the one ahead lands"
+}
+
+test_a_branch_with_a_pr_outranks_one_without() {
+  local w out status
+  w=$(new_world a-branch-with-a-pr-outranks-one-without)
+  # Dispatched first, but still mid-implementation: it has never been validated
+  # and nothing is waiting on it, so it is not in the landing queue.
+  push_branch "$(queue_task "$w" nopr fm/nopr 1000)" fm/nopr
+  push_branch "$(queue_task "$w" haspr fm/haspr 2000 https://example.invalid/pull/9)" fm/haspr
+  advance_origin "$w"
+
+  out=$(run_sweep "$w"); status=$?
+
+  expect_code 1 "$status" "the queued branch must report"
+  assert_contains "$out" "STALE BASE: haspr" "the branch with a PR is the one next to land"
+  assert_contains "$out" "PARKED BASE: nopr" "a branch with no PR waits behind the landing queue"
+  pass "fm-stale-base: a branch with a PR is next to land ahead of one without"
 }
 
 # --- acknowledgement: silence what was acted on, re-alarm on a new base -----
@@ -401,10 +517,14 @@ test_ack_all_silences_every_current_finding() {
 
 test_ack_only_touches_the_named_task() {
   local w out status
+  # Two projects, so each task is the head of its own landing queue and the
+  # acknowledgement is the only thing that can separate them.
   w=$(new_world ack-only-touches-the-named-task)
+  add_project "$w" beta >/dev/null
   push_branch "$(add_task "$w" b1 fm/b1)" fm/b1
-  push_branch "$(add_task "$w" b2 fm/b2)" fm/b2
-  advance_origin "$w"
+  push_branch "$(add_task "$w" b2 fm/b2 ship beta)" fm/b2
+  advance_origin "$w" proj
+  advance_origin "$w" beta
 
   run_sweep "$w" --ack b1 >/dev/null || fail "--ack must succeed"
 
@@ -454,7 +574,11 @@ test_missing_project_clone_is_undeterminable
 test_absent_origin_default_ref_is_undeterminable
 test_detached_head_with_own_commits_is_undeterminable
 test_worktree_outside_the_project_is_undeterminable
-test_multi_task_incident_names_exactly_the_behind_branches
+test_multi_task_incident_queues_the_behind_branches
+test_only_the_next_branch_to_land_is_asked_to_merge_forward
+test_parked_findings_alone_do_not_fail_the_sweep
+test_next_flips_to_the_sibling_once_the_head_of_the_queue_lands
+test_a_branch_with_a_pr_outranks_one_without
 test_ack_silences_until_the_base_moves_again
 test_ack_all_silences_every_current_finding
 test_ack_only_touches_the_named_task
