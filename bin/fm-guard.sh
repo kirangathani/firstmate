@@ -235,6 +235,10 @@ if [ -n "$unactioned" ]; then
     printf '●  UNACTIONED DIRECT REPORT - A REPORTED STATE IS SITTING UNANSWERED\n'
     while IFS=$'\t' read -r u_id u_verb u_age u_verdict u_open u_last; do
       [ -n "$u_id" ] || continue
+      # "-" is this row format's empty; see bin/fm-ack-lib.sh's fm_ack_unactioned.
+      [ "$u_open" != - ] || u_open=
+      [ "$u_verb" != - ] || u_verb=
+      [ "$u_verdict" != - ] || u_verdict=
       if [ -n "$u_open" ]; then
         # Owed under the open-decision rule, so the LAST verb is not what is
         # unanswered - naming it here would point at the wrong line entirely.

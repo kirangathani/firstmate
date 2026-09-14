@@ -260,6 +260,10 @@ describe() {  # <class> <verb> <age> <verdict> <detail> <open-keys>
 
 while IFS=$TAB read -r id class verb age verdict open_keys detail; do
   [ -n "$id" ] || continue
+  # "-" is this row format's empty; see bin/fm-ack-lib.sh's fm_ack_unactioned.
+  [ "$open_keys" != - ] || open_keys=
+  [ "$verb" != - ] || verb=
+  [ "$verdict" != - ] || verdict=
   line="$id  $(describe "$class" "$verb" "$age" "$verdict" "$detail" "$open_keys")"
   case "$class" in
     unactioned)

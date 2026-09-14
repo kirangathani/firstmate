@@ -247,6 +247,10 @@ rule='━━━━━━━━━━━━━━━━━━━━━━━━�
     printf '●  TURN WOULD END WITH A REPORTED STATE UNANSWERED\n'
     while IFS=$'\t' read -r u_id u_verb u_age u_verdict u_open u_last; do
       [ -n "$u_id" ] || continue
+      # "-" is this row format's empty; see bin/fm-ack-lib.sh's fm_ack_unactioned.
+      [ "$u_open" != - ] || u_open=
+      [ "$u_verb" != - ] || u_verb=
+      [ "$u_verdict" != - ] || u_verdict=
       if [ -n "$u_open" ]; then
         printf '●  %s is waiting on a decision (%s) that firstmate has not answered (state: %s).\n' \
           "$u_id" "$u_open" "$u_verdict"

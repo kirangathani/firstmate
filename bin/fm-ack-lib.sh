@@ -508,9 +508,19 @@ fm_ack_resolve_grace() {  # [grace]
 # The ALARM surface's view. Prints one TAB-separated row per direct report
 # sitting in a terminal or firstmate-owed state that firstmate has not acted on:
 #   <id>\t<verb>\t<age-seconds>\t<confirm-verdict>\t<open-keys>\t<last-status-line>
-# <open-keys> is empty unless the task is owed under rule 2, and <verb> remains
-# the LAST line's verb, which under rule 2 is routinely something that owes
-# nothing - the alarm surface has to say which of the two rules fired.
+# <open-keys> is "-" unless the task is owed under rule 2, and <verb> remains the
+# LAST line's verb, which under rule 2 is routinely something that owes nothing -
+# the alarm surface has to say which of the two rules fired.
+#
+# EVERY OPTIONAL FIELD IS "-" WHEN EMPTY, never an empty string, and a reader
+# turns "-" back into empty. This is not cosmetic. Bash's `read` collapses runs
+# of IFS WHITESPACE into one delimiter, and TAB is IFS whitespace, so an empty
+# interior field in a tab-separated row is not read as empty - it is not read at
+# all, and every later field silently shifts left by one. A reader would then
+# hand the crew's status line to a caller expecting the confirm verdict with no
+# error anywhere. The verdict field has always been able to be empty (a task
+# over the per-invocation confirm budget), so this was already latent; the
+# open-keys field is empty on most rows, which would have made it routine.
 # Prints nothing when the fleet is clean, which is what lets bin/fm-guard.sh and
 # bin/fm-turnend-guard.sh stay byte-silent. Always returns 0.
 fm_ack_unactioned() {  # <state-dir> [grace-seconds]
@@ -525,7 +535,8 @@ fm_ack_unactioned() {  # <state-dir> [grace-seconds]
     fm_ack_classify "$state" "$id" "$grace" "$now" alarm
     [ "$FM_ACK_CLASS" = unactioned ] || continue
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$id" "$FM_ACK_VERB" "$FM_ACK_AGE" "$FM_ACK_VERDICT" "$FM_ACK_OPEN_KEYS" "$FM_ACK_LAST"
+      "$id" "${FM_ACK_VERB:--}" "$FM_ACK_AGE" "${FM_ACK_VERDICT:--}" \
+      "${FM_ACK_OPEN_KEYS:--}" "$FM_ACK_LAST"
   done
   return 0
 }
@@ -534,7 +545,8 @@ fm_ack_unactioned() {  # <state-dir> [grace-seconds]
 # ones that owe nothing. Prints one TAB-separated row per task:
 #   <id>\t<class>\t<verb>\t<age-seconds>\t<confirm-verdict>\t<open-keys>\t<detail>
 # <detail> is the signed reason for class `exempt` and the crew's own last status
-# line otherwise; <open-keys> is the still-open decision keys, space separated. Always returns 0; bin/fm-monitor.sh owns the render itself.
+# line otherwise; <open-keys> is the still-open decision keys, space separated.
+# Optional fields are "-" when empty, for the reason fm_ack_unactioned states. Always returns 0; bin/fm-monitor.sh owns the render itself.
 fm_ack_sweep() {  # <state-dir> [grace-seconds]
   local state=$1 grace meta id now detail
   grace=$(fm_ack_resolve_grace "${2:-}")
@@ -547,8 +559,8 @@ fm_ack_sweep() {  # <state-dir> [grace-seconds]
     fm_ack_classify "$state" "$id" "$grace" "$now" render
     if [ "$FM_ACK_CLASS" = exempt ]; then detail=$FM_ACK_REASON; else detail=$FM_ACK_LAST; fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$id" "$FM_ACK_CLASS" "$FM_ACK_VERB" "$FM_ACK_AGE" "$FM_ACK_VERDICT" \
-      "$FM_ACK_OPEN_KEYS" "$detail"
+      "$id" "$FM_ACK_CLASS" "${FM_ACK_VERB:--}" "$FM_ACK_AGE" "${FM_ACK_VERDICT:--}" \
+      "${FM_ACK_OPEN_KEYS:--}" "$detail"
   done
   return 0
 }
