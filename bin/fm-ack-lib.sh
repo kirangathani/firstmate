@@ -53,6 +53,13 @@
 #   the worker re-sent them by hand
 #   (state/eln-location-no-project-l3.status, state/eln-live-comments-a1.status).
 #
+#   The two rules are not exclusive, and the open keys are reported on EVERY
+#   owed row rather than only on rule 2's own. An ack covers the whole task, so a
+#   row alarming under rule 1 that did not name a decision open behind it would
+#   be acted on, recorded, and take that decision into permanent silence with
+#   nothing left to re-arm it. A surface tells the rules apart with
+#   fm_ack_verb_is_owed on the row's verb rather than a second copy of the list.
+#
 #   KNOWN CEILING: the grace window is still aged from the log's mtime, i.e. from
 #   the LAST append, because status lines carry no timestamps to age an
 #   individual decision from. A worker that keeps appending unrelated lines
