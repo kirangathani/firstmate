@@ -245,11 +245,17 @@ rule='━━━━━━━━━━━━━━━━━━━━━━━━�
   if [ -n "$UNACTIONED" ]; then
     { [ "$blind" = 1 ] || [ -n "$STALE_BASE" ]; } && printf '●%s\n' "$rule"
     printf '●  TURN WOULD END WITH A REPORTED STATE UNANSWERED\n'
-    while IFS=$'\t' read -r u_id u_verb u_age u_verdict u_last; do
+    while IFS=$'\t' read -r u_id u_verb u_age u_verdict u_open u_last; do
       [ -n "$u_id" ] || continue
-      printf '●  %s reported "%s" %ss ago and firstmate has not acted (state: %s).\n' \
-        "$u_id" "$u_verb" "$u_age" "$u_verdict"
-      printf '●      %s\n' "$u_last"
+      if [ -n "$u_open" ]; then
+        printf '●  %s is waiting on a decision (%s) that firstmate has not answered (state: %s).\n' \
+          "$u_id" "$u_open" "$u_verdict"
+        printf '●      a later status line does NOT close it; latest line was: %s\n' "$u_last"
+      else
+        printf '●  %s reported "%s" %ss ago and firstmate has not acted (state: %s).\n' \
+          "$u_id" "$u_verb" "$u_age" "$u_verdict"
+        printf '●      %s\n' "$u_last"
+      fi
     done <<EOF
 $UNACTIONED
 EOF

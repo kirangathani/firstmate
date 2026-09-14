@@ -241,9 +241,15 @@ say_worker() {  # <verdict>
   esac
 }
 
-describe() {  # <class> <verb> <age> <verdict> <detail>
+describe() {  # <class> <verb> <age> <verdict> <detail> <open-keys>
   case "$1" in
-    unactioned) printf 'NEEDS ACTION - reported "%s" %ss ago and firstmate has not acted (worker: %s)' "$2" "$3" "$(say_worker "$4")" ;;
+    unactioned)
+      if [ -n "$6" ]; then
+        printf 'NEEDS ACTION - waiting on a decision (%s) firstmate has not answered; a later status line does not close it (worker: %s)' "$6" "$(say_worker "$4")"
+      else
+        printf 'NEEDS ACTION - reported "%s" %ss ago and firstmate has not acted (worker: %s)' "$2" "$3" "$(say_worker "$4")"
+      fi
+      ;;
     pending)    printf 'just reported "%s" - not acted on yet, still inside the %ss window' "$2" "$(fm_ack_resolve_grace)" ;;
     acked)      printf 'reported "%s"; firstmate has acted, now waiting on someone else' "$2" ;;
     moved-on)   printf 'log still shows "%s" but the worker has moved past it' "$2" ;;
@@ -252,9 +258,9 @@ describe() {  # <class> <verb> <age> <verdict> <detail>
   esac
 }
 
-while IFS=$TAB read -r id class verb age verdict detail; do
+while IFS=$TAB read -r id class verb age verdict open_keys detail; do
   [ -n "$id" ] || continue
-  line="$id  $(describe "$class" "$verb" "$age" "$verdict" "$detail")"
+  line="$id  $(describe "$class" "$verb" "$age" "$verdict" "$detail" "$open_keys")"
   case "$class" in
     unactioned)
       N_UNACTIONED=$((N_UNACTIONED + 1))

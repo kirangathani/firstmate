@@ -36,6 +36,12 @@ FM_PID_IDENTITY_PROC_PREFIX='proc-starttime:'
 # reads anything back from here.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$FM_WAKE_LIB_DIR/fm-session-lock-lib.sh"
+# fm-classify-lib.sh owns status_open_decisions, the one fold that says which
+# keyed decisions are still open. The drain annotation reports them; it must not
+# re-derive them. Sourcing it defines functions and defaults only.
+# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck disable=SC1091
+. "$FM_WAKE_LIB_DIR/fm-classify-lib.sh"
 
 # The command half of a /proc-derived identity, read from /proc/<pid>/cmdline so
 # the common path forks nothing at all. argv is NUL-separated there, so it is
@@ -570,10 +576,17 @@ EOF
 
 FM_WAKE_EVENT_LINE=
 FM_WAKE_EVENT_TRUNCATED=false
+# The whole bounded chunk this read returned, and whether the log was larger than
+# the cap. Kept so the open-decision fold below can reuse this one O_NOFOLLOW read
+# instead of reopening a path this phase deliberately hardens.
+FM_WAKE_EVENT_CHUNK=
+FM_WAKE_EVENT_PARTIAL=false
 fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
   local path=$1 tail_bytes=$2 result size chunk record line_number
   FM_WAKE_EVENT_LINE=
   FM_WAKE_EVENT_TRUNCATED=false
+  FM_WAKE_EVENT_CHUNK=
+  FM_WAKE_EVENT_PARTIAL=false
   result=$(perl -MFcntl=:DEFAULT -e '
     my ($path, $limit) = @ARGV;
     sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
@@ -597,6 +610,8 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
   chunk=${result#*$'\t'}
   case "$size" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$chunk" ] || return 1
+  FM_WAKE_EVENT_CHUNK=$chunk
+  [ "$size" -le "$tail_bytes" ] || FM_WAKE_EVENT_PARTIAL=true
   record=$(printf '%s' "$chunk" | LC_ALL=C awk '
     /[^[:space:]]/ { line = $0; line_number = NR }
     END { if (line_number) printf "%d\t%s", line_number, line }
@@ -614,7 +629,7 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 # raw queue consumption and released the append lock. The limits are constants,
 # so status-file volume cannot turn a drain into an unbounded context read.
 fm_wake_print_annotations() {  # <deduped-raw-rows>
-  local rows=$1 manifest status_key mode path prefix line suffix keep bytes
+  local rows=$1 manifest status_key mode path prefix line suffix keep bytes open_keys
   local output='' used=0 omitted=0 read_omitted=0 annotation_marker marker_reserve=192
   local tail_bytes=8192 item_bytes=2048 global_bytes=8192 read_cap=8 reads=0
   local LC_ALL=C
@@ -664,6 +679,18 @@ fm_wake_print_annotations() {  # <deduped-raw-rows>
       suffix=' [truncated]'
       keep=$((item_bytes - ${#suffix} - 1))
       line="${line:0:$keep}$suffix"
+    fi
+    # A reader who only sees the latest line cannot tell that an EARLIER keyed
+    # decision is still unanswered - that is exactly how two captain requests sat
+    # 50 minutes on 2026-09-14 (bin/fm-ack-lib.sh's header owns the incident).
+    # So name the still-open keys on their own labelled line whenever the fold
+    # finds any. Folded from the chunk just read, not a second open of the path.
+    open_keys=$(printf '%s\n' "$FM_WAKE_EVENT_CHUNK" | status_open_decisions - \
+      | LC_ALL=C awk -F '\t' '$1 != "" { printf "%s%s", (n++ ? " " : ""), $1 }')
+    if [ -n "$open_keys" ]; then
+      line="$line
+OPEN DECISIONS: $status_key: $open_keys (still unanswered; a later status line does not close them)"
+      [ "$FM_WAKE_EVENT_PARTIAL" = false ] || line="$line [folded from a bounded tail]"
     fi
     bytes=$(( ${#line} + 1 ))
     if [ $((used + bytes + marker_reserve)) -gt "$global_bytes" ]; then
