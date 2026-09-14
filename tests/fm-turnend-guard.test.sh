@@ -792,12 +792,15 @@ make_stale_base_project() {
   printf '%s\n' "$root/clone"
 }
 
-# add_stale_base_task <scenario-dir> <clone> <id> behind|level: publish a task
-# branch and record the task meta fm-spawn would write. `behind` then lands one
-# more commit on that origin's main and refreshes the clone, which is exactly
-# what a merged sibling PR does to every other open branch.
+# add_stale_base_task <scenario-dir> <clone> <id> behind|level [<dispatch-epoch>]
+# [<pr-url>]: publish a task branch and record the task meta fm-spawn would
+# write. `behind` then lands one more commit on that origin's main and refreshes
+# the clone, which is exactly what a merged sibling PR does to every other open
+# branch. The dispatch time and PR are what place the task in its project's
+# landing queue, and are written explicitly because file mtimes tie within one
+# second; omitted, they leave the single-task shape every case below uses.
 add_stale_base_task() {
-  local dir=$1 clone=$2 id=$3 want=$4 root wt
+  local dir=$1 clone=$2 id=$3 want=$4 at=${5:-} pr=${6:-} root wt
   root=$(dirname "$clone")
   wt="$root/wt-$id"
   git -C "$clone" worktree add -q -b "fm/$id" "$wt" origin/main
@@ -820,6 +823,8 @@ add_stale_base_task() {
     "kind=ship" \
     "mode=direct-PR" \
     "yolo=off"
+  [ -z "$at" ] || printf 'spawned_at=%s\n' "$at" >> "$dir/state/$id.meta"
+  [ -z "$pr" ] || printf 'pr=%s\n' "$pr" >> "$dir/state/$id.meta"
 }
 
 # start_live_watcher <dir>: give the scenario a live identity-matched watcher
@@ -913,6 +918,27 @@ test_hook_stale_base_honours_the_acknowledgement() {
   expect_code 0 "$status" "an acknowledged stale base must not block the next turn end"
   [ -z "$out" ] || fail "hook produced output for an acknowledged finding: $out"
   pass "fm-turnend-guard: an acknowledged stale base stops blocking turn ends"
+}
+
+test_hook_does_not_block_on_a_branch_parked_behind_another() {
+  local dir clone out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-stale-parked")
+  clone=$(make_stale_base_project parked)
+  # Two branches of one project, both behind the base the second one's landing
+  # would move. sib5 was dispatched first, so it is next to land; sib6 is parked
+  # behind it and owes nothing until sib5 lands. With the steer to sib5 already
+  # recorded, a turn that ends with sib6 outstanding is not a blind turn.
+  add_stale_base_task "$dir" "$clone" sib5 level 1000 https://example.invalid/pull/5
+  add_stale_base_task "$dir" "$clone" sib6 behind 2000 https://example.invalid/pull/6
+  FM_HOME="$dir" bash "$dir/bin/fm-stale-base.sh" --ack sib5 >/dev/null \
+    || fail "could not acknowledge the branch next to land"
+  start_live_watcher "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  stop_live_watcher
+
+  expect_code 0 "$status" "a branch parked behind another must not block a turn end"
+  [ -z "$out" ] || fail "hook produced output for a parked branch alone: $out"
+  pass "fm-turnend-guard: a branch parked behind another does not block a turn end"
 }
 
 test_hook_reports_a_stale_base_sweep_that_times_out() {
@@ -1434,6 +1460,7 @@ test_hook_blocks_when_a_sibling_branch_is_behind
 test_hook_silent_when_every_sibling_contains_the_base
 test_hook_reports_both_reasons_together
 test_hook_stale_base_honours_the_acknowledgement
+test_hook_does_not_block_on_a_branch_parked_behind_another
 test_hook_reports_a_stale_base_sweep_that_times_out
 test_hook_blocks_on_a_validation_that_stopped_advancing
 test_hook_nm_stall_pairs_silence_with_the_block

@@ -158,6 +158,9 @@ fleet_sync_relay_filtered_output() {
       # longer exists, and the remedy. Every line of that report carries this
       # marker so the finding and its remedy cannot be relayed apart.
       'STALE BASE'*) echo "FLEET_SYNC: $line" ;;
+      # The same report's parked branches: visible, so firstmate can tell the
+      # captain what is waiting and why, but carrying no instruction.
+      'PARKED BASE'*) echo "FLEET_SYNC: $line" ;;
       *': recovered:'*) echo "FLEET_SYNC: $line" ;;
     esac
   done < "$tmp"

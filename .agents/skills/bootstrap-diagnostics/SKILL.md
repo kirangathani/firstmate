@@ -37,7 +37,10 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `FLEET_SYNC: <repo>: STUCK: on <state>, N commits behind <base> - needs attention` - the clone is dirty, on a non-default branch, detached with unique commits, or diverged, so the sync left it untouched (never forcing or discarding); it will keep falling behind until you look.
   A loud STUCK, especially a growing N across bootstraps, means that clone needs hands-on attention; dispatch a crewmate or resolve it before it strands work.
 - `FLEET_SYNC: STALE BASE: <task> (<repo>) is on <branch>, N commit(s) behind origin/<default> ...` - that clone's base actually moved during the refresh, so every CI result on the named branch was measured against a base that no longer exists and is not a verdict on the branch.
-  Steer each named worker to do exactly the merge its line names and re-verify, never to rebase, then record it with `bin/fm-stale-base.sh --ack <task-id>`; the accompanying `FLEET_SYNC: STALE BASE REMEDY:` lines carry that instruction verbatim.
+  Steer that worker to do exactly the merge its line names and re-verify, never to rebase, then record it with `bin/fm-stale-base.sh --ack <task-id>`; the accompanying `FLEET_SYNC: STALE BASE REMEDY:` lines carry that instruction verbatim.
+- `FLEET_SYNC: PARKED BASE: <task> (<repo>) is on <branch>, N commit(s) behind origin/<default> - parked behind <task> ...` - that branch is behind too but is not the one next to land in its project, so it owes nothing: no merge-forward, no re-run, no acknowledgement.
+  It becomes the one next to land on its own once the branch ahead of it lands, which is what keeps a branch to one merge-forward per landing cycle.
+  Relay it to the captain as a branch waiting and what it is waiting on, never as work to do.
 - `FLEET_SYNC: STALE BASE UNDETERMINABLE: cannot tell whether <task> is behind: <reason>` - the sweep could not answer for that task, which is not an all-clear.
   Resolve the named reason before treating any CI result on that branch as a verdict on the branch.
 - `PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home` - the non-executing migration rebuilt canonical task polls from validated metadata, and those polls are already armed.

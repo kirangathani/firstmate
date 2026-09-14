@@ -19,8 +19,10 @@
 # It blocks for FOUR independent reasons, reported together in one banner so a
 # permanently broken watcher cannot hide the others:
 #   1. in-flight work with no live watcher (the original blind-turn reason),
-#   2. an in-flight branch whose CI was measured against a base that has since
-#      moved (bin/fm-stale-base.sh, which owns that predicate and its remedy),
+#   2. the branch NEXT to land in a project whose CI was measured against a base
+#      that has since moved (bin/fm-stale-base.sh, which owns that predicate, the
+#      landing queue, and the remedy; a branch it reports as parked behind
+#      another owes nothing yet and never blocks),
 #   3. a direct report sitting in a state that owes firstmate an action, past the
 #      grace window, unacted on (bin/fm-ack-lib.sh, which owns that predicate), and
 #   4. a validation whose no-mistakes step has stopped advancing past the
@@ -167,6 +169,15 @@ if [ -x "$SCRIPT_DIR/fm-stale-base.sh" ]; then
   fi
   if [ "$stale_base_rc" -eq 124 ]; then
     STALE_BASE="STALE BASE UNDETERMINABLE: the stale-base sweep did not finish within ${STALE_BASE_TIMEOUT}s, so NO branch in flight has been checked against the current base"
+  fi
+  # A `PARKED BASE` line is a branch that is NOT next to land in its project
+  # (the landing queue, owned by that script's header). It owes nothing until
+  # the branch ahead of it lands, so it must not block a turn end, and on a turn
+  # where nothing else blocks, printing it would turn a silent healthy turn into
+  # an alarm. It rides along only when something in the same report does block,
+  # where it is the context for the one branch that was steered.
+  if [ -n "$STALE_BASE" ] && ! printf '%s\n' "$STALE_BASE" | grep -qv '^PARKED BASE'; then
+    STALE_BASE=
   fi
 fi
 

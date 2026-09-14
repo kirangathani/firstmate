@@ -56,6 +56,12 @@ Two places raise it, and they are deliberately not the same place:
 - Immediate: `bin/fm-fleet-sync.sh`, per project, when that clone's `origin/<default>` actually moved across the fetch. That is the first instant the new base exists in this home at all, so the answer is fresh by construction. It is not raised on the merge notification itself, because that wake fires before anything has refreshed the clone: a list computed there would be measured against the OLD base and would report all clear at the exact moment it is wrong.
 - Backstop: this guard, so an absorbed wake or a skipped refresh cannot let the condition survive a whole turn.
 
+Not every behind branch is owed a merge-forward, and this reason blocks only on the one that is.
+`bin/fm-stale-base.sh` orders each project's behind branches into the landing queue `bin/fm-merge-green.sh` lands in and reports the head of that queue as `STALE BASE:`, which blocks here, and every other one as `PARKED BASE:`, which does not and asks for nothing.
+A parked branch becomes the head on its own once the branch ahead of it lands and moves the base again, so it merges the base forward once per landing cycle rather than once per sibling landing.
+The captain ruled that on 2026-09-14, after four ELN PRs landed in one afternoon and drove one feature branch through five full pipeline runs, three of them caused purely by main moving.
+This guard drops the parked lines from its block decision, and on a turn where nothing else blocks it prints nothing at all rather than turning a healthy turn into an alarm.
+
 The check reads only local refs and never fetches, so it adds no network call to the turn-end path and never writes to a project clone.
 It resolves each task's branch from `git worktree list --porcelain` on the parent clone - git's own record, never anything an agent wrote - and it never touches a worker's worktree.
 A determinate all-clear is silent (a scout, a secondmate record, a clone with no origin remote, a task still on the pristine detached base, an unpushed branch, or a branch that already contains the base), while anything undeterminable is reported as undeterminable rather than folded into silence.

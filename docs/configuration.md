@@ -158,6 +158,7 @@ The poll never merges anything and never decides what green means.
 It reads greenness from `bin/fm-pr-green.sh`, the same owner a ship worker reports its own green from, so it cannot wake firstmate on a definition the merge gate would then refuse; and the merge itself still goes through `bin/fm-pr-merge.sh` and every gate in its header, including the attribution, merge-resolution, up-to-date, kept-tests, and checks-green gates.
 It also stays silent while the task's own last status event says the worker is still working, because a worker mid-run can have a head GitHub already calls green, and `bin/fm-pr-poll.sh`'s header owns that rule.
 So this file buys one thing only: firstmate is told, rather than asked.
+It does not make several green PRs of one project land at once: `bin/fm-merge-green.sh` lands them one at a time, oldest dispatch first, and steers only the branch next to land when main has moved, which its header owns.
 It grants no authority over destructive, irreversible, or security-sensitive choices, and it does not weaken a single gate.
 
 Create it with `touch "$FM_HOME/config/merge-green"` and remove the file to revoke it.

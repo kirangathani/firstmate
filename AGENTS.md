@@ -383,8 +383,10 @@ A high context reading together with uncommitted changes in the task worktree is
 `bin/fm-peek.sh` reports the uncommitted half alongside every peek, and a stale wake carrying a visible usage-limit dialog means the worker is frozen at a provider prompt, never a benign quiet pane to dismiss.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
-That refresh names every other in-flight branch the merge just left behind, whose CI results were measured against a base that no longer exists, and the turn-end guard blocks while one is unaddressed.
-Steer each named worker to merge the moved base into its own branch and re-verify, never to rebase, then record it with `bin/fm-stale-base.sh --ack <id>`.
+That refresh names every other in-flight branch the merge just left behind, whose CI results were measured against a base that no longer exists.
+Only the one branch next to land in that project is owed anything: steer that worker to merge the moved base into its own branch and re-verify, never to rebase, then record it with `bin/fm-stale-base.sh --ack <id>`, and the turn-end guard blocks while that one is unaddressed.
+Every other branch is reported as parked behind it, owes nothing, and becomes next on its own once the branch ahead of it lands, so each branch merges the base forward once per landing cycle rather than once per sibling landing.
+Tell the captain which branches are parked and what they are waiting on.
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, always post the final completion follow-up so the link clears even if earlier follow-ups were spent.
 
 A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.
