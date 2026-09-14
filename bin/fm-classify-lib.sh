@@ -219,12 +219,23 @@ status_open_decisions() {  # <status-file-or-dash>
 # O_NOFOLLOW - can fold that same text with `status_open_decisions -` instead of
 # opening the file a second time on a deliberately hardened path.
 _fm_status_open_decisions_stream() {
-  local line verb key note resolve held open='' stripped
+  local line verb key note resolve held open='' trimmed
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    stripped=${line//[[:space:]]/}
-    [ -n "$stripped" ] || continue
+    trimmed=${line#"${line%%[![:space:]]*}"}
+    [ -n "$trimmed" ] || continue
+    # Skip every line the fold below cannot act on, WITHOUT forking. The two
+    # parsers are command substitutions, so an unfiltered fold pays two
+    # subprocesses for every working: note a long-running task ever wrote:
+    # measured 270ms for one 60-line log, and this predicate is on the turn-end
+    # path (bin/fm-ack-lib.sh), where per-task cost is multiplied by the fleet.
+    # Exact, not a heuristic: status_line_verb takes the leading word, so a line
+    # the case below acts on must begin with that verb once indented.
+    case "$trimmed" in
+      needs-decision*|blocked*|"$resolve"*|"$held"*) ;;
+      *) continue ;;
+    esac
     verb=$(status_line_verb "$line")
     key=$(_fm_decision_key "$line") || continue
     case "$verb" in

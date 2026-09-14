@@ -209,17 +209,13 @@ fm_ack_cache_file() {  # <state-dir> <id>
   printf '%s' "$1/.unactioned-$2"
 }
 
-# The still-open keyed decisions for <id>, space separated, or nothing. The grep
-# is a pure cheap gate on the fold, not a second parser: a log that never opened
-# a decision at all cannot have one open, and skipping it there keeps the fold's
-# per-line cost off every quiet task on the turn-end path. Anything that matches
-# goes to fm-classify-lib.sh's status_open_decisions, which stays the one owner
-# of what "open" means.
+# The still-open keyed decisions for <id>, space separated, or nothing.
+# fm-classify-lib.sh's status_open_decisions stays the one owner of what "open"
+# means; this only asks it and flattens the answer to the keys. That fold skips
+# every line it cannot act on without forking, so a quiet task with a long status
+# log costs a read loop and one awk here, not two subprocesses per line.
 fm_ack_open_keys() {  # <state-dir> <id>
-  local log="$1/$2.status"
-  [ -f "$log" ] || return 0
-  grep -qE '(^|[[:space:]])(needs-decision|blocked)([[:space:]]*\[key=[^]]*\])?[[:space:]]*:' "$log" 2>/dev/null || return 0
-  status_open_decisions "$log" | LC_ALL=C awk -F '\t' '
+  status_open_decisions "$1/$2.status" | LC_ALL=C awk -F '\t' '
     $1 != "" { printf "%s%s", (n++ ? " " : ""), $1 }
   '
 }
