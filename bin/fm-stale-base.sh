@@ -542,7 +542,12 @@ fi
 if [ "$HAS_UNKNOWN" = 1 ]; then
   printf 'STALE BASE REMEDY: undeterminable is not clean - resolve each one above before treating any CI result on that branch as a verdict on the branch.\n'
 fi
-printf 'STALE BASE REMEDY: once acted on, silence a finding with bin/fm-stale-base.sh --ack <task-id>\n'
+# Only when something is actually owed. A report of nothing but parked branches
+# asks for no action, so a remedy footer on it would carry the blocking marker
+# and re-arm the very alarm the queue exists to silence.
+if [ "$HAS_BEHIND" = 1 ] || [ "$HAS_UNKNOWN" = 1 ]; then
+  printf 'STALE BASE REMEDY: once acted on, silence a finding with bin/fm-stale-base.sh --ack <task-id>\n'
+fi
 
 [ "$UNACKED" = 1 ] && exit 1
 exit 0
