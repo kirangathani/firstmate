@@ -21,8 +21,9 @@
 # on every run, counts included.
 #
 # THE SIX CLASSES, all named on every render:
-#   unactioned  reported a state that owes firstmate an action, past the grace
-#               window, not acted on. This is what blocks a turn end.
+#   unactioned  reported a state that owes firstmate an action, or left a keyed
+#               decision open behind later status lines, past the grace window
+#               and not acted on. This is what blocks a turn end.
 #   pending     owes an action but is still inside the grace window.
 #   acked       firstmate did its part; the ball is with the captain, a worker,
 #               or an external wait.
