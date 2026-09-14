@@ -853,6 +853,43 @@ test_resolving_the_same_key_clears_it() {
   pass "fm-guard: a resolution closes its own key and only its own key"
 }
 
+# Rule 2's own false-alarm twin, and the case that decides whether it is worth
+# having at all. Once firstmate has relayed the hidden decision, the ball is with
+# the captain and this must go quiet for as long as they take - otherwise it
+# becomes the banner data/learnings.md records being learned past.
+test_a_relayed_hidden_decision_never_alarms() {
+  local home id out age parked
+  id=eln-location-no-project-l3
+  home=$(make_home relayed-hidden "$id")
+  crew_reported_fixture "$home" "$id" "$id.status" 8
+  parked='state: parked · source: run-step · parked at fix_review: 1 finding(s) (ask-user: captain decision)'
+
+  out=$(FM_TEST_CREW_STATE="$parked" run_guard "$home" "$INCIDENT_SECS")
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" "precondition: the hidden decision must alarm before it is relayed"
+
+  run_ack "$home" "$id" "relayed the picker-props decision to the captain" >/dev/null
+  for age in "$INCIDENT_SECS" 3600 86400; do
+    out=$(FM_TEST_CREW_STATE="$parked" run_guard "$home" "$age")
+    assert_not_contains "$out" "UNACTIONED DIRECT REPORT" \
+      "guard alarmed after ${age}s on a hidden decision already relayed to the captain"
+  done
+  pass "fm-ack: a hidden decision already relayed to the captain goes quiet like any other"
+}
+
+# A worker that resumed past the decision on its own is not an alarm either: the
+# authoritative current-state read still clears it, exactly as it does for rule 1.
+test_a_worker_that_resumed_clears_a_hidden_decision() {
+  local home id out
+  id=eln-location-no-project-l3
+  home=$(make_home resumed-hidden "$id")
+  crew_reported_fixture "$home" "$id" "$id.status" 8
+  out=$(FM_TEST_CREW_STATE='state: working · source: run-step · running' \
+    run_guard "$home" "$INCIDENT_SECS")
+  assert_not_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "guard alarmed on a stale open decision the worker has provably moved past"
+  pass "fm-guard: a worker provably past its own open decision clears it, the same as any other owed state"
+}
+
 # An ack covers one situation. A key opened after it must not inherit it.
 test_an_ack_does_not_cover_a_key_opened_after_it() {
   local home id out parked
@@ -956,6 +993,8 @@ test_captain_wait_never_alarms
 test_no_row_field_is_ever_emitted_empty
 test_an_open_decision_alarms_behind_a_later_resolved_line
 test_resolving_the_same_key_clears_it
+test_a_relayed_hidden_decision_never_alarms
+test_a_worker_that_resumed_clears_a_hidden_decision
 test_an_ack_does_not_cover_a_key_opened_after_it
 test_the_drain_annotation_names_an_open_decision
 test_the_session_start_tail_names_an_open_decision
