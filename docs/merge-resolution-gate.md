@@ -156,7 +156,30 @@ This check answers one question - "did any line one side introduced disappear?" 
 - **Octopus merges are skipped.** The two-side verdict has no meaning for three parents. The authorship hook exits 0 and the landing gate reports them as unverifiable without blocking, because git cannot produce a conflicted octopus commit in the first place.
 - **A squash merge erases the evidence afterwards.** The landing gate reads the branch's merge commits before the squash, so it is unaffected, but once landed the default branch's history no longer shows the resolutions the gate checked.
 - **Nothing scans a push.** A branch can carry a deleting resolution on the remote until the landing gate refuses it.
+- **A rebase carries a resolution this cannot see at all.** The verdict compares a merge commit's two parents, so a conflict resolved during a rebase leaves nothing to compare. This is not hypothetical on a firstmate fleet: when the default branch moves while no-mistakes is monitoring CI, the pipeline rebases the branch itself, resolves the conflict with an agent whose prompt carries no additive constraint, and re-pushes. That happens in the pipeline's own worktree, so the `commit-msg` hook never fires, and the landing gate is handed no merge commit to read. Observed in `ci.log` for runs `01M25G1Y7VNP3FEB3PXWY21YK1`, `01M2FXYDHGDQ9TAVFF6MNRRBG6` and `01M2FZCEQ92YXP65HKEP5TJVB7` (2026-09-14): "rebased HEAD is byte-identical to its pre-rebase state (`440fea3`)". Those instances report byte-identical results, so no loss is known to have occurred; the gap is that nothing here would report one if it had.
 - **A worktree handed out before this landed has no hook.** The installer runs at spawn, so work already in flight gets it only at its next spawn into that project. The landing gate covers those tasks meanwhile, which is the whole reason it is the boundary and the hook is not.
+
+## Why the integration must be a merge, not a rebase
+
+Both shapes end with the same files. They differ in what happens to history, and this gate depends entirely on that difference.
+
+A merge adds one commit with two parents and leaves every existing branch commit's SHA untouched.
+A rebase replays the branch's commits onto the new base, giving each a new SHA and orphaning the originals.
+
+Three things break under a rebase, and only the second is this document's own:
+
+1. The pipeline-reviewed attestation binds to one exact commit (`bin/fm-review-attest.sh`). A merge keeps that commit in history as an ancestor, so the attested SHA still names something on the branch. A rebase rewrites every branch SHA, so nothing that was reviewed survives to be carried forward.
+2. This gate's verdict needs two parents. A rebase produces no merge commit, so a resolution taken during one is invisible to the hook and to the landing gate alike.
+3. A rebased branch can only be published with `--force`, which rewrites an open PR's head.
+
+The usual argument for rebasing is a linear, readable history.
+On a fleet that squash-merges, that argument is already satisfied: every in-branch merge commit and pipeline fix commit collapses into one commit per PR at landing and never reaches the default branch.
+So the merge shape costs nothing there while the rebase shape costs all three of the above.
+
+no-mistakes' own CI monitor states the same asymmetry from the other side, in its guidance text: it "revalidates from Review because rebasing cannot prove continuity with the reviewed head".
+A merge can prove that continuity, because the reviewed head is a parent of the result.
+Firstmate currently obtains the merge shape by having the worker merge the default branch forward before the run starts, which makes the pipeline's own integration step a no-op - measured at zero actions across 87 fleet-clone runs.
+That steer is load-bearing for exactly as long as the pipeline's integration step rebases, and becomes redundant if it ever merges instead.
 
 ## Fail-open points, and why each one is deliberate
 
