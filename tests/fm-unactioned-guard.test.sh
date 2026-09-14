@@ -925,7 +925,7 @@ test_the_session_start_tail_names_an_open_decision() {
 # handed the crew's status line. So no optional field may ever be emitted empty.
 test_no_row_field_is_ever_emitted_empty() {
   local home id rows fields
-  id=fields-f1
+  id='fields-f1'
   home=$(make_home row-fields "$id")
   crew_reports "$home" "$id" "working: nothing owed here, so verb is the only field with content"
 
