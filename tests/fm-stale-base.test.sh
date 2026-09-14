@@ -445,7 +445,7 @@ test_next_flips_to_the_sibling_once_the_head_of_the_queue_lands() {
   assert_contains "$out" "STALE BASE: f2" "f2 must become the branch next to land"
   assert_contains "$out" "merge origin/main into fm/f2 and re-verify" \
     "f2 must now be given the merge-forward remedy - its one per landing cycle"
-  assert_not_contains "$out" "PARKED BASE" "with nothing ahead of it, f2 is not parked"
+  assert_not_contains "$out" "PARKED BASE:" "with nothing ahead of it, f2 is not parked"
   pass "fm-stale-base: the next branch to land takes over once the one ahead lands"
 }
 

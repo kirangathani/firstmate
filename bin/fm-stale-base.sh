@@ -530,7 +530,7 @@ done <<< "$RECORDS"
 # other's text.
 printf '%s' "$REPORT"
 if [ "$HAS_BEHIND" = 1 ]; then
-  printf 'STALE BASE REMEDY: steer each worker above to do exactly the merge named on its line, then re-verify that branch.\n'
+  printf 'STALE BASE REMEDY: steer the worker on each STALE BASE line above to do exactly the merge named on its line, then re-verify that branch. A PARKED BASE line is not one of them: that branch is not next to land and is owed nothing until it is.\n'
   # shellcheck disable=SC2016 # The backticked flag is literal text, not an expansion.
   printf 'STALE BASE REMEDY: Never rebase - a global settings rule denies `git push --force*`, so a rebased branch cannot be pushed at all.\n'
   # A fast read BEFORE that merge, never instead of it: the CI check re-runs the
