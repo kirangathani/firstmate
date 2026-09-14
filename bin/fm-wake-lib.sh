@@ -631,7 +631,15 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 fm_wake_print_annotations() {  # <deduped-raw-rows>
   local rows=$1 manifest status_key mode path prefix line suffix keep bytes open_keys
   local output='' used=0 omitted=0 read_omitted=0 annotation_marker marker_reserve=192
-  local tail_bytes=8192 item_bytes=2048 global_bytes=8192 read_cap=8 reads=0
+  # tail_bytes bounds only how much of a log is READ, never how much is printed
+  # (item_bytes and global_bytes below own that). It is far larger than the
+  # printed caps because the open-decision fold needs to see the line that OPENED
+  # a decision, which can sit arbitrarily far above the latest event: at 8192 a
+  # 7.8KB incident log was already within one append of hiding its own opener.
+  # A log beyond even this reads as partial and says so when it still finds keys;
+  # the same drain's liveness check runs the whole-file predicate right after, so
+  # the alarm never depends on this bound.
+  local tail_bytes=65536 item_bytes=2048 global_bytes=8192 read_cap=8 reads=0
   local LC_ALL=C
 
   manifest=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
