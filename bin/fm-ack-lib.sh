@@ -418,13 +418,15 @@ fm_ack_classify() {  # <state-dir> <id> <grace> <now> [alarm|render]
       m=$(fm_ack_stat_mtime "$log")
       case "$m" in ''|*[!0-9]*) ;; *) age=$((now - m)); FM_ACK_AGE=$age ;; esac
     fi
-    # Rule 2 (see THE TWO WAYS A TASK IS OWED above). Read only when the last
-    # verb has not already settled it, so the fold is never paid twice for the
-    # same verdict.
-    if [ "$owed" -eq 0 ]; then
-      FM_ACK_OPEN_KEYS=$(fm_ack_open_keys "$state" "$id")
-      [ -n "$FM_ACK_OPEN_KEYS" ] && owed=1
-    fi
+    # Rule 2 (see THE TWO WAYS A TASK IS OWED above). Read for EVERY task, not
+    # only one the last verb left un-owed. A task owed under rule 1 whose open
+    # keys went unreported would be acked for what its last line said, and that
+    # ack covers the whole task, so an unrelated decision opened earlier would be
+    # silenced permanently with nothing left to re-arm it - the very failure this
+    # rule exists to close. Reporting the keys on every owed row is what makes
+    # the ack an informed assertion rather than an accident.
+    FM_ACK_OPEN_KEYS=$(fm_ack_open_keys "$state" "$id")
+    [ -n "$FM_ACK_OPEN_KEYS" ] && owed=1
   fi
 
   # An exemption outranks every other class, so the render always names it and
@@ -504,9 +506,11 @@ fm_ack_resolve_grace() {  # [grace]
 # The ALARM surface's view. Prints one TAB-separated row per direct report
 # sitting in a terminal or firstmate-owed state that firstmate has not acted on:
 #   <id>\t<verb>\t<age-seconds>\t<confirm-verdict>\t<open-keys>\t<last-status-line>
-# <open-keys> is "-" unless the task is owed under rule 2, and <verb> remains the
-# LAST line's verb, which under rule 2 is routinely something that owes nothing -
-# the alarm surface has to say which of the two rules fired.
+# <open-keys> is every still-open decision key, "-" when there are none, and
+# <verb> remains the LAST line's verb, which under rule 2 is routinely something
+# that owes nothing. A surface tells the two apart with fm_ack_verb_is_owed on
+# <verb>: owed means rule 1 fired and any open keys are ADDITIONAL, not owed
+# means the open keys are the whole reason the row is here.
 #
 # EVERY OPTIONAL FIELD IS "-" WHEN EMPTY, never an empty string, and a reader
 # turns "-" back into empty. This is not cosmetic. Bash's `read` collapses runs

@@ -916,6 +916,35 @@ test_an_ack_does_not_cover_a_key_opened_after_it() {
   pass "fm-ack: an ack covers the decisions that were open when it was recorded, never one opened after it"
 }
 
+# An ack covers the whole task, not one line of it. So a task alarming for what
+# its LAST line reported must also name any decision still open behind it, or
+# acting on the last line silently buries the decision with nothing left to
+# re-arm the alarm - the same permanent silence this whole rule exists to close.
+test_an_owed_last_line_still_names_a_decision_open_behind_it() {
+  local home id out parked
+  id=eln-location-no-project-l3
+  home=$(make_home owed-plus-open "$id")
+  parked='state: parked · source: run-step · parked at fix_review: 1 finding(s) (ask-user: captain decision)'
+  # Lines 1-6 leave key=picker-props open, and line 6 IS that decision. Then the
+  # worker finishes something else: the last line owes an action under the
+  # original rule, and the decision is still open behind it.
+  crew_reported_fixture "$home" "$id" "$id.status" 6
+  crew_reports "$home" "$id" "done: PR https://github.com/o/r/pull/9 checks green"
+
+  out=$(FM_TEST_CREW_STATE="$parked" run_guard "$home" "$INCIDENT_SECS")
+  assert_contains "$out" 'reported "done"' \
+    "the banner must still lead with what the last line reported, which is what firstmate acts on first"
+  assert_contains "$out" "ALSO still unanswered here: decision(s) picker-props" \
+    "the banner hid a decision that the coming ack would have silenced for good"
+
+  # And after acting on the done and recording it, the alarm is quiet - which is
+  # correct only BECAUSE the banner named the decision before it was recorded.
+  run_ack "$home" "$id" "relayed the PR and the picker-props decision to the captain" >/dev/null
+  out=$(FM_TEST_CREW_STATE="$parked" run_guard "$home" "$INCIDENT_SECS")
+  assert_not_contains "$out" "UNACTIONED DIRECT REPORT" "the ack did not cover the situation it was recorded for"
+  pass "fm-guard: a row owed by its last line still names every decision open behind it"
+}
+
 # The two READ surfaces. A reader who only sees the latest event cannot be
 # expected to notice an earlier unanswered request, so both places firstmate
 # actually reads a status log must name the open keys themselves.
@@ -996,6 +1025,7 @@ test_resolving_the_same_key_clears_it
 test_a_relayed_hidden_decision_never_alarms
 test_a_worker_that_resumed_clears_a_hidden_decision
 test_an_ack_does_not_cover_a_key_opened_after_it
+test_an_owed_last_line_still_names_a_decision_open_behind_it
 test_the_drain_annotation_names_an_open_decision
 test_the_session_start_tail_names_an_open_decision
 test_ack_rearms_on_new_status

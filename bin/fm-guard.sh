@@ -239,8 +239,8 @@ if [ -n "$unactioned" ]; then
       [ "$u_open" != - ] || u_open=
       [ "$u_verb" != - ] || u_verb=
       [ "$u_verdict" != - ] || u_verdict=
-      if [ -n "$u_open" ]; then
-        # Owed under the open-decision rule, so the LAST verb is not what is
+      if [ -n "$u_open" ] && ! fm_ack_verb_is_owed "$u_verb"; then
+        # Owed only under the open-decision rule, so the LAST verb is not what is
         # unanswered - naming it here would point at the wrong line entirely.
         printf '●  %s is waiting on a decision (%s) that firstmate has not answered (state: %s).\n' \
           "$u_id" "$u_open" "$u_verdict"
@@ -249,6 +249,9 @@ if [ -n "$unactioned" ]; then
         printf '●  %s reported "%s" %ss ago and firstmate has not acted (state: %s).\n' \
           "$u_id" "$u_verb" "$u_age" "$u_verdict"
         printf '●      %s\n' "$u_last"
+        # Acking this row covers the whole task, so the decision it would also
+        # silence has to be named before anyone records having acted.
+        [ -z "$u_open" ] || printf '●      ALSO still unanswered here: decision(s) %s\n' "$u_open"
       fi
     done <<EOF
 $unactioned
