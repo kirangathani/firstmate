@@ -178,6 +178,11 @@ So the merge shape costs nothing there while the rebase shape costs all three of
 
 no-mistakes' own CI monitor states the same asymmetry from the other side, in its guidance text: it "revalidates from Review because rebasing cannot prove continuity with the reviewed head".
 A merge can prove that continuity, because the reviewed head is a parent of the result.
+Upstream no-mistakes issue #1013 (open, triaged `ready-for-pr`, filed 2026-09-08 by a third party) approaches the same rebase from the cost side.
+It proposes proving with `git patch-id` that a rebase replayed a branch unchanged, so the existing review approval can carry forward while Test and CI still run.
+That proof exists only because a rebase destroys the ancestry a merge would have preserved, so it is a workaround for the shape rather than an alternative to changing it, and it does nothing for the audit question above.
+Nothing upstream currently covers that audit question.
+
 Firstmate currently obtains the merge shape by having the worker merge the default branch forward before the run starts, which makes the pipeline's own integration step a no-op - measured at zero actions across 87 fleet-clone runs.
 That steer is load-bearing for exactly as long as the pipeline's integration step rebases, and becomes redundant if it ever merges instead.
 
