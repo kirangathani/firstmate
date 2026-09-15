@@ -140,13 +140,17 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
-# The no-mistakes ship brief must make the WORKER verify CI on the PR itself.
-# The pipeline's own ci step polls `gh pr checks` with no PR number from a
-# detached-HEAD worktree, so it never sees green and loops for up to 168 hours
-# while the PR is green on GitHub (bin/fm-pr-green.sh's header owns the
-# evidence). A brief that told the worker to wait on that step would park every
-# no-mistakes ship task until someone aborted its run by hand.
-test_no_mistakes_dod_verifies_ci_on_the_pr_itself() {
+# The no-mistakes ship brief must let the run's own `ci` step watch the PR, and
+# must never tell the worker to abort a run to shortcut it. The step resolves
+# the PR by number/URL from the run record (internal/pipeline/steps/ci.go;
+# internal/scm/github/github.go's prSelector refuses a cwd-inferred branch since
+# v1.40.2 - verified on v1.70.1 and on the fork build ce2d749/v1.75.3 installed
+# 2026-09-15), so the detached-HEAD blindness the old instruction was written
+# for is gone. The abort accounted for 63 of 78
+# run cancellations (audit R6, 2026-09-15), and the captain ruled it out that
+# day. One confirming read of bin/fm-pr-green.sh stays, because that command is
+# still what distinguishes an infrastructure outcome from a red.
+test_no_mistakes_dod_lets_the_run_watch_ci() {
   local home id brief
   home="$TMP_ROOT/ci-verify-home"
   mkdir -p "$home/data"
@@ -154,17 +158,25 @@ test_no_mistakes_dod_verifies_ci_on_the_pr_itself() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
+  # The abort instruction and its poll loop must never come back.
+  # `axi abort` is still named once, in the list of commands the attach gate
+  # leaves alone; what must never come back is an instruction to USE it.
+  assert_no_grep "abort it" "$brief" \
+    "no-mistakes DOD tells the worker to abort a run again"
+  assert_no_grep "CI-monitor step was aborted" "$brief" \
+    "no-mistakes DOD still has the worker report an aborted CI step as done"
+  assert_no_grep "Do NOT wait for the pipeline to report CI green" "$brief" \
+    "no-mistakes DOD carries the withdrawn wait-nothing-out instruction again"
+  assert_no_grep "Wait 60 seconds and run it again" "$brief" \
+    "no-mistakes DOD reintroduced the worker-side CI poll loop"
+  assert_no_grep "could not determine current branch" "$brief" \
+    "no-mistakes DOD carries the stale detached-HEAD rationale again"
+  assert_grep "Do NOT abort a run to shortcut" "$brief" \
+    "no-mistakes DOD does not forbid aborting a run to shortcut its ci step"
+  assert_grep "never a polling loop" "$brief" \
+    "no-mistakes DOD does not cap the worker at one confirming read"
   assert_grep "bin/fm-pr-green.sh" "$brief" \
     "no-mistakes DOD does not point the worker at the command that reads the PR's own checks"
-  assert_grep "Do NOT wait for the pipeline to report CI green" "$brief" \
-    "no-mistakes DOD still lets the worker wait on the broken CI-monitor step"
-  assert_grep "Wait 60 seconds and run it again" "$brief" \
-    "no-mistakes DOD does not tell the worker to poll on a bounded interval"
-  assert_grep "zero checks is never green" "$brief" \
-    "no-mistakes DOD does not forbid reading an empty rollup as green"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep 'abort it with `no-mistakes axi abort`' "$brief" \
-    "no-mistakes DOD does not tell the worker to abort a run left looping on the broken step"
   assert_grep "checks green at {sha}" "$brief" \
     "no-mistakes DOD's done report does not carry the verified head commit"
   # The captain's standing rule of 2026-09-07: a timed-out review is an alarm,
@@ -180,7 +192,7 @@ test_no_mistakes_dod_verifies_ci_on_the_pr_itself() {
   # survive it: the done report still depends on it.
   assert_grep "rerun-check" "$brief" \
     "no-mistakes DOD lost its decision re-run verification"
-  pass "fm-brief.sh: the no-mistakes DOD makes the worker verify CI on the PR itself"
+  pass "fm-brief.sh: the no-mistakes DOD lets the run's own ci step watch the PR"
 }
 
 # A testing skip is authorized at DISPATCH and nowhere else, so scaffolding takes
@@ -676,7 +688,7 @@ test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_generated_brief_tells_a_worker_to_rebase
 test_no_mistakes_dod_wording
-test_no_mistakes_dod_verifies_ci_on_the_pr_itself
+test_no_mistakes_dod_lets_the_run_watch_ci
 test_scaffold_refuses_every_testing_skip_flag
 test_ship_brief_carries_labelled_skip_regions
 test_applied_testing_skip_briefs
