@@ -345,6 +345,7 @@ The wiring shapes follow the already-verified per-harness mechanics recorded in 
 **The raw-attach denial WAS confirmed live on Claude, the harness this fleet runs.**
 Verified 2026-09-15 in a real `fm-spawn`-generated crewmate worktree whose `.claude/settings.local.json` PreToolUse hook was pointed at this branch's `bin/fm-fix-instructions-check.sh --claude`.
 `no-mistakes axi run --intent "..." --wait 8m` and `no-mistakes axi respond --action approve` were each blocked before executing, with the `nm-raw-attach` reason and the wrapper command returned to the model; `no-mistakes axi status` in the same session ran normally and printed its record.
+In that same armed session, `bin/fm-nm-attach.sh <task-id>` was run with a stub `no-mistakes` first on `PATH`, and its recorded invocations were `axi run --intent <the real brief text>` followed by `axi status` - so the wrapper's own raw subprocess is not denied, which confirms the hook sees only the model's command string and never a command a script spawns.
 No wiring changed for any harness, so Codex, Grok, OpenCode and Pi keep exactly the mechanics recorded above - only the policy module behind the shared transport changed, and each of those four is still exercised through that transport by the suite, not live.
 
 Checked 2026-08-08 in the build environment: `claude` 2.1.226 and `opencode` 1.18.15 are installed; `codex`, `pi`, and `grok` are absent.
