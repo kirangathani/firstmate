@@ -366,16 +366,14 @@ After the first review of a run, you get at most TWO further fix rounds on the s
 A finding that comes back a third time, or any finding still open after that second fix round, becomes a follow-up instead of a third attempt: file it with \`$TASKS_ADD_CMD "<title from the finding>" --mint --blocked-by $ID\`, which prints the id it minted; name it in the PR description under a \`Deferred to follow-up\` heading with its finding id and the new task id, and carry on with the run.
 This is a normal outcome, not a failure: do not append \`failed:\` or \`blocked:\` for a capped finding, and do not abort the run over one.
 
-# Reporting done: verify CI green yourself, on the PR
-Do NOT wait for the pipeline to report CI green. Its \`ci\` step cannot see your PR go green: it polls \`gh pr checks\` with no PR number from a detached-HEAD worktree, so gh exits 1 on every poll with \`could not determine current branch\` and the step loops on \`warning: could not check CI: gh pr checks: exit status 1\` for up to 168 hours while the PR is green on GitHub. Reproduced 2026-09-07 on two separate PRs.
+# Reporting done: let the run's own \`ci\` step watch the PR
+Do NOT abort a run to shortcut its \`ci\` step, and do not poll the PR yourself while the run is live. That step watches the PR it opened by PR number from the run record, so it sees your PR go green from this detached-HEAD worktree.
 
-Once the pipeline's \`pr\` step has opened the PR, you verify CI yourself:
+You are detached from the run while it monitors: the attach owner holds it in the background and appends the one status line that wakes firstmate at the run's next gate or outcome. A run that stays active until the PR merges therefore costs you nothing.
 
-1. Poll \`$PR_GREEN_CMD $ID {url}\`, passing the PR link the pipeline printed. It reads the PR's head commit and that commit's checks from GitHub by URL, so it works from any directory and from a detached HEAD.
-2. While it exits non-zero it names every check that is failing, unfinished, unreadable, or infrastructure. Wait 60 seconds and run it again. A PR reporting zero checks is never green and that command never calls one green, so keep polling rather than reading silence as success.
-   **An \`infrastructure:\` line is not a red and is never re-run.** It means a check never delivered a verdict about your branch at all - it timed out, was cancelled, could not run, or died having written nothing. A timed-out review is an alarm, not a retry. Stop polling, append \`blocked: infrastructure - {the infrastructure line verbatim}\` to the status file, and stop. Do not re-run that check, do not push an empty commit to retrigger it, and do not keep waiting for it to pass on its own.
-3. When it exits 0 it prints \`green: {url} {sha} {n} checks\`. Run that \`rerun-check\`, then append \`done: PR {url} checks green at {sha}\` quoting the exact sha it printed, and stop. You are finished.
-4. If the run is still parked at its \`ci\` step looping on that warning once you have verified green, abort it with \`no-mistakes axi abort\` - a between-runs action that returns at once, so it is yours to take directly - and say in your \`done:\` line that every prior step completed and only the stuck CI-monitor step was aborted.
+1. When the run reaches its CI-green outcome, the attach owner appends \`resolved [key=nm-run]: run {id} checks-passed\`. Confirm it with ONE read of \`$PR_GREEN_CMD $ID {url}\`, passing the PR link the pipeline printed - one read, never a polling loop.
+   **An \`infrastructure:\` line is not a red and is never re-run.** It means a check never delivered a verdict about your branch at all - it timed out, was cancelled, could not run, or died having written nothing. A timed-out review is an alarm, not a retry. Append \`blocked: infrastructure - {the infrastructure line verbatim}\` to the status file and stop. Do not re-run that check, do not push an empty commit to retrigger it, and do not keep waiting for it to pass on its own.
+2. When that read exits 0 it prints \`green: {url} {sha} {n} checks\`. Run that \`rerun-check\`, then append \`done: PR {url} checks green at {sha}\` quoting the exact sha it printed, and stop. You are finished.
 
 # The pipeline's review is worth telling the PR about
 The moment the pipeline's \`pr\` step has opened the PR, append \`review-attest needed for {full-40-char-sha} on {owner}/{repo}\` to the status file, with the PR's head commit and the owner/repo, and carry straight on driving the run - this is a note to firstmate, not a stop.
