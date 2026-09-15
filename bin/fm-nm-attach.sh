@@ -113,6 +113,12 @@
 # run time and asserts the cap stays under it, so a later cap raise cannot
 # silently cross it.
 #
+# ON A --local-skip TASK this is not the command to reach for: bin/fm-spawn.sh
+# puts a `no-mistakes` shim at the front of that worker's PATH which exits 0 with
+# a message naming the flag, so the hold learns nothing and classifies the result
+# as an unreachable daemon. The shim's own message is in the attach log, which is
+# where that diagnosis comes from; the daemon itself is fine.
+#
 # THE ONE GAP LEFT, stated rather than papered over. The hold reports on every
 # exit path once it is running, including being killed. It cannot report if it is
 # killed in the few milliseconds between this script returning and the
