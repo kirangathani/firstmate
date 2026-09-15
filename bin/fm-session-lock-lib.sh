@@ -247,3 +247,59 @@ fm_session_lock_holder_is_harness() {
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$FM_SESSION_HARNESS_RE"
 }
+
+# --- describing the holder ----------------------------------------------------
+# Every surface that has to explain a refusal says the same thing about the same
+# holder, so the description and the remedy are each written once here and quoted
+# nowhere: bin/fm-lock.sh's acquire refusal and `status` today, and the arm,
+# checkpoint, watcher, and status-line surfaces as they adopt them.
+# Both are READ-ONLY: they fork ps, and never write, create state, or acquire.
+
+# Describe lock holder $1, judged against the start ticks recorded as $2 when
+# the lock carries them. Prints one line:
+#   pid <N> (<comm>, argv0 <word>, started <lstart>, <alive|dead|reused>,
+#            <is|is not> an ancestor of this process)
+# A field the kernel cannot answer for - every one of them, for a dead pid - is
+# left out rather than printed empty. `reused` is a live pid whose start ticks
+# are not the ones recorded, which is a stale lock rather than a live rival, and
+# naming it is the difference `status` could not report before.
+fm_session_lock_describe_holder() {
+  local pid=$1 recorded=${2:-} comm args started liveness part out=''
+  local parts=()
+  case "$pid" in
+    ''|*[!0-9]*) printf 'an unreadable holder pid\n'; return 0 ;;
+  esac
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  # LC_ALL=C so the start time reads the same for every operator and in every log.
+  started=$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null)
+  started=$(printf '%s' "$started" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  [ -n "$comm" ] && parts+=("$(basename "$comm")")
+  [ -n "$args" ] && parts+=("argv0 ${args%% *}")
+  [ -n "$started" ] && parts+=("started $started")
+  if ! kill -0 "$pid" 2>/dev/null; then
+    liveness=dead
+  elif ! fm_session_lock_identity_matches "$pid" "$recorded"; then
+    liveness=reused
+  else
+    liveness=alive
+  fi
+  parts+=("$liveness")
+  if fm_pid_ancestry_contains "$pid"; then
+    parts+=("is an ancestor of this process")
+  else
+    parts+=("is not an ancestor of this process")
+  fi
+  for part in "${parts[@]}"; do
+    if [ -n "$out" ]; then out="$out, "; fi
+    out="$out$part"
+  done
+  printf 'pid %s (%s)\n' "$pid" "$out"
+}
+
+# The remedy printed after the description wherever a live holder that is not
+# this session blocks the caller. One owner so that a new sanctioned recovery
+# path reaches every surface at once.
+fm_session_lock_remedy() {
+  printf 'end that session and rerun bin/fm-session-start.sh here\n'
+}

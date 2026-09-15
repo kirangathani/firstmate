@@ -102,8 +102,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
-| `fm-lock.sh`             | Per-home firstmate session lock; `ownership` also answers owned/other/missing read-only for the adapters |
-| `fm-session-lock-lib.sh` | Single implementation of session-lock ownership: the ancestry walk, holder liveness, and the owned/other/missing verdict every gate consumes |
+| `fm-lock.sh`             | Per-home firstmate session lock; `ownership` also answers owned/other/missing read-only for the adapters, and any other argument prints the usage and exits 2 rather than acquiring |
+| `fm-session-lock-lib.sh` | Single implementation of session-lock ownership: the ancestry walk, holder liveness, the owned/other/missing verdict every gate consumes, and the one holder description and remedy every refusal prints |
 | `fm-statusline.sh`       | Harness-neutral status line saying whether this session is in control of the current home's fleet, composed beneath the operator's own status line |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
 | `fm-x-poll.sh`           | One bounded X relay poll: stash newly offered mentions and emit their once-only wake |

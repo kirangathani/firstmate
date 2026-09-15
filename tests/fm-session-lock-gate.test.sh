@@ -186,6 +186,89 @@ test_lock_holder_identity_and_file_format() {
   pass "fm-session-lock-lib: holder identity is pid plus optional start ticks, parsed from the value not the read status"
 }
 
+# --- bin/fm-lock.sh acquire refusal and argument handling --------------------
+
+# bin/fm-lock.sh acquire asks TWO questions the ownership walk does not: which
+# process to record (fm_session_harness_pid, an upward walk for a harness), and
+# whether the current holder is a harness. A suite process has no harness
+# ancestor of its own, so these cases shadow `ps` with a stub that reports every
+# queried pid as a live `claude` and refuses `ppid=` - the same stub shape
+# tests/fm-session-start.test.sh and tests/fm-grok-harness.test.sh use. Refusing
+# `ppid=` stops the ancestry walk at the caller, which is what makes the rival
+# below a NON-ancestor deterministically rather than by luck of the pid tree.
+install_fake_ps_claude() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"comm="*) printf '/usr/local/bin/claude\n'; exit 0 ;;
+  *"args="*) printf 'claude\n'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+}
+
+test_lock_refusal_describes_the_holder_and_names_a_remedy() {
+  local dir state other out status
+  # Before this, the refusal said only "another live firstmate session holds the
+  # lock (pid N)", which left the captain with a bare number and no way to tell a
+  # rival session from an ancestor of this one - the question the 2026-09-15
+  # lock-loss incident turned on. Every surface that has to explain a refusal now
+  # prints bin/fm-session-lock-lib.sh's one description and one remedy.
+  dir=$(make_case lock-refusal-description)
+  state="$dir/state"
+  install_fake_ps_claude "$dir/fakebin"
+  other=$(start_other_session)
+  printf '%s\n' "$other" > "$state/.lock"
+
+  out=$(PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$LOCK_CLI" 2>&1); status=$?
+  expect_code 1 "$status" "acquiring over a live rival holder must still fail"
+  assert_contains "$out" "another live firstmate session holds the lock" \
+    "the refusal must still say a live session holds the lock"
+  assert_contains "$out" "pid $other" "the refusal must name the exact holder pid"
+  assert_contains "$out" "is not an ancestor of this process" \
+    "the refusal must say whether the holder is an ancestor of this session"
+  assert_contains "$out" "bin/fm-session-start.sh" "the refusal must name the remedy command"
+  [ "$(cat "$state/.lock")" = "$other" ] || fail "a refused acquire rewrote the lock"
+
+  # The same description reaches `status`, which previously could not tell a
+  # rival from an ancestor either.
+  out=$(PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$LOCK_CLI" status); status=$?
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 0 "$status" "fm-lock.sh status must always exit 0"
+  assert_contains "$out" "lock: held by live harness pid $other" \
+    "status must still report a live harness holder the way every caller reads it"
+  assert_contains "$out" "is not an ancestor of this process" \
+    "status must say whether the holder is an ancestor of this session"
+  assert_contains "$out" "bin/fm-session-start.sh" "status must name the remedy for a rival holder"
+  pass "fm-lock.sh: the acquire refusal and status share one holder description and one remedy"
+}
+
+test_lock_rejects_unknown_arguments_without_touching_state() {
+  local dir state arg out status
+  # `fm-lock.sh --help` used to fall through to ACQUIRE, because the verb list
+  # was a two-way test: it created state/ and tried to take the lock. It was run
+  # for real during the 2026-09-15 incident, while the home was already in
+  # trouble.
+  dir="$TMP_ROOT/lock-unknown-args"
+  state="$dir/state"
+  mkdir -p "$dir"
+
+  for arg in --help -h help bogus ownershipp; do
+    out=$(FM_STATE_OVERRIDE="$state" "$LOCK_CLI" "$arg" 2>&1); status=$?
+    expect_code 2 "$status" "fm-lock.sh $arg must exit 2, never attempt an acquisition"
+    assert_contains "$out" "Usage: fm-lock.sh" "fm-lock.sh $arg must print the usage"
+    assert_contains "$out" "ownership" "the usage must list the read-only ownership verb"
+    assert_not_contains "$out" "lock acquired" "fm-lock.sh $arg must not acquire the lock"
+    [ ! -d "$state" ] || fail "fm-lock.sh $arg created the state dir"
+    [ ! -e "$state/.lock" ] || fail "fm-lock.sh $arg wrote a lock"
+  done
+  pass "fm-lock.sh: an unknown argument prints the usage and exits 2, creating nothing"
+}
+
 # --- bin/fm-watch-arm.sh gate ------------------------------------------------
 
 test_arm_refuses_when_another_session_owns_the_fleet() {
@@ -668,6 +751,8 @@ test_ownership_walk_has_exactly_one_implementation() {
 
 test_ownership_cli_classifies_and_writes_nothing
 test_lock_holder_identity_and_file_format
+test_lock_refusal_describes_the_holder_and_names_a_remedy
+test_lock_rejects_unknown_arguments_without_touching_state
 test_arm_refuses_when_another_session_owns_the_fleet
 test_arm_refuses_restart_when_another_session_owns_the_fleet
 test_arm_starts_for_the_owning_session
