@@ -1,8 +1,28 @@
 #!/usr/bin/env node
-// Semantic policy for the fix-instructions gate: does a shell command submit a
-// no-mistakes fix round that carries no substantive --instructions?
+// Semantic policy for the no-mistakes command gate. Two questions, in this
+// order:
 //
-// Why this exists. A crewmate at a no-mistakes gate has exactly three responses:
+//   1. Does this command ATTACH to a run - `no-mistakes axi run` or
+//      `axi respond`? Those two block on the daemon until the next gate or
+//      outcome, so bin/fm-nm-attach.sh owns them and this refuses the raw form,
+//      naming that wrapper. Code `nm-raw-attach`. Rule 1 is skipped in
+//      --fix-instructions-only mode, which exists for exactly one caller: that
+//      wrapper, whose own command rule 1 would otherwise refuse.
+//   2. Does it submit a fix round with no substantive --instructions? Codes
+//      `fix-instructions-missing` and `fix-instructions-thin`. Rule 1 fires
+//      first, so through the PreToolUse gate this is now only reachable via the
+//      wrapper's own --fix-instructions-only call - which is where the floor now
+//      lives, and it is enforced there or nowhere.
+//
+// Why rule 1 exists. Read bin/fm-nm-attach.sh's header for the measurement: a
+// foreground attach returns `error: wait of 8m0s elapsed` three or four times
+// per run, each costing a turn and carrying no news, and a parked gate waits
+// indefinitely with nobody told. A hook cannot verify a command was backgrounded
+// with a long wait - it sees only the command string, and harness-native
+// background execution is not itself a policy signal - so backgrounding is owned
+// by the wrapper and this refuses everything else.
+//
+// Why rule 2 exists. A crewmate at a no-mistakes gate has exactly three responses:
 // approve, fix, skip. `--action fix` hands the work to no-mistakes' OWN gate
 // agent, which is not the crewmate. That agent sees the finding text and the
 // diff, and nothing else. It cannot see the crewmate's brief, which lives at
@@ -128,9 +148,14 @@ function parseRespondInvocation(words) {
 // Does this no-mistakes node ATTACH to a run - `axi run` or `axi respond`?
 // Those two are the only subcommands that block on the daemon, so they are the
 // only ones the wrapper has to own. `axi status`, `axi logs`, `axi sync` and
-// `axi abort` return immediately and are untouched, and a node asking for help
-// is reading documentation the generated brief itself points at, never driving a
-// run, so it is allowed at any depth.
+// `axi abort` return immediately and are untouched.
+//
+// A node carrying a literal `--help` or `-h` WORD allows, and that is exact
+// rather than lenient: no-mistakes is a Cobra program, so help short-circuits
+// the command and nothing is driven. The test is on a whole word in command
+// position's argument list, so `--help` inside a flag's VALUE is a different
+// token and does not match. The generated brief itself points a worker at
+// `no-mistakes axi run --help`, so refusing it would refuse reading the docs.
 function classifyRawAttachNode(position) {
   const words = position.words.slice(position.index + 1);
   const { positionals } = parseRespondInvocation(words);

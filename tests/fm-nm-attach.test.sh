@@ -510,7 +510,8 @@ test_the_gate_denies_every_raw_attach_form() {
     'git status && no-mistakes axi respond --action approve' \
     'bash -c "no-mistakes axi run --intent x"' \
     '/usr/local/bin/no-mistakes axi run --intent x' \
-    'no-mistakes axi run --intent="x"'
+    'no-mistakes axi run --intent="x"' \
+    'no-mistakes axi run --intent "x --help y"'
   do
     [ "$(deny_code "$cmd")" = nm-raw-attach ] \
       || fail "the gate did not deny a raw attach: $cmd"
@@ -532,7 +533,8 @@ test_the_gate_leaves_the_read_only_subcommands_alone() {
     'no-mistakes doctor' \
     'no-mistakes init' \
     'no-mistakes axi run --help' \
-    'no-mistakes axi respond --help'
+    'no-mistakes axi respond --help' \
+    'no-mistakes axi run --intent x --help'
   do
     [ "$(deny_code "$cmd")" = allow ] || fail "the gate denied a command it must allow: $cmd"
   done

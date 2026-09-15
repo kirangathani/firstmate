@@ -58,7 +58,10 @@ Worse, the daemon pushes nothing, so an ask-user finding parks a step at `awaiti
 So the hook cannot verify that a command was backgrounded with a long wait; it can only refuse the command and name one that always is.
 Part D owns what the wrapper guarantees.
 
-`axi status`, `axi logs`, `axi sync` and `axi abort` all return immediately and are untouched, as are `no-mistakes doctor`, `no-mistakes init`, `--version`, and any invocation carrying `--help` or `-h` - including `axi run --help`, which is documentation the generated brief itself points a worker at.
+`axi status`, `axi logs`, `axi sync` and `axi abort` all return immediately and are untouched, as are `no-mistakes doctor`, `no-mistakes init`, and `--version`.
+
+An invocation carrying a literal `--help` or `-h` WORD also allows, and that is exact rather than lenient: no-mistakes is a Cobra program, so help short-circuits the command and nothing is driven, and the generated brief itself points a worker at `no-mistakes axi run --help`.
+The test is on a whole word in the argument list, so a `--help` appearing inside a flag's VALUE is a different token and still denies - `no-mistakes axi run --intent "x --help y"` is refused, `no-mistakes axi run --intent x --help` is not, and the suite pins both.
 
 This rule fires ahead of the substance floor below, so through this transport every fix round now denies as `nm-raw-attach`.
 The floor is not weakened by that: the wrapper calls this same policy owner in `--fix-instructions-only` mode before it sends a response, which is the one remaining place the floor can fire, and `tests/fm-fix-instructions-check.test.sh` pins its whole acceptance set in that mode.
