@@ -38,7 +38,7 @@ Verified 2026-08-03 against the installed `no-mistakes version v1.37.0 (78e4dcb)
 
 `gh api repos/kunchenguid/no-mistakes/issues/591` returns issue 591, state `open`, filed 2026-07-26 by `jokim1` against `v1.40.0`, titled "Test-step auto-fix silently reverted ask-user decisions and the final review passed with 0 findings".
 
-## Part A: the fix-instructions seatbelt
+## Part A: the no-mistakes command seatbelt
 
 `bin/fm-spawn.sh` installs `bin/fm-fix-instructions-check.sh` as a PreToolUse-equivalent deny check in each crewmate's own worktree hook file, following the three primary-side precedents `bin/fm-arm-pretool-check.sh`, `bin/fm-cd-pretool-check.sh`, and `bin/fm-continuity-pretool-check.sh`.
 A newly spawned crewmate receives it automatically; there is no per-task wiring.
