@@ -62,6 +62,11 @@
 #     treats that as "no open questions", because there is no run that could
 #     hold one; it refuses only when a conversation file EXISTS and cannot be
 #     read, which is the one case where an open question could be invisible.
+#   - `surface` skips a task whose conversation it cannot read rather than
+#     alarming: a half-written trailing line is expected while the reviewer is
+#     still appending, and an alarm on every sweep for it would be noise. The
+#     merge gate above is what makes that safe - nothing ships past an
+#     unreadable conversation even though nothing woke firstmate about it.
 #
 # Usage:
 #   fm-nm-questions.sh list <task-id>     the open questions, one block each
