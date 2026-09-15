@@ -75,6 +75,15 @@
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
 #
+# NOTE on the several comments below that reason about a crew "blocked on its own
+# long-running foreground `no-mistakes axi run`": a firstmate crewmate no longer
+# produces that shape. bin/fm-nm-attach.sh owns every attach and detaches it, so
+# an attached run leaves the pane IDLE and the run-step source - which already
+# takes precedence here - is what reports it as working. Those comments still
+# describe a real case this reader handles (any other long foreground tool call,
+# or a run driven by hand outside a crewmate worktree) and nothing about the
+# precedence changes, but do not read them as describing today's crewmate.
+#
 # --progress adds ONE extra line after the canonical one, and only for a run this
 # reader is currently calling `working` off a FULL `axi status` record:
 #

@@ -1,5 +1,22 @@
 #!/usr/bin/env bash
-# Stable PreToolUse transport for the no-mistakes fix-instructions gate.
+# Stable PreToolUse transport for the no-mistakes command gate.
+#
+# It carries two refusals, both decided by bin/fm-fix-instructions-policy.mjs.
+#
+# FIRST, AND UNCONDITIONALLY: a raw `no-mistakes axi run` or `axi respond`. Both
+# ATTACH to the branch's run in the shared background daemon and BLOCK until the
+# next gate or outcome, or until `--wait` (default 8m) elapses, so in the
+# foreground they return `error: wait of 8m0s elapsed` several times per 25-35
+# minute run, each return costing a turn and carrying no news. bin/fm-nm-attach.sh
+# owns those two commands instead: it always detaches, always uses a multi-hour
+# wait, and turns the hold's return into a status line that wakes firstmate. That
+# has to be OWNED rather than checked here, because a hook sees only the model's
+# command string and harness-native background execution is not itself a policy
+# signal (bin/fm-arm-pretool-check.sh's header). `axi status`, `axi logs`,
+# `axi sync`, `axi abort` and any `--help` return at once and stay allowed.
+#
+# SECOND, and now reachable only through the wrapper: a fix round with no
+# substantive `--instructions`.
 #
 # A crewmate that answers a no-mistakes gate with `--action fix` hands the work
 # to no-mistakes' own gate agent, which sees the finding text and the diff and
@@ -55,8 +72,10 @@ Usage: fm-fix-instructions-check.sh [--command <cmd>] [--claude]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, or Claude/Codex tool_input.command).
-Exits 0 to allow and 2 to deny a `no-mistakes axi respond --action fix` that
-carries no --instructions, or instructions below the substance floor owned by
+Exits 0 to allow and 2 to deny a raw `no-mistakes axi run` or `axi respond`,
+naming bin/fm-nm-attach.sh as the route to use instead, and a
+`no-mistakes axi respond --action fix` carrying no --instructions or instructions
+below the substance floor. Both decisions are owned by
 bin/fm-fix-instructions-policy.mjs.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
