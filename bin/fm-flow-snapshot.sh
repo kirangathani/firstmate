@@ -182,7 +182,21 @@ run_bounded() {  # <seconds> <command...>
 # The worker cannot forge this row. That is the whole point of reading it here
 # instead of having each crewmate report its own run id, which would be the
 # checked entity producing the thing being checked.
-run_index() {  # <project-path> <branch> -> "<id>|<status>|<updated_at>|<created_at>|<count>" or empty
+# Which columns the daemon's `runs` table actually has, read once per process,
+# so run_index() can ask for an optional column only where it exists.
+RUN_INDEX_COLS=''
+run_index_has() {  # <column> -> 0 when the runs table has it
+  if [ -z "$RUN_INDEX_COLS" ]; then
+    RUN_INDEX_COLS=" $(sqlite3 "file:$NM_DB?mode=ro" 'PRAGMA table_info(runs);' 2>/dev/null |
+      cut -d'|' -f2 | tr '\n' ' ') "
+  fi
+  case "$RUN_INDEX_COLS" in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+run_index() {  # <project-path> <branch> -> "<id>|<status>|<updated_at>|<created_at>|<count>|<prev_ended>|<head>|<worktree>|<default_branch>|<error>" or empty
   [ -f "$NM_DB" ] || return 0
   command -v sqlite3 >/dev/null 2>&1 || return 0
   # created_at is read as well as updated_at because it is the one machine
@@ -193,10 +207,35 @@ run_index() {  # <project-path> <branch> -> "<id>|<status>|<updated_at>|<created
   # number the view puts beside the agent. It is counted in the SAME statement,
   # scoped by r.repo_id rather than by the branch name alone, so two projects
   # holding an identically named branch never share a count.
+  #
+  # The sixth column is when the run BEFORE this one ended - its last write -
+  # which is where this run's building phase starts: the captain's rule is that
+  # the box measures the current phase only, so Run #N begins where Run #N-1
+  # stopped and never counts the earlier runs' time. 0 when there is none.
+  #
+  # Then the run's head, its own worktree, the project's default branch, and
+  # LAST its error text, which is the one column free to contain the separator.
+  #
+  # `worktree_dir` is read only when the table has it. The daemon's schema has
+  # grown since this collector was written and the installed binary trails the
+  # current one by several minor versions, so a column this version records is
+  # not one every database on every host is guaranteed to carry; naming an
+  # absent column would refuse the whole statement and lose the run index
+  # entirely, which is a far worse answer than one blank field.
+  local wt_col="''"
+  if run_index_has worktree_dir; then
+    wt_col="COALESCE(r.worktree_dir, '')"
+  fi
   sqlite3 "file:$NM_DB?mode=ro" \
     "SELECT r.id, r.status, r.updated_at, r.created_at,
             (SELECT COUNT(*) FROM runs c
-              WHERE c.repo_id = r.repo_id AND c.branch = r.branch)
+              WHERE c.repo_id = r.repo_id AND c.branch = r.branch),
+            COALESCE((SELECT c.updated_at FROM runs c
+                       WHERE c.repo_id = r.repo_id AND c.branch = r.branch
+                         AND c.created_at < r.created_at
+                       ORDER BY c.created_at DESC LIMIT 1), 0),
+            COALESCE(r.head_sha, ''), $wt_col,
+            COALESCE(p.default_branch, 'main'), COALESCE(r.error, '')
        FROM runs r JOIN repos p ON p.id = r.repo_id
       WHERE p.working_path = '$(printf '%s' "$1" | sed "s/'/''/g")'
         AND r.branch = '$(printf '%s' "$2" | sed "s/'/''/g")'
@@ -285,7 +324,7 @@ toon_field() {  # <axi-status-output> <key>
     }'
 }
 
-CI_EMPTY='{"collection":{"ok":false,"reason":""},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"excused":0,"excused_authority":[]}'
+CI_EMPTY='{"collection":{"ok":false,"reason":""},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"excused":0,"excused_authority":[],"head":"","superseded":null}'
 ci_unread() {  # <reason>
   printf '%s' "$CI_EMPTY" | jq --arg r "$1" '.collection.reason = $r'
 }
@@ -311,7 +350,10 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
   # resolves the repository from the working directory, which is the firstmate
   # root for every task this view draws: measured 2026-09-07, an ELN PR 28 with
   # four checks rendered as firstmate PR 28's eleven green ones.
-  raw=$(run_bounded "$GH_TIMEOUT" gh pr view "$num" --repo "$owner/$repo" --json statusCheckRollup 2>/dev/null) || raw=
+  # headRefOid rides the same call: it is the commit these checks describe, and
+  # the renderer compares it with the run's own head to tell checks that passed
+  # on a head the run will replace from checks on the head that will land.
+  raw=$(run_bounded "$GH_TIMEOUT" gh pr view "$num" --repo "$owner/$repo" --json statusCheckRollup,headRefOid 2>/dev/null) || raw=
   if [ -z "$raw" ]; then
     ci_unread "gh read failed or timed out"
     return
@@ -395,8 +437,11 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
     fi
   fi
 
+  local head
+  head=$(printf '%s' "$raw" | jq -r '.headRefOid // ""' 2>/dev/null) || head=
   printf '%s' "$norm" | jq \
     --arg attest "$FM_ATTESTATION_CHECK_NAME" \
+    --arg head "$head" \
     --argjson excuse "$excuse" \
     --argjson authority "$authority" '
     map(if $excuse and .verdict == "failed" and .name == $attest
@@ -410,8 +455,55 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
         pending: (map(select(.verdict == "pending")) | length),
         skipped: (map(select(.verdict == "skipped")) | length),
         excused: (map(select(.verdict == "excused")) | length),
-        excused_authority: $authority
+        excused_authority: $authority,
+        head: $head,
+        superseded: null
       }'
+}
+
+# Whether the checks GitHub reports for `ci_head` describe a head that the live
+# run, whose own head is `run_head`, will replace when it pushes - and why.
+#
+# Two reasons, each a machine fact rather than a guess, and both can hold:
+#   main_moved   the two heads sit on different bases: `git merge-base` of each
+#                against the default branch differs, so the run has taken a
+#                newer main under the branch than the checks ever saw.
+#   new_commits  the branch's own content changed: the set of `git patch-id`s
+#                over each head's commits above its base differs. A pure rebase
+#                keeps every patch-id, so it is NOT counted here; it is counted
+#                above.
+#
+# The daemon's `runs.base_sha` is NOT a main base and cannot answer the first
+# question: measured 2026-09-15 on branch fm/eln-location-no-project-l3, every
+# run's base_sha was the previous run's head_sha and the first run's was
+# 0000000. The read is done in the run's OWN worktree (`runs.worktree_dir`):
+# the pipeline's fix commits live in the daemon's mirror and not in the project
+# clone, where the run head was `could not get object info` on the same day.
+# A missing directory or an unreadable head reports both reasons as null with
+# the reason named, and the renderer then says only what is certain.
+superseded_json() {  # <run-worktree> <ci-head> <run-head> <default-branch> -> json
+  local wt=$1 ci_head=$2 run_head=$3 main=${4:-main} b1 b2 ids1 ids2
+  local main_moved=false new_commits=false
+  if [ -z "$wt" ] || [ ! -d "$wt" ]; then
+    jq -cn '{main_moved:null, new_commits:null, reason:"the run has no copy of the repository left to compare"}'
+    return
+  fi
+  b1=$(git -C "$wt" merge-base "origin/$main" "$ci_head" 2>/dev/null) || b1=
+  b2=$(git -C "$wt" merge-base "origin/$main" "$run_head" 2>/dev/null) || b2=
+  if [ -z "$b1" ] || [ -z "$b2" ]; then
+    jq -cn '{main_moved:null, new_commits:null, reason:"one of the two commits could not be compared with main"}'
+    return
+  fi
+  [ "$b1" = "$b2" ] || main_moved=true
+  ids1=$(git -C "$wt" rev-list "$b1..$ci_head" 2>/dev/null |
+    git -C "$wt" diff-tree --stdin -p 2>/dev/null |
+    git -C "$wt" patch-id --stable 2>/dev/null | cut -d' ' -f1 | sort -u)
+  ids2=$(git -C "$wt" rev-list "$b2..$run_head" 2>/dev/null |
+    git -C "$wt" diff-tree --stdin -p 2>/dev/null |
+    git -C "$wt" patch-id --stable 2>/dev/null | cut -d' ' -f1 | sort -u)
+  [ "$ids1" = "$ids2" ] || new_commits=true
+  jq -cn --argjson m "$main_moved" --argjson n "$new_commits" \
+    '{main_moved:$m, new_commits:$n, reason:""}'
 }
 
 # Which model is pushing ONE PIPELINE STEP through, which is a different
@@ -649,6 +741,7 @@ row_common() {  # <task-json>
 agent_json() {  # <task-json>
   local task=$1 id kind mode project worktree window branch endpoint_alive agent_alive pr_url
   local idx run_id run_status run_updated run_created run_number axi rc steps actives ci meta skip_local skip_ci
+  local run_count prev_ended run_head run_worktree run_error default_branch
 
   row_common "$task"
   id=$FM_ROW_ID
@@ -686,25 +779,30 @@ agent_json() {  # <task-json>
   run_updated=0
   run_created=0
   run_number=null
+  prev_ended=0
+  run_head=''
+  run_worktree=''
+  run_error=''
+  default_branch=main
   local collect_ok=true collect_reason='' collect_source=axi
 
   idx=$(run_index "$project" "$branch")
   if [ -z "$idx" ]; then
     collect_reason='no pipeline run for this branch'
   else
-    run_id=${idx%%|*}
-    local rest=${idx#*|}
-    run_status=${rest%%|*}
-    rest=${rest#*|}
-    run_updated=${rest%%|*}
-    rest=${rest#*|}
-    run_created=${rest%%|*}
+    # The error text is the last field on purpose: `read` hands the remainder
+    # of the line to the last name, so a separator inside the text stays in it.
+    IFS='|' read -r run_id run_status run_updated run_created run_count \
+      prev_ended run_head run_worktree default_branch run_error <<<"$idx"
     # Never 0: a branch with a run always has at least one, so a zero here would
     # mean the read went wrong, and blank is the honest answer for that.
-    case ${rest##*|} in
+    case ${run_count:-} in
       ''|0|*[!0-9]*) run_number=null ;;
-      *) run_number=${rest##*|} ;;
+      *) run_number=$run_count ;;
     esac
+    case ${prev_ended:-} in ''|*[!0-9]*) prev_ended=0 ;; esac
+    case ${run_updated:-} in ''|*[!0-9]*) run_updated=0 ;; esac
+    case ${run_created:-} in ''|*[!0-9]*) run_created=0 ;; esac
     local axi_err
     axi_err="${TMPDIR:-/tmp}/fm-flow-axi-err.$$.$id"
     axi=$(axi_read "$project" "$run_id" "$axi_err")
@@ -771,6 +869,14 @@ agent_json() {  # <task-json>
   # would be a fact reported inside a frame that says nothing is known.
   local built_at build_step build_active=''
   built_at=$(fm_spawned_at "$STATE_DIR" "$id")
+  # Run #N, for N of two or more, begins where Run #N-1 ended. The captain's
+  # rule is that this box measures the CURRENT building phase: the time the
+  # earlier runs took, and the building before them, is not counted again, so
+  # a fifth run does not open on `building 14h38m` (seen 2026-09-15). Run #1
+  # still starts at dispatch.
+  if [ "${prev_ended:-0}" -gt 0 ]; then
+    built_at=$prev_ended
+  fi
   # A start later than the run it is supposed to precede is not a start. It
   # means every record of the real one has been rewritten since, so the length
   # of the building phase is not known and the cell says so rather than
@@ -791,7 +897,27 @@ agent_json() {  # <task-json>
       pr_at=
     fi
   fi
-  if [ -z "$built_at" ]; then
+  # A run that ended without completing - failed or cancelled - handed the
+  # branch back to its worker (`branch_sync.state: custody_returned`). While
+  # that worker's endpoint still resolves it is building AGAIN, from the run's
+  # last write until now, and the row says so with the running band instead of
+  # drawing a finished phase beside a dead run's steps: on 2026-09-15 the
+  # captain watched `building 1h29m` and `review FAIL` over a worker that had
+  # been busy for 27 minutes since the daemon died under its review. A gone
+  # worker builds nothing and keeps the completed interval.
+  local rebuilding=0
+  case $run_status in
+    failed|cancelled)
+      if [ "$endpoint_alive" = true ] && [ "${run_updated:-0}" -gt 0 ]; then
+        rebuilding=1
+      fi ;;
+  esac
+  if [ "$rebuilding" = 1 ]; then
+    local since=$(( (NOW_EPOCH - run_updated) * 1000 ))
+    [ "$since" -ge 0 ] || since=0
+    build_step='{"step":"building","status":"running","findings":0,"duration_ms":0}'
+    build_active="{\"step\":\"building\",\"status\":\"running\",\"active_for\":\"\",\"active_ms\":$since,\"last_activity\":\"\",\"agent_pid\":\"\",\"round\":\"\"}"
+  elif [ -z "$built_at" ]; then
     build_step='{"step":"building","status":"unknown","findings":0,"duration_ms":0}'
   elif [ "$build_end" -gt 0 ]; then
     local ms=$(( (build_end - built_at) * 1000 ))
@@ -843,6 +969,25 @@ agent_json() {  # <task-json>
   ci=$(ci_unread "skipped")
   if [ "$WANT_CI" = 1 ] && [ -n "$pr_url" ]; then
     ci=$(ci_json "$pr_url" "$id" "$meta")
+    # Checks on a head the live run will replace. Claimed only on the evidence
+    # for it: a GitHub head that was read and differs from the run's own, a run
+    # still going on a worker still there, and a rebase step already completed -
+    # before that the run has not decided what head it will push. Under --no-ci
+    # there is no GitHub head and the question is not asked. A completed run's
+    # head IS the pushed head, and a terminal run pushes nothing more.
+    local ci_head sup=null
+    ci_head=$(printf '%s' "$ci" | jq -r '.head // ""')
+    if [ "$collect_ok" = true ] && [ "$endpoint_alive" = true ] &&
+       [ -n "$ci_head" ] && [ -n "$run_head" ] && [ "$ci_head" != "$run_head" ]; then
+      case $run_status in
+        failed|cancelled|completed) ;;
+        *)
+          if [ "$(printf '%s' "$steps" | jq -r '[.[] | select(.step == "rebase") | .status][0] // ""')" = completed ]; then
+            sup=$(superseded_json "$run_worktree" "$ci_head" "$run_head" "$default_branch")
+          fi ;;
+      esac
+    fi
+    ci=$(printf '%s' "$ci" | jq -c --argjson s "$sup" '.superseded = $s')
   fi
 
   # The number the view labels the PR with comes from the same parser the CI
@@ -863,6 +1008,8 @@ agent_json() {  # <task-json>
     --arg pr_url "$pr_url" \
     --arg run_id "$run_id" \
     --arg run_status "$run_status" \
+    --arg run_error "$run_error" \
+    --arg run_head "$run_head" \
     --arg agent_alive "$agent_alive" \
     --arg collect_reason "$collect_reason" \
     --arg collect_source "$collect_source" \
@@ -903,6 +1050,7 @@ agent_json() {  # <task-json>
       run:{
         present:($run_id != ""),
         id:$run_id, status:$run_status,
+        error:$run_error, head:$run_head,
         db_updated_epoch:$run_updated,
         db_age_seconds:(if $run_updated > 0 then ($now_epoch - $run_updated) else null end)
       },

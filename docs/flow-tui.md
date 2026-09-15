@@ -244,7 +244,7 @@ Every other state a secondmate can report - `blocked`, `failed`, `parked` - keep
 
 ### Blocks are two heights, so the window is solved once
 
-A compact block is three rows and a pipeline block is eight, so how many blocks fit depends on which one is first.
+A compact block is three rows and a pipeline block is twelve, so how many blocks fit depends on which one is first.
 Dividing the available rows by a single constant would answer for a frame that is not being drawn, and that disagreement is not cosmetic: an over-tall frame scrolls the terminal and desynchronises every absolute cursor address in the repaint.
 
 `scrollWindow(heights, avail, top, sel)` therefore returns the window start and the block count together, greedily fitting heights from `top` in the same shape `layout()` already uses for the horizontal cell window.
@@ -307,8 +307,9 @@ Neither time fits beside its word in a nine-column cell, so the timer is two row
 The second row is drawn unconditionally and left blank where a cell has no time, so the frame height does not depend on which states happen to be on screen.
 Two further rows below it carry the model label, on the same unconditional terms and for the same reason.
 All four of those detail rows are left-aligned to their box's own first column, through `padLeft()` rather than the centring `pad()` the box label itself uses: the eye follows one vertical edge down a stage instead of a ragged middle, and each cell still occupies exactly its own columns so neighbours cannot collide.
+A fifth detail row follows, blank under every step box: it exists for the superseded CI cell described below, whose two sentences wrap to five rows, and it is drawn unconditionally for the same reason the others are.
 A blank row then separates the last detail row from the check tally, always, including for an agent whose detail rows are all empty, so the tally reads as the agent's summary rather than as one more per-stage line.
-`BLOCK` is therefore 11 rather than 7, and `scrollWindow()` reads that constant.
+`BLOCK` is therefore 12 rather than 7, and `scrollWindow()` reads that constant.
 
 The two elapsed values come from different places, and neither is computed in the viewer.
 A parked step's is its own `duration_ms`, which the tool freezes when the step produced its findings.
@@ -356,8 +357,8 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
         "present": true,
         "id": "01KZETHEHPT5RQFB14A83FMZCK",
         "status": "running",
-        "head": "bb73f233",
-        "findings": "2 info",
+        "error": "",
+        "head": "bb73f233e0c0d1a4a0f3d3a2f6d0b4c8e1a2b3c4",
         "db_updated_epoch": 1785999000,
         "db_age_seconds": 1000
       },
@@ -398,7 +399,9 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
         "skipped": 0, "excused": 1,
         "excused_authority": [
           "firstmate is registered as a direct-PR project, whose PRs are raised without the pipeline by design"
-        ]
+        ],
+        "head": "bb73f233e0c0d1a4a0f3d3a2f6d0b4c8e1a2b3c4",
+        "superseded": null
       }
     },
     {
@@ -447,9 +450,12 @@ Guarantees the renderer is entitled to rely on:
 - `steps` carries all nine no-mistakes steps in pipeline order whenever `collection.ok` is true AND `pipeline` is true, using the tool's own step names, preceded by the synthetic `building` step described below.
   Folding `push` and `pr` into one box is a rendering decision and is not done here.
 - `building` is the worker's own phase and is the only step this collector states rather than reads: the tool has no record of the time before its own run existed.
-  Its start is the dispatch time `bin/fm-spawned-at-lib.sh` reads.
+  It measures the CURRENT building phase only, by the captain's rule.
+  For the branch's first run its start is the dispatch time `bin/fm-spawned-at-lib.sh` reads; for Run #N with N of two or more it is the moment Run #N-1 last wrote its record, its `updated_at`, so the earlier runs' time is never counted again.
   Its end is the run's own `created_at` from the run index, or - when there is no run - the moment the PR was recorded, described under "A task with no run still ends its building phase" below.
   It reports `completed` with that interval once either end exists, `running` with an `active_steps` entry while neither does, and `unknown` when no record yields a start - never `pending`, which would claim the worker has not begun.
+  It reports `running` AGAIN, from the run's `updated_at` until now, when the branch's latest run ended `failed` or `cancelled` and the task's endpoint still resolves: that run handed the branch back (`branch_sync.state: custody_returned`), so the worker is in its own phase once more, and the run's steps keep their own statuses beside it.
+  A gone worker builds nothing and keeps the completed interval.
   Its `active_for` is empty because that string is the tool's own humanising of a step it owns; `active_ms`, which is the only elapsed the renderer reads, is computed from the two epochs directly.
 - `rework` is the work after the PR is open. It is a fact about the AGENT and never a step: `{ "active_ms": N }` when there is a PR recorded in that task's own record, no pipeline run to own the work instead, and an endpoint that still resolves, and `null` otherwise, because a gone worker counts time against nobody.
   Its elapsed runs from the recorded PR against the same clock every other elapsed on the document uses.
@@ -469,6 +475,15 @@ Guarantees the renderer is entitled to rely on:
   When the database fallback also failed, its own reason follows as `; db: <error>`, so the row says which source failed how rather than naming only the first.
 - `ci.collection` is separate from the agent's `collection`, because a GitHub read can fail while the local read succeeds.
 - `run.present` false means no pipeline run exists for that branch, which is the ordinary state of a task that has not yet started validating.
+- `run.status` is the daemon's own status for the branch's newest run, verbatim, and `run.error` is that run's recorded error text, empty when it has none.
+  The renderer draws a `failed` or `cancelled` run's end on the head line - `run failed: daemon shutting down` - because a nine-column cell cannot hold the reason and a bare FAIL under the step that died left the captain to go and find out.
+  Both are additive fields on the same schema.
+- `run.head` is the run's own head commit from the daemon's record, and `ci.head` is the commit GitHub reports the PR's checks for, read in the same call as the rollup.
+  They differ exactly when the checks describe a head the run has not yet pushed.
+- `ci.superseded` is `null` when the checks describe the head that will land, or the question was not asked - under `--no-ci`, with no run, with a run that has ended or not yet completed its `rebase`, or for a gone worker.
+  Otherwise it is `{ "main_moved": bool, "new_commits": bool, "reason": "" }`: whether the two heads sit on different bases against the default branch, and whether the branch's own content changed, read with `git merge-base` and `git patch-id` in the run's own worktree.
+  When that comparison could not be made both booleans are `null` and `reason` says why; the renderer then states only what is certain.
+  See "The CI cell's colour is its verdict, and a superseded head is yellow" below for what is drawn and why the daemon's `base_sha` is not consulted.
 - `run_number` is how many distinct pipeline runs that branch has had, counted in the daemon's own `runs` table and INCLUDING the run the document describes, so the current run is `Run #N` where N is that count.
   One `no-mistakes axi run` is one run, so a run that fails or is cancelled and is restarted from building is the next number; the auto-fix rounds INSIDE a single run are not, and the view already states those as `auto-fix n/3`.
   It is `null` - never `0` - for a worker that runs no pipeline, for a branch with no run yet, and when the database could not be read, and the renderer then draws nothing rather than a placeholder.
@@ -670,6 +685,43 @@ The source is never silent.
 `bin/fm-crew-state.sh` appends `run read from database` to its own detail for the same reason.
 
 `unreadable` now means both sources failed, and `collection.reason` names each: `axi printed nothing; db: no steps recorded for <run>`.
+
+## The CI cell's colour is its verdict, and a superseded head is yellow
+
+Two things the captain saw on 2026-09-15 came from one cell carrying two meanings.
+`GITHUB CI` drew a fully green PR as an amber box reading `4/4 your word`, because amber was both "parked on the captain" and "not green", and he read it as a failure.
+And that PR's checks were for head `4a22cbba`, pushed by a run that had since been cancelled, while the row's `review` box was 28 minutes into Run #5 on a head that had not been pushed - so the header counted `1 ready to merge` for a head that would never land.
+
+The captain's ruling, recorded here as the contract:
+
+| CI cell | colour | first row | why |
+|---|---|---|---|
+| any check failed | red | `N/N FAIL` | unchanged |
+| checks still running on the head that will land | white, with the runner | `N/N running` | unchanged |
+| every check passed on the head that will land | green - `PAINT.passed`, the runner band's own centre token | `N/N passed` | the colour is the verdict and nothing else |
+| passed, or running, on a head the live run will replace | yellow | the sentences below | never bright green, so nobody is tempted to merge a head that will not land |
+| not read, no PR, nothing ran | unchanged | | |
+
+Waiting on the captain's word is a separate fact from the checks' verdict, and it moves to the box that actually waits for it: when the cell is green, `pre-merge` draws amber with `your word`.
+Yellow is unambiguous on the CI cell only because that phrase has left it.
+
+The superseded cell says, in the captain's own words and nothing else, `main moved, must retest` and/or `new branch commit, must retest`, both in that order when both hold, wrapped at word boundaries over the cell's detail rows and never shortened.
+The first wraps to two fifteen-column rows and the second to three, so both together need five, which is why every pipeline block carries a fifth detail row.
+Widening the cell by one column, the alternative the captain named, was measured and still leaves the pair at five rows: `new branch commit,` is eighteen columns.
+The checked commit's sha rides the facts line, `checks ran on commit 4a22cbb`, whenever the collector read it.
+When the heads differ but the comparison could not be made, the cell says `branch changed, must retest`, which is the one thing then certain.
+
+How the collector decides, and why not from the daemon.
+`runs.base_sha` is NOT a main base: on `fm/eln-location-no-project-l3` every run's `base_sha` was the previous run's `head_sha`, and the first run's was `0000000`, so it cannot say whether main moved.
+The read is `git merge-base origin/<default branch> <head>` for each head, in the run's own worktree (`runs.worktree_dir`): the pipeline's fix commits live in the daemon's mirror and not in the project clone, where the run head was `could not get object info` on the same day.
+`main_moved` is the two bases differing.
+`new_commits` is the set of `git patch-id --stable` over each head's commits above its base differing, which counts an added, dropped, or amended commit and does not count a pure rebase.
+Measured on that branch: the checked head's base was `161ab53` and the run head's `0344f7e`, with 21 patch-ids in common and 2 only on the run head, so the real state was both.
+The comparison is claimed only on the evidence for it: a GitHub head that was read and differs from the run's own, a run still going on a worker still there, and a `rebase` step already completed - before that the run has not decided what it will push.
+
+One more colour changed under the same ruling.
+Every finished box - `PAINT.done`, including a finished `building` - is the runner band's centre green, so a row reads green up to the box the runner is circling, white for that one, dim beyond; the trail is built from the named painters so the three uses are one token.
+`Run #N` stays red, as it was: the captain did not ask for it to change.
 
 ## The PR number rides the connector leaving push+PR
 
