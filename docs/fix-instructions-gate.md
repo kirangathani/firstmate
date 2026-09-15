@@ -259,6 +259,15 @@ A record whose own `branch:` is not `fm/<task-id>` is discarded rather than repo
 - A second attach while one is already alive for the task, pointing at the live log. The marker holds the follower's pid, and a pid that is no longer alive is treated as a dead hold's leftover rather than as a reason to strand the task.
 - A composed intent over the push-option size limit, with the measured size.
 
+### Reporting is unconditional, with one stated gap
+
+The status line is the only thing that tells firstmate the run moved, because the worker's turn ended the moment the wrapper returned.
+So the hold reports on every exit path once it is running: a classified return, an unreadable run, and being killed all append a line, and the same handler clears the liveness marker so no path can leave one behind.
+`tests/fm-nm-attach.test.sh` proves the killed case by signalling the hold's own process group mid-attach, which works because bash runs an `EXIT` trap on `SIGTERM`.
+
+The one gap, stated rather than papered over: a hold killed in the few milliseconds between the wrapper returning and the re-executed follower installing its handler cannot report.
+It has not started the attach either, so there is nothing about the run to report, and the only trace is a marker naming a dead pid, which the next attach clears rather than being blocked by.
+
 ### The intent size cap
 
 The pinned intent travels as a base64 git push option, whose limit is 65520 bytes encoded - 49140 raw, since base64 emits 4 characters per 3-byte group.

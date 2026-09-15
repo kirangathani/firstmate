@@ -102,6 +102,14 @@
 #   - a second attach while one is already alive for this task
 #   - a composed intent too large to reach the daemon (see below)
 #
+# THE ONE GAP LEFT, stated rather than papered over. The hold reports on every
+# exit path once it is running, including being killed. It cannot report if it is
+# killed in the few milliseconds between this script returning and the
+# re-executed follower installing its handler - but a hold killed in that window
+# has not started the attach either, so there is nothing about the run to report,
+# and the only trace it leaves is a liveness marker naming a dead pid, which the
+# next attach clears rather than being blocked by.
+#
 # THE INTENT SIZE CAP. The pinned intent travels as a base64 git push option,
 # whose limit is 65520 bytes of encoded text - 49140 raw bytes, since base64
 # expands 3 bytes to 4. Over that, this refuses with the exact measured size
