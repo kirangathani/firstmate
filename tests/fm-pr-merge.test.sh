@@ -125,6 +125,14 @@
 #   (u4) it refuses BEFORE the checks-green gate, proven on a case whose rollup
 #        query would fail: the run never reaches that read
 #
+# Open-review-question gate (contract in bin/fm-pr-merge.sh's header): a question
+# the run's own reviewer asked and nobody answered is a decision the PR is asking
+# for, and a human can approve the review gate over it.
+#   (q1) an unanswered review question refuses, names the reader that prints it,
+#        and merges nothing
+#   (q2) the same question ANSWERED merges normally
+#   (q3) yolo does not bypass it
+#
 # A signed CI waiver over an empty rollup (contract in bin/fm-pr-merge.sh's
 # header): the zero-checks refusal asks whether absent CI was a captain's
 # decision, and a signed ci_skip is that decision at task scope. (z5) above is
@@ -148,6 +156,13 @@ fm_git_identity fmtest fmtest@example.invalid
 
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
+
+# The open-review-question gate reads the no-mistakes database to find the task's
+# run. Every case here points it at a path that does not exist, so the gate is a
+# silent no-run pass and no case can accidentally consult the real daemon's
+# record; the one case that exercises the refusal points it at its own fixture.
+export FM_NM_QUESTIONS_DB="$TMP_ROOT/absent-state.sqlite"
+export FM_NM_QUESTIONS_EVIDENCE_ROOT="$TMP_ROOT/absent-evidence"
 
 # Build a fresh sandbox for one test case: a state dir with a task meta, a
 # fakebin with a gh-axi mock that records how it was invoked, and a real
@@ -2854,3 +2869,116 @@ test_every_merge_chain_gh_read_is_answered_by_each_merge_mock() {
 }
 
 test_every_merge_chain_gh_read_is_answered_by_each_merge_mock
+
+# --- the open-review-question gate -----------------------------------------
+
+# make_question_case <name> <open|answered>: a merge case whose task has an
+# active run carrying one review question, open or answered. The conversation is
+# a hand-written fixture in the shipped wire format, never a live daemon: the
+# installed binary predates the fork commit the reader codes against.
+make_question_case() {  # <name> <open|answered>
+  local name=$1 state=$2 case_dir conv
+  case_dir=$(make_case "$name")
+  mkdir -p "$case_dir/wt"
+  sqlite3 "$case_dir/nm.sqlite" <<SQL
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
+  head_sha TEXT NOT NULL, base_sha TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+  pr_url TEXT, error TEXT, awaiting_agent_since INTEGER,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+INSERT INTO runs VALUES ('RQ','repo1','fm/task-x1','abc','base','awaiting_approval',NULL,NULL,NULL,1000,2000);
+SQL
+  conv="$case_dir/evidence/RQ/review"
+  mkdir -p "$conv"
+  printf '%s\n' '{"id":"q1","kind":"question","question":"Should the legacy route keep answering?","options":["Keep","Remove"],"weight":"major"}' \
+    > "$conv/questions.ndjson"
+  if [ "$state" = answered ]; then
+    printf '%s\n' '{"id":"q1","answer":"Keep","answered_by":"captain"}' > "$conv/answers.ndjson"
+  else
+    : > "$conv/answers.ndjson"
+  fi
+  printf '%s\n' "$case_dir"
+}
+
+run_question_merge() {  # <case_dir> <args...>
+  local case_dir=$1; shift
+  FM_NM_QUESTIONS_DB="$case_dir/nm.sqlite" \
+  FM_NM_QUESTIONS_EVIDENCE_ROOT="$case_dir/evidence" \
+    run_pr_merge "$case_dir" "$@"
+}
+
+test_open_review_question_refuses_the_merge() {
+  local case_dir rc
+  case_dir=$(make_question_case open-review-question open)
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_question_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "open-review-question: the merge should be refused"
+  assert_grep 'fm-pr-merge-refusal: open-review-question' "$case_dir/stderr" \
+    "open-review-question: the refusal was not reported under its own code"
+  assert_grep 'still waiting on an answer' "$case_dir/stderr" \
+    "open-review-question: the refusal does not say what is missing"
+  assert_grep 'fm-nm-questions.sh list task-x1' "$case_dir/stderr" \
+    "open-review-question: the refusal does not name the reader that prints the question"
+  assert_grep 'no override flag' "$case_dir/stderr" \
+    "open-review-question: the refusal does not state that it cannot be overridden"
+  assert_no_grep 'pr merge 9' "$case_dir/gh-axi.log" \
+    "open-review-question: the PR was merged despite an unanswered question"
+  pass "an unanswered review question refuses the merge and merges nothing"
+}
+
+test_answered_review_question_merges_normally() {
+  local case_dir rc
+  case_dir=$(make_question_case answered-review-question answered)
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_question_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "answered-review-question: the merge should proceed"
+  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "answered-review-question: the merge did not run once the question was answered"
+  pass "a review question that has been answered stops refusing the merge"
+}
+
+test_yolo_does_not_bypass_the_open_review_question_gate() {
+  local case_dir rc
+  case_dir=$(make_question_case yolo-review-question open)
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  : > "$case_dir/gh-axi.log"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "yolo=on"
+
+  set +e
+  run_question_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "yolo-review-question: yolo must not bypass the gate"
+  assert_grep 'fm-pr-merge-refusal: open-review-question' "$case_dir/stderr" \
+    "yolo-review-question: the refusal was not reported under its own code"
+  assert_no_grep 'pr merge 9' "$case_dir/gh-axi.log" \
+    "yolo-review-question: the PR was merged under yolo despite an unanswered question"
+  pass "yolo does not bypass the open-review-question gate"
+}
+
+if command -v sqlite3 >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  test_open_review_question_refuses_the_merge
+  test_answered_review_question_merges_normally
+  test_yolo_does_not_bypass_the_open_review_question_gate
+else
+  printf 'ok - skipped the open-review-question gate cases (sqlite3 or jq absent)\n'
+fi
+

@@ -534,20 +534,25 @@ test_ship_brief_lets_the_worker_answer_info_findings() {
   pass "brief: the worker answers info-severity findings and escalates the rest"
 }
 
-test_ship_brief_caps_the_fix_rounds() {
+# The captain's ruling of 2026-09-15: "there is no round cap we have introduced
+# here". The follow-up guidance stays as a convention for the worker's own
+# judgement, and neither the brief nor anything downstream may enforce a limit.
+test_ship_brief_states_the_round_guidance_as_a_convention() {
   local brief
   brief=$(generated_no_mistakes_brief)
-  assert_grep 'After the first review of a run, you get at most TWO further fix rounds on the same set of findings.' "$brief" \
-    "the brief must state the fix-round cap"
-  assert_grep 'becomes a follow-up instead of a third attempt' "$brief" \
-    "a capped finding must become a follow-up"
+  assert_grep 'THERE IS NO ROUND CAP.' "$brief" \
+    "the brief must state outright that no round cap exists"
+  assert_grep 'a convention, not a cap' "$brief" \
+    "the round guidance must name itself a convention"
   assert_grep '--mint --blocked-by gate-demo' "$brief" \
-    "the follow-up must be filed blocked by this task"
+    "a deferred finding must still be filed blocked by this task"
   assert_grep 'Deferred to follow-up' "$brief" \
-    "the brief must name the PR-description heading capped findings are listed under"
-  assert_grep 'This is a normal outcome, not a failure: do not append `failed:` or `blocked:` for a capped finding' "$brief" \
-    "a capped round must not be reported as a failure"
-  pass "brief: at most two further fix rounds, then a follow-up"
+    "the brief must name the PR-description heading deferred findings are listed under"
+  assert_grep 'do not append `failed:` or `blocked:` for a deferred finding' "$brief" \
+    "a deferred round must not be reported as a failure"
+  assert_grep 'the convention never forces you to stop' "$brief" \
+    "the brief must leave a converging finding with the worker"
+  pass "brief: the two-round follow-up guidance is a convention, never a cap"
 }
 
 test_ship_brief_states_the_no_change_outcome() {
@@ -676,7 +681,7 @@ test_ship_brief_states_the_fix_instructions_rule
 test_ship_brief_requires_recording_and_a_re_run
 test_ship_brief_states_the_no_change_outcome
 test_ship_brief_lets_the_worker_answer_info_findings
-test_ship_brief_caps_the_fix_rounds
+test_ship_brief_states_the_round_guidance_as_a_convention
 test_ship_brief_retires_the_end_of_run_diff_check
 test_scout_and_local_only_briefs_are_untouched
 test_ship_brief_commands_carry_the_resolved_home

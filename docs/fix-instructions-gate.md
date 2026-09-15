@@ -312,18 +312,18 @@ The flag cannot launder a code change.
 Nothing here reads the diff.
 The guard is against the ordinary mistake, not against a worker that misreports what it did, and the fresh run every `change` decision still forces is unchanged.
 
-## Info-severity findings, and the fix-round cap
+## Info-severity findings, and the fix-round convention
 
 The generated ship brief hands the worker two further rules, both aimed at the same cost:
 
 - An ask-user finding of severity `info` or `suggestion` is the worker's own to answer, choosing the option that keeps the recorded decisions and the brief's `# Task` section true, recorded under its own name with the outcome class above, and listed in the PR description under `Decisions taken by the worker (info severity)`.
   An info finding that re-raises a decision already in `## Gate decisions` is answered by citing that key and recorded `--outcome no-change`.
   Security, credential, and data-loss findings escalate at any severity, and `warning` and `error` findings still reach firstmate.
-- After the first review of a run, at most two further fix rounds on the same set of findings.
-  A finding returning a third time, or left open after that second round, is filed as a follow-up backlog item blocked by the current task, named in the PR description under `Deferred to follow-up`, and the run proceeds.
+- A convention, never a limit: after about two further fix rounds on the same set of findings, a finding that keeps returning is usually better filed as a follow-up backlog item blocked by the current task, named in the PR description under `Deferred to follow-up`, with the run proceeding.
+  There is no round cap. The captain's ruling of 2026-09-15 is that none was introduced and none may be added, so nothing here, in the brief, or in the pipeline counts rounds or stops a worker that is genuinely converging.
 
-A capped round is a normal outcome, and the brief forbids reporting it as `failed:` or `blocked:`.
-Nothing on firstmate's side had to change for that: `bin/fm-nm-stall.sh`'s predicate is whether the run's STEP is still advancing, and a capped round advances it, while `bin/fm-classify-lib.sh` reads the status verbs the worker writes and a capped round writes none.
+A deferred round is a normal outcome, and the brief forbids reporting it as `failed:` or `blocked:`.
+Nothing on firstmate's side had to change for that: `bin/fm-nm-stall.sh`'s predicate is whether the run's STEP is still advancing, and a deferred round advances it, while `bin/fm-classify-lib.sh` reads the status verbs the worker writes and a deferred round writes none.
 
 `record` stores the no-mistakes run id current at the moment of recording, read from `no-mistakes axi status`, and `rerun-check` compares it against the current one.
 Run ids are unique per run, so "the run I was recorded during is still the most recent run" is exactly "no fresh run has scored this branch since".

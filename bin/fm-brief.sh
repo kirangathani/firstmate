@@ -329,17 +329,23 @@ The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
-You drive no-mistakes by responding to its gates, not by implementing fixes.
+You drive no-mistakes by responding to its gates.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary - with one exception, below: you never run \`axi run\` or \`axi respond\` yourself, whatever that guidance shows.
-Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
-Five firstmate-specific rules layer on top of that guidance:
+**REVIEW findings are yours to fix, in your own worktree.** You wrote the code, so you fix it: edit, commit and push on your branch while the run is parked at review.
+That push supersedes the parked run and a fresh, cold reviewer re-reads the result, which is the independence the pipeline is actually built on - so a mid-run commit for a review finding is the expected path, not a fault, and you do not need \`--instructions\` for a fix you apply yourself.
+Everything else the pipeline still owns: a TEST, DOCUMENT or LINT finding is applied by the pipeline's own fixer through the gate, so do not hand-edit those while a run is active.
+Escalating a decision is unchanged whichever kind it is (see the ask-user rules below).
+
+Six firstmate-specific rules layer on top of that guidance:
 
 - **An ask-user finding of severity \`info\` or \`suggestion\` is YOURS to answer.** Answer it yourself, choosing the option that keeps the decisions already recorded for this task and this brief's own \`# Task\` section true, record it under your own name with \`record --outcome <change|no-change>\` (see below), and list it in the PR description under a \`Decisions taken by the worker (info severity)\` heading with the finding id, the option you took, and the one-line reason.
   An info finding that RE-RAISES a decision already in this brief's \`## Gate decisions\` subsection is answered by citing that key, and recorded \`--outcome no-change\`; do not re-open a settled question.
   A finding about a security, credential, or data-loss risk escalates no matter what severity it carries.
 - **Ask-user findings of severity \`warning\` or \`error\` are not yours to answer**: escalate to firstmate (rule 6) and stop.
   When the decision comes back, feed it to the gate with \`$NM_ATTACH_CMD $ID --respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
+- **A review QUESTION is not yours.** The reviewer can ask a question while it works; firstmate reads it, puts it to the captain, and answers the reviewer directly with its own command. You are not in that loop: nothing is relayed to you, you owe no \`resolved\` line for it, and you never run \`axi answer\` yourself.
+  The run may therefore resume without you having done anything, which is normal. An answer settles only the question it answers.
 - Avoid \`--yes\`: it silently auto-resolves EVERY ask-user finding, including the warning and error ones the captain owns. The attach owner refuses it outright.
 - **Start, reattach and respond ONLY through the attach owner.** Never call \`no-mistakes axi run\` or \`axi respond\` yourself; a gate refuses those commands before they run.
   \`$NM_ATTACH_CMD $ID\` starts the run, or reattaches to it.
@@ -361,10 +367,12 @@ A decision you submit at a gate changes what this branch is supposed to be, but 
    A round whose decisions were all \`no-change\` needs no fresh run: nothing on the branch moved, so a fresh 25-35 minute run would re-score exactly what the last one already scored.
 3. \`$NM_DECISION_CMD rerun-check $ID\` must exit 0 before you report done. It refuses while any \`change\` decision was recorded during the run that is still the most recent one, which is exactly the case where nothing has yet scored the branch against the decided goal.
 
-# At most two fix rounds per run on the same findings
-After the first review of a run, you get at most TWO further fix rounds on the same set of findings.
-A finding that comes back a third time, or any finding still open after that second fix round, becomes a follow-up instead of a third attempt: file it with \`$TASKS_ADD_CMD "<title from the finding>" --mint --blocked-by $ID\`, which prints the id it minted; name it in the PR description under a \`Deferred to follow-up\` heading with its finding id and the new task id, and carry on with the run.
-This is a normal outcome, not a failure: do not append \`failed:\` or \`blocked:\` for a capped finding, and do not abort the run over one.
+# Two fix rounds on the same findings, then file a follow-up - a convention, not a cap
+THERE IS NO ROUND CAP. Nothing in the pipeline limits fix rounds, nothing here adds one, and none may be added.
+What follows is a working convention for your own judgement: after about two further rounds on the SAME set of findings, a finding that keeps coming back is usually better as a follow-up than as a third attempt.
+When you judge that, file it with \`$TASKS_ADD_CMD "<title from the finding>" --mint --blocked-by $ID\`, which prints the id it minted; name it in the PR description under a \`Deferred to follow-up\` heading with its finding id and the new task id, and carry on with the run.
+This is a normal outcome, not a failure: do not append \`failed:\` or \`blocked:\` for a deferred finding, and do not abort the run over one.
+Equally, a finding you are genuinely converging on is yours to keep working; the convention never forces you to stop.
 
 # Reporting done: let the run's own \`ci\` step watch the PR
 Do NOT abort a run to shortcut its \`ci\` step, and do not poll the PR yourself while the run is live. That step watches the PR it opened by PR number from the run record, so it sees your PR go green from this detached-HEAD worktree.

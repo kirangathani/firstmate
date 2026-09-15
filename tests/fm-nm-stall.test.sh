@@ -430,6 +430,38 @@ test_the_real_advanced_capture_is_a_different_reading() {
 # The flag is opt-in for a reason: every existing caller of this reader parses
 # its one canonical line, and a second line appearing unasked would reach all of
 # them.
+# --- the reviewer's question park is a wait, not a freeze -------------------
+
+# The captain's ruling of 2026-09-15: a reviewer that has said everything it can
+# and is waiting on answers is PARKED, and neither the pipeline's own timeout nor
+# this alarm may count that wait. The fork carries that state as an approval park
+# whose findings are review questions (kirangathani/no-mistakes 31b58c7), so the
+# assertion worth having is that the SHIPPED park shape reaches this predicate as
+# a settled reading rather than a step frozen at "review".
+test_a_run_waiting_on_answers_is_not_a_stalled_step() {
+  local d out status frozen_at
+  d=$(make_wedged_case answers-park "$FIXTURES/axi-status-review-waiting-on-answers.toon")
+
+  # A frozen record already past the threshold, as if the step had been observed
+  # twice while the reviewer was still working. Without the drop below, the very
+  # next sweep would alarm on it.
+  frozen_at=$((1000 + PAST_THRESHOLD))
+  printf '%s\t%s\t%s\t%s\t%s\n' 1000 "$frozen_at" 0 review \
+    'run=01KZRQJJ2JX66ECFBTNPKPSKGH;status=running;steps=review:running:0' \
+    > "$d/state/eln-drop-variables-w7.nm-progress"
+
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_BIN="$CREW_STATE" FM_NM_STALL_NOW="$frozen_at" \
+    "$STALL" --observe)
+  status=$?
+
+  expect_code 0 "$status" "a run waiting on the captain's answers was reported as a stalled validation"
+  [ -z "$out" ] || fail "a run waiting on answers printed a stall alarm: $out"
+  [ -e "$d/state/eln-drop-variables-w7.nm-progress" ] \
+    && fail "a run waiting on answers kept a frozen-step record, so the alarm would fire the moment the captain took an hour to answer"
+  pass "fm-nm-stall: a run waiting on the reviewer's answers is a park, never a stalled step"
+}
+
 test_the_reader_is_unchanged_without_the_flag() {
   local d with without
   d=$(make_wedged_case token-noflag "$FIXTURES/axi-status-ci-wedged.toon")
@@ -473,5 +505,6 @@ test_every_task_is_reached_despite_the_per_sweep_budget
 test_the_real_frozen_capture_reports_working_and_names_its_step
 test_the_token_excludes_every_field_that_ticks_on_its_own
 test_the_real_advanced_capture_is_a_different_reading
+test_a_run_waiting_on_answers_is_not_a_stalled_step
 test_the_reader_is_unchanged_without_the_flag
 test_a_run_with_no_step_table_is_reported_as_unmeasurable

@@ -678,6 +678,11 @@ function stepBox(agent, spec, anim) {
 
   let timer = "";
   if (state === "failed") timer = "FAIL";
+  // A review parked on its own reviewer's questions is not parked on findings
+  // somebody has to fix: it is waiting on the captain's answers, which is a
+  // different thing to do about it. The collector states which park it is.
+  else if (state === "waiting" && st?.step === "review" && agent.run?.waiting_on === "answers")
+    timer = agent.run?.open_questions ? `${agent.run.open_questions} ask` : "answers";
   else if (state === "waiting") timer = st?.findings ? `${st.findings} find` : "parked";
   else if (state === "live") timer = "running";
   else if (state === "done") timer = dur(st?.duration_ms);

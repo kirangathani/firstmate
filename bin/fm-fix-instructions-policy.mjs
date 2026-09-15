@@ -150,6 +150,12 @@ function parseRespondInvocation(words) {
 // only ones the wrapper has to own. `axi status`, `axi logs`, `axi sync` and
 // `axi abort` return immediately and are untouched.
 //
+// `axi answer` is untouched too, and that one is deliberate rather than
+// incidental: it is FIRSTMATE'S own command, run by bin/fm-nm-questions.sh to
+// put the captain's answer straight to the reviewer, and it must not be denied
+// here. It records one answer and returns at once, so it never produces the
+// foreground-8m shape this policy exists to prevent.
+//
 // A node carrying a literal `--help` or `-h` WORD allows, and that is exact
 // rather than lenient: no-mistakes is a Cobra program, so help short-circuits
 // the command and nothing is driven. The test is on a whole word in command

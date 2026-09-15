@@ -347,6 +347,10 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
 `out_of_scope` is gone: it existed to name the live workers `agents` excluded, and `agents` now excludes none, so an empty array left in place would be a field whose emptiness meant the opposite of what it used to.
 `bin/fm-flow-tui.mjs` refuses any other schema id outright, so the two ship together or neither runs.
 
+`run.waiting_on` is `"answers"` while the run is parked on questions its own reviewer asked, and `null` otherwise; `run.open_questions` counts them.
+That park is neither running nor wedged - the reviewer has said everything it can and is waiting on the captain - so it is a field of its own rather than something a reader infers from the step status, which cannot tell the two parks apart.
+Both are additive `v2` fields: a consumer that ignores them reads exactly the document it read before.
+
 ```json
 {
   "schema": "fm-flow-snapshot.v2",
@@ -376,6 +380,8 @@ The bump from `v1` is a genuine break in both directions, which is why it is a b
         "present": true,
         "id": "01KZETHEHPT5RQFB14A83FMZCK",
         "status": "running",
+        "waiting_on": null,
+        "open_questions": 0,
         "error": "",
         "head": "bb73f233e0c0d1a4a0f3d3a2f6d0b4c8e1a2b3c4",
         "db_updated_epoch": 1785999000,

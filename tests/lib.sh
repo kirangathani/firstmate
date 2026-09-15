@@ -35,6 +35,16 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Keep the review-question reader off the real daemon's record. bin/fm-watch.sh
+# sweeps for open review questions on its own cadence, and bin/fm-pr-merge.sh
+# gates on the same reader, so any test driving either would otherwise resolve a
+# run out of this machine's live ~/.no-mistakes/state.sqlite - a real read of
+# shared state from a test, and one whose cost lands inside the watcher cycle
+# that several suites time. A path that does not exist means "no run", which is
+# the correct answer for a sandbox fleet; a test that wants a conversation points
+# this at its own fixture database explicitly.
+export FM_NM_QUESTIONS_DB="${FM_NM_QUESTIONS_DB:-/nonexistent/fm-tests-no-nm-database.sqlite}"
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

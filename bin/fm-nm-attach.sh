@@ -27,6 +27,15 @@
 # foreground-8m shape out of it. bin/fm-fix-instructions-check.sh denies the raw
 # `axi run`/`axi respond` command so this is the only route.
 #
+# WHAT THIS OWNER DOES NOT COVER: `axi answer`. That verb attaches to nothing -
+# it records one answer to a question the run's own reviewer asked and returns at
+# once - so none of the reasoning above applies to it, and the raw-command denial
+# deliberately does not match it. It is FIRSTMATE'S OWN command, run by
+# bin/fm-nm-questions.sh so the captain's answer reaches the reviewer directly
+# rather than through the worker (captain's ruling, 2026-09-15). A worker never
+# runs it, and `axi respond` refuses `--action answer`, so a gate with questions
+# still open cannot be released from either side.
+#
 # WHAT THE CALLER GETS. The attach runs in a detached process group with stdin
 # closed and both output streams in the task's own temp root. When it returns,
 # the SAME detached process re-reads `no-mistakes axi status` and appends exactly
