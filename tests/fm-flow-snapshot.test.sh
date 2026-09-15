@@ -1612,3 +1612,32 @@ run_terminal --json --no-ci > "$TERM_ROOT/noci.json" 2>/dev/null
 got=$(jq -r '.agents[] | select(.id == "sup-both-b1") | "\(.ci.head)|\(.ci.superseded)"' "$TERM_ROOT/noci.json")
 [ "$got" = "|null" ] || fail "--no-ci still claimed a GitHub head or a comparison: $got"
 pass "checks on a head the live run will replace are stated as superseded, with main moved and new commits read from git"
+
+# --- the captain-driving marker: state/<id>.monitor-exempt -------------------
+#
+# AGENTS.md section 2: state/<id>.monitor-exempt is the captain's own signed
+# record that he has taken a worker's window for himself, written by
+# bin/fm-monitor.sh --exempt and removed by --unexempt. This view draws a
+# marker from its PRESENCE alone - the signature inside it is bin/fm-monitor.sh's
+# own thing to verify, never this read-only collector's - so the field is a
+# plain boolean and carries no signature or reason text.
+#
+# Before either marker exists, every kind reads false: this is the ordinary
+# case for every task in the base fixture.
+got=$(jq -r '.agents[] | select(.id=="some-scout-x1") | .captain_driving' "$OUT")
+[ "$got" = false ] || fail "a scout with no exemption record read captain_driving true: $got"
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .captain_driving' "$OUT")
+[ "$got" = false ] || fail "a ship task with no exemption record read captain_driving true: $got"
+pass "captain_driving is false for every agent absent an exemption record"
+
+touch "$LIVE_HOME/state/some-scout-x1.monitor-exempt"
+touch "$LIVE_HOME/state/eager-dispatch-e2.monitor-exempt"
+run_snapshot --no-ci > "$TMP_ROOT/driving.json" 2>/dev/null
+
+got=$(jq -r '.agents[] | select(.id=="some-scout-x1") | .captain_driving' "$TMP_ROOT/driving.json")
+[ "$got" = true ] || fail "a scout carrying the exemption record did not read captain_driving true: $got"
+got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .captain_driving' "$TMP_ROOT/driving.json")
+[ "$got" = true ] || fail "a ship task carrying the exemption record did not read captain_driving true: $got"
+got=$(jq -r '.agents[] | select(.id=="idle-sm-z2") | .captain_driving' "$TMP_ROOT/driving.json")
+[ "$got" = false ] || fail "a worker with no exemption record of its own read captain_driving true: $got"
+pass "captain_driving reads true only for the agent whose own exemption record exists"
