@@ -145,7 +145,24 @@ if [ "$1" = --follow-internal ]; then
 
   STATUS_FILE="$STATE_DIR/$ID.status"
   say() { printf '%s\n' "$*"; }
-  note() { printf '%s\n' "$1" >> "$STATUS_FILE"; }
+  CLASSIFIED=0
+  note() { printf '%s\n' "$1" >> "$STATUS_FILE"; CLASSIFIED=1; }
+
+  # The status line this process appends is the ONLY thing that tells firstmate
+  # the run moved - the worker's turn ended the moment the parent returned. So a
+  # follower that dies on its way to classifying would take the whole
+  # notification with it, silently, which is the exact failure class this script
+  # exists to remove. So every exit path reports something, and the same handler
+  # owns clearing the liveness marker so no path can leave one behind.
+  # shellcheck disable=SC2329 # Invoked indirectly, by the EXIT trap below.
+  on_follower_exit() {
+    if [ "$CLASSIFIED" != 1 ]; then
+      printf 'blocked [key=nm-run]: the background attach for %s stopped before it could report what the run did; read the attach log\n' \
+        "$ID" >> "$STATUS_FILE"
+    fi
+    unlink "$MARKER" 2>/dev/null || true
+  }
+  trap on_follower_exit EXIT
 
   # The hold. Never `--yes`; the caller already refused it, and it is not added
   # back here.
@@ -243,13 +260,16 @@ if [ "$1" = --follow-internal ]; then
     note "needs-decision [key=nm-run]: run $RUN_ID parked at $GATE_STEP ($GATE_STATUS) - respond through $SCRIPT_DIR/fm-nm-attach.sh $ID --respond"
   else
     case "$RUN_STATUS" in
+      # `completed` reaches here only from a record that carries no `outcome:` -
+      # the daemon-database rendering never writes one (bin/fm-nm-db-lib.sh) -
+      # and a finished run must not read as an external wait.
+      completed) note "resolved [key=nm-run]: run $RUN_ID completed" ;;
       failed|cancelled) note "blocked [key=nm-run]: run $RUN_ID $RUN_STATUS: $RUN_ERROR" ;;
       *) note "paused [key=nm-run]: run $RUN_ID still ${RUN_STATUS:-active} at $ACTIVE_STEP after $WAIT; reattach with $SCRIPT_DIR/fm-nm-attach.sh $ID" ;;
     esac
   fi
 
-  unlink "$MARKER" 2>/dev/null || true
-  say "classified; marker cleared"
+  say "classified; the EXIT trap clears the marker"
   exit 0
 fi
 

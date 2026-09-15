@@ -282,6 +282,70 @@ test_no_run_at_all_blocks_rather_than_pausing() {
   pass "attach: an attach that left no run blocks rather than pausing on nothing"
 }
 
+test_a_killed_follower_still_reports() {
+  local dir pid line waited
+  # The wrapper's whole value is that the hold's return becomes a wake. A hold
+  # that dies without classifying would take that wake with it silently, and the
+  # worker's turn is long over, so nothing else would notice. A hold killed
+  # mid-attach is the plausible version of that (a sweep, the OOM killer, a
+  # teardown racing the run) and bash runs an EXIT trap on SIGTERM, so it is the
+  # one form of that death a test can actually observe.
+  dir=$(make_case follower-killed "$FIXTURE_TASK" "$NM_STALL_FIXTURES/axi-status-ci-advanced.toon" 60)
+  run_attach "$dir" "$FIXTURE_TASK" >/dev/null || fail "attach refused"
+  pid=$(sed -n '1p' "$dir/home/state/$FIXTURE_TASK.nm-attach")
+  # Wait for the hold to have actually begun before signalling it. The parent
+  # returns before the re-executed follower has installed its handler, and a
+  # signal landing inside that window kills a hold that has not started the
+  # attach and so has nothing to report - which is not the case under test.
+  waited=0
+  while [ -z "$(find "$dir/tmp" -name 'nm-attach-*.log' -size +0 2>/dev/null)" ]; do
+    sleep 1
+    waited=$((waited + 1))
+    [ "$waited" -lt 10 ] || fail "the hold never started; no attach log was written"
+  done
+  # The whole process GROUP, which setsid made the hold the leader of. Signalling
+  # only the bash pid would be deferred until the attach it is blocked on returns,
+  # because bash finishes a foreground command before it runs a trap - and killing
+  # the group is what a sweep or the OOM killer does anyway.
+  kill -TERM -"$pid" 2>/dev/null || fail "could not signal the hold's process group at $pid"
+  await_status "$dir" "$FIXTURE_TASK" 15 || fail "a killed hold reported nothing at all"
+  line=$(status_of "$dir" "$FIXTURE_TASK")
+  case "$line" in
+    "blocked [key=nm-run]: "*) ;;
+    *) fail "a hold killed before it classified must still block, got: $line" ;;
+  esac
+  assert_contains "$line" 'stopped before it could report' "the line did not say the hold never reported"
+  [ ! -e "$dir/home/state/$FIXTURE_TASK.nm-attach" ] \
+    || fail "the killed hold left its liveness marker behind"
+  pass "attach: a hold killed before it classified still reports, and clears its marker"
+}
+
+test_a_vanished_tool_still_reports() {
+  local dir line
+  # The other half of the same guarantee, on the path that does reach the
+  # classifier: the tool itself is gone by the time `axi status` is read, so
+  # nothing can be learned about the run - and that still has to wake firstmate
+  # rather than go quiet.
+  dir=$(make_case tool-vanishes "$FIXTURE_TASK" "" 0 0)
+  cat > "$dir/bin/no-mistakes" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/invocations"
+find "$dir/bin" -name no-mistakes -delete
+exit 0
+SH
+  chmod +x "$dir/bin/no-mistakes"
+  run_attach "$dir" "$FIXTURE_TASK" >/dev/null || fail "attach refused"
+  await_status "$dir" "$FIXTURE_TASK" 15 || fail "a vanished tool reported nothing at all"
+  line=$(status_of "$dir" "$FIXTURE_TASK")
+  case "$line" in
+    blocked*) ;;
+    *) fail "a hold that could learn nothing about the run must block, got: $line" ;;
+  esac
+  [ ! -e "$dir/home/state/$FIXTURE_TASK.nm-attach" ] \
+    || fail "the hold left its liveness marker behind"
+  pass "attach: a hold that could not read the run at all still blocks, and clears its marker"
+}
+
 # --- the refusals -----------------------------------------------------------
 
 test_refuses_an_off_branch_working_directory() {
@@ -562,6 +626,8 @@ test_an_elapsed_wait_is_a_declared_pause
 test_an_unreachable_daemon_blocks_under_its_own_key
 test_another_branchs_run_is_never_reported_as_this_task
 test_no_run_at_all_blocks_rather_than_pausing
+test_a_killed_follower_still_reports
+test_a_vanished_tool_still_reports
 test_refuses_an_off_branch_working_directory
 test_refuses_outside_a_git_worktree
 test_refuses_a_second_live_attach
