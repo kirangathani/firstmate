@@ -309,6 +309,37 @@ steps[3]{step,status,findings,duration_ms}:
 EOF
 }
 
+# The review conversation's own park (kirangathani/no-mistakes 31b58c7): each
+# still-open question is carried as an ask-user finding, the gate is marked
+# `waiting_on: answers`, and the questions are listed beside it with their own
+# options. Nothing is running and nothing is wedged - the reviewer has said
+# everything it can and is waiting on the captain.
+run_parked_on_answers() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 12m4s
+  head: "abc1234"
+  pr: ""
+  findings[2]{id,severity,file,line,action,description}:
+    review-question-q1,warning,a.go,,ask-user,Review question awaiting an answer
+    review-question-q2,warning,b.go,,ask-user,Review question awaiting an answer
+gate:
+  step: review
+  status: awaiting_approval
+  waiting_on: answers
+  review_questions[2]{id,question,options,file}:
+    q1,Keep the legacy route?,Keep | Remove,a.go
+    q2,Is the cache bound deliberate?,Deliberate | Raise it,b.go
+steps[3]{step,status,findings,duration_ms}:
+  intent,completed,0,0
+  review,awaiting_approval,2,0
+  test,pending,0,0
+EOF
+}
+
 run_passed() {  # <branch>
   cat <<EOF
 run:
@@ -466,6 +497,38 @@ test_scalar_gate_parked_not_superseded() {
   assert_contains "$out" "1 finding(s)" "scalar gate wait includes finding count"
   assert_not_contains "$out" "superseded" "scalar gate wait not flagged stale"
   pass "scalar gate parked run is not flagged superseded"
+}
+
+test_waiting_on_answers_is_named_apart_from_an_ordinary_gate_park() {
+  reset_fakes
+  local d; d=$(new_case parked-on-answers)
+  make_repo_on_branch "$d/wt" fm/feat-qa
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-qa.meta" "window=fm:fm-feat-qa" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_parked_on_answers fm/feat-qa)"
+  local out; out=$(run_crew_state "$d" feat-qa)
+  assert_contains "$out" "state: parked" "a run waiting on answers is not parked"
+  assert_contains "$out" "parked at review" "the answers park does not name its gate"
+  assert_contains "$out" "waiting on answers: 2 review question(s) for the captain" \
+    "the answers park reads like an ordinary gate park, so nobody can see what it is owed"
+  assert_not_contains "$out" "validating" "a run waiting on answers was reported as still validating"
+  pass "a run waiting on the captain's answers is named apart from an ordinary gate park"
+}
+
+test_waiting_on_answers_offers_no_progress_token() {
+  reset_fakes
+  local d; d=$(new_case answers-no-token)
+  make_repo_on_branch "$d/wt" fm/feat-qb
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-qb.meta" "window=fm:fm-feat-qb" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_parked_on_answers fm/feat-qb)"
+  # The helper passes one argument, so the flag is given to the reader directly.
+  local out
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_DB="$d/no-such-database.sqlite" "$CREW_STATE" --progress feat-qb)
+  assert_not_contains "$out" "progress: " \
+    "a run waiting on answers offered a frozen-step token, which would make the stall alarm fire on a captain who has not answered yet"
+  pass "waiting on answers offers no progress token, so the stalled-validation alarm cannot fire on it"
 }
 
 test_gate_block_parked_not_superseded() {
@@ -1727,6 +1790,8 @@ test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
+test_waiting_on_answers_is_named_apart_from_an_ordinary_gate_park
+test_waiting_on_answers_offers_no_progress_token
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done

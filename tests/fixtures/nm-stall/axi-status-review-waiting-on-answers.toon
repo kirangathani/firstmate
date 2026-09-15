@@ -1,0 +1,27 @@
+run:
+  id: "01KZRQJJ2JX66ECFBTNPKPSKGH"
+  branch: fm/eln-drop-variables-w7
+  status: awaiting_approval
+  awaiting_agent: parked 41m12s
+  head: a316b52d
+  pr: ""
+  findings[2]{id,severity,file,line,action,description}:
+    review-question-q1,warning,src/router.go,88,ask-user,Review question awaiting an answer
+    review-question-q2,warning,src/cache.go,17,ask-user,Review question awaiting an answer
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,12
+    rebase,completed,0,2596
+    review,awaiting_approval,2,183573
+    test,pending,0,0
+    document,pending,0,0
+    lint,pending,0,0
+    push,pending,0,0
+    pr,pending,0,0
+    ci,pending,0,0
+gate:
+  step: review
+  status: awaiting_approval
+  waiting_on: answers
+  review_questions[2]{id,question,options,file}:
+    q1,Should the legacy /v1 route keep answering after this change?,Keep answering | Remove it | Keep behind a flag,src/router.go
+    q2,Is the 512-entry cache bound deliberate?,Deliberate | Raise it,src/cache.go
