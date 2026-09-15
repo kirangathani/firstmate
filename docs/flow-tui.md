@@ -719,9 +719,9 @@ The read is `git merge-base origin/<default branch> <head>` for each head, in th
 Measured on that branch: the checked head's base was `161ab53` and the run head's `0344f7e`, with 21 patch-ids in common and 2 only on the run head, so the real state was both.
 The comparison is claimed only on the evidence for it: a GitHub head that was read and differs from the run's own, a run still going on a worker still there, and a `rebase` step already completed - before that the run has not decided what it will push.
 
-Two more colours changed under the same ruling.
+One more colour changed under the same ruling.
 Every finished box - `PAINT.done`, including a finished `building` - is the runner band's centre green, so a row reads green up to the box the runner is circling, white for that one, dim beyond; the trail is built from the named painters so the three uses are one token.
-`Run #N` is dim rather than red: the counter is an identity, and red is this view's failed slot.
+`Run #N` stays red, as it was: the captain did not ask for it to change.
 
 ## The PR number rides the connector leaving push+PR
 

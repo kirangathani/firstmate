@@ -897,17 +897,16 @@ const DEFAULT_OPEN_HINT = "enter: open this worker's window";
 // on screen. A run is one `no-mistakes axi run` - one row in the daemon's own
 // `runs` table for the branch - so a run that fails and is restarted from
 // building is the next number, while the auto-fix rounds INSIDE one run are not
-// (the row already states those as `auto-fix n/3`). Dim, like the project
-// label beside it: the counter is an identity, and red is this view's failed
-// slot, so a red counter on a healthy first run read as an alarm that was not
-// there.
+// (the row already states those as `auto-fix n/3`). Red, from the same palette
+// slot every other colour on this view comes from, so it re-skins with the
+// terminal theme rather than staying neon against it.
 //
 // Nothing at all when the collector states no number: a worker that runs no
 // pipeline, a branch with no run yet, or a database that could not be read.
 // A placeholder there would be a claim the snapshot did not make.
 function runCounter(agent) {
   const nRuns = agent.run_number;
-  return Number.isInteger(nRuns) && nRuns > 0 ? `  ${dim(`Run #${nRuns}`)}` : "";
+  return Number.isInteger(nRuns) && nRuns > 0 ? `  ${red(`Run #${nRuns}`)}` : "";
 }
 
 // How the branch's latest run ended, when it ended without completing, in the

@@ -1457,10 +1457,8 @@ const { render } = await import(process.argv[2]);
 const snap = JSON.parse(process.argv[3]);
 let bad = 0;
 const say = (m) => { console.error(m); bad++; };
-// Dim, the same slot as the project label beside it: the counter is an
-// identity, and red is the view's failed slot, so a red counter read as an
-// alarm on a healthy first run.
-const DIM = "\x1b[2m";
+// The renderer's own red slot, read from the file rather than written down
+// here, so a palette change moves the assertion with it.
 const RED = "\x1b[91m";
 
 const headFor = (frame, id) => frame.find((l) => l.includes(id)) ?? "";
@@ -1470,8 +1468,7 @@ const headFor = (frame, id) => frame.find((l) => l.includes(id)) ?? "";
 const frame = render(snap, { rows: 60, cols: 200, sel: 0, cell: -1 });
 for (const [id, variant] of [["run3a", "inverse"], ["run3b", "ordinary"]]) {
   const head = headFor(frame, id);
-  if (!head.includes(`${DIM}Run #3`)) say(`${variant} header carries no dim run counter: ${JSON.stringify(head)}`);
-  if (head.includes(`${RED}Run #3`)) say(`${variant} header paints the run counter in the failed slot: ${JSON.stringify(head)}`);
+  if (!head.includes(`${RED}Run #3`)) say(`${variant} header carries no red run counter: ${JSON.stringify(head)}`);
   const idAt = head.indexOf(id);
   const runAt = head.indexOf("Run #3");
   if (idAt < 0 || runAt < idAt) say(`${variant} header did not put the counter after the id: ${JSON.stringify(head)}`);
@@ -1493,7 +1490,7 @@ RUNDOC=$(snap "[$(agent_with run3a "$(steps_all completed)" '{"run_number":3}'),
                 $(agent_with run3b "$(steps_all completed)" '{"run_number":3}')]")
 node "$TMP_ROOT/runcount.mjs" "$TUI" "$RUNDOC" ||
   fail "the run counter is missing, mispositioned, uncoloured, or drawn from nothing"
-pass "the run counter renders dim, never red, after the agent id on both header variants"
+pass "the run counter renders in red after the agent id on both header variants"
 
 # --- a run that ended under a live worker, and a CI head that will not land ---
 #
@@ -1517,8 +1514,7 @@ pass "the run counter renders dim, never red, after the agent id on both header 
 # step keeps its FAIL and the head line names the reason; the CI cell's colour
 # is its verdict alone - green passed, red failed, yellow for a head the live
 # run will replace, with his two sentences wrapped whole - and `your word`
-# moves to the pre-merge box; every finished box is the runner's centre green;
-# `Run #N` is dim.
+# moves to the pre-merge box; every finished box is the runner's centre green.
 
 cat >"$TMP_ROOT/verdicts.mjs" <<'JS'
 const { render, layout, CELL_WIDTHS, STEPS, BLOCK, ciVerdict, dur } = await import(process.argv[2]);
@@ -1668,7 +1664,7 @@ expectCI(sup({ main_moved: null, new_commits: null, reason: "the run has no copy
   }
   if (!r.mid(at("review")).includes("97") || !r.mid(at("review")).includes("1;92")) say(`running box: ${r.mid(at("review"))}`);
   if (r.mid(at("document")) !== "2") say(`pending docs box: ${r.mid(at("document"))}`);
-  if (!r.headRaw.includes("\x1b[2mRun #5")) say("the run counter is not dim");
+  if (!r.headRaw.includes("\x1b[91mRun #5")) say("the run counter lost its red");
 }
 // A red head is a red head, superseded or not: a failure on the branch is a
 // fact the captain wants, and it is not the false green this rule guards.

@@ -182,6 +182,20 @@ run_bounded() {  # <seconds> <command...>
 # The worker cannot forge this row. That is the whole point of reading it here
 # instead of having each crewmate report its own run id, which would be the
 # checked entity producing the thing being checked.
+# Which columns the daemon's `runs` table actually has, read once per process,
+# so run_index() can ask for an optional column only where it exists.
+RUN_INDEX_COLS=''
+run_index_has() {  # <column> -> 0 when the runs table has it
+  if [ -z "$RUN_INDEX_COLS" ]; then
+    RUN_INDEX_COLS=" $(sqlite3 "file:$NM_DB?mode=ro" 'PRAGMA table_info(runs);' 2>/dev/null |
+      cut -d'|' -f2 | tr '\n' ' ') "
+  fi
+  case "$RUN_INDEX_COLS" in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
 run_index() {  # <project-path> <branch> -> "<id>|<status>|<updated_at>|<created_at>|<count>|<prev_ended>|<head>|<worktree>|<default_branch>|<error>" or empty
   [ -f "$NM_DB" ] || return 0
   command -v sqlite3 >/dev/null 2>&1 || return 0
@@ -201,6 +215,17 @@ run_index() {  # <project-path> <branch> -> "<id>|<status>|<updated_at>|<created
   #
   # Then the run's head, its own worktree, the project's default branch, and
   # LAST its error text, which is the one column free to contain the separator.
+  #
+  # `worktree_dir` is read only when the table has it. The daemon's schema has
+  # grown since this collector was written and the installed binary trails the
+  # current one by several minor versions, so a column this version records is
+  # not one every database on every host is guaranteed to carry; naming an
+  # absent column would refuse the whole statement and lose the run index
+  # entirely, which is a far worse answer than one blank field.
+  local wt_col="''"
+  if run_index_has worktree_dir; then
+    wt_col="COALESCE(r.worktree_dir, '')"
+  fi
   sqlite3 "file:$NM_DB?mode=ro" \
     "SELECT r.id, r.status, r.updated_at, r.created_at,
             (SELECT COUNT(*) FROM runs c
@@ -209,7 +234,7 @@ run_index() {  # <project-path> <branch> -> "<id>|<status>|<updated_at>|<created
                        WHERE c.repo_id = r.repo_id AND c.branch = r.branch
                          AND c.created_at < r.created_at
                        ORDER BY c.created_at DESC LIMIT 1), 0),
-            COALESCE(r.head_sha, ''), COALESCE(r.worktree_dir, ''),
+            COALESCE(r.head_sha, ''), $wt_col,
             COALESCE(p.default_branch, 'main'), COALESCE(r.error, '')
        FROM runs r JOIN repos p ON p.id = r.repo_id
       WHERE p.working_path = '$(printf '%s' "$1" | sed "s/'/''/g")'
