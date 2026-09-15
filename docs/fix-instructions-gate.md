@@ -232,11 +232,11 @@ Verified 2026-09-15 against `no-mistakes version v1.70.1`:
 
 - `no-mistakes axi run --help` documents `--wait duration` (default `8m0s`) as "maximum time to block driving this run before returning so the caller can reattach", and states the 10-minute harness tool cap as the reason for that default.
 - `--wait` accepts a multi-hour value. `no-mistakes axi run --wait 3h` in a non-repo directory clears flag parsing and fails later with `error: not in a git repository`, while `--wait 3x` fails at parse time with `invalid argument "3x" for "--wait" flag: time: unknown unit "x" in duration "3x"`. The source agrees: `internal/cli/axi_drive.go:47` registers it with `cmd.Flags().DurationVar`, so the value goes through `time.ParseDuration` and has no upper bound of its own.
+- `no-mistakes axi respond --help` carries the identical `--wait` flag and the identical default.
 
 Every source citation in this document was read with `git show v1.70.1:<path>` in the `projects/no-mistakes` clone, not from that clone's working tree.
 The distinction matters: the clone's own checkout is at `ce2d749` (`v1.75.3-1-gce2d749`), five minor versions ahead of the installed binary, so its working tree describes a renderer this machine does not run.
 `v1.70.1` resolves to `9c380d4`, the exact commit the installed tool reports.
-- `no-mistakes axi respond --help` carries the identical `--wait` flag and the identical default.
 
 ### The status line, and why each verb is the one it is
 
