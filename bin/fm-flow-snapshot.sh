@@ -774,6 +774,8 @@ agent_json() {  # <task-json>
 
   steps='[]'
   actives='[]'
+  waiting_on=''
+  open_questions=0
   run_id=''
   run_status=''
   run_updated=0
@@ -849,6 +851,19 @@ agent_json() {  # <task-json>
       steps=$(steps_json "$axi")
       actives=$(active_steps_json "$axi")
       [ -n "$pr_url" ] || pr_url=$(toon_field "$axi" pr)
+      # The review conversation's own park. The fork's review step
+      # (kirangathani/no-mistakes 31b58c7) marks the gate `waiting_on: answers`
+      # and lists the still-open questions beside it, and that state is neither
+      # running nor wedged: the reviewer has said everything it can and is
+      # waiting on the captain. It is carried as its own field rather than
+      # inferred from the step status, which cannot tell the two parks apart.
+      # The value is under the gate object, so it is grepped rather than read
+      # through toon_field, which only reads top-level keys.
+      if printf '%s\n' "$axi" | grep -Eq '^[[:space:]]*waiting_on:[[:space:]]*"?answers"?'; then
+        waiting_on=answers
+        open_questions=$(printf '%s\n' "$axi" | grep -oE 'review_questions\[[0-9]+\]' | head -1 | grep -oE '[0-9]+')
+        [ -n "$open_questions" ] || open_questions=0
+      fi
     fi
   fi
 
@@ -1008,6 +1023,8 @@ agent_json() {  # <task-json>
     --arg pr_url "$pr_url" \
     --arg run_id "$run_id" \
     --arg run_status "$run_status" \
+    --arg waiting_on "$waiting_on" \
+    --argjson open_questions "${open_questions:-0}" \
     --arg run_error "$run_error" \
     --arg run_head "$run_head" \
     --arg agent_alive "$agent_alive" \
@@ -1050,6 +1067,8 @@ agent_json() {  # <task-json>
       run:{
         present:($run_id != ""),
         id:$run_id, status:$run_status,
+        waiting_on:(if $waiting_on == "" then null else $waiting_on end),
+        open_questions:$open_questions,
         error:$run_error, head:$run_head,
         db_updated_epoch:$run_updated,
         db_age_seconds:(if $run_updated > 0 then ($now_epoch - $run_updated) else null end)
@@ -1152,7 +1171,7 @@ compact_json() {  # <task-json>
       pr:{url:(if $pr_url == "" then null else $pr_url end), number:null},
       collection:{ok:true, reason:"this worker runs no pipeline", source:"",
                   at:$now_iso, epoch:$now_epoch},
-      run:{present:false, id:"", status:"",
+      run:{present:false, id:"", status:"", waiting_on:null, open_questions:0,
            db_updated_epoch:0, db_age_seconds:null},
       steps:[],
       active_steps:[],

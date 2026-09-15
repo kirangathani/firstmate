@@ -108,6 +108,11 @@ HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 NM_STALL_INTERVAL=${FM_NM_STALL_INTERVAL:-600}  # seconds between stalled-validation sweeps
+# Seconds between review-question sweeps. Shorter than the stall sweep because
+# this one is what puts a question in front of the captain WHILE the reviewer is
+# still working, and the whole value of the channel is that the answer arrives
+# before the rest of the pass is spent.
+NM_QUESTIONS_INTERVAL=${FM_NM_QUESTIONS_INTERVAL:-180}
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -871,6 +876,27 @@ while :; do
         # One reason line, because the daemon's wake grammar is line-oriented.
         reason="check: $(printf '%s' "$nm_stall_out" | tr '\n' ' ')"
         fm_wake_append check nm-stall "$reason" || exit 1
+        wake "$reason"
+      fi
+    fi
+  fi
+
+  # Slow review-question sweep: has a validating task's reviewer asked something
+  # only the captain can answer. It needs its own cadence for the same reason
+  # the stall sweep does - a validating fleet writes no status lines and shows
+  # no stale panes - and it cannot wait for the run to park, because the point
+  # of the channel is that an early answer redirects the rest of the pass.
+  # bin/fm-nm-questions.sh owns the protocol, the durable surfaced record and
+  # the wording; `surface` follows the *.check.sh contract of printing a line
+  # only when firstmate should wake, and nothing at all otherwise.
+  if [ "$(age_of "$STATE/.last-nm-questions")" -ge "$NM_QUESTIONS_INTERVAL" ]; then
+    touch "$STATE/.last-nm-questions"
+    if [ -x "$SCRIPT_DIR/fm-nm-questions.sh" ]; then
+      nm_q_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-nm-questions.sh" surface 2>/dev/null || true)
+      if [ -n "$nm_q_out" ]; then
+        reason="check: $(printf '%s' "$nm_q_out" | tr '\n' ' ')"
+        fm_wake_append check nm-questions "$reason" || exit 1
         wake "$reason"
       fi
     fi

@@ -44,7 +44,7 @@
 #      The coarse runs list is repo-wide and is therefore only ever queried for
 #      fm/<id>, the one branch name unique to this task.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
-#      awaiting_approval/fix_review -> parked (with gate findings), terminal
+#      awaiting_approval/fix_review -> parked (with gate findings, and named as waiting on answers when the gate is the review conversation's own question park), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
@@ -386,6 +386,17 @@ nm_gate_name() {
   [ -n "$gate" ] && { printf '%s' "$gate"; return; }
   row=$(nm_gate_step_row)
   [ -n "$row" ] && printf '%s' "${row%%|*}"
+}
+# The review conversation's own park, distinct from an ordinary gate park: the
+# fork's review step (kirangathani/no-mistakes 31b58c7) carries each still-open
+# question as an ask-user finding and marks the gate `waiting_on: answers`, with
+# a `review_questions[N]{...}` table beside it. Nothing is running and nothing is
+# wedged in that state - the reviewer has said everything it can and is waiting
+# on the captain - so it is named rather than folded into "validating".
+# Empty when the run is not in it.
+nm_review_question_count() {
+  printf '%s\n' "$RUN_OUT" | grep -Eq '^[[:space:]]*waiting_on:[[:space:]]*"?answers"?[[:space:]]*$' || return 0
+  printf '%s\n' "$RUN_OUT" | grep -oE 'review_questions\[[0-9]+\]' | head -1 | grep -oE '[0-9]+'
 }
 nm_gate_findings_count() {
   local f row rest
@@ -824,7 +835,10 @@ if [ "$HAVE_RUN" = 1 ]; then
       RUN_DETAIL="parked at $gate"
       fcount=$(nm_gate_findings_count)
       [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
-      if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
+      qcount=$(nm_review_question_count)
+      if [ -n "$qcount" ]; then
+        RUN_DETAIL="$RUN_DETAIL (waiting on answers: $qcount review question(s) for the captain)"
+      elif printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
         RUN_DETAIL="$RUN_DETAIL (ask-user: captain decision)"
       fi
     else

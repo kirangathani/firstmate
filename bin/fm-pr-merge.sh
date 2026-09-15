@@ -56,6 +56,13 @@
 # a local copy that does not resolve is noted rather than refused because the
 # test-keep gate below refuses that condition outright.
 #
+# Open-review-question gate: before the expensive gates, every question the
+# run's reviewer asked must be answered. bin/fm-nm-questions.sh owns the
+# predicate and reads the run's own review conversation; a still-open question
+# is a hard refusal with no override flag, and yolo is not one, because a human
+# can approve the review gate over an open question and this is what stops that
+# landing unanswered.
+#
 # Test-keep gate: after recording and before merging, bin/fm-assert-tests-kept.sh
 # must confirm every test assertion present on the authoritative base is still
 # present (check 1, by name) and still passing against the branch's code
@@ -985,6 +992,34 @@ EOF_RES_SHAS
   fi
 else
   echo "note: task $ID has no resolvable local copy, so the merge-resolution gate did not run; the kept-tests gate below refuses that same condition, so this merge cannot proceed on it" >&2
+fi
+
+# --- open-review-question gate (contract in this script's header) -------------
+# The reviewer's own questions are answered before the branch lands, never
+# after. bin/fm-nm-questions.sh owns the predicate: it reads the task's active
+# run's review conversation, applies retractions and supersedes, and reports
+# every question that is neither retracted nor answered.
+# It sits here, ahead of the up-to-date gate's fetch and the kept-tests gate's
+# 20-35 minutes, because it is one database read and one small file read.
+# There is no override flag and yolo is not one: a question the reviewer raised
+# and nobody answered is a decision the PR is asking for, and a human can
+# approve the review gate OVER an open question, which is precisely the case
+# this refuses to let land unanswered.
+# A task with no run, or a run with no conversation, holds no question and
+# passes silently. A conversation that EXISTS and cannot be read refuses, for
+# the same reason an unreadable check rollup does: an open question could be
+# sitting in it.
+if [ -x "$SCRIPT_DIR/fm-nm-questions.sh" ]; then
+  nmq_rc=0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-nm-questions.sh" gate "$ID" || nmq_rc=$?
+  if [ "$nmq_rc" -ne 0 ]; then
+    {
+      echo "error: this task's reviewer is still waiting on an answer, so the PR is asking for a decision nobody has given; refusing to merge."
+      echo "error: read the question with bin/fm-nm-questions.sh list $ID, put it to the captain as the multiple choice the reviewer wrote, then send the answer with bin/fm-nm-questions.sh answer."
+      echo "error: there is no override flag for this gate and yolo is not one."
+    } >&2
+    refuse open-review-question
+  fi
 fi
 
 # --- up-to-date gate (contract in this script's header) -----------------------
