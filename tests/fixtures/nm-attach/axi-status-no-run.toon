@@ -1,0 +1,15 @@
+current_branch: fm/fm-nm-attach-owner-a7
+runs_on_current_branch: 0
+count: 10 of 73 total
+runs[10]{id,branch,status,head,pr}:
+  "01M1VAA2GB7QK8VGYDQXTN5FTP",fm/fm-flow-elapsed-t2,completed,"42013930","https://github.com/kirangathani/firstmate/pull/63"
+  "01KZH6AZ75WXZG5JKQEMFBK6EJ",fm/fm-fix-instructions-i8,failed,36f586b1,""
+  "01KZH5FQE77B8QZVCYJ5HE2X6R",fm/design-work-p2,failed,4442cb61,""
+  "01KZH447PV9DJTKMJ4SERF3JKZ",fm/snapshot-argmax-a7,cancelled,66b11cf2,""
+  "01KZH3SZ0F9P945YF5129TA124",fm/pr-integrate-x1,cancelled,0bfb1d4d,""
+  "01KZH3HYHB1HQ10A2DQ4TB1W9K",fm/pr-integrate-x1,cancelled,0bfb1d4d,""
+  "01KZH2Y6S2PHM82NBT9Y94QN75",fm/design-work-p2,failed,a7cca4df,""
+  "01KZGYH5GF39FH7QN7QR336JFV",fm/fm-arm-lock-gate-q4,failed,17ab2f18,"https://github.com/kirangathani/firstmate/pull/30"
+  "01KZGXM9QQ2JD66T1K7QRQ5XXV",fm/lint-cache-shared-w8,cancelled,"0062943a","https://github.com/kirangathani/firstmate/pull/28"
+  "01KZGM7NAGHK6JYW5H2MZ499JA",fm/gate-pr-base-ref-b6,cancelled,5074d727,""
+help[2]: "Run no-mistakes axi run --intent \"the user's goal\" --yes to validate the current branch",No run exists for this branch; every run listed above is on another branch - inspect one deliberately with `no-mistakes axi status --run <id>`

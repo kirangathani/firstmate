@@ -475,13 +475,23 @@ generated_no_mistakes_brief() {
   printf '%s\n' "$NM_BRIEF"
 }
 
-test_ship_brief_pins_the_intent_to_its_one_owner() {
+test_ship_brief_routes_every_attach_through_its_one_owner() {
   local brief
   brief=$(generated_no_mistakes_brief)
-  assert_grep "fm-nm-intent.sh' gate-demo" "$brief" "the brief must name the intent owner with this task's id"
-  assert_grep 'no-mistakes axi run --intent' "$brief" "the brief must show the pinned run command"
+  assert_grep "fm-nm-attach.sh' gate-demo" "$brief" "the brief must name the attach owner with this task's id"
+  assert_grep "fm-nm-attach.sh' gate-demo --respond --action" "$brief" \
+    "the brief must show how to answer a gate through the attach owner"
   assert_grep 'never a paraphrase' "$brief" "the brief must say why the intent is pinned"
-  pass "brief: pins --intent to bin/fm-nm-intent.sh, the one owner of that string"
+  # The raw commands are denied before they run, so the brief must not hand a
+  # worker one to type. Anchored to a real invocation shape, so the prose that
+  # explains WHY they are refused is still allowed to name them.
+  assert_no_grep 'no-mistakes axi run --intent' "$brief" \
+    "the brief must not show the raw run command it exists to replace"
+  assert_grep 'returns immediately, on purpose' "$brief" \
+    "the brief must say the immediate return is deliberate, or a worker will retry it"
+  assert_grep 'ONE line to your status file' "$brief" \
+    "the brief must say the status line is what wakes firstmate"
+  pass "brief: routes every start, reattach and gate response through bin/fm-nm-attach.sh"
 }
 
 test_ship_brief_states_the_fix_instructions_rule() {
@@ -491,6 +501,8 @@ test_ship_brief_states_the_fix_instructions_rule() {
   assert_grep 'principle the fix must preserve' "$brief" "the brief must state the preserve clause"
   assert_grep 'not break or reintroduce' "$brief" "the brief must state the do-not-reintroduce clause"
   assert_grep 'refused before it runs' "$brief" "the brief must say the refusal is mechanical"
+  assert_grep 'through the attach owner like any other flag' "$brief" \
+    "the brief must say where --instructions is passed now"
   pass "brief: states the fix-instructions requirement the seatbelt enforces"
 }
 
@@ -499,7 +511,7 @@ test_ship_brief_requires_recording_and_a_re_run() {
   brief=$(generated_no_mistakes_brief)
   assert_grep "fm-nm-decision.sh' record gate-demo" "$brief" "the brief must require recording each gate decision"
   assert_grep "fm-nm-decision.sh' rerun-check gate-demo" "$brief" "the brief must require the re-run gate before done"
-  assert_grep 'start a fresh run with the same pinned-intent command' "$brief" \
+  assert_grep 'start a fresh run with the same attach command' "$brief" \
     "the brief must require a re-run after any round that produced a decision"
   assert_grep 'must exit 0 before you report done' "$brief" "the re-run gate must be a precondition, not advice"
   assert_grep '#591' "$brief" "the brief must cite the upstream evidence"
@@ -597,13 +609,28 @@ test_ship_brief_commands_carry_the_resolved_home() {
   brief="$home/data/nohome-demo/brief.md"
   sed -i 's/{TASK}/Pinned intent fixture text./' "$brief"
   assert_grep "FM_HOME='$home'" "$brief" "the brief's helper commands must carry the resolved home"
-  cmd=$(grep -o "FM_HOME='[^']*' '[^']*fm-nm-intent\.sh' nohome-demo" "$brief" | head -1)
-  [ -n "$cmd" ] || fail "could not extract the emitted intent command from the generated brief"
-  out=$(env -u FM_HOME bash -c "$cmd") \
-    || fail "the brief's own intent command failed with no inherited FM_HOME"
+  # The attach owner is the command the brief now emits. The failure this case
+  # guards is a root-anchored path that resolves data/ and state/ to the code
+  # root and so finds nothing in a secondmate home, so it is enough to prove the
+  # emitted command resolves THIS home: run it with FM_HOME scrubbed from the
+  # environment and read which home its refusal names. Actually attaching would
+  # need a daemon and a worktree this case does not have.
+  cmd=$(grep -o "FM_HOME='[^']*' '[^']*fm-nm-attach\.sh' nohome-demo" "$brief" | head -1)
+  [ -n "$cmd" ] || fail "could not extract the emitted attach command from the generated brief"
+  case "$cmd" in
+    *"'$home'"*) ;;
+    *) fail "the emitted attach command did not carry the resolved home: $cmd" ;;
+  esac
+  out=$(env -u FM_HOME bash -c "$cmd" 2>&1) && fail "the attach command should refuse without this home's state"
+  assert_contains "$out" "$home/state" \
+    "the emitted attach command resolved some other home with no inherited FM_HOME: $out"
+  # And the intent it composes for that task is still this brief's own text,
+  # resolved under the same home with nothing inherited.
+  out=$(env -u FM_HOME bash -c "FM_HOME='$home' '$ROOT/bin/fm-nm-intent.sh' nohome-demo") \
+    || fail "the attach owner's intent source failed with no inherited FM_HOME"
   case "$out" in
     *"Pinned intent fixture text."*) ;;
-    *) fail "the emitted intent command did not print the task text: $out" ;;
+    *) fail "the intent the attach owner composes did not print the task text: $out" ;;
   esac
   grep -q "FM_HOME='$home' '[^']*fm-nm-decision\.sh' record nohome-demo" "$brief" \
     || fail "the decision-record command must carry the resolved home too"
@@ -614,7 +641,8 @@ test_scripts_are_shellcheck_clean() {
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
   shellcheck "$INTENT" >/dev/null 2>&1 || fail "bin/fm-nm-intent.sh is not shellcheck-clean"
   shellcheck "$DECISION" >/dev/null 2>&1 || fail "bin/fm-nm-decision.sh is not shellcheck-clean"
-  pass "bin/fm-nm-intent.sh and bin/fm-nm-decision.sh are shellcheck-clean"
+  shellcheck "$ROOT/bin/fm-nm-attach.sh" >/dev/null 2>&1 || fail "bin/fm-nm-attach.sh is not shellcheck-clean"
+  pass "the intent, decision and attach owners are shellcheck-clean"
 }
 
 test_intent_is_the_brief_task_section
@@ -643,7 +671,7 @@ test_decision_requires_text_is_not_rewritten
 test_decision_marks_only_the_named_block
 test_decision_usage_errors
 test_decision_list_and_path
-test_ship_brief_pins_the_intent_to_its_one_owner
+test_ship_brief_routes_every_attach_through_its_one_owner
 test_ship_brief_states_the_fix_instructions_rule
 test_ship_brief_requires_recording_and_a_re_run
 test_ship_brief_states_the_no_change_outcome

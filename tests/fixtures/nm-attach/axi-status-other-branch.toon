@@ -1,0 +1,20 @@
+current_branch: fm/fm-nm-attach-owner-a7
+other_branch_run:
+  id: "01KZH6AZ75WXZG5JKQEMFBK6EJ"
+  branch: fm/fm-fix-instructions-i8
+  status: failed
+  head: 36f586b1
+  head_sha: 36f586b1dbeea060237eec243159e258b1bf6e58
+  findings: none
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,22
+    rebase,completed,0,15655
+    review,failed,0,500603
+    test,pending,0,0
+    document,pending,0,0
+    lint,pending,0,0
+    push,pending,0,0
+    pr,pending,0,0
+    ci,pending,0,0
+outcome: failed
+error: "step review failed: agent review: claude exited: exit status 1: "

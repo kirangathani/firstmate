@@ -1212,10 +1212,12 @@ fi
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
 # they never block teardown's dirty check or leak into a commit.
 #
-# The same per-harness hook files also carry the fix-instructions PreToolUse
-# seatbelt (bin/fm-fix-instructions-check.sh, docs/fix-instructions-gate.md),
-# which denies a `no-mistakes axi respond --action fix` that carries no
-# substantive --instructions. It is wired here rather than per task so every
+# The same per-harness hook files also carry the no-mistakes PreToolUse seatbelt
+# (bin/fm-fix-instructions-check.sh, docs/fix-instructions-gate.md), which denies
+# a raw `no-mistakes axi run` or `axi respond` outright - both block on the
+# daemon, so bin/fm-nm-attach.sh owns them - and which is also the owner the
+# wrapper itself calls for the fix-round --instructions floor. It is wired here
+# rather than per task so every
 # newly spawned crewmate receives it with no hand wiring, exactly as the turn-end
 # signal is. The check is referenced by absolute path into the firstmate code
 # root because a task worktree is a worktree of the PROJECT, not of firstmate.

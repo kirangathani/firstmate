@@ -26,8 +26,17 @@
 # Usage:
 #   fm-nm-intent.sh <task-id>
 #
-# Typical use, from inside a task worktree:
-#   no-mistakes axi run --intent "$(<firstmate-root>/bin/fm-nm-intent.sh <task-id>)"
+# NOBODY CALLS THIS BY HAND ANYMORE. bin/fm-nm-attach.sh - the one owner of
+# attaching to a run - composes the intent through this script and passes it to
+# `no-mistakes axi run --intent`, and a PreToolUse gate denies a worker's raw
+# `axi run`/`axi respond` outright, so the wrapper is the only route:
+#   <firstmate-root>/bin/fm-nm-attach.sh <task-id>              # start or reattach
+#   <firstmate-root>/bin/fm-nm-attach.sh <task-id> --respond ... # answer a gate
+# That wrapper detaches the attach with a multi-hour wait and returns at once,
+# then appends one line to state/<task-id>.status when the run reaches a gate or
+# an outcome; that status line is what wakes firstmate. Run this script directly
+# only to INSPECT what the intent currently says. It also owns the size cap on
+# that intent - see bin/fm-nm-attach.sh's header.
 #
 # Refuses loudly (exit 1, nothing on stdout) when the brief is missing, has no
 # `# Task` section, or still carries the unreplaced {TASK} placeholder. A silent

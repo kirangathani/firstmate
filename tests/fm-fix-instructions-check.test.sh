@@ -34,8 +34,15 @@ GOOD_INSTRUCTIONS="The reporting surface must never imply a verification it did 
 # Present but a single word: exactly what the captain rejected presence-only for.
 THIN_INSTRUCTIONS="context"
 
+# The one command the per-harness wiring drives both ways. DENY_COMMAND is a
+# real fix round, which the gate now refuses as a RAW ATTACH before it ever
+# reaches the substance floor: `no-mistakes axi run` and `axi respond` are owned
+# by bin/fm-nm-attach.sh. ALLOW_COMMAND has to be a no-mistakes command that is
+# genuinely still allowed, so it is the read-only one - a substantive fix round
+# is no longer an allow through this transport.
 DENY_COMMAND="no-mistakes axi respond --action fix --findings F1"
-ALLOW_COMMAND="no-mistakes axi respond --action fix --findings F1 --instructions \"$GOOD_INSTRUCTIONS\""
+DENY_CODE=nm-raw-attach
+ALLOW_COMMAND="no-mistakes axi status"
 
 # --- full cross-harness acceptance matrix ----------------------------------
 
@@ -51,38 +58,59 @@ matrix_case() {
   MATRIX_COMMANDS+=("$4")
 }
 
-# BLOCK: a fix round with no --instructions at all.
-matrix_case B01 deny fix-instructions-missing 'no-mistakes axi respond --action fix'
-matrix_case B02 deny fix-instructions-missing 'no-mistakes axi respond --action fix --findings F1,F2'
-matrix_case B03 deny fix-instructions-missing 'no-mistakes axi respond --action=fix --findings F1'
-matrix_case B04 deny fix-instructions-missing 'no-mistakes axi respond --step review --action fix'
-matrix_case B05 deny fix-instructions-missing '/usr/local/bin/no-mistakes axi respond --action fix'
-matrix_case B06 deny fix-instructions-missing 'cd /tmp && no-mistakes axi respond --action fix'
-matrix_case B07 deny fix-instructions-missing 'no-mistakes axi respond --action fix | tee log'
-matrix_case B08 deny fix-instructions-missing "bash -c 'no-mistakes axi respond --action fix'"
-matrix_case B09 deny fix-instructions-missing '(no-mistakes axi respond --action fix)'
-matrix_case B10 deny fix-instructions-missing 'no-mistakes axi respond --action fix --add-finding {}'
+# BLOCK: every raw attach, whatever it is trying to do. `axi run` and
+# `axi respond` both block on the daemon, so both are owned by the wrapper, and
+# the denial fires ahead of the substance floor. The floor itself is still
+# enforced, by the wrapper, and is pinned in --fix-instructions-only mode below.
+#
+# A fix round with no --instructions at all.
+matrix_case B01 deny nm-raw-attach 'no-mistakes axi respond --action fix'
+matrix_case B02 deny nm-raw-attach 'no-mistakes axi respond --action fix --findings F1,F2'
+matrix_case B03 deny nm-raw-attach 'no-mistakes axi respond --action=fix --findings F1'
+matrix_case B04 deny nm-raw-attach 'no-mistakes axi respond --step review --action fix'
+matrix_case B05 deny nm-raw-attach '/usr/local/bin/no-mistakes axi respond --action fix'
+matrix_case B06 deny nm-raw-attach 'cd /tmp && no-mistakes axi respond --action fix'
+matrix_case B07 deny nm-raw-attach 'no-mistakes axi respond --action fix | tee log'
+matrix_case B08 deny nm-raw-attach "bash -c 'no-mistakes axi respond --action fix'"
+matrix_case B09 deny nm-raw-attach '(no-mistakes axi respond --action fix)'
+matrix_case B10 deny nm-raw-attach 'no-mistakes axi respond --action fix --add-finding {}'
 
-# BLOCK: a fix round whose --instructions are below the substance floor.
-matrix_case B11 deny fix-instructions-thin "no-mistakes axi respond --action fix --instructions '$THIN_INSTRUCTIONS'"
-matrix_case B12 deny fix-instructions-thin 'no-mistakes axi respond --action fix --instructions "fix it"'
-matrix_case B13 deny fix-instructions-thin 'no-mistakes axi respond --action fix --instructions=short'
-matrix_case B14 deny fix-instructions-thin 'no-mistakes axi respond --action fix --instructions "                                                                                                                             "'
-matrix_case B15 deny fix-instructions-thin "no-mistakes axi respond --action fix --instructions 'do what the finding says and keep it clean'"
+# A fix round whose --instructions are below the substance floor.
+matrix_case B11 deny nm-raw-attach "no-mistakes axi respond --action fix --instructions '$THIN_INSTRUCTIONS'"
+matrix_case B12 deny nm-raw-attach 'no-mistakes axi respond --action fix --instructions "fix it"'
+matrix_case B13 deny nm-raw-attach 'no-mistakes axi respond --action fix --instructions=short'
+matrix_case B14 deny nm-raw-attach 'no-mistakes axi respond --action fix --instructions "                                                                                                                             "'
+matrix_case B15 deny nm-raw-attach "no-mistakes axi respond --action fix --instructions 'do what the finding says and keep it clean'"
 
-# ALLOW: a fix round carrying substantive instructions.
-matrix_case A01 allow '' "no-mistakes axi respond --action fix --instructions '$GOOD_INSTRUCTIONS'"
-matrix_case A02 allow '' "no-mistakes axi respond --action fix --findings F1 --instructions \"$GOOD_INSTRUCTIONS\""
-matrix_case A03 allow '' "no-mistakes axi respond --instructions '$GOOD_INSTRUCTIONS' --action fix"
-matrix_case A04 allow '' "no-mistakes axi respond --action fix --instructions='$GOOD_INSTRUCTIONS'"
-matrix_case A05 allow '' "bash -c \"no-mistakes axi respond --action fix --instructions '$GOOD_INSTRUCTIONS'\""
+# A substantive fix round. It used to allow; it is now refused for a different
+# reason, because substantive instructions do not make a foreground attach safe.
+matrix_case B16 deny nm-raw-attach "no-mistakes axi respond --action fix --instructions '$GOOD_INSTRUCTIONS'"
+matrix_case B17 deny nm-raw-attach "no-mistakes axi respond --action fix --findings F1 --instructions \"$GOOD_INSTRUCTIONS\""
+matrix_case B18 deny nm-raw-attach "no-mistakes axi respond --instructions '$GOOD_INSTRUCTIONS' --action fix"
+matrix_case B19 deny nm-raw-attach "no-mistakes axi respond --action fix --instructions='$GOOD_INSTRUCTIONS'"
+matrix_case B20 deny nm-raw-attach "bash -c \"no-mistakes axi respond --action fix --instructions '$GOOD_INSTRUCTIONS'\""
 
-# ALLOW: not a fix round at all.
-matrix_case A06 allow '' 'no-mistakes axi respond --action approve'
-matrix_case A07 allow '' 'no-mistakes axi respond --action skip'
-matrix_case A08 allow '' 'no-mistakes axi run --intent "ship the thing"'
+# Any other gate response, and starting a run.
+matrix_case B21 deny nm-raw-attach 'no-mistakes axi respond --action approve'
+matrix_case B22 deny nm-raw-attach 'no-mistakes axi respond --action skip'
+matrix_case B23 deny nm-raw-attach 'no-mistakes axi run --intent "ship the thing"'
+
+# A dynamic flag VALUE on a real attach node. The old floor deliberately failed
+# open on one, because an unexpanded payload cannot be measured; the raw-attach
+# rule does not measure anything, so it still refuses.
+matrix_case B24 deny nm-raw-attach 'no-mistakes axi respond --action fix --instructions "$REASONING"'
+matrix_case B25 deny nm-raw-attach 'no-mistakes axi respond --action fix --instructions "$(cat /tmp/reasoning.txt)"'
+matrix_case B26 deny nm-raw-attach 'no-mistakes axi respond --action "$DECIDED" --instructions "x"'
+
+# ALLOW: the no-mistakes subcommands that return immediately, so nothing about
+# them needs owning, plus reading the tool's own documentation.
 matrix_case A09 allow '' 'no-mistakes doctor'
 matrix_case A10 allow '' 'no-mistakes axi status'
+matrix_case A21 allow '' 'no-mistakes axi logs --step review --full'
+matrix_case A22 allow '' 'no-mistakes axi sync'
+matrix_case A23 allow '' 'no-mistakes axi abort'
+matrix_case A24 allow '' 'no-mistakes axi run --help'
+matrix_case A25 allow '' 'no-mistakes --version'
 
 # ALLOW: the bytes appear only as data, never in command position.
 matrix_case A11 allow '' "echo 'no-mistakes axi respond --action fix'"
@@ -90,13 +118,13 @@ matrix_case A12 allow '' "printf '%s\\n' 'no-mistakes axi respond --action fix'"
 matrix_case A13 allow '' '# no-mistakes axi respond --action fix'
 matrix_case A14 allow '' 'grep -r "no-mistakes axi respond --action fix" docs/'
 
-# ALLOW: unrelated commands, and the deliberate dynamic-value fail-open.
+# ALLOW: unrelated commands, and the dynamic PROGRAM NAME fail-open - an
+# unexpanded command word cannot be resolved without running it, and this policy
+# runs nothing.
 matrix_case A15 allow '' 'ls -la'
 matrix_case A16 allow '' 'git commit -m "wire the fix gate"'
-matrix_case A17 allow '' 'no-mistakes axi respond --action fix --instructions "$REASONING"'
-matrix_case A18 allow '' 'no-mistakes axi respond --action fix --instructions "$(cat /tmp/reasoning.txt)"'
-matrix_case A19 allow '' 'no-mistakes axi respond --action "$DECIDED" --instructions "x"'
 matrix_case A20 allow '' '$NM axi respond --action fix'
+matrix_case A26 allow '' "$ROOT/bin/fm-nm-attach.sh some-task --respond --action approve"
 
 MATRIX_TMP="$TMP_ROOT/matrix"
 mkdir -p "$MATRIX_TMP"
@@ -141,12 +169,26 @@ run_matrix_entry() {
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
   jq -e --arg code "$code" '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | contains("[" + $code + "]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry the $code reason code on stderr: $(cat "$err_file")"
-  # The refusal must name what is missing AND what the instructions must contain.
-  jq -e '.systemMessage
-           | contains("design reasoning")
-             and contains("principle the fix must preserve")
-             and contains("not break or reintroduce")' "$err_file" >/dev/null 2>&1 \
-    || fail "$id via $entry deny must state what the instructions must contain: $(cat "$err_file")"
+  # A refusal is only useful if it hands back the thing to do instead. What that
+  # is depends on the code, so it is asserted per code rather than once: a
+  # raw-attach denial must name the wrapper command, and a floor denial must name
+  # what the instructions have to contain.
+  case "$code" in
+    nm-raw-attach)
+      jq -e --arg wrapper "$ROOT/bin/fm-nm-attach.sh" '.systemMessage
+               | contains($wrapper + " <task-id>")
+                 and contains("--respond")
+                 and contains("axi status")' "$err_file" >/dev/null 2>&1 \
+        || fail "$id via $entry deny must name the wrapper command to use instead: $(cat "$err_file")"
+      ;;
+    fix-instructions-*)
+      jq -e '.systemMessage
+               | contains("design reasoning")
+                 and contains("principle the fix must preserve")
+                 and contains("not break or reintroduce")' "$err_file" >/dev/null 2>&1 \
+        || fail "$id via $entry deny must state what the instructions must contain: $(cat "$err_file")"
+      ;;
+  esac
   if [ "$entry" = claude ]; then
     [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
   elif [ "$entry" = grok ]; then
@@ -162,7 +204,58 @@ test_full_acceptance_matrix() {
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "${MATRIX_CODES[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
   done
-  pass "fix-instructions acceptance matrix: ${#MATRIX_IDS[@]} cases x 5 harness entry forms, block/allow all correct"
+  # The assertion NAME is a constant and the case count is reported beside it.
+  # bin/fm-assert-tests-kept.sh's check 2 compares the names two runs emitted,
+  # and can only do that while a name is stable; a count derived from the tree
+  # under test is a different string on every tree, so it landed in `unstable:`
+  # and blocked every landing. That script's header states this exact remedy:
+  # "name the assertion with a constant string and put the runtime value in its
+  # fail message". Each case's own failure already names the case, so the total
+  # goes to a diagnostic line rather than into a new assertion identifier.
+  echo "# matrix: ${#MATRIX_IDS[@]} cases x 5 harness entry forms"
+  pass "fix-instructions acceptance matrix: every case blocks or allows correctly through every harness entry form"
+}
+
+# --- the substance floor still has an owner, behind the wrapper's mode -------
+#
+# The PreToolUse gate refuses every raw attach, so it never sees a fix round
+# again and can no longer be where the floor is enforced. bin/fm-nm-attach.sh
+# calls this same policy owner with --fix-instructions-only before it sends a
+# response, which is the ONE remaining place the floor can fire. These cases
+# reuse the matrix's own B-series command strings so the floor's acceptance set
+# is unchanged by the redirect, only relocated.
+
+floor_code() {  # <command> -> the deny code in --fix-instructions-only mode, or "allow"
+  local out
+  out=$(node "$POLICY" --fix-instructions-only --command "$1" 2>/dev/null) || { printf 'error'; return; }
+  case "$out" in
+    deny*) printf '%s' "$out" | cut -f2 ;;
+    *) printf 'allow' ;;
+  esac
+}
+
+test_the_floor_is_still_enforced_in_the_wrapper_mode() {
+  local i id cmd want got denied=0 allowed=0
+  for ((i = 0; i < ${#MATRIX_IDS[@]}; i++)); do
+    id=${MATRIX_IDS[$i]}
+    cmd=${MATRIX_COMMANDS[$i]}
+    # The floor's own verdict for each matrix command, derived from the case id
+    # rather than restated: B01-B10 are fix rounds with no instructions at all,
+    # B11-B15 are fix rounds below the floor, and everything else clears it -
+    # including the raw attaches the gate refuses for its own reason.
+    case "$id" in
+      B0[1-9]|B10) want=fix-instructions-missing ;;
+      B1[1-5]) want=fix-instructions-thin ;;
+      *) want=allow ;;
+    esac
+    got=$(floor_code "$cmd")
+    [ "$got" = "$want" ] \
+      || fail "$id: the floor answered $got in --fix-instructions-only mode, expected $want: $cmd"
+    if [ "$want" = allow ]; then allowed=$((allowed + 1)); else denied=$((denied + 1)); fi
+  done
+  [ "$denied" -eq 15 ] || fail "the floor should refuse exactly the 15 B01-B15 cases, counted $denied"
+  [ "$allowed" -gt 0 ] || fail "the floor refused every case, so it is no longer a floor"
+  pass "substance floor: still refuses all 15 context-free fix rounds in the wrapper's mode, and nothing else"
 }
 
 # --- the substance floor is a named constant, not a magic number ------------
@@ -179,13 +272,25 @@ test_substance_floor_is_a_named_constant() {
   at_floor=$(head -c "$floor" < /dev/zero | tr '\0' 'a')
   below_floor=$(head -c "$((floor - 1))" < /dev/zero | tr '\0' 'a')
 
-  "$CHECK" --command "no-mistakes axi respond --action fix --instructions '$at_floor'" >/dev/null 2>&1; rc=$?
-  expect_code 0 "$rc" "instructions of exactly MIN_INSTRUCTIONS_CHARS ($floor) must be allowed"
-  "$CHECK" --command "no-mistakes axi respond --action fix --instructions '$below_floor'" >/dev/null 2>&1; rc=$?
-  expect_code 2 "$rc" "instructions one character below MIN_INSTRUCTIONS_CHARS ($floor) must be denied"
+  # Probed in --fix-instructions-only mode, the mode bin/fm-nm-attach.sh calls:
+  # the PreToolUse transport refuses every raw attach ahead of the floor, so the
+  # boundary is only observable where the floor is still the deciding rule.
+  local at_out below_out
+  at_out=$(node "$POLICY" --fix-instructions-only \
+    --command "no-mistakes axi respond --action fix --instructions '$at_floor'")
+  [ "$at_out" = allow ] || fail "instructions of exactly MIN_INSTRUCTIONS_CHARS ($floor) must be allowed: $at_out"
+  below_out=$(node "$POLICY" --fix-instructions-only \
+    --command "no-mistakes axi respond --action fix --instructions '$below_floor'" | cut -f2)
+  [ "$below_out" = fix-instructions-thin ] \
+    || fail "instructions one character below MIN_INSTRUCTIONS_CHARS ($floor) must be denied: $below_out"
+  rc=0
   # The constant needs its value justified in a comment, not left bare.
   assert_grep 'Justification for' "$POLICY" "MIN_INSTRUCTIONS_CHARS must carry a justification comment"
-  pass "substance floor: named constant MIN_INSTRUCTIONS_CHARS=$floor, boundary exact, justified in a comment"
+  # Constant name, for the same reason. The floor is read from the module at run
+  # time, so interpolating it made this name unverifiable by that gate; both
+  # boundary checks above already carry the value in their own fail messages.
+  echo "# substance floor: MIN_INSTRUCTIONS_CHARS=$floor"
+  pass "substance floor: named constant MIN_INSTRUCTIONS_CHARS, boundary exact, justified in a comment"
 }
 
 # --- transport fail-open behavior -------------------------------------------
@@ -276,9 +381,9 @@ test_prefilter_is_a_strict_superset() {
 test_policy_cli_direct() {
   local out
   out=$(node "$POLICY" --command "$DENY_COMMAND")
-  assert_contains "$out" 'deny	fix-instructions-missing' "direct policy CLI must emit the tab-separated deny record"
+  assert_contains "$out" "deny	$DENY_CODE" "direct policy CLI must emit the tab-separated deny record"
   out=$(node "$POLICY" --command "$ALLOW_COMMAND")
-  [ "$out" = "allow" ] || fail "direct policy CLI must emit allow for a substantive fix round: $out"
+  [ "$out" = "allow" ] || fail "direct policy CLI must emit allow for a read-only axi command: $out"
   pass "policy owner: direct CLI emits stable allow/deny records"
 }
 
@@ -358,7 +463,7 @@ assert_hook_command() {
   rc=$?
   if [ "$expected" = deny ]; then
     expect_code 2 "$rc" "$label must deny a bare fix round"
-    assert_contains "$(cat "$err")" 'fix-instructions-missing' "$label deny must carry the reason code"
+    assert_contains "$(cat "$err")" "$DENY_CODE" "$label deny must carry the reason code"
   else
     expect_code 0 "$rc" "$label must allow a substantive fix round"
     [ ! -s "$err" ] || fail "$label allow must stay silent: $(cat "$err")"
@@ -533,7 +638,7 @@ EOF
     process.stdout.write(`${await run("ls -la")}\n`);
   ' 2>&1) || fail "driving the opencode plugin failed: $out"
   assert_contains "$out" 'blocked:' "opencode plugin must throw on a bare fix round: $out"
-  assert_contains "$out" 'fix-instructions-missing' "opencode plugin must surface the reason code: $out"
+  assert_contains "$out" "$DENY_CODE" "opencode plugin must surface the reason code: $out"
   [ "$(printf '%s\n' "$out" | sed -n 2p)" = allowed ] || fail "opencode plugin must allow a substantive fix round: $out"
   [ "$(printf '%s\n' "$out" | sed -n 3p)" = allowed ] || fail "opencode plugin must allow an unrelated command: $out"
   pass "opencode: fm-spawn writes a plugin whose tool.execute.before blocks/allows end to end"
@@ -566,7 +671,7 @@ EOF
     process.stdout.write(`${await run("ls -la")}\n`);
   ' 2>&1) || fail "driving the pi extension failed: $out"
   assert_contains "$out" 'blocked:' "pi extension must block a bare fix round: $out"
-  assert_contains "$out" 'fix-instructions-missing' "pi extension must surface the reason code: $out"
+  assert_contains "$out" "$DENY_CODE" "pi extension must surface the reason code: $out"
   [ "$(printf '%s\n' "$out" | sed -n 2p)" = allowed ] || fail "pi extension must allow a substantive fix round: $out"
   [ "$(printf '%s\n' "$out" | sed -n 3p)" = allowed ] || fail "pi extension must allow an unrelated command: $out"
   pass "pi: fm-spawn writes an extension whose tool_call blocks/allows end to end"
@@ -602,6 +707,7 @@ test_scripts_are_shellcheck_clean() {
 }
 
 test_full_acceptance_matrix
+test_the_floor_is_still_enforced_in_the_wrapper_mode
 test_substance_floor_is_a_named_constant
 test_fail_open_empty_stdin
 test_fail_open_unparseable_json

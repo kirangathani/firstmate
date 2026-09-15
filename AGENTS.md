@@ -96,6 +96,7 @@ state/               volatile runtime signals; gitignored
   <id>.acted           written by bin/fm-ack.sh, bin/fm-send.sh, and bin/fm-pr-check.sh: firstmate acted on this task's reported state; silences the unactioned alarm until the crew's next status append (bin/fm-ack-lib.sh); removed by teardown
   <id>.stale-base-ack  written by bin/fm-stale-base.sh --ack: firstmate acted on this task's stale-base finding; keyed to the base commit, so a base that moves again re-alarms; removed by teardown
   <id>.monitor-exempt  captain-signed standing exemption from the monitoring alarm, written only by bin/fm-monitor.sh --exempt; the signature and stated reason are what make it authority, so an unsigned or hand-written record is NOT an exemption; announced at every session start while it stands; removed by teardown
+  <id>.nm-attach       liveness record of the one detached no-mistakes attach bin/fm-nm-attach.sh has running for the task, holding that hold's pid and log path; that script's header owns the format and the idempotency contract; removed by teardown
   <id>.nm-progress     last observed no-mistakes step fingerprint and the window it has gone unchanged, written by bin/fm-nm-stall.sh, whose header owns the format; removed by teardown
   <id>.nm-stall-ack    written by bin/fm-nm-stall.sh --ack: firstmate acted on this task's stalled-validation finding; keyed to the frozen step, so a run that advances and freezes again re-alarms; removed by teardown
   <id>.merge-green-rounds  one line per merge-main-forward steer bin/fm-merge-green.sh has sent for this task, so its summary can report how many update rounds a branch needed; removed by teardown
@@ -310,12 +311,12 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 ### Validate
 
 For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
-The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
-Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
+The task worker that starts a no-mistakes run drives the pipeline and owns every attach through the next gate or outcome, always through `bin/fm-nm-attach.sh`, whose header owns why the raw `axi run`/`axi respond` is denied and how its one status line per returned hold is what wakes firstmate.
+Firstmate never responds to a gate for a crew-owned run.
 
 An ask-user finding of severity `info` or `suggestion` is answered by the worker itself under the generated brief's rule, so only `warning` and `error` findings, plus anything security-shaped at any severity, return as `needs-decision`; firstmate decides those only when the configured authority permits, otherwise escalates to the captain.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command.
-Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
+Require the matching `resolved` event, forbid `--yes`, and require the worker to keep driving each returned hold until completion or a genuinely new escalation.
 A recorded decision amends that task's pinned intent, so a gate round that produced any decision changing the branch ends with a fresh run scored against the decided goal rather than a separate end-of-run check that each decision survived, while a decision recorded as changing nothing is listed and owes no run.
 A worker gets at most two further fix rounds per run on the same findings and then files what is left as a follow-up backlog item and carries on, which is a normal outcome and never reported as a failure.
 Resume fleet supervision immediately after the decision lands.
