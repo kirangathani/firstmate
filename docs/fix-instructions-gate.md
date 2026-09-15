@@ -263,7 +263,7 @@ A record whose own `branch:` is not `fm/<task-id>` is discarded rather than repo
 ### What it refuses, all before anything is launched
 
 - A working directory that is not a git worktree on `fm/<task-id>`. Both `axi run` and `axi status` answer for the worktree they are called in, so a wrong cwd drives another task's run.
-- `--yes` anywhere in the respond arguments.
+- `--yes` anywhere in the respond arguments, in every spelling Cobra accepts: `--yes`, `--yes=true`, `-y`, and `-y` inside a short-flag cluster. The cluster test is narrowed to a pure dash-and-letters word so an ordinary flag value cannot trip it.
 - A fix round below the substance floor, delegated to `bin/fm-fix-instructions-policy.mjs --fix-instructions-only`. The PreToolUse gate never sees a fix round again, so this is where that floor now lives.
 - A second attach while one is already alive for the task, pointing at the live log. The marker holds the follower's pid, and a pid that is no longer alive is treated as a dead hold's leftover rather than as a reason to strand the task.
 - A composed intent over the push-option size limit, with the measured size.
