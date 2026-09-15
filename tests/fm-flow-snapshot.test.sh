@@ -126,13 +126,14 @@ CREATE TABLE runs (
   id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repos(id), branch TEXT NOT NULL,
   head_sha TEXT NOT NULL, base_sha TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
   pr_url TEXT, error TEXT, awaiting_agent_since INTEGER,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, worktree_dir TEXT);
 INSERT INTO repos VALUES ('repo1','$PROJECT','git@github.com:x/y.git',NULL,'main',1000);
 INSERT INTO runs VALUES
-  ('01KZETHEHPT5RQFB14A83FMZCK','repo1','fm/eager-dispatch-e2','bb73f233','base','running',NULL,NULL,NULL,2000,2500),
-  ('01KZGM44YAB57YWGBN0E0XFZF4','repo1','fm/arm-lock-gate-q4','653a676f','base','failed',NULL,NULL,NULL,3000,3500),
-  ('01KZOLDOLDOLDOLDOLDOLDOLDX','repo1','fm/arm-lock-gate-q4','aaaaaaa','base','completed',NULL,NULL,NULL,1500,1600),
-  ('01KZWEDGEDWEDGEDWEDGEDWEDG','repo1','fm/stale-runner-s9','ccccccc','base','running',NULL,NULL,NULL,500,600);
+  ('01KZETHEHPT5RQFB14A83FMZCK','repo1','fm/eager-dispatch-e2','bb73f233','base','running',NULL,NULL,NULL,2000,2500,NULL),
+  ('01KZGM44YAB57YWGBN0E0XFZF4','repo1','fm/arm-lock-gate-q4','653a676f','base','failed',NULL,
+   'step review failed: agent fix: claude start: fork/exec /home/kiran/.local/bin/claude: argument list too long',NULL,3000,3500,NULL),
+  ('01KZOLDOLDOLDOLDOLDOLDOLDX','repo1','fm/arm-lock-gate-q4','aaaaaaa','base','completed',NULL,NULL,NULL,1500,1600,NULL),
+  ('01KZWEDGEDWEDGEDWEDGEDWEDG','repo1','fm/stale-runner-s9','ccccccc','base','running',NULL,NULL,NULL,500,600,NULL);
 SQL
 
 # --- fake tools -------------------------------------------------------------
@@ -1107,7 +1108,7 @@ CREATE TABLE step_results (
   last_activity TEXT, agent_pid INTEGER, auto_fix_limit INTEGER);
 INSERT INTO runs VALUES
   ('01M1YFPB01T3AR66BPT6Y6JSXM','repo1','fm/silent-axi-s5','1d006fd7','base','running',
-   NULL,NULL,NULL,4000,4500);
+   NULL,NULL,NULL,4000,4500,NULL);
 INSERT INTO step_results
   (id,run_id,step_name,step_order,status,duration_ms,findings_json,started_at,completed_at,last_activity)
 VALUES
@@ -1311,15 +1312,15 @@ CREATE TABLE runs (
   id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repos(id), branch TEXT NOT NULL,
   head_sha TEXT NOT NULL, base_sha TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
   pr_url TEXT, error TEXT, awaiting_agent_since INTEGER,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, worktree_dir TEXT);
 INSERT INTO repos VALUES ('rc1','$RC_P1','git@github.com:x/one.git',NULL,'main',1000);
 INSERT INTO repos VALUES ('rc2','$RC_P2','git@github.com:x/two.git',NULL,'main',1000);
 INSERT INTO runs VALUES
-  ('RCA1','rc1','fm/run-count-r3','h1','base','failed',NULL,NULL,NULL,1000,1100),
-  ('RCA2','rc1','fm/run-count-r3','h2','base','cancelled',NULL,NULL,NULL,2000,2100),
-  ('RCA3','rc1','fm/run-count-r3','h3','base','running',NULL,NULL,NULL,3000,3100),
-  ('RCB1','rc2','fm/run-count-r3','h4','base','running',NULL,NULL,NULL,3500,3600),
-  ('RCA9','rc1','fm/other-branch-z1','h5','base','running',NULL,NULL,NULL,4000,4100);
+  ('RCA1','rc1','fm/run-count-r3','h1','base','failed',NULL,NULL,NULL,1000,1100,NULL),
+  ('RCA2','rc1','fm/run-count-r3','h2','base','cancelled',NULL,NULL,NULL,2000,2100,NULL),
+  ('RCA3','rc1','fm/run-count-r3','h3','base','running',NULL,NULL,NULL,3000,3100,NULL),
+  ('RCB1','rc2','fm/run-count-r3','h4','base','running',NULL,NULL,NULL,3500,3600,NULL),
+  ('RCA9','rc1','fm/other-branch-z1','h5','base','running',NULL,NULL,NULL,4000,4100,NULL);
 SQL
 
 RC_HOME="$TMP_ROOT/home-runcount"
@@ -1373,3 +1374,241 @@ pass "a branch with no run, and an unreadable database, carry no run number rath
 got=$(jq -r '.agents[] | select(.pipeline == false) | .run_number' "$OUT" | sort -u | tr '\n' ' ')
 [ "$got" = "null " ] || fail "a worker with no pipeline was given a run number: $got"
 pass "a worker that runs no pipeline carries no run number"
+
+# --- a run that ended under a live worker, the per-run building phase, and a
+#     CI head the live run will replace -----------------------------------------
+#
+# Reproduced from the captain's fleet on 2026-09-15, where `building 1h29m` and
+# `review FAIL` were drawn over a worker that had been busy for 27 minutes since
+# the daemon died under its review, and Run #5's `building 14h38m` counted four
+# earlier runs (data/fm-pipeline-view-stale-run-r4/report.md). The rulings: the
+# building box measures the CURRENT phase only, running again from a failed or
+# cancelled run's last write while the worker is still there; the run's end
+# reason reaches the wire; and checks GitHub reports for a head the live run
+# will replace are stated as superseded, with why.
+#
+# The TOON bodies below are in the shape `no-mistakes axi status --run` printed
+# that day (v1.37.0), trimmed to the blocks this collector parses. The rollup is
+# the shape `gh pr view --json statusCheckRollup,headRefOid` printed for
+# kirangathani/eln PR 50 the same day.
+
+TERM_ROOT="$TMP_ROOT/terminal"
+TERM_HOME="$TERM_ROOT/home"
+TERM_PROJECT="$TERM_ROOT/project"
+TERM_DB="$TERM_ROOT/state.sqlite"
+mkdir -p "$TERM_HOME/state" "$TERM_PROJECT" "$TERM_ROOT/no-transcripts"
+TERM_BIN=$(fm_fakebin "$TERM_ROOT")
+
+# A real repository, built with real git, so merge-base and patch-id are the
+# tool's own answers: A is the base, X the branch's commit, B a later main
+# commit, Y a further branch commit.
+#   H1  = A + X            the head GitHub checked
+#   H2A = B + X'           X rebased onto the moved main   -> main moved
+#   H3  = A + X + Y        a new commit on the old base    -> new commits
+#   H2B = B + X' + Y'      both
+SUP="$TERM_ROOT/suprepo"
+mkdir -p "$SUP"
+g() { git -C "$SUP" -c user.name=fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false "$@"; }
+git init -q "$SUP"
+g symbolic-ref HEAD refs/heads/main
+printf 'a\n' > "$SUP/a"; g add a; g commit -q -m A
+g checkout -q -b br1
+printf 'x\n' > "$SUP/x"; g add x; g commit -q -m X
+H1=$(g rev-parse HEAD)
+g checkout -q main
+printf 'b\n' > "$SUP/b"; g add b; g commit -q -m B
+g checkout -q -b br2 main
+g cherry-pick "$H1" >/dev/null
+H2A=$(g rev-parse HEAD)
+printf 'y\n' > "$SUP/y"; g add y; g commit -q -m Y
+H2B=$(g rev-parse HEAD)
+g checkout -q -b br3 "$H1"
+printf 'y\n' > "$SUP/y"; g add y; g commit -q -m Y
+H3=$(g rev-parse HEAD)
+g update-ref refs/remotes/origin/main refs/heads/main
+g checkout -q main
+
+sqlite3 "$TERM_DB" <<SQL
+CREATE TABLE repos (
+  id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE, upstream_url TEXT NOT NULL,
+  fork_url TEXT, default_branch TEXT NOT NULL DEFAULT 'main', created_at INTEGER NOT NULL);
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repos(id), branch TEXT NOT NULL,
+  head_sha TEXT NOT NULL, base_sha TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+  pr_url TEXT, error TEXT, awaiting_agent_since INTEGER,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, worktree_dir TEXT);
+INSERT INTO repos VALUES ('t1','$TERM_PROJECT','git@github.com:x/y.git',NULL,'main',1000);
+INSERT INTO runs VALUES
+  ('01TERMFAILALIVE00000000A1','t1','fm/rebuild-alive-a1','aaaa1','0000000','failed',NULL,'daemon shutting down',NULL,3000,3500,NULL),
+  ('01TERMFAILGONE000000000G1','t1','fm/rebuild-gone-g1','aaaa2','0000000','failed',NULL,'daemon shutting down',NULL,3000,3500,NULL),
+  ('01TERMSECONDFIRST00000S21','t1','fm/second-run-s2','aaaa3','0000000','cancelled',NULL,'cancelled: aborted by user',NULL,1000,1500,NULL),
+  ('01TERMSECONDAGAIN00000S22','t1','fm/second-run-s2','aaaa4','aaaa3','running',NULL,NULL,NULL,3000,3100,NULL),
+  ('01TERMSUPMAIN0000000000M1','t1','fm/sup-main-m1','$H2A','0000000','running','https://github.com/o/r/pull/50',NULL,NULL,5000,5100,'$SUP'),
+  ('01TERMSUPNEW00000000000N1','t1','fm/sup-new-n1','$H3','0000000','running','https://github.com/o/r/pull/50',NULL,NULL,5000,5100,'$SUP'),
+  ('01TERMSUPBOTH0000000000B1','t1','fm/sup-both-b1','$H2B','0000000','running','https://github.com/o/r/pull/50',NULL,NULL,5000,5100,'$SUP'),
+  ('01TERMSUPNOWT0000000000X1','t1','fm/sup-nowt-x1','$H2B','0000000','running','https://github.com/o/r/pull/50',NULL,NULL,5000,5100,'$TERM_ROOT/missing'),
+  ('01TERMSUPSAME0000000000E1','t1','fm/sup-same-e1','$H1','0000000','running','https://github.com/o/r/pull/50',NULL,NULL,5000,5100,'$SUP'),
+  ('01TERMSUPPRE000000000000P1','t1','fm/sup-pre-p1','$H2B','0000000','running','https://github.com/o/r/pull/50',NULL,NULL,5000,5100,'$SUP');
+SQL
+
+cat > "$TERM_ROOT/axi-ended.txt" <<'TOON'
+run:
+  id: "RUN"
+  branch: fm/x
+  status: failed
+  head: ef1d5be5
+  head_sha: ef1d5be5766ad8bb1df5c3b7163aad61e7922175
+  findings: 1 awaiting
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,57
+    rebase,completed,0,5104
+    review,failed,1,12014770
+    test,pending,0,0
+    document,pending,0,0
+    lint,pending,0,0
+    push,pending,0,0
+    pr,pending,0,0
+    ci,pending,0,0
+outcome: failed
+error: daemon shutting down
+TOON
+cat > "$TERM_ROOT/axi-live.txt" <<'TOON'
+run:
+  id: "RUN"
+  branch: fm/x
+  status: running
+  head: d1127afd
+  head_sha: d1127afd90ec49611f6ebc64ca01ced2b5ca4d1f
+  findings: 1 awaiting
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,115
+    rebase,completed,0,2889
+    review,fixing,1,527054
+    test,pending,0,0
+    document,pending,0,0
+    lint,pending,0,0
+    push,pending,0,0
+    pr,pending,0,0
+    ci,pending,0,0
+  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+    review,fixing,31m44s,"10m11s","0s ago: claude producing output",2
+TOON
+cat > "$TERM_ROOT/axi-prerebase.txt" <<'TOON'
+run:
+  id: "RUN"
+  branch: fm/x
+  status: running
+  head: d1127afd
+  head_sha: d1127afd90ec49611f6ebc64ca01ced2b5ca4d1f
+  findings: 0
+  steps[9]{step,status,findings,duration_ms}:
+    intent,running,0,0
+    rebase,pending,0,0
+    review,pending,0,0
+    test,pending,0,0
+    document,pending,0,0
+    lint,pending,0,0
+    push,pending,0,0
+    pr,pending,0,0
+    ci,pending,0,0
+  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+    intent,running,2s,"","",1
+TOON
+cat > "$TERM_BIN/no-mistakes" <<SH
+#!/usr/bin/env bash
+set -u
+printf 'A new version of no-mistakes is available\n' >&2
+run=""; prev=""
+for a in "\$@"; do [ "\$prev" = "--run" ] && run=\$a; prev=\$a; done
+case "\$run" in
+  01TERMFAILALIVE00000000A1|01TERMFAILGONE000000000G1) cat "$TERM_ROOT/axi-ended.txt" ;;
+  01TERMSUPPRE000000000000P1) cat "$TERM_ROOT/axi-prerebase.txt" ;;
+  *) cat "$TERM_ROOT/axi-live.txt" ;;
+esac
+exit 0
+SH
+cat > "$TERM_BIN/gh" <<SH
+#!/usr/bin/env bash
+printf '{"headRefOid":"%s","statusCheckRollup":[' "$H1"
+printf '{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"ci","startedAt":"2026-09-15T02:11:50Z"},'
+printf '{"__typename":"CheckRun","name":"review-gate","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"ci","startedAt":"2026-09-15T02:11:50Z"},'
+printf '{"__typename":"StatusContext","context":"Vercel","state":"SUCCESS"},'
+printf '{"__typename":"CheckRun","name":"Vercel Preview Comments","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"","startedAt":"2026-09-15T02:13:24Z"}]}\n'
+SH
+chmod +x "$TERM_BIN/no-mistakes" "$TERM_BIN/gh"
+
+TERM_IDS="rebuild-alive-a1 rebuild-gone-g1 second-run-s2 sup-main-m1 sup-new-n1 sup-both-b1 sup-nowt-x1 sup-same-e1 sup-pre-p1"
+for id in $TERM_IDS; do
+  printf 'window=fm:9\nspawned_at=1200\nharness=claude\nkind=ship\nmode=no-mistakes\n' > "$TERM_HOME/state/$id.meta"
+done
+jq -n --arg p "$TERM_PROJECT" '{tasks:[
+  {id:"rebuild-alive-a1",kind:"ship",mode:"no-mistakes",project:$p,paths:{worktree:{path:"/wt/a"}},endpoint:{target:"fm:9",exists:true},pr:{url:null}},
+  {id:"rebuild-gone-g1",kind:"ship",mode:"no-mistakes",project:$p,paths:{worktree:{path:"/wt/g"}},endpoint:{target:"fm:9",exists:false},pr:{url:null}},
+  {id:"second-run-s2",kind:"ship",mode:"no-mistakes",project:$p,paths:{worktree:{path:"/wt/s"}},endpoint:{target:"fm:9",exists:true},pr:{url:null}},
+  {id:"sup-main-m1",kind:"ship",mode:"no-mistakes",project:$p,paths:{worktree:{path:"/wt/m"}},endpoint:{target:"fm:9",exists:true},pr:{url:"https://github.com/o/r/pull/50"}},
+  {id:"sup-new-n1",kind:"ship",mode:"no-mistakes",project:$p,paths:{worktree:{path:"/wt/n"}},endpoint:{target:"fm:9",exists:true},pr:{url:"https://github.com/o/r/pull/50"}},
+  {id:"sup-both-b1",kind:"ship",mode:"no-mistakes",project:$p,paths:{worktree:{path:"/wt/b"}},endpoint:{target:"fm:9",exists:true},pr:{url:"https://github.com/o/r/pull/50"}},
+  {id:"sup-nowt-x1",kind:"ship",mode:"no-mistakes",project:$p,paths:{worktree:{path:"/wt/x"}},endpoint:{target:"fm:9",exists:true},pr:{url:"https://github.com/o/r/pull/50"}},
+  {id:"sup-same-e1",kind:"ship",mode:"no-mistakes",project:$p,paths:{worktree:{path:"/wt/e"}},endpoint:{target:"fm:9",exists:true},pr:{url:"https://github.com/o/r/pull/50"}},
+  {id:"sup-pre-p1",kind:"ship",mode:"no-mistakes",project:$p,paths:{worktree:{path:"/wt/p"}},endpoint:{target:"fm:9",exists:true},pr:{url:"https://github.com/o/r/pull/50"}}
+]}' > "$TERM_ROOT/fleet.json"
+
+run_terminal() {  # <extra args...>
+  PATH="$TERM_BIN:$PATH" \
+  FM_HOME="$TERM_HOME" \
+  FM_FLOW_SNAPSHOT_DB="$TERM_DB" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TERM_ROOT/fleet.json" \
+  FM_FLOW_SNAPSHOT_NOW_EPOCH=10000 \
+  FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT="$TERM_ROOT/no-transcripts" \
+    "$SNAPSHOT" "$@"
+}
+TERM_OUT="$TERM_ROOT/out.json"
+run_terminal --json --include-dead > "$TERM_OUT" 2>"$TERM_ROOT/err.txt"
+expect_code 0 $? "the ended-run snapshot exits clean"
+tq() { jq -r --arg id "$1" ".agents[] | select(.id == \$id) | $2" "$TERM_OUT"; }
+
+# The run ended `failed` 6500 s before the pinned clock and the worker is still
+# there, so it is building again from the run's last write, with the reason on
+# the wire in the daemon's own words.
+got=$(tq rebuild-alive-a1 '[.steps[] | select(.step=="building") | .status][0]')
+[ "$got" = running ] || fail "a live worker after a failed run is not building again: $got"
+got=$(tq rebuild-alive-a1 '[.active_steps[] | select(.step=="building") | .active_ms][0]')
+[ "$got" = 6500000 ] || fail "the rebuild does not count from the run's last write: $got"
+got=$(tq rebuild-alive-a1 '"\(.run.status)|\(.run.error)|\(.run.head)"')
+[ "$got" = "failed|daemon shutting down|aaaa1" ] || fail "the run's end did not reach the wire: $got"
+got=$(tq rebuild-alive-a1 '[.steps[] | select(.step=="review") | .status][0]')
+[ "$got" = failed ] || fail "the failed step lost its own status beside the rebuild: $got"
+# The same run with the worker gone builds nothing: the phase keeps the
+# interval dispatch (1200) to the run's creation (3000).
+got=$(tq rebuild-gone-g1 '"\(.endpoint_alive)|\([.steps[] | select(.step=="building")][0] | "\(.status)/\(.duration_ms)")|\([.active_steps[] | select(.step=="building")] | length)"')
+[ "$got" = "false|completed/1800000|0" ] || fail "a gone worker was drawn building again: $got"
+pass "a failed run under a live worker re-opens the building phase from the run's end, and a gone worker keeps the finished interval"
+
+# Run #2's building phase starts where Run #1 ended (1500), not at dispatch
+# (1200), and ends where Run #2 began (3000).
+got=$(tq second-run-s2 '"\(.run_number)|\([.steps[] | select(.step=="building")][0] | "\(.status)/\(.duration_ms)")|\(.run.status)"')
+[ "$got" = "2|completed/1500000|running" ] || fail "Run #2's building phase did not start at Run #1's end: $got"
+pass "the building phase of a later run measures only that run's own phase"
+
+# The checked head is GitHub's, the run head is the daemon's, and the
+# comparison is git's own, made in the run's worktree.
+got=$(tq sup-main-m1 '"\(.ci.head)|\(.run.head)"')
+[ "$got" = "$H1|$H2A" ] || fail "the two heads did not reach the wire: $got"
+got=$(tq sup-main-m1 '.ci.superseded | "\(.main_moved)|\(.new_commits)|\(.reason)"')
+[ "$got" = "true|false|" ] || fail "a rebase onto a moved main did not read as main moved alone: $got"
+got=$(tq sup-new-n1 '.ci.superseded | "\(.main_moved)|\(.new_commits)|\(.reason)"')
+[ "$got" = "false|true|" ] || fail "a new commit on the same base did not read as new commits alone: $got"
+got=$(tq sup-both-b1 '.ci.superseded | "\(.main_moved)|\(.new_commits)|\(.reason)"')
+[ "$got" = "true|true|" ] || fail "a rebase plus a new commit did not read as both: $got"
+got=$(tq sup-nowt-x1 '.ci.superseded | "\(.main_moved)|\(.new_commits)|\(.reason | length > 0)"')
+[ "$got" = "null|null|true" ] || fail "a missing run worktree did not report both reasons unknown with a reason: $got"
+# Not asked when the checks are for the run's own head, or before the run has
+# completed its rebase, or when no GitHub read was made.
+got=$(tq sup-same-e1 '.ci.superseded')
+[ "$got" = null ] || fail "checks on the run's own head were called superseded: $got"
+got=$(tq sup-pre-p1 '.ci.superseded')
+[ "$got" = null ] || fail "a run that has not rebased yet was called a superseding run: $got"
+run_terminal --json --no-ci > "$TERM_ROOT/noci.json" 2>/dev/null
+got=$(jq -r '.agents[] | select(.id == "sup-both-b1") | "\(.ci.head)|\(.ci.superseded)"' "$TERM_ROOT/noci.json")
+[ "$got" = "|null" ] || fail "--no-ci still claimed a GitHub head or a comparison: $got"
+pass "checks on a head the live run will replace are stated as superseded, with main moved and new commits read from git"
