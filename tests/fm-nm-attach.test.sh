@@ -162,6 +162,38 @@ test_the_hold_uses_a_long_wait_and_the_pinned_intent() {
   pass "attach: the hold runs with a multi-hour wait, the pinned intent, and no --yes"
 }
 
+test_the_recorded_pid_is_the_hold_even_with_job_control_on() {
+  local dir pid cmdline
+  # With bash's `monitor` option on, a background job becomes its own
+  # process-group leader, which makes setsid(1) fork instead of exec - and then
+  # `$!` is the short-lived setsid process, not the hold. The marker would record
+  # a pid that dies at once, and because the idempotency guard reads that pid's
+  # liveness, a second attach would be allowed to race a hold still running.
+  # Non-interactive bash defaults `monitor` off, so this is only reachable
+  # through an inherited SHELLOPTS - which is exactly why the script sets it off
+  # itself, and why this case drives it through that inheritance.
+  dir=$(make_case job-control "$FIXTURE_TASK" "$NM_STALL_FIXTURES/axi-status-ci-advanced.toon" 30)
+  # Through `env`, not a command-prefix assignment: SHELLOPTS is readonly in an
+  # already-running bash, so a prefix would print "readonly variable" and leave
+  # monitor OFF - which would make this case pass without ever exercising the
+  # hazard. bash reads SHELLOPTS from its environment at startup, so `env` is the
+  # seam. Confirmed: `env SHELLOPTS=monitor bash -c 'case "$-" in *m*)'` reports
+  # monitor on, a bare run reports it off.
+  ( cd "$dir/repo" \
+    && env SHELLOPTS=monitor \
+       PATH="$dir/bin:$PATH" \
+       FM_HOME="$dir/home" \
+       FM_TASK_TMP_OVERRIDE="$dir/tmp" \
+       "$ATTACH" "$FIXTURE_TASK" >/dev/null ) || fail "attach refused under job control"
+  pid=$(sed -n '1p' "$dir/home/state/$FIXTURE_TASK.nm-attach")
+  kill -0 "$pid" 2>/dev/null || fail "the recorded pid is already dead; setsid forked and \$! named the wrong process"
+  cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || ps -o args= -p "$pid" 2>/dev/null)
+  assert_contains "$cmdline" '--follow-internal' \
+    "the recorded pid is not the hold itself: $cmdline"
+  kill -TERM -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+  pass "attach: the recorded pid is the hold itself, even with job control inherited on"
+}
+
 test_the_wait_is_overridable() {
   local dir
   dir=$(make_case wait-override "$FIXTURE_TASK" "$NM_STALL_FIXTURES/axi-status-ci-advanced.toon" 0)
@@ -641,6 +673,7 @@ test_scripts_are_shellcheck_clean() {
 
 test_returns_immediately_while_the_hold_still_blocks
 test_the_hold_uses_a_long_wait_and_the_pinned_intent
+test_the_recorded_pid_is_the_hold_even_with_job_control_on
 test_the_wait_is_overridable
 test_a_parked_gate_opens_a_keyed_decision
 test_a_passed_run_closes_the_key

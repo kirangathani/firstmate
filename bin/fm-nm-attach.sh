@@ -137,6 +137,16 @@
 # silently cross it.
 #
 set -eu
+# Job control OFF, deliberately and explicitly, exactly as bin/fm-watch-arm.sh
+# does and for the same reason. With `monitor` on, bash puts each background job
+# in its own process group, which makes the launched process a group leader,
+# which makes setsid(1) FORK instead of exec. `$!` would then be the short-lived
+# setsid process rather than the hold, so the marker below would record a pid
+# that dies immediately - and the idempotency guard reads that pid's liveness, so
+# a second attach would be allowed to race a hold that is genuinely still
+# running. Non-interactive bash already defaults to this, but an exported
+# SHELLOPTS carrying `monitor` would otherwise turn it back on.
+set +m
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -409,9 +419,15 @@ if [ "$RESPOND" = respond ]; then
 fi
 
 # Detach. setsid puts the hold in its own process group and session so it is not
-# reaped when the worker's shell, tool call, or whole agent goes away; nohup is
-# the fallback where setsid is absent. stdin is closed so the hold can never
-# block on a read, and both streams go to the log.
+# reaped when the worker's shell, tool call, or whole agent goes away. stdin is
+# closed so the hold can never block on a read, and both streams go to the log.
+#
+# setsid is ABSENT ON macOS (the same fact bin/fm-watch-arm.sh records), so there
+# the hold falls back to nohup: it still survives the parent exiting and SIGHUP,
+# but it stays in the caller's process group, so a group-directed kill of the
+# worker's shell would take it too. A worker's turn ending sends no such signal,
+# so the ordinary case is unaffected; this is stated rather than engineered
+# around because the fleet this defends runs on Linux.
 if command -v setsid >/dev/null 2>&1; then
   setsid "$0" --follow-internal "$ID" "$STATE" "$MARKER" "$WAIT" "$RESPOND" \
     "${INTENT:-}" "$@" </dev/null >>"$LOG" 2>&1 &
