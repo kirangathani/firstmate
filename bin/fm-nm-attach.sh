@@ -357,10 +357,24 @@ fi
 
 # `--yes` is refused rather than passed through: it auto-resolves EVERY ask-user
 # finding, including the warning and error ones that are the captain's to decide.
+#
+# All four spellings Cobra accepts, not just the bare long one: `--yes`,
+# `--yes=true`, `-y`, and `-y` inside a short-flag cluster. The cluster test is
+# deliberately narrowed to a pure `-<letters>` word, so an ordinary flag VALUE
+# cannot trip it - the only text it could false-refuse is a value that is itself
+# nothing but a dash and letters including a y, and refusing that costs a
+# reword, while missing a real --yes silently auto-resolves a captain decision.
 if [ "$RESPOND" = respond ]; then
   for arg in "$@"; do
     case "$arg" in
-      -y|--yes) die "--yes is never used from here: it auto-resolves every ask-user finding, including the ones the captain owns" ;;
+      --yes|--yes=*) die "--yes is never used from here: it auto-resolves every ask-user finding, including the ones the captain owns" ;;
+      --*) ;;
+      -*[yY]*)
+        case "$arg" in
+          -*[!-a-zA-Z]*) ;;
+          *) die "--yes is never used from here (found as $arg): it auto-resolves every ask-user finding, including the ones the captain owns" ;;
+        esac
+        ;;
     esac
   done
 fi

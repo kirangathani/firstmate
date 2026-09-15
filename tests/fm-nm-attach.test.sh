@@ -481,13 +481,25 @@ test_the_intent_cap_stays_under_the_kernels_argv_limit() {
 }
 
 test_refuses_yes_in_a_respond() {
-  local dir out rc=0
+  local dir out rc spelling
   dir=$(make_case respond-yes "$FIXTURE_TASK" "$NM_STALL_FIXTURES/axi-status-ci-advanced.toon" 0)
-  out=$(run_attach "$dir" "$FIXTURE_TASK" --respond --action approve --yes 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "--yes was accepted"
-  assert_contains "$out" 'auto-resolves every ask-user finding' "the refusal did not say why --yes is refused"
-  [ ! -e "$dir/invocations" ] || fail "the wrapper responded anyway"
-  pass "attach: refuses --yes in a gate response"
+  # Every spelling Cobra accepts. Missing one silently auto-resolves the ask-user
+  # findings the captain owns, which is the whole reason it is refused here.
+  for spelling in --yes --yes=true -y -yh; do
+    rc=0
+    out=$(run_attach "$dir" "$FIXTURE_TASK" --respond --action approve "$spelling" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$spelling was accepted"
+    assert_contains "$out" 'auto-resolves every ask-user finding' \
+      "the refusal of $spelling did not say why"
+    [ ! -e "$dir/invocations" ] || fail "the wrapper responded anyway on $spelling"
+  done
+  # And an ordinary instruction value is not mistaken for one, even when it
+  # contains the letter.
+  rc=0
+  out=$(run_attach "$dir" "$FIXTURE_TASK" --respond --action fix --findings r1 \
+    --instructions 'Keep the 503-only retry: a 4xx is a caller bug and retrying it hides the bug, so yes to the split and no to a blanket retry-all.' 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a legitimate instruction containing 'yes' was refused: $out"
+  pass "attach: refuses every --yes spelling, and does not mistake an instruction value for one"
 }
 
 test_refuses_a_fix_round_with_no_substantive_instructions() {
