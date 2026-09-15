@@ -337,7 +337,7 @@ That push supersedes the parked run and a fresh, cold reviewer re-reads the resu
 Everything else the pipeline still owns: a TEST, DOCUMENT or LINT finding is applied by the pipeline's own fixer through the gate, so do not hand-edit those while a run is active.
 Escalating a decision is unchanged whichever kind it is (see the ask-user rules below).
 
-Five firstmate-specific rules layer on top of that guidance:
+Six firstmate-specific rules layer on top of that guidance:
 
 - **An ask-user finding of severity \`info\` or \`suggestion\` is YOURS to answer.** Answer it yourself, choosing the option that keeps the decisions already recorded for this task and this brief's own \`# Task\` section true, record it under your own name with \`record --outcome <change|no-change>\` (see below), and list it in the PR description under a \`Decisions taken by the worker (info severity)\` heading with the finding id, the option you took, and the one-line reason.
   An info finding that RE-RAISES a decision already in this brief's \`## Gate decisions\` subsection is answered by citing that key, and recorded \`--outcome no-change\`; do not re-open a settled question.
