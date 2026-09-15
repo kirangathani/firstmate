@@ -242,6 +242,24 @@ It never falls back to the status log's last line.
 So a secondmate reading `unknown` renders the word `idle` in dim, and its detail is dropped with it: `no current-state source available` is the reason that read is unknown, and printing it beside `idle` reads as the explanation for an alarm that is not there.
 Every other state a secondmate can report - `blocked`, `failed`, `parked` - keeps its own colour, because those come from its status log and are real.
 
+### A scout row never shows its raw status line
+
+The captain's ruling, 2026-09-15, from a live scout row that read `working · captain ruled in-window - no round cap (decision review-round-cap answered: none); question routing...`: "what is this random text... Instead of rambling on about the questions we should just say...".
+
+A scout carries no pipeline for this view to describe, and that is true whatever its status log happens to hold at the moment of collection - the status log is a wake-EVENT record of a captain-facing decision thread, not a fact this fleet-wide instrument has any business narrating.
+So a `kind=scout` row is drawn UNCONDITIONALLY, whether or not its own `bin/fm-crew-state.sh` read succeeded: the state word is `scouting`, in a palette slot of its own (blue, `CREW_STATE_PAINT`) rather than sharing `working`'s green - a scout is never "working" in the pipeline sense this view otherwise means by that word.
+The detail is the fixed sentence `no pipeline view as this is a scout agent`, never the crew-state reader's own `detail` or `reason`.
+
+The collector still calls `bin/fm-crew-state.sh` for a scout and carries its answer on the wire exactly as it does for a secondmate - reading it is not the defect, drawing it unfiltered is - so a future row kind that needs the real read can still have it; the override lives entirely in the renderer's `compactState()`.
+
+### The captain-driving marker: one record, drawn the same way everywhere
+
+`state/<id>.monitor-exempt` is the captain's own signed record that he has taken a worker's window for himself (`bin/fm-monitor.sh --exempt`, cleared by `--unexempt`; `AGENTS.md` section 2).
+The collector states its presence as `captain_driving`, a plain boolean with no signature or reason attached - verifying the signature is `bin/fm-monitor.sh`'s job, and this read-only collector only reports whether the record exists.
+
+It means the same thing whatever kind of row carries it, so it is drawn the same way on every kind rather than being given a row-specific spelling: the fixed sentence `captain driving directly in the window`, appended to whatever detail the row already carries (or standing alone when that detail is otherwise empty, as on an idle secondmate's row).
+A scout's row therefore reads `no pipeline view as this is a scout agent · captain driving directly in the window`, and a ship row carries the same sentence among its head's other agent-wide notes - authority, `worker gone`, `unreadable: ...` - because a pipeline row has no single "detail" field the way a compact row does.
+
 ### Blocks are two heights, so the window is solved once
 
 A compact block is three rows and a pipeline block is twelve, so how many blocks fit depends on which one is first.
@@ -352,6 +370,7 @@ Both are additive `v2` fields: a consumer that ignores them reads exactly the do
       "state": null,
       "run_number": 5,
       "endpoint_alive": true,
+      "captain_driving": false,
       "skips": { "local": false, "ci": false },
       "rework": null,
       "worker": { "harness": "claude", "model": "claude-opus-5", "effort": "high" },
@@ -425,6 +444,7 @@ Both are additive `v2` fields: a consumer that ignores them reads exactly the do
         "detail": "harness busy", "reason": ""
       },
       "endpoint_alive": true,
+      "captain_driving": false,
       "skips": { "local": false, "ci": false },
       "worker": { "harness": "claude", "model": null, "effort": "xhigh" },
       "pr": { "url": null, "number": null },
@@ -494,6 +514,9 @@ Guarantees the renderer is entitled to rely on:
   One `no-mistakes axi run` is one run, so a run that fails or is cancelled and is restarted from building is the next number; the auto-fix rounds INSIDE a single run are not, and the view already states those as `auto-fix n/3`.
   It is `null` - never `0` - for a worker that runs no pipeline, for a branch with no run yet, and when the database could not be read, and the renderer then draws nothing rather than a placeholder.
   It is an additive field: a `v2` consumer that does not know it is unaffected, so it carries no version bump.
+- `captain_driving` is on every agent, of either kind, and is true exactly when `state/<id>.monitor-exempt` exists for that task - the captain's own signed record that he has taken that worker's window for himself (`bin/fm-monitor.sh --exempt`, removed by `--unexempt`; AGENTS.md section 2).
+  The collector reads PRESENCE alone; verifying the signature inside it is `bin/fm-monitor.sh`'s own job, not a read-only collector's.
+  It is an additive field for the same reason `run_number` is: a `v2` consumer that does not know it is unaffected, so it carries no version bump.
 - Every entry of `agents` has a recorded endpoint that resolved at collection time, unless `--include-dead` was passed.
   `omitted` names every task held back for that reason, of any kind, and is always present and empty when there is nothing to report.
 - `ci.passed`, `ci.failed`, `ci.pending`, `ci.skipped` and `ci.excused` partition `ci.checks`, and their sum is always `ci.total`.
@@ -579,6 +602,18 @@ Ending `building` at the PR without saying so would draw a live worker as a row 
 
 It is a MARKER, not a stage. It rides the second timer line under the `push+PR` box, whose own aftermath it is, and it is drawn dim because it reports work still going on rather than a verdict on the stage above it.
 A column of its own would have said the row grew a stage the pipeline does not have, and would have changed what `steps` carries for every task on the fleet - so `steps` stays exactly the nine the tool names plus `building`, and the wire carries the rework fact on the agent instead.
+
+### The `since PR` caption reads in plain words, or drops the duration rather than cut it
+
+The captain's ruling, 2026-09-15: the marker's old caption, `rework <dur>` in `dur()`'s own seconds-precise shape, arrived on screen as `rework 2m3…` - cut mid-digit by `fit()`'s one-column ellipsis inside the push+PR box's 11-column cell (9 plus its border), and he could not tell what it meant.
+
+Two changes, in the same spirit as "Text that does not fit says so" above.
+The word changed from `rework` to `since PR`: the caption names what the clock is timing rather than relying on the box label above it to supply the noun.
+The duration is rounded to the coarsest unit pair that still says something - `<h>h<mm>m` once the count reaches an hour, bare minutes below that, bare seconds below a minute - because seconds-of-minutes precision is not legible at this cell's width whatever the word count wanted.
+
+`since PR` alone is 8 columns, and the cell is never narrower than 9, so the bare phrase always fits.
+The duration is appended only when the WHOLE caption - `since PR` plus a space plus the rounded duration - still fits the cell; otherwise it is dropped entirely, never cut with an ellipsis.
+An hours-scale duration routinely does not fit an 11-column cell (`since PR 2h03m` is 14 columns), and that is not a defect: a caption that says `since PR` with no number is still true and legible, where an ellipsis-cut duration is neither.
 
 ### Five check classes, because three folded two facts away
 

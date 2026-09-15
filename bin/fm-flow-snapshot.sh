@@ -700,6 +700,13 @@ row_common() {  # <task-json>
   FM_ROW_MODE=$(printf '%s' "$task" | jq -r '.mode // ""')
   FM_ROW_PROJECT=$(printf '%s' "$task" | jq -r '.project // ""')
   FM_ROW_WORKTREE=$(printf '%s' "$task" | jq -r '.paths.worktree.path // ""')
+  # The captain's own record that he has taken this worker's window himself:
+  # state/<id>.monitor-exempt, written by `bin/fm-monitor.sh --exempt` and
+  # removed by `--unexempt`. Presence is the whole answer - the signature inside
+  # it is bin/fm-monitor.sh's own thing to verify, and this view only draws a
+  # marker, never an authority.
+  FM_ROW_CAPTAIN_DRIVING=false
+  [ ! -e "$STATE_DIR/$FM_ROW_ID.monitor-exempt" ] || FM_ROW_CAPTAIN_DRIVING=true
   FM_ROW_WINDOW=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
   FM_ROW_ENDPOINT_ALIVE=$(printf '%s' "$task" | jq -r 'if .endpoint.exists then "true" else "false" end')
   # `endpoint.exists` only says a pane is there. The deeper probe asks what is
@@ -1037,6 +1044,7 @@ agent_json() {  # <task-json>
     --argjson collect_ok "$collect_ok" \
     --argjson pr_num "${pr_num:-null}" \
     --argjson rework "$rework" \
+    --argjson captain_driving "$FM_ROW_CAPTAIN_DRIVING" \
     --argjson skip_local "$skip_local" \
     --argjson skip_ci "$skip_ci" \
     --argjson run_number "$run_number" \
@@ -1054,6 +1062,7 @@ agent_json() {  # <task-json>
       run_number:$run_number,
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
+      captain_driving:$captain_driving,
       skips:{local:$skip_local, ci:$skip_ci},
       rework:$rework,
       worker:{
@@ -1152,6 +1161,7 @@ compact_json() {  # <task-json>
     --argjson now_epoch "$NOW_EPOCH" \
     --argjson endpoint_alive "$FM_ROW_ENDPOINT_ALIVE" \
     --argjson state "$state" \
+    --argjson captain_driving "$FM_ROW_CAPTAIN_DRIVING" \
     --argjson ci "$CI_EMPTY" \
     '{
       id:$id, branch:$branch, project:$project, worktree:$worktree,
@@ -1161,6 +1171,7 @@ compact_json() {  # <task-json>
       state:$state,
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
+      captain_driving:$captain_driving,
       skips:{local:false, ci:false},
       rework:null,
       worker:{

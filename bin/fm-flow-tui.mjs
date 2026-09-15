@@ -585,9 +585,37 @@ function stepFor(agent, spec) {
 // only on a recorded PR, no pipeline run to own the work instead, and a worker
 // still there, and this view performs no outside reads of its own. A gone
 // worker leaves the line blank rather than counting time against nobody.
+//
+// The captain's ruling, 2026-09-15: the old caption, `rework <dur>` in
+// `dur()`'s own seconds-precise shape, arrived at the cell as `rework 2m3…` -
+// he could not tell what it meant. Two changes. The word is plain: `since PR`
+// says what the clock is timing, where `rework` needed the box label above it
+// to make sense of. And the duration is rounded to the coarsest two units that
+// still say something - hours-and-minutes once the count reaches an hour,
+// otherwise bare minutes, otherwise bare seconds - because the cell this rides
+// under is nine columns wide plus its border, and seconds-of-minutes precision
+// is not free at that width whatever the word count wanted.
+//
+// `since PR` alone is 8 columns and this box is never narrower than 9, so it
+// always fits; the duration is appended only when the WHOLE caption still
+// fits the cell, and dropped rather than cut short when it does not - an
+// ellipsis mid-duration is exactly the illegible cell this replaces.
+function sincePRDuration(ms) {
+  const totalSec = Math.round(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h}h${String(m).padStart(2, "0")}m`;
+  if (m > 0) return `${m}m`;
+  return `${s}s`;
+}
+
 function reworkFor(agent) {
   const ms = agent?.rework?.active_ms;
-  return typeof ms === "number" ? `rework ${dur(ms)}` : "";
+  if (typeof ms !== "number") return "";
+  const bare = "since PR";
+  const full = `${bare} ${sincePRDuration(ms)}`;
+  return full.length <= W + 2 ? full : bare;
 }
 
 function skipOverride(agent, spec) {
@@ -973,6 +1001,11 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   const authority = skipAuthority(agent);
   const notes = [];
   if (authority) notes.push(blue(authority));
+  // The captain's own switch, and it means the same thing on every row kind:
+  // he has taken this worker's window for himself. A pipeline row has no
+  // separate "detail" field the way a compact row does, so the note rides the
+  // head beside the other agent-wide facts rather than any one step cell.
+  if (agent.captain_driving === true) notes.push(cyan(CAPTAIN_DRIVING_NOTE));
   if (agent.collection?.ok === false) notes.push(magenta(`unreadable: ${agent.collection.reason}`));
   else if (agent.endpoint_alive === false) notes.push(magenta("worker gone"));
   // A run that ended without completing says how, here, because a nine-column
@@ -1069,6 +1102,16 @@ const CREW_STATE_PAINT = new Map([
   ["paused", dim],
   ["failed", red],
   ["unknown", magenta],
+  // The captain's ruling, 2026-09-15: a scout row must never show its raw
+  // status line - he read "working · captain ruled in-window - no round cap
+  // ..." and asked "what is this random text". A scout carries no pipeline for
+  // this view to describe, so `working` is wrong twice over: it is not this
+  // view's word for what a scout is doing, and the sentence behind it belongs
+  // to the crew's own status log, not to a fleet-wide instrument. `scouting` is
+  // this view's own word for the state, painted its own slot rather than
+  // sharing green with `working` - a scout is never "working" in the pipeline
+  // sense this view otherwise means by that word.
+  ["scouting", blue],
 ]);
 
 // Firstmate's own house word for each kind, because the row is read by the
@@ -1081,10 +1124,34 @@ const KIND_LABEL = new Map([
 ]);
 export const kindLabel = (kind) => KIND_LABEL.get(kind) ?? String(kind ?? "worker");
 
+// Whether the captain has taken this worker's window for himself - the one
+// fact `captain_driving` states, read from state/<id>.monitor-exempt's
+// presence alone. It means the same thing on every row, so it is appended the
+// same way everywhere it is drawn, never given a row-specific spelling.
+const CAPTAIN_DRIVING_NOTE = "captain driving directly in the window";
+function withDriving(detail, driving) {
+  if (!driving) return detail;
+  return detail ? `${detail} · ${CAPTAIN_DRIVING_NOTE}` : CAPTAIN_DRIVING_NOTE;
+}
+
 export function compactState(agent) {
+  const driving = agent?.captain_driving === true;
+  // The captain's ruling, 2026-09-15: a scout row must never show its raw
+  // status line - he read "working · captain ruled in-window - no round cap
+  // ..." and asked "what is this random text". A scout carries no pipeline for
+  // this view to describe, and this is true whether or not its own status
+  // read succeeded, so the word and the detail are fixed and unconditional -
+  // never the crew-state reader's value, never its reason.
+  if (agent?.kind === "scout") {
+    return {
+      word: "scouting",
+      paint: CREW_STATE_PAINT.get("scouting"),
+      detail: withDriving("no pipeline view as this is a scout agent", driving),
+    };
+  }
   const s = agent?.state;
   if (!s || s.ok === false) {
-    return { word: "state not read", paint: magenta, detail: s?.reason ?? "" };
+    return { word: "state not read", paint: magenta, detail: withDriving(s?.reason ?? "", driving) };
   }
   const value = s.value || "unknown";
   // A quiet second mate is HEALTHY, and AGENTS.md section 8 says so outright:
@@ -1099,12 +1166,12 @@ export function compactState(agent) {
   // that read is unknown, and printing it beside the word `idle` reads as the
   // explanation for an alarm that is not there.
   if (agent.kind === "secondmate" && value === "unknown") {
-    return { word: "idle", paint: dim, detail: "" };
+    return { word: "idle", paint: dim, detail: withDriving("", driving) };
   }
   return {
     word: value,
     paint: CREW_STATE_PAINT.get(value) ?? magenta,
-    detail: s.detail ?? "",
+    detail: withDriving(s.detail ?? "", driving),
   };
 }
 
