@@ -399,9 +399,10 @@ test_the_harness_predicate_has_exactly_one_implementation() {
   definitions=$(grep -rl 'fm_session_pid_is_harness()' "$ROOT/bin" 2>/dev/null | wc -l | tr -d '[:space:]')
   [ "$definitions" = 1 ] || fail "expected exactly one harness predicate, found $definitions"
 
-  leftovers=$(grep -rn 'grep -qE "\$FM_SESSION_HARNESS_RE"' "$ROOT/bin" 2>/dev/null \
-    | grep -v 'fm-session-lock-lib.sh' | wc -l | tr -d '[:space:]')
-  [ "$leftovers" = 0 ] || fail "the harness regex is matched outside the predicate in $leftovers place(s)"
+  leftovers=$(grep -rln 'FM_SESSION_HARNESS_RE\|FM_SESSION_HARNESS_NAMES' "$ROOT/bin" 2>/dev/null \
+    | grep -vc 'fm-session-lock-lib\.sh$' || true)
+  [ "$leftovers" = 0 ] \
+    || fail "the harness name list is read outside its own library in $leftovers file(s); the predicate is the only reader"
 
   # The predicate needs the harness list in two forms: a loose regex for a
   # basename, and a plain name list for the exact directory-component test. They
