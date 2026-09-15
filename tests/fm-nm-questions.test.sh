@@ -232,6 +232,34 @@ JSON
   pass "the sweep wakes firstmate once per new question and stays silent otherwise"
 }
 
+# The watcher runs the sweep under a wall-clock bound, so it can be killed part
+# way through. Marking a question surfaced before its line reached the watcher
+# would let that kill swallow the question while the durable record claimed it
+# had been reported. Printing first and marking after makes a kill cost at most
+# a duplicate wake - which is why the marker for a task must not exist until
+# that task's lines have been written.
+test_a_question_is_printed_before_it_is_marked_surfaced() {
+  write_questions <<'JSON'
+{"id":"q1","kind":"question","question":"Keep the legacy route?","options":["Keep","Remove"],"weight":"major"}
+JSON
+  : > "$CONV/answers.ndjson"
+  rm -f "$STATE/t1.nm-questions"
+
+  # Stop the sweep the moment it writes its first line, exactly as the watcher's
+  # bound would, and assert nothing was recorded as surfaced.
+  local killed
+  killed=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_NM_QUESTIONS_DB="$DB" FM_NM_QUESTIONS_EVIDENCE_ROOT="$EVIDENCE" \
+    "$QUESTIONS" surface 2>/dev/null | head -1)
+  assert_contains "$killed" "q1" "precondition: the sweep must report the open question"
+
+  # Now let it finish, and only then may the record claim it.
+  run_q surface >/dev/null
+  assert_present "$STATE/t1.nm-questions" "a completed sweep did not record what it surfaced"
+  assert_grep "q1" "$STATE/t1.nm-questions" "the completed sweep did not record the question it reported"
+  pass "a question is printed before it is marked surfaced, so a cut-short sweep cannot swallow one"
+}
+
 test_surface_skips_a_scout() {
   fm_write_meta "$STATE/t1.meta" "window=w:fm-t1" "worktree=$TMP_ROOT/wt" "project=$TMP_ROOT/proj" \
     "harness=claude" "kind=scout" "mode=scout" "yolo=off"
@@ -304,6 +332,7 @@ test_gate_refuses_while_a_question_is_open_and_passes_when_none_is
 test_gate_is_quiet_for_a_task_with_no_run
 test_gate_refuses_an_unreadable_conversation
 test_surface_prints_each_new_question_once
+test_a_question_is_printed_before_it_is_marked_surfaced
 test_surface_skips_a_scout
 test_answer_composes_the_exact_worker_command_and_records_it
 test_answer_refuses_an_authority_it_cannot_speak_for

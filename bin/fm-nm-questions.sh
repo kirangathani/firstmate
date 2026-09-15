@@ -334,8 +334,17 @@ task_in_domain() {  # <meta-file>
 
 surfaced_file() { printf '%s/%s.nm-questions' "$STATE" "$1"; }
 
+# THE MARKER IS WRITTEN LAST, PER TASK, AFTER THAT TASK'S LINES ARE PRINTED.
+# The watcher runs this under a wall-clock bound, so it can be killed part way
+# through, and the order decides what a kill costs. Marking a question surfaced
+# BEFORE its line reaches the watcher would let a kill in between swallow the
+# question entirely - firstmate would never be told, and the durable record would
+# say it already had been. Printing first and marking after inverts that: a kill
+# can only ever cost the marker, so the next sweep reports the same question
+# again. A duplicate wake is cheap; a swallowed question is the failure this
+# alarm exists to prevent.
 cmd_surface() {
-  local meta id run dir qid text opts file lineno marker seen any=0 nl
+  local meta id run dir qid text opts file lineno marker seen fresh any=0 nl
   nl=$'\n'
   [ -d "$STATE" ] || return 0
   for meta in "$STATE"/*.meta; do
@@ -351,13 +360,14 @@ cmd_surface() {
     marker=$(surfaced_file "$id")
     seen=$(cat "$marker" 2>/dev/null || true)
     [ -z "$seen" ] || seen="$seen$nl"
+    fresh=''
     while IFS=$TAB read -r qid text opts file lineno; do
       [ -n "$qid" ] || continue
       case "$nl$seen" in
         *"$nl$run$TAB$qid$nl"*) continue ;;
       esac
-      printf '%s\t%s\n' "$run" "$qid" >> "$marker" 2>/dev/null || true
       seen="$seen$run$TAB$qid$nl"
+      fresh="$fresh$run$TAB$qid$nl"
       any=1
       printf 'NM QUESTION: %s is waiting on an answer to review question %s: %s' "$id" "$qid" "$text"
       [ -z "$opts" ] || printf ' (options: %s)' "$(printf '%s' "$opts" | tr "$US" '|' | sed 's/|/ | /g')"
@@ -365,6 +375,7 @@ cmd_surface() {
     done <<EOF
 $(open_entries)
 EOF
+    [ -z "$fresh" ] || printf '%s' "$fresh" >> "$marker" 2>/dev/null || true
   done
   # EVERY line starts with the same marker, for the reason bin/fm-nm-stall.sh's
   # footer gives: a relay that allowlists lines by marker must not be able to

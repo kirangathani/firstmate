@@ -903,10 +903,10 @@ while :; do
     if [ -x "$SCRIPT_DIR/fm-nm-questions.sh" ]; then
       # Wall-clock bounded like the stall sweep's own reads: this runs inside the
       # watcher's cycle, and a cycle that stretches is what breaks the timing the
-      # stale and pause classifications depend on. A sweep cut short reports
-      # nothing this cycle and the next one picks the question up, which only
-      # ever delays a wake rather than losing it - the durable record is what
-      # decides whether a question has been surfaced, not this run.
+      # stale and pause classifications depend on. A sweep cut short costs at
+      # most a duplicate wake next cycle, never a swallowed question: the owner
+      # prints each question BEFORE it marks it surfaced, and that ordering is
+      # what makes the bound safe to put here (see its cmd_surface comment).
       if command -v fm_bounded_available >/dev/null 2>&1 && fm_bounded_available; then
         nm_q_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
           fm_bounded_run "$NM_QUESTIONS_TIMEOUT" "$SCRIPT_DIR/fm-nm-questions.sh" surface 2>/dev/null || true)
