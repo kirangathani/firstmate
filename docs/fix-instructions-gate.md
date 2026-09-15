@@ -1,8 +1,8 @@
 # Carrying worker context into no-mistakes gate agents
 
-This document is the authoritative human-readable contract for the three mechanisms that carry a crewmate's own context through a no-mistakes run.
-`bin/fm-fix-instructions-policy.mjs` owns the fix-round refusal decision, `bin/fm-fix-instructions-check.sh` is only its harness transport, `bin/fm-nm-intent.sh` owns the run intent string, and `bin/fm-nm-decision.sh` owns the durable gate-decision record and the amendment that carries each decision into that intent.
-`bin/fm-brief.sh` is the one place that instructs a worker to use all three.
+This document is the authoritative human-readable contract for the mechanisms that carry a crewmate's own context through a no-mistakes run, and for the gate that makes the sanctioned attach command the only one available.
+`bin/fm-fix-instructions-policy.mjs` owns every refusal decision, `bin/fm-fix-instructions-check.sh` is only its harness transport, `bin/fm-nm-attach.sh` owns attaching to a run, `bin/fm-nm-intent.sh` owns the run intent string, and `bin/fm-nm-decision.sh` owns the durable gate-decision record and the amendment that carries each decision into that intent.
+`bin/fm-brief.sh` is the one place that instructs a worker to use them.
 
 ## The problem
 
@@ -44,7 +44,26 @@ Verified 2026-08-03 against the installed `no-mistakes version v1.37.0 (78e4dcb)
 A newly spawned crewmate receives it automatically; there is no per-task wiring.
 A secondmate does not, because a secondmate is a firstmate in its own home, not a worker driving a gate.
 
-### What it refuses, and the settled limits of that
+### What it refuses: the raw attach
+
+It refuses any command whose executed program is `no-mistakes` and whose subcommand is `axi run` or `axi respond`, naming `bin/fm-nm-attach.sh` as the route to use instead.
+Reason code `nm-raw-attach`.
+
+Those two subcommands are the only ones that block on the daemon: they ATTACH to the branch's run and hold until the next gate, decision point, or outcome, or until `--wait` (default 8m) elapses.
+A full run is 25-35 minutes, so in the foreground the wait elapses three or four times per run, each return costing a turn and carrying no news.
+Measured 2026-09-15 on task `eln-location-no-project-l3`: three consecutive foreground holds, three `error: wait of 8m0s elapsed while driving the run` returns, no progress.
+Worse, the daemon pushes nothing, so an ask-user finding parks a step at `awaiting_approval` and waits indefinitely, noticed only when somebody happens to reattach.
+
+**Backgrounding had to be owned rather than inspected.** A PreToolUse hook sees only the model's command string, and `bin/fm-arm-pretool-check.sh`'s header records the reason that is not enough: harness-native tracked background execution is not itself a policy signal.
+So the hook cannot verify that a command was backgrounded with a long wait; it can only refuse the command and name one that always is.
+Part D owns what the wrapper guarantees.
+
+`axi status`, `axi logs`, `axi sync` and `axi abort` all return immediately and are untouched, as are `no-mistakes doctor`, `no-mistakes init`, `--version`, and any invocation carrying `--help` or `-h` - including `axi run --help`, which is documentation the generated brief itself points a worker at.
+
+This rule fires ahead of the substance floor below, so through this transport every fix round now denies as `nm-raw-attach`.
+The floor is not weakened by that: the wrapper calls this same policy owner in `--fix-instructions-only` mode before it sends a response, which is the one remaining place the floor can fire, and `tests/fm-fix-instructions-check.test.sh` pins its whole acceptance set in that mode.
+
+### What it refuses: a context-free fix round, and the settled limits of that
 
 It refuses a `no-mistakes axi respond --action fix` command that either carries no `--instructions` at all, or whose instructions fall below the substance floor.
 
@@ -79,10 +98,14 @@ Two deliberate allows:
 
 ### Stable reason codes
 
-| Code | Meaning |
-| --- | --- |
-| `fix-instructions-missing` | A fix round carries no `--instructions` at all. |
-| `fix-instructions-thin` | The instructions are shorter than `MIN_INSTRUCTIONS_CHARS`. |
+| Code | Meaning | Mode |
+| --- | --- | --- |
+| `nm-raw-attach` | A raw `no-mistakes axi run` or `axi respond`, which `bin/fm-nm-attach.sh` owns. | default only |
+| `fix-instructions-missing` | A fix round carries no `--instructions` at all. | both |
+| `fix-instructions-thin` | The instructions are shorter than `MIN_INSTRUCTIONS_CHARS`. | both |
+
+`--fix-instructions-only` on the policy CLI selects the second mode, which skips the raw-attach rule.
+It exists for exactly one caller, `bin/fm-nm-attach.sh`, because the default mode would refuse the very command that script exists to run.
 
 ### Output contract
 
@@ -141,13 +164,16 @@ It prints the `# Task` section of `data/<task-id>/brief.md`, whitespace-normaliz
 That section includes the `## Gate decisions` subsection Part C writes into it, so the intent tracks the decided goal rather than the goal as first dispatched.
 Nothing else is consulted, so there is no second copy to keep in sync.
 
-The generated no-mistakes ship brief instructs the worker to start every run with:
+The generated no-mistakes ship brief no longer emits that command.
+It names `bin/fm-nm-attach.sh` (Part D), which composes the intent through this owner itself:
 
 ```sh
-no-mistakes axi run --intent "$(FM_HOME=<firstmate-home> <firstmate-root>/bin/fm-nm-intent.sh <task-id>)"
+FM_HOME=<firstmate-home> <firstmate-root>/bin/fm-nm-attach.sh <task-id>
 ```
 
-The `FM_HOME=` prefix is load-bearing, not decoration, and `bin/fm-brief.sh` embeds the resolved home into every command it emits for both helpers.
+So the intent has one owner and one caller, and a worker cannot start a run with a paraphrase even by accident, because it never assembles the `--intent` flag at all.
+
+The `FM_HOME=` prefix is load-bearing, not decoration, and `bin/fm-brief.sh` embeds the resolved home into every command it emits for every helper.
 The helpers read `data/<task-id>/` under the HOME while the scripts come from the shared tracked code ROOT, and a crewmate pane is launched with no `FM_HOME` of its own: only a `--secondmate` launch carries that env prefix.
 In the main home the two paths coincide, so a root-anchored command happens to work; in a secondmate home they do not, which is the entire point of the `FM_HOME` split.
 Root-anchored, a secondmate's crewmate resolved `data/` to the code root, found no brief, and could not start a run at all.
@@ -181,10 +207,66 @@ The heading is the anchor instead, because `bin/fm-nm-intent.sh` emits this text
 The generated ship brief then requires the worker to:
 
 1. `record` each decision at the moment it is submitted, with the finding id, the decision key, and what the decision required in concrete, checkable terms.
-2. Start a fresh run with the same pinned-intent command once a run in which any `change` decision was recorded reaches its outcome.
+2. Start a fresh run with the same attach command once a run in which any `change` decision was recorded reaches its outcome.
    That run's review is the mechanical proof that the branch and the decided goal agree, and it is also the only thing that re-reviews whatever the later auto-fix steps (test, document, lint) changed.
 3. Pass `rerun-check` before reporting done.
    It exits 0 only when every recorded `change` decision was recorded during a run older than the most recent one, and exits 1 both when such a decision is still waiting for that re-run and when the current run id cannot be read at all.
+
+## Part D: one owner for attaching to a run
+
+`bin/fm-nm-attach.sh` is the only sanctioned way to start, reattach to, or respond to a run, and its header owns the exact mechanics.
+Three guarantees are what make it worth having, and none of them is an instruction a worker can decline:
+
+1. **It always detaches and always returns immediately.**
+   The attach runs in its own process group and session (`setsid`, `nohup` where absent) with stdin closed and both streams in the task's own temp root, and the caller gets the log path and control back at once.
+   A worker cannot obtain the foreground shape from it.
+2. **It always uses a multi-hour wait.**
+   `FM_NM_ATTACH_WAIT` defaults to `3h`, comfortably past a 25-35 minute run, so the hold returns on a real event rather than on the clock.
+3. **The hold's return becomes a wake, not a thing to notice.**
+   The same detached process re-reads `no-mistakes axi status` and appends exactly one line to `state/<task-id>.status`, so the run's next event reaches firstmate even if the worker is idle, compacted, or gone.
+
+Verified 2026-09-15 against `no-mistakes version v1.70.1`:
+
+- `no-mistakes axi run --help` documents `--wait duration` (default `8m0s`) as "maximum time to block driving this run before returning so the caller can reattach", and states the 10-minute harness tool cap as the reason for that default.
+- `--wait` accepts a multi-hour value. `no-mistakes axi run --wait 3h` in a non-repo directory clears flag parsing and fails later with `error: not in a git repository`, while `--wait 3x` fails at parse time with `invalid argument "3x" for "--wait" flag: time: unknown unit "x" in duration "3x"`. The source agrees: `internal/cli/axi_drive.go:47` registers it with `cmd.Flags().DurationVar`, so the value goes through `time.ParseDuration` and has no upper bound of its own.
+- `no-mistakes axi respond --help` carries the identical `--wait` flag and the identical default.
+
+### The status line, and why each verb is the one it is
+
+`bin/fm-classify-lib.sh` owns firstmate's wake vocabulary, and the wrapper uses only verbs that library already triages, so its line is never absorbed as a no-verb signal.
+Every line carries the same `[key=nm-run]` token, because a task has at most one active run and that library's keyed fold is what stops an earlier parked gate being masked by a later append.
+
+| Situation | Line | Why that verb |
+| --- | --- | --- |
+| parked at a gate | `needs-decision [key=nm-run]: run <id> parked at <step> (<gate-status>) - respond through ...` | captain-relevant, and it OPENS the keyed decision so a park cannot rot silently |
+| run passed | `resolved [key=nm-run]: run <id> <passed\|checks-passed>` | CLOSES the key, since nothing is owed at the gate. Not captain-relevant by verb, which is correct: the watcher then asks `bin/fm-crew-state.sh` whether the crew is provably working, and a finished run is not, so the wake surfaces on the real state rather than on a hardcoded word |
+| run failed or cancelled | `blocked [key=nm-run]: run <id> <outcome>: <error>` | captain-relevant, and `blocked` REPLACES the record under the same key: what firstmate owes moved from answering the gate to dealing with a dead run, which is one open decision, not two |
+| `--wait` elapsed, run still live | `paused [key=nm-run]: run <id> still <status> at <step> after <wait>; reattach with ...` | the library's exact declared-external-wait case: expected to clear on its own, so an idle pane is not escalated as a possible wedge |
+| daemon did not answer | `blocked [key=nm-daemon]: daemon unreachable while attached to run <id>` | its own key, because a dead daemon is not this run's gate |
+| no run for this branch | `blocked [key=nm-run]: no run exists for fm/<id> after attaching (rc=<n>)` | the attach started nothing, and nothing will clear on its own |
+
+A `--respond` attach appends one further line at SEND time, `resolved [key=nm-run]: responded to the gate ...`, because sending the response is what answers the park.
+Without it, a park opened by a previous hold would stay open behind a later `paused` or `resolved` return and firstmate would keep chasing a gate that had already been answered.
+
+A record whose own `branch:` is not `fm/<task-id>` is discarded rather than reported.
+`no-mistakes axi status` answers with another branch's run under `other_branch_run:` (`internal/cli/axi_query.go` picks the key), and that body carries the same `id:`, `status:` and `outcome:` fields, so a positional read would pin another task's failure on this one.
+
+### What it refuses, all before anything is launched
+
+- A working directory that is not a git worktree on `fm/<task-id>`. Both `axi run` and `axi status` answer for the worktree they are called in, so a wrong cwd drives another task's run.
+- `--yes` anywhere in the respond arguments.
+- A fix round below the substance floor, delegated to `bin/fm-fix-instructions-policy.mjs --fix-instructions-only`. The PreToolUse gate never sees a fix round again, so this is where that floor now lives.
+- A second attach while one is already alive for the task, pointing at the live log. The marker holds the follower's pid, and a pid that is no longer alive is treated as a dead hold's leftover rather than as a reason to strand the task.
+- A composed intent over the push-option size limit, with the measured size.
+
+### The intent size cap
+
+The pinned intent travels as a base64 git push option, whose limit is 65520 bytes encoded - 49140 raw, since base64 emits 4 characters per 3-byte group.
+`INTENT_B64_LIMIT` in `bin/fm-nm-attach.sh` is the named owner, and `tests/fm-nm-attach.test.sh` sizes its boundary cases by reading that constant at run time rather than from a number that happens to fit today.
+
+The refusal names the measured size and points at the brief's own `## Gate decisions` subsection, which is the only part of the intent that grows without bound.
+**Compaction is deliberately not implemented here**; task `fm-nm-intent-size-cap-i6` owns it.
+This is the refusal only.
 
 ## The outcome class: a decision that changes nothing owes no run
 
@@ -235,16 +317,26 @@ They are still useful when investigating a suspect run by hand, so they were kep
 
 ## Validation
 
-`tests/fm-fix-instructions-check.test.sh` owns the seatbelt's acceptance matrix: 35 cases across all five harness entry forms, the exact substance-floor boundary read from the named constant, transport fail-open behavior, the strict-superset prefilter, and per-harness wiring driven through the REAL `bin/fm-spawn.sh`.
+`tests/fm-fix-instructions-check.test.sh` owns the seatbelt's acceptance matrix: 41 cases across all five harness entry forms, the exact substance-floor boundary read from the named constant, transport fail-open behavior, the strict-superset prefilter, and per-harness wiring driven through the REAL `bin/fm-spawn.sh`.
+Its raw-attach cases cover leading environment assignments, `&&` chains, pipes, subshells, a nested `bash -c`, a path-qualified program name, and `--flag=value`, plus the dynamic-value forms the substance floor deliberately let through.
+It also pins the floor's whole 15-case acceptance set in `--fix-instructions-only` mode, so relocating that enforcement into the wrapper did not shrink it, and it pins that a raw-attach refusal names the wrapper command by absolute path while a floor refusal names what the instructions have to contain.
 The Claude, Codex and Grok hooks are proven end to end by executing the exact command string `fm-spawn` recorded, against both a refusal case and a pass case.
 The OpenCode plugin and Pi extension are proven end to end by importing the generated file in Node and invoking the generated blocking callback, again both ways.
 The Grok global hook is additionally proven inert for a workspace with no token pointer and for one whose pointer names an unregistered token.
 
 `tests/fm-nm-gate-context.test.sh` owns the intent owner, the decision record lifecycle, the intent amendment and its re-run gate, and the generated brief's contract.
 
+`tests/fm-nm-attach.test.sh` owns the attach owner: that it returns within 2 seconds while a hold that sleeps 30 is provably still running, that the hold carries `--wait 3h` and the pinned intent and never `--yes`, each classified return shape, every refusal including the size cap sized from its own named constant, and the denial through the real Claude and Grok stdin transports.
+Its `no-mistakes axi status` fixtures and their provenance are recorded in `tests/fixtures/nm-attach/PROVENANCE.md`, which states per fixture which bytes were captured from the installed tool and which two shapes could not be - a gate state is not durable, and no `awaiting_approval` row exists anywhere in this machine's daemon database across all 73 recorded runs, so those two are composed from strings the tool's own test suite asserts it emits, named line by line.
+
 No harness binary was spawned by either suite.
 **Live per-harness hook-loading was not confirmed for Codex, OpenCode, Pi, or Grok.**
 The wiring shapes follow the already-verified per-harness mechanics recorded in `docs/arm-pretool-check.md` and the `harness-adapters` skill, and the generated adapter code is exercised directly by the suites above, but the step of "the harness actually loads this file" is inherited from those prior validations rather than re-observed here.
+
+**The raw-attach denial WAS confirmed live on Claude, the harness this fleet runs.**
+Verified 2026-09-15 in a real `fm-spawn`-generated crewmate worktree whose `.claude/settings.local.json` PreToolUse hook was pointed at this branch's `bin/fm-fix-instructions-check.sh --claude`.
+`no-mistakes axi run --intent "..." --wait 8m` and `no-mistakes axi respond --action approve` were each blocked before executing, with the `nm-raw-attach` reason and the wrapper command returned to the model; `no-mistakes axi status` in the same session ran normally and printed its record.
+No wiring changed for any harness, so Codex, Grok, OpenCode and Pi keep exactly the mechanics recorded above - only the policy module behind the shared transport changed, and each of those four is still exercised through that transport by the suite, not live.
 
 Checked 2026-08-08 in the build environment: `claude` 2.1.226 and `opencode` 1.18.15 are installed; `codex`, `pi`, and `grok` are absent.
 OpenCode being present does not upgrade its row above, and the attempt is recorded so nobody repeats it expecting a cheap win.
@@ -256,9 +348,10 @@ Run:
 
 ```sh
 bash -n bin/fm-fix-instructions-check.sh
-shellcheck bin/fm-fix-instructions-check.sh bin/fm-nm-intent.sh bin/fm-nm-decision.sh
+shellcheck bin/fm-fix-instructions-check.sh bin/fm-nm-attach.sh bin/fm-nm-intent.sh bin/fm-nm-decision.sh
 node --check bin/fm-fix-instructions-policy.mjs
 tests/fm-fix-instructions-check.test.sh
+tests/fm-nm-attach.test.sh
 tests/fm-nm-gate-context.test.sh
 bin/fm-lint.sh
 bin/fm-test.sh
