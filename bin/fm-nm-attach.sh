@@ -102,17 +102,6 @@
 #   - a second attach while one is already alive for this task
 #   - a composed intent too large to reach the daemon (see below)
 #
-# THE INTENT TRAVELS ON ARGV, and that is bounded on purpose. The follower is
-# this same script re-executed, and the intent is handed to it as one argument,
-# so it is subject to the kernel's per-argument limit (MAX_ARG_STRLEN, 131072
-# bytes on Linux; measured 2026-09-15 - 131071 execs, 131072 does not). An argv
-# payload dies at its threshold rather than degrading, which is why firstmate
-# normally keeps growing payloads off argv entirely. It is safe here only because
-# the size cap below is enforced BEFORE the exec and is far smaller: 49140 raw
-# bytes, 2.7x of headroom. tests/fm-nm-attach.test.sh probes the real limit at
-# run time and asserts the cap stays under it, so a later cap raise cannot
-# silently cross it.
-#
 # ON A --local-skip TASK this is not the command to reach for: bin/fm-spawn.sh
 # puts a `no-mistakes` shim at the front of that worker's PATH which exits 0 with
 # a message naming the flag, so the hold learns nothing and classifies the result
@@ -135,6 +124,18 @@
 # (bin/fm-nm-decision.sh writes it, bin/fm-nm-intent.sh emits it), which is the
 # only part of the intent that grows without bound, and task
 # fm-nm-intent-size-cap-i6 owns doing that.
+#
+# THE INTENT TRAVELS ON ARGV, and that is bounded on purpose. The follower is
+# this same script re-executed, and the intent is handed to it as one argument,
+# so it is subject to the kernel's per-argument limit (MAX_ARG_STRLEN, 131072
+# bytes on Linux; measured 2026-09-15 - 131071 execs, 131072 does not). An argv
+# payload dies at its threshold rather than degrading, which is why firstmate
+# normally keeps growing payloads off argv entirely. It is safe here only because
+# the size cap above is enforced BEFORE the exec and is far smaller: 49140 raw
+# bytes, 2.7x of headroom. tests/fm-nm-attach.test.sh probes the real limit at
+# run time and asserts the cap stays under it, so a later cap raise cannot
+# silently cross it.
+#
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
