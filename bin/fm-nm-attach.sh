@@ -87,6 +87,10 @@
 # would keep chasing a gate that was already answered. The follower still
 # appends exactly one line of its own when the hold returns.
 #
+# `--wait` is appended AFTER the caller's own respond arguments, and pflag is
+# last-wins, so a `--wait 8m` a worker put in its own arguments cannot take
+# effect. That ordering is the enforcement, not a detail.
+#
 # WHAT IT REFUSES, all before anything is launched:
 #   - a working directory that is not a git worktree on fm/<task-id>
 #   - `--yes`/`-y` in the respond arguments (it auto-resolves every ask-user
@@ -345,6 +349,18 @@ fi
 mkdir -p "$TASK_TMP"
 LOG="$TASK_TMP/nm-attach-$(date +%s).log"
 
+# Sending the response is what answers a parked gate, so the keyed decision the
+# previous attach opened is closed here rather than when this hold returns - see
+# the header. It MUST be written before the launch below, not after: a response
+# that returns instantly would otherwise let the follower append its own line
+# first, and a `resolved` landing after a fresh `needs-decision` would close the
+# NEXT gate instead of the one just answered. Everything that can refuse has
+# already refused by this point, so nothing is closed for a response never sent.
+if [ "$RESPOND" = respond ]; then
+  printf 'resolved [key=nm-run]: responded to the gate for %s; attaching again\n' \
+    "$ID" >> "$STATE/$ID.status"
+fi
+
 # Detach. setsid puts the hold in its own process group and session so it is not
 # reaped when the worker's shell, tool call, or whole agent goes away; nohup is
 # the fallback where setsid is absent. stdin is closed so the hold can never
@@ -357,15 +373,12 @@ else
     "${INTENT:-}" "$@" </dev/null >>"$LOG" 2>&1 &
 fi
 FOLLOWER_PID=$!
+# The pid only exists after the launch, so a hold that finishes instantly can
+# remove this marker before it is written and leave it behind. That is why the
+# liveness test above is `kill -0` on the recorded pid rather than the file's
+# existence: a marker whose pid is gone is a dead hold's leftover, and is cleared
+# rather than allowed to strand the task.
 printf '%s\n%s\n' "$FOLLOWER_PID" "$LOG" > "$MARKER"
-
-# Sending the response is what answers a parked gate, so the keyed decision the
-# previous attach opened is closed here and not when this hold returns - see the
-# header. Written after the launch so a refusal above never closes anything.
-if [ "$RESPOND" = respond ]; then
-  printf 'resolved [key=nm-run]: responded to the gate for %s; attached again (pid %s)\n' \
-    "$ID" "$FOLLOWER_PID" >> "$STATE/$ID.status"
-fi
 
 echo "attached in the background (pid $FOLLOWER_PID), --wait $WAIT: $LOG"
 echo "Returning now on purpose. The hold appends one line to $STATE/$ID.status when the run reaches a gate, an outcome, or the wait; that line is what wakes firstmate. Do not poll this - read $LOG or 'no-mistakes axi status' if you want a look."
