@@ -71,6 +71,7 @@ const yellow = sgr("93");
 const red = sgr("91");
 const cyan = sgr("96");
 const white = sgr("97");
+const whiteBold = sgr("1;97");
 const magenta = sgr("95");
 // `skipped` needs a slot of its own. It used to share dim with `pending`, so a
 // stage the captain deliberately switched off looked exactly like one that had
@@ -85,7 +86,13 @@ const blue = sgr("94");
 // head. That rules out slot 32 and every dim variant. The palette offers one
 // bright green and one foreground, so length comes from holding each step
 // across several cells rather than from more hues.
-const TAIL = ["1;92", "1;92", "92", "92", "92", "1;97", "97"].map(sgr);
+//
+// The trail is built from the NAMED painters, not from raw codes, because its
+// centre - `green` - is also the paint of every finished box (PAINT.done) and
+// of a CI cell whose checks passed on the head that will land (PAINT.passed).
+// The captain's rule is that those three are the same colour, and one token
+// spelled once is what keeps them the same when the palette is next tuned.
+const TAIL = [greenBold, greenBold, green, green, green, whiteBold, white];
 
 // `building` is the worker's own implementation phase - from the moment
 // dispatch wrote its record until the pipeline run for that branch starts - so
@@ -107,8 +114,8 @@ const CIW = 13;
 const MW = 9;
 const NCELLS = STEPS.length + 2;
 // One PIPELINE block: the head, the three box rows, the TWO timer rows, the
-// TWO model rows, the facts row, and one blank. One COMPACT block: the head, the state row, and one
-// blank. scrollWindow() below derives the frame from these two numbers, so a
+// TWO model rows, one further detail row, a blank, and the facts row. One
+// COMPACT block: the head, the state row, and one blank. scrollWindow() below derives the frame from these two numbers, so a
 // row added to either builder has to be added here in the same edit or the
 // frame runs past the bottom of the terminal.
 //
@@ -122,9 +129,17 @@ const NCELLS = STEPS.length + 2;
 // Two further rows carry WHICH MODEL is pushing the active cell through, split
 // one axis per row for the reason modelLabel() states, and drawn on the same
 // unconditional terms for the same reason.
+// A fifth detail row follows them, blank under every step box. It exists for
+// the GITHUB CI cell alone: when that cell's checks describe a head a newer run
+// will replace, the captain's two plain sentences - "main moved, must retest"
+// and "new branch commit, must retest" - wrap at word boundaries to two and
+// three fifteen-column rows, so both together need five. Widening the cell by
+// one column, the ruled alternative, still leaves them at five, because the
+// second sentence's longest word pair is eighteen columns. The row is drawn
+// unconditionally for the same reason every other detail row is.
 // A blank row then separates those detail rows from the check tally, so the
 // tally reads as the agent's summary rather than as one more per-stage line.
-export const BLOCK = 11;
+export const BLOCK = 12;
 export const COMPACT_BLOCK = 3;
 
 // Whether this agent has a no-mistakes pipeline to draw. The snapshot STATES
@@ -167,9 +182,16 @@ export function stepState(status) {
   return STATE_BY_STATUS.get(status) ?? "unknown";
 }
 
+// `done` is the runner's own centre green, by the captain's rule: a finished
+// box is painted the colour the trail leaves behind it, so a row reads as
+// green up to the box the runner is circling, white for that one, dim beyond.
+// `passed` is the same token on the GITHUB CI cell, and means the checks passed
+// on the head that will land; that cell's colour is its verdict and nothing
+// else, so waiting on the captain's word is no longer drawn there.
 const PAINT = {
   live: white,
-  done: white,
+  done: green,
+  passed: green,
   waiting: yellow,
   failed: red,
   pending: dim,
@@ -415,7 +437,7 @@ function perimeter(w) {
 function box(label, state, width, opts = {}) {
   const {
     dashed = false, badge = false, timer = "", timer2 = "",
-    model = "", effort = "", anim = 0,
+    model = "", effort = "", extra = "", anim = 0,
   } = opts;
   const base = PAINT[state] ?? dim;
   const [tl, tr, bl, br, hz, vt] = dashed
@@ -443,6 +465,7 @@ function box(label, state, width, opts = {}) {
     top: row(0), mid: row(1), bot: row(2),
     timer: padLeft(timer, width + 2), timer2: padLeft(timer2, width + 2),
     model: padLeft(model, width + 2), effort: padLeft(effort, width + 2),
+    extra: padLeft(extra, width + 2),
   };
 }
 
@@ -695,14 +718,57 @@ export function ciVerdict(agent) {
   if (!ci || ci.collection?.ok === false) return agent.pr?.url ? "unread" : "none";
   const { total = 0, failed = 0, pending = 0, excused = 0 } = ci;
   if (failed > 0) return "failed";
-  if (pending > 0) return "running";
   if (total === 0) return "none";
   // An excused check is an authorized RED, not evidence that anything ran, so
   // bin/fm-pr-merge.sh subtracts it before asking whether this PR reported any
   // checks at all - and refuses a PR whose only entries were excused exactly
   // like one that reported none. Nothing here may be readier than that gate.
   if (total - excused === 0) return "nothing-ran";
+  // Checks on a head that a newer run will replace are not this PR's verdict,
+  // whether they passed or are still running: the push at the end of that run
+  // re-runs them. The collector states the comparison (`ci.superseded`, an
+  // object when the checked head is not the run's head and the run is past its
+  // rebase); this only reads it, so a green here can never outrun the facts.
+  if (ci.superseded && typeof ci.superseded === "object") return "superseded";
+  if (pending > 0) return "running";
   return "ready";
+}
+
+// The captain's own sentences for a CI cell whose checks describe a head a
+// newer run will replace, wrapped at word boundaries to the cell's rows. The
+// words are never shortened: a word that does not fit its row starts the next.
+export function wrapWords(text, width) {
+  const lines = [];
+  let cur = "";
+  for (const w of String(text).split(/\s+/).filter(Boolean)) {
+    if (!cur) cur = w;
+    else if (cur.length + 1 + w.length <= width) cur += ` ${w}`;
+    else { lines.push(cur); cur = w; }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+// Which sentences, in the captain's order: main moved first, new commits
+// second, both when both hold. When the heads differ but the collector could
+// not read why, the cell still says what is certain - the branch changed - so
+// the yellow is never left unexplained.
+export function supersededLines(sup, width) {
+  const msgs = [];
+  if (sup?.main_moved) msgs.push("main moved, must retest");
+  if (sup?.new_commits) msgs.push("new branch commit, must retest");
+  if (msgs.length === 0) msgs.push("branch changed, must retest");
+  return msgs.flatMap((m) => wrapWords(m, width));
+}
+
+const shortSha = (s) => (typeof s === "string" && /^[0-9a-f]{7,}$/i.test(s) ? s.slice(0, 7) : "");
+
+// The commit the checks actually ran on, for the facts line. It is stated
+// whenever the collector read it, so the superseded cell's sha lives here in
+// full width rather than crowding the sentences above.
+export function ciCommit(agent) {
+  const head = shortSha(agent?.ci?.head);
+  return head ? `checks ran on commit ${head}` : "";
 }
 
 function ciBox(agent, anim) {
@@ -743,17 +809,32 @@ function ciBox(agent, anim) {
       const b = box("GITHUB CI", "unknown", CIW, { dashed: true, timer: "nothing ran" });
       return { ...b, timer: magenta(b.timer) };
     }
-    default: {
-      // "N/N your word" is 15 columns at two-digit counts, which is exactly the
-      // timer field under a 13-wide box. The dash this phrase used to carry cost
-      // two more and pushed it over, which is how it reached the captain as
-      // `11/11 - your wo`. fit() still guards the three-digit case; the phrase is
-      // chosen so the guard does not have to fire on a real fleet.
+    case "superseded": {
+      // Yellow, and the sentences in yellow with it: the colour is the verdict
+      // "passed, but not on the head that will land", and the words say why.
+      // Two sentences wrap to five rows, which is why the block has five.
+      const [l1 = "", l2 = "", l3 = "", l4 = "", l5 = ""] = supersededLines(ci.superseded, CIW + 2);
       const b = box("GITHUB CI", "waiting", CIW, {
-        dashed: true,
-        timer: `${passed}/${total} your word`,
+        dashed: true, timer: l1, timer2: l2, model: l3, effort: l4, extra: l5,
       });
-      return { ...b, timer: yellow(b.timer) };
+      const y = (s, v) => (v ? yellow(s) : s);
+      return {
+        ...b,
+        timer: y(b.timer, l1), timer2: y(b.timer2, l2),
+        model: y(b.model, l3), effort: y(b.effort, l4), extra: y(b.extra, l5),
+      };
+    }
+    default: {
+      // Every check passed on the head that will land. Green is the verdict and
+      // the only thing this cell says; whether the captain has given the word
+      // is a different fact and is drawn on the pre-merge box, which is the
+      // gate that actually waits for it. "N/N passed" is 12 columns at
+      // two-digit counts and 14 at three, inside the 15-column timer field.
+      const b = box("GITHUB CI", "passed", CIW, {
+        dashed: true,
+        timer: `${passed}/${total} passed`,
+      });
+      return { ...b, timer: green(b.timer) };
     }
   }
 }
@@ -791,8 +872,14 @@ export function ciTally(agent) {
 
 // The final box is the pre-merge check: the base branch's own assertions run
 // against this branch. It cannot show a verdict before the captain acts,
-// because it does not run until a merge is attempted.
-function premergeBox() {
+// because it does not run until a merge is attempted - so when every check has
+// passed on the head that will land, THIS is the box that parks amber and asks
+// for the captain's word. The CI cell beside it keeps its verdict colour.
+function premergeBox(agent) {
+  if (ciVerdict(agent) === "ready") {
+    const b = box("pre-merge", "waiting", MW, { timer: "your word" });
+    return { ...b, timer: yellow(b.timer) };
+  }
   return box("pre-merge", "pending", MW);
 }
 
@@ -810,22 +897,36 @@ const DEFAULT_OPEN_HINT = "enter: open this worker's window";
 // on screen. A run is one `no-mistakes axi run` - one row in the daemon's own
 // `runs` table for the branch - so a run that fails and is restarted from
 // building is the next number, while the auto-fix rounds INSIDE one run are not
-// (the row already states those as `auto-fix n/3`). Red, from the same palette
-// slot every other colour on this view comes from, so it re-skins with the
-// terminal theme rather than staying neon against it.
+// (the row already states those as `auto-fix n/3`). Dim, like the project
+// label beside it: the counter is an identity, and red is this view's failed
+// slot, so a red counter on a healthy first run read as an alarm that was not
+// there.
 //
 // Nothing at all when the collector states no number: a worker that runs no
 // pipeline, a branch with no run yet, or a database that could not be read.
 // A placeholder there would be a claim the snapshot did not make.
 function runCounter(agent) {
   const nRuns = agent.run_number;
-  return Number.isInteger(nRuns) && nRuns > 0 ? `  ${red(`Run #${nRuns}`)}` : "";
+  return Number.isInteger(nRuns) && nRuns > 0 ? `  ${dim(`Run #${nRuns}`)}` : "";
+}
+
+// How the branch's latest run ended, when it ended without completing, in the
+// tool's own words: `run failed: daemon shutting down`. The run's record says
+// `failed` or `cancelled` and its error line often repeats that word
+// (`cancelled: aborted by user`), so the repeat is dropped rather than printed
+// twice. Nothing for a run that is still going or that completed.
+export function runEnd(agent) {
+  const status = agent?.run?.status;
+  if (status !== "failed" && status !== "cancelled") return "";
+  let reason = String(agent.run?.error ?? "").trim();
+  if (reason.toLowerCase().startsWith(`${status}:`)) reason = reason.slice(status.length + 1).trim();
+  return reason ? `run ${status}: ${reason}` : `run ${status}`;
 }
 
 function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   const cells = STEPS.map((s) => stepBox(agent, s, anim));
   cells.push(ciBox(agent, anim));
-  cells.push(premergeBox());
+  cells.push(premergeBox(agent));
 
   // Selection is reverse video, deliberately NOT green: green already means
   // "the agent is here" and must keep exactly one meaning.
@@ -834,12 +935,12 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
     const mark = (s) => `${ESC}7m${s.replace(ANSI, "")}${R}`;
     cells[cell] = {
       top: mark(c.top), mid: mark(c.mid), bot: mark(c.bot),
-      timer: c.timer, timer2: c.timer2, model: c.model, effort: c.effort,
+      timer: c.timer, timer2: c.timer2, model: c.model, effort: c.effort, extra: c.extra,
     };
   }
 
   const shown = cells.slice(lay.first, lay.first + lay.count);
-  const top = [], mid = [], bot = [], tim = [], tim2 = [], mod = [], eff = [];
+  const top = [], mid = [], bot = [], tim = [], tim2 = [], mod = [], eff = [], ext = [];
   shown.forEach((c, i) => {
     const idx = lay.first + i;
     if (i > 0) {
@@ -853,11 +954,11 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
       // because not evaluated and absent are different answers and a blank
       // says neither.
       bot.push(idx === PR_CONNECTOR ? dim(pad(prLabel(agent), g)) : blank);
-      tim.push(blank); tim2.push(blank); mod.push(blank); eff.push(blank);
+      tim.push(blank); tim2.push(blank); mod.push(blank); eff.push(blank); ext.push(blank);
     }
     top.push(c.top); mid.push(c.mid); bot.push(c.bot);
     tim.push(c.timer); tim2.push(c.timer2);
-    mod.push(c.model); eff.push(c.effort);
+    mod.push(c.model); eff.push(c.effort); ext.push(c.extra);
   });
 
   const onHead = selected && cell < 0;
@@ -870,6 +971,13 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   if (authority) notes.push(blue(authority));
   if (agent.collection?.ok === false) notes.push(magenta(`unreadable: ${agent.collection.reason}`));
   else if (agent.endpoint_alive === false) notes.push(magenta("worker gone"));
+  // A run that ended without completing says how, here, because a nine-column
+  // cell cannot hold `daemon shutting down` and a bare FAIL under the step that
+  // died leaves the captain to go and find out. It sits beside `worker gone`
+  // rather than replacing it: the run's end and the worker's absence are two
+  // facts, and either can hold without the other.
+  const ended = runEnd(agent);
+  if (ended) notes.push(red(ended));
   // A run the CLI would not render, read straight from the daemon database
   // instead. Muted, because the row is healthy - but stated, because these
   // steps are not the view `no-mistakes axi status` would have printed. It sits
@@ -901,7 +1009,12 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   // only trace of it, and a clip leaves its opening words - which are the ones
   // that matter - intact.
   const skip = skipDisclosure(agent);
-  const facts = dim(ciTally(agent)) + (skip ? `  ${dim("·")}  ${blue(skip)}` : "");
+  // The commit the checks ran on comes last: it is the newest fact on the line
+  // and the one a narrow terminal can afford to lose first.
+  const commit = ciCommit(agent);
+  const facts = dim(ciTally(agent)) +
+    (skip ? `  ${dim("·")}  ${blue(skip)}` : "") +
+    (commit ? `  ${dim("·")}  ${dim(commit)}` : "");
 
   return [
     head,
@@ -912,6 +1025,7 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
     "  " + tim2.join(""),
     "  " + mod.join(""),
     "  " + eff.join(""),
+    "  " + ext.join(""),
     // One blank row, always, so the tally below is read as a summary of the
     // whole agent rather than as a fifth detail line under the last box.
     "",

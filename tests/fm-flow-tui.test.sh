@@ -326,9 +326,13 @@ pass "the two shell-out flags are refused outside watch mode"
 green11='{"pr":{"url":"https://github.com/o/r/pull/7","number":7},
           "ci":{"collection":{"ok":true,"reason":""},"checks":[],"total":11,"passed":11,"failed":0,"pending":0}}'
 out=$(render "$(snap "[$(agent_with t1 "$(steps_all completed)" "$green11")]")" | sed 's/\x1b\[[0-9;]*m//g')
-assert_contains "$out" "11/11 your word" "the all-green summary still does not fit its cell"
-assert_not_contains "$out" "your wo…" "the all-green summary is being shortened when it fits"
-pass "the pre-merge summary fits its cell whole at real fleet check counts"
+assert_contains "$out" "11/11 passed" "the all-green summary still does not fit its cell"
+assert_not_contains "$out" "passe…" "the all-green summary is being shortened when it fits"
+# The captain's word is asked for on the pre-merge box, the gate that actually
+# waits for it, and it fits that nine-wide box whole too.
+assert_contains "$out" "your word" "an all-green PR did not ask for the captain's word on pre-merge"
+assert_not_contains "$out" "your wo…" "the pre-merge summary is being shortened when it fits"
+pass "the CI verdict and the pre-merge summary each fit their cell whole at real fleet check counts"
 
 # Every variable-length value any cell can hold, swept across the widths that
 # produce them. Whatever reaches the screen is either the whole value or a
@@ -661,7 +665,8 @@ pass "a chunk holding several keys, in either arrow encoding, decodes to all of 
 excused=$(render "$(snap "[$(agent_with ex1 "$(steps_all completed)" "$(ci_result 11 10 0 0 0 1)")]")" |
   sed 's/\x1b\[[0-9;]*m//g')
 assert_not_contains "$excused" "FAIL" "an excused-only red PR still rendered as a CI failure"
-assert_contains "$excused" "10/11 your word" "an excused-only red PR did not park for the captain"
+assert_contains "$excused" "10/11 passed" "an excused-only red PR did not read as passed"
+assert_contains "$excused" "your word" "an excused-only red PR did not park for the captain"
 assert_contains "$excused" "1 excused" "the excused check was not counted in its own category"
 pass "a PR whose only red check is the excused one is not drawn as a failure"
 
@@ -960,7 +965,7 @@ const parked = rowsFor(ciAgent({
     total: 11, passed: 11, failed: 0, pending: 0, skipped: 0, excused: 0,
   },
 }));
-if (parked.words[CI] !== "11/11 your word") say(`CI lost its word: "${parked.words[CI]}"`);
+if (parked.words[CI] !== "11/11 passed") say(`CI lost its verdict: "${parked.words[CI]}"`);
 if (parked.times[CI] !== "") say(`a CI stage that is not running invented an elapsed: "${parked.times[CI]}"`);
 
 // Nor does a cell drawn `unknown` because the fleet no longer believes its
@@ -1452,8 +1457,10 @@ const { render } = await import(process.argv[2]);
 const snap = JSON.parse(process.argv[3]);
 let bad = 0;
 const say = (m) => { console.error(m); bad++; };
-// The renderer's own red slot, read from the file rather than written down
-// here, so a palette change moves the assertion with it.
+// Dim, the same slot as the project label beside it: the counter is an
+// identity, and red is the view's failed slot, so a red counter read as an
+// alarm on a healthy first run.
+const DIM = "\x1b[2m";
 const RED = "\x1b[91m";
 
 const headFor = (frame, id) => frame.find((l) => l.includes(id)) ?? "";
@@ -1463,7 +1470,8 @@ const headFor = (frame, id) => frame.find((l) => l.includes(id)) ?? "";
 const frame = render(snap, { rows: 60, cols: 200, sel: 0, cell: -1 });
 for (const [id, variant] of [["run3a", "inverse"], ["run3b", "ordinary"]]) {
   const head = headFor(frame, id);
-  if (!head.includes(`${RED}Run #3`)) say(`${variant} header carries no red run counter: ${JSON.stringify(head)}`);
+  if (!head.includes(`${DIM}Run #3`)) say(`${variant} header carries no dim run counter: ${JSON.stringify(head)}`);
+  if (head.includes(`${RED}Run #3`)) say(`${variant} header paints the run counter in the failed slot: ${JSON.stringify(head)}`);
   const idAt = head.indexOf(id);
   const runAt = head.indexOf("Run #3");
   if (idAt < 0 || runAt < idAt) say(`${variant} header did not put the counter after the id: ${JSON.stringify(head)}`);
@@ -1485,4 +1493,193 @@ RUNDOC=$(snap "[$(agent_with run3a "$(steps_all completed)" '{"run_number":3}'),
                 $(agent_with run3b "$(steps_all completed)" '{"run_number":3}')]")
 node "$TMP_ROOT/runcount.mjs" "$TUI" "$RUNDOC" ||
   fail "the run counter is missing, mispositioned, uncoloured, or drawn from nothing"
-pass "the run counter renders in red after the agent id on both header variants"
+pass "the run counter renders dim, never red, after the agent id on both header variants"
+
+# --- a run that ended under a live worker, and a CI head that will not land ---
+#
+# Two frames the captain read wrong on 2026-09-15, both reproduced from live
+# collector output that day (data/fm-pipeline-view-stale-run-r4/report.md, the
+# scout that diagnosed them; epochs pinned here to the values it captured):
+#
+#   eln-live-body-coedit-b2   run 01M2GY0VXE7ERKBFP3QACX6PDH ended `failed`,
+#                             `daemon shutting down`, 27 minutes before the
+#                             frame; the worker was alive and building again.
+#                             The row drew `building 1h29m` finished, `review
+#                             FAIL`, no band, no reason.
+#   eln-location-no-project-l3  Run #5 was 31 minutes into review on head
+#                             d1127afd, unpushed; PR 50's checks were for head
+#                             4a22cbba from a cancelled earlier run. The CI cell
+#                             drew amber `4/4 your word` and the header counted
+#                             it ready to merge.
+#
+# The captain's rulings, asserted here cell by cell through the renderer's own
+# layout arithmetic: the building box runs again with the band while the failed
+# step keeps its FAIL and the head line names the reason; the CI cell's colour
+# is its verdict alone - green passed, red failed, yellow for a head the live
+# run will replace, with his two sentences wrapped whole - and `your word`
+# moves to the pre-merge box; every finished box is the runner's centre green;
+# `Run #N` is dim.
+
+cat >"$TMP_ROOT/verdicts.mjs" <<'JS'
+const { render, layout, CELL_WIDTHS, STEPS, BLOCK, ciVerdict, dur } = await import(process.argv[2]);
+const base = JSON.parse(process.argv[3]);
+const COLS = 200, ROWS = 60;
+let bad = 0;
+const say = (m) => { console.error(m); bad++; };
+const lay = layout(COLS, 0);
+const offsets = [];
+{ let x = 2; for (const w of CELL_WIDTHS) { offsets.push(x); x += w + lay.gap; } }
+const plain = (l) => l.replace(/\x1b\[[0-9;]*m/g, "");
+// The SGR codes painting the visible glyphs of cell i on one raw row, so a
+// box's colour is read off the bytes rather than inferred from a word.
+const paints = (raw, i) => {
+  const out = new Set();
+  const re = /\x1b\[([0-9;]*)m/g;
+  let cur = "", col = 0;
+  for (let k = 0; k < raw.length;) {
+    re.lastIndex = k;
+    const m = re.exec(raw);
+    if (m && m.index === k) { cur = m[1] === "0" ? "" : m[1]; k += m[0].length; continue; }
+    const ch = raw[k++];
+    if (col >= offsets[i] && col < offsets[i] + CELL_WIDTHS[i] && ch !== " " && cur) out.add(cur);
+    col++;
+  }
+  return [...out].sort().join(" ");
+};
+const rowsFor = (a) => {
+  const raw = render({ ...base, agents: [a] }, { rows: ROWS, cols: COLS, sel: 0, cell: -1 });
+  const frame = raw.map(plain);
+  const head = frame.findIndex((l) => l.includes(a.id));
+  const cellsOf = (row) => CELL_WIDTHS.map((w, i) => (frame[row] ?? "").slice(offsets[i], offsets[i] + w).trim());
+  return {
+    header: frame[0], head: frame[head], headRaw: raw[head],
+    // head, top, mid, bot, then the five detail rows, a blank, and the facts.
+    words: cellsOf(head + 4), times: cellsOf(head + 5),
+    r3: cellsOf(head + 6), r4: cellsOf(head + 7), r5: cellsOf(head + 8),
+    blank: frame[head + 9], facts: frame[head + 10],
+    mid: (i) => paints(raw[head + 2], i),
+  };
+};
+const at = (key) => STEPS.findIndex((s) => s.key === key);
+const CI = CELL_WIDTHS.length - 2, PRE = CELL_WIDTHS.length - 1;
+const step = (s, status, ms = 0, findings = 0) => ({ step: s, status, findings, duration_ms: ms });
+const rest = (from) => ["test", "document", "lint", "push", "pr", "ci"].slice(from).map((s) => step(s, "pending"));
+const T = base.agents[0];
+
+// --- case 1: eln-live-body-coedit-b2 at 08:55:50Z ---------------------------
+const stale = {
+  ...T, id: "stale-run", run_number: 1, endpoint_alive: true,
+  run: { present: true, id: "01M2GY0VXE7ERKBFP3QACX6PDH", status: "failed",
+         error: "daemon shutting down", head: "ef1d5be5766ad8bb1df5c3b7163aad61e7922175",
+         db_updated_epoch: 1789460925, db_age_seconds: 1625 },
+  steps: [step("building", "running"), step("intent", "completed", 57), step("rebase", "completed", 5104),
+          step("review", "failed", 12014770, 1), ...rest(0)],
+  active_steps: [{ step: "building", status: "running", active_for: "", active_ms: 1625000,
+                   last_activity: "", agent_pid: "", round: "" }],
+};
+{
+  const r = rowsFor(stale);
+  if (r.words[at("building")] !== "running") say(`building is not running again: "${r.words[at("building")]}"`);
+  if (r.times[at("building")] !== dur(1625000)) say(`building does not count since the run ended: "${r.times[at("building")]}"`);
+  if (!r.mid(at("building")).includes("1;92")) say(`no runner band on the building box: ${r.mid(at("building"))}`);
+  if (r.words[at("review")] !== "FAIL") say(`the failed step lost its FAIL: "${r.words[at("review")]}"`);
+  if (r.mid(at("review")) !== "91") say(`the failed box is not red alone: ${r.mid(at("review"))}`);
+  if (r.mid(at("intent")) !== "92") say(`a finished box is not the runner's green: ${r.mid(at("intent"))}`);
+  if (r.mid(at("test")) !== "2") say(`a pending box is not dim: ${r.mid(at("test"))}`);
+  if (!r.head.includes("run failed: daemon shutting down")) say(`the head line does not say how the run ended: ${JSON.stringify(r.head)}`);
+  if (!r.headRaw.includes("\x1b[91mrun failed: daemon shutting down")) say("the run's end is not painted red");
+  if (!r.header.includes("0 ready to merge")) say(`header: ${r.header}`);
+}
+// The same run with the worker gone: nothing is building, nothing moves, and
+// both facts are stated side by side.
+{
+  const r = rowsFor({ ...stale, id: "stale-gone", endpoint_alive: false });
+  if (r.mid(at("building")) !== "95") say(`a gone worker's building box is not unknown: ${r.mid(at("building"))}`);
+  for (let i = 0; i < CELL_WIDTHS.length; i++) {
+    if (r.mid(i).includes("1;92")) say(`a runner band on cell ${i} of a gone worker`);
+  }
+  if (!r.head.includes("worker gone") || !r.head.includes("run failed: daemon shutting down")) {
+    say(`gone worker's head line lost a fact: ${JSON.stringify(r.head)}`);
+  }
+}
+// A cancelled run's error repeats its own status; the note says it once.
+{
+  const r = rowsFor({ ...stale, id: "cancelled-run",
+    run: { ...stale.run, status: "cancelled", error: "cancelled: aborted by user" } });
+  if (!r.head.includes("run cancelled: aborted by user")) say(`cancelled note: ${JSON.stringify(r.head)}`);
+  if (r.head.includes("cancelled: cancelled")) say(`the cancelled note repeats itself: ${JSON.stringify(r.head)}`);
+  const bare = rowsFor({ ...stale, id: "bare-fail", run: { ...stale.run, error: "" } });
+  if (!bare.head.includes("run failed") || bare.head.includes("run failed:")) say(`empty reason: ${JSON.stringify(bare.head)}`);
+}
+
+// --- case 2: eln-location-no-project-l3 at 08:59:52Z ------------------------
+const RUN_HEAD = "d1127afd90ec49611f6ebc64ca01ced2b5ca4d1f";
+const CI_HEAD = "4a22cbbacc8b79651d3e41904eed193565e49b2e";
+const live = {
+  ...T, id: "run-five", run_number: 5, endpoint_alive: true,
+  pr: { url: "https://github.com/kirangathani/eln/pull/50", number: 50 },
+  run: { present: true, id: "01M2J2WDC5WZMD3M3X54H8TRQ1", status: "running", error: "", head: RUN_HEAD,
+         db_updated_epoch: 1789462273, db_age_seconds: 519 },
+  steps: [step("building", "completed", 52705000), step("intent", "completed", 115), step("rebase", "completed", 2889),
+          step("review", "fixing", 527054), ...rest(0)],
+  active_steps: [{ step: "review", status: "fixing", active_for: "31m44s", active_ms: 1904000,
+                   last_activity: "", agent_pid: "", round: "2", model: "claude-opus-5", effort: "high" }],
+  ci: { collection: { ok: true, reason: "" }, checks: [], total: 4, passed: 4, failed: 0, pending: 0,
+        skipped: 0, excused: 0, excused_authority: [], head: CI_HEAD, superseded: null },
+};
+const sup = (s) => ({ ...live, id: `sup-${Object.keys(s).filter((k) => s[k]).join("-") || "unknown"}`,
+                      ci: { ...live.ci, superseded: { reason: "", ...s } } });
+const expectCI = (a, want, label) => {
+  const r = rowsFor(a);
+  const got = [r.words[CI], r.times[CI], r.r3[CI], r.r4[CI], r.r5[CI]];
+  if (JSON.stringify(got) !== JSON.stringify(want)) say(`${label}: CI rows ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+  if (r.mid(CI) !== "93") say(`${label}: superseded CI box is not yellow alone: ${r.mid(CI)}`);
+  if (r.words[PRE] !== "") say(`${label}: pre-merge asked for the word on a head that will not land: "${r.words[PRE]}"`);
+  if (!r.header.includes("0 ready to merge")) say(`${label}: header counted a superseded PR: ${r.header}`);
+  if (!r.facts.includes("checks ran on commit 4a22cbb")) say(`${label}: facts line does not name the checked commit: ${r.facts}`);
+  if (ciVerdict(a) !== "superseded") say(`${label}: verdict ${ciVerdict(a)}`);
+  return r;
+};
+expectCI(sup({ main_moved: true, new_commits: false }), ["main moved,", "must retest", "", "", ""], "main moved");
+expectCI(sup({ main_moved: false, new_commits: true }), ["new branch", "commit, must", "retest", "", ""], "new commits");
+expectCI(sup({ main_moved: true, new_commits: true }), ["main moved,", "must retest", "new branch", "commit, must", "retest"], "both");
+expectCI(sup({ main_moved: null, new_commits: null, reason: "the run has no copy of the repository left to compare" }),
+  ["branch changed,", "must retest", "", "", ""], "unreadable reason");
+// The five sentences' rows never spill into the blank row or the facts.
+{
+  const r = rowsFor(sup({ main_moved: true, new_commits: true }));
+  if (r.blank !== "") say(`the both case spilled past its five rows: ${JSON.stringify(r.blank)}`);
+  if (!r.facts.startsWith("  CI 4 checks:")) say(`facts row moved: ${JSON.stringify(r.facts)}`);
+}
+// The same checks on the head that will land: green, and the word on pre-merge.
+{
+  const green = { ...live, id: "green-ci", ci: { ...live.ci, head: RUN_HEAD, superseded: null } };
+  const r = rowsFor(green);
+  if (r.words[CI] !== "4/4 passed") say(`green CI word: "${r.words[CI]}"`);
+  if (r.mid(CI) !== "92") say(`green CI box paint: ${r.mid(CI)}`);
+  if (r.words[PRE] !== "your word") say(`pre-merge does not ask for the word: "${r.words[PRE]}"`);
+  if (r.mid(PRE) !== "93") say(`pre-merge asking for the word is not amber: ${r.mid(PRE)}`);
+  if (!r.header.includes("1 ready to merge")) say(`header did not count the green PR: ${r.header}`);
+  if (ciVerdict(green) !== "ready") say(`verdict ${ciVerdict(green)}`);
+  // Finished boxes are the runner's centre green; the running one keeps its
+  // white box under the band; unreached ones are dim.
+  for (const k of ["building", "intent", "rebase"]) {
+    if (r.mid(at(k)) !== "92") say(`finished ${k} box is not green: ${r.mid(at(k))}`);
+  }
+  if (!r.mid(at("review")).includes("97") || !r.mid(at("review")).includes("1;92")) say(`running box: ${r.mid(at("review"))}`);
+  if (r.mid(at("document")) !== "2") say(`pending docs box: ${r.mid(at("document"))}`);
+  if (!r.headRaw.includes("\x1b[2mRun #5")) say("the run counter is not dim");
+}
+// A red head is a red head, superseded or not: a failure on the branch is a
+// fact the captain wants, and it is not the false green this rule guards.
+{
+  const red = sup({ main_moved: true, new_commits: true });
+  red.ci = { ...red.ci, failed: 1, passed: 3 };
+  if (ciVerdict(red) !== "failed") say(`a failed check on a superseded head read as ${ciVerdict(red)}`);
+}
+if (BLOCK !== 12) say(`BLOCK is ${BLOCK}; the five detail rows need 12`);
+process.exit(bad ? 1 : 0);
+JS
+node "$TMP_ROOT/verdicts.mjs" "$TUI" "$(snap "[$(agent_with tmpl '[]' '{}')]")" ||
+  fail "the ended-run and superseded-CI frames do not draw as the captain ruled"
+pass "an ended run rebuilds with the band and its reason, a superseded CI head is yellow with the captain's sentences, and green means passed on the head that will land"
