@@ -30,6 +30,25 @@
 # reviewer's own job. A question is OPEN when it is neither retracted nor
 # answered.
 #
+# THE SWEEP RUNS ON EVERY WATCHER CYCLE, AND THAT IS WHAT MAKES IT CHEAP.
+# Captain's concern of 2026-09-15: a crewmate's status line is picked up on every
+# cycle (FM_POLL, 15s), so a reviewer's question sitting three minutes behind a
+# separate cadence was the slowest thing in the loop. `surface` therefore runs
+# every cycle, and pays for it by doing almost nothing on a cycle where nothing
+# changed:
+#   - one stat of the evidence ROOT, shared by the whole fleet. A new run creates
+#     a directory under it, so an unchanged root mtime means no task can have
+#     started a run this reader does not already know the id of - which is what
+#     licenses reusing each task's cached run id instead of asking the database.
+#   - one stat of each known run's questions.ndjson. When its size and mtime match
+#     what the last sweep recorded, the file is NOT read, no jq runs, and the task
+#     is done.
+# So the steady state is two stats per task per cycle and no database query at
+# all; a database query happens on a task's first sight and when the evidence
+# root has actually changed. The cached run id and the last-seen signature live
+# in state/<task-id>.nm-questions beside the surfaced ledger, appended rather
+# than rewritten so the ordering guarantee below still holds.
+#
 # WHY THIS IS A FLEET SWEEP AND NOT A PER-TASK state/<id>.check.sh. The wake
 # travels on the watcher's existing `check:` channel either way; what differs is
 # where the poll lives. A per-task check has to live at state/<id>.check.sh, and
@@ -42,13 +61,34 @@
 # should wake and nothing otherwise. Same wake kind, same contract, no shared
 # slot.
 #
-# THE ANSWER PATH NEVER TOUCHES THE RUN. AGENTS.md section 7 gives the task
-# worker sole ownership of its own run, and bin/fm-nm-attach.sh's header owns
-# why. So `answer` writes NOTHING to the conversation: it records the decision
-# durably through bin/fm-nm-decision.sh - which is what carries it into the
-# pinned intent the next cold reviewer is scored against - and composes the one
-# line firstmate sends the worker, which runs `no-mistakes axi answer` itself
-# from inside its own worktree and appends its own `resolved [key=<qid>]`.
+# FIRSTMATE ANSWERS THE REVIEWER DIRECTLY, AND THE WORKER IS NOT IN THE LOOP.
+# Captain's ruling of 2026-09-15: "the answer need to GO DIRECTLY TO THE REVIEWER
+# otherwise we are passing it through a middleman which is a waste of time". So
+# `answer` records the decision through bin/fm-nm-decision.sh - which is what
+# carries it into the pinned intent the next cold reviewer is scored against -
+# and then runs the fork's own `no-mistakes axi answer` itself. No steer is
+# composed, the worker is never told, and no `resolved` line is owed by anyone.
+#
+# THIS DOES NOT BREACH THE ONE-OWNER RULE. That rule is about ATTACHING to a run:
+# `axi run` and `axi respond` block on the daemon until the next gate or outcome,
+# which is why bin/fm-nm-attach.sh owns them and why
+# bin/fm-fix-instructions-check.sh denies them raw. `axi answer` is neither. It
+# records one answer and returns at once, and `axi respond` refuses
+# `--action answer` outright, so an answer can never release a gate that still
+# has questions open. It writes only to the pipeline's own state - the run's
+# answers.ndjson and the daemon's record - never to the project's files, so
+# firstmate running it does not cross the never-write-to-a-project boundary.
+#
+# WHY IT RUNS FROM THE TASK WORKTREE. The fork's command resolves its repository
+# from the CWD: internal/cli/axi_answer.go calls openAxiDaemonEnv() with no
+# explicit run id, which reaches findRepo() in internal/cli/root.go, and that
+# reads `.` (falling back to the main worktree root, which is what makes a git
+# worktree work). `--run` only skips the branch lookup; it does not remove the
+# repository requirement. So the command runs with its working directory set to
+# the `worktree=` path in state/<task-id>.meta, AND with `--run <run-id>` for the
+# run this reader already resolved and validated the question against - so a
+# worktree that has moved off fm/<task-id> still answers the right run rather
+# than whatever the cwd branch happens to be running.
 #
 # WHAT IT DOES NOT COVER, stated rather than hidden:
 #   - The evidence root is resolved from NM_HOME and, when set there, from the
@@ -74,6 +114,7 @@
 #   fm-nm-questions.sh surface            sweep the fleet, print only NEW ones
 #   fm-nm-questions.sh answer <task-id> --question <id> --answer <text>
 #                                         [--by captain|firstmate] [--outcome change]
+#                                         records it, then answers the reviewer
 #
 # Environment:
 #   FM_NM_QUESTIONS_DB             no-mistakes state database
@@ -82,6 +123,11 @@
 #   FM_NM_QUESTIONS_NM_HOME        no-mistakes home (default $NM_HOME, else
 #                                  $HOME/.no-mistakes)
 #   FM_NM_DECISION_BIN             the decision recorder, for tests
+#   FM_NM_QUESTIONS_NM_BIN         the no-mistakes binary, for tests
+#
+# state/<task-id>.nm-questions is line-oriented and append-only. `run=<id>` and
+# `sig=<size>:<mtime>` are the sweep's cache, last occurrence winning, and each
+# `<run-id><TAB><question-id>` line is a question already reported to firstmate.
 #
 # Exit: 0 fine, 1 the named condition, 2 usage or an unreadable conversation.
 set -u
@@ -100,12 +146,15 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 NM_DB=${FM_NM_QUESTIONS_DB:-$HOME/.no-mistakes/state.sqlite}
 NM_HOME_DIR=${FM_NM_QUESTIONS_NM_HOME:-${NM_HOME:-$HOME/.no-mistakes}}
 DECISION_BIN=${FM_NM_DECISION_BIN:-$SCRIPT_DIR/fm-nm-decision.sh}
+NM_BIN=${FM_NM_QUESTIONS_NM_BIN:-no-mistakes}
 TAB=$'\t'
 # The options separator inside one TSV field. A unit separator cannot occur in
 # an option the reviewer wrote, so joining on it and splitting it back is
 # lossless where a comma or a pipe would not be.
 US=$'\037'
 NL=$'\n'
+# The conversation's own file names, as internal/reviewqa names them.
+QUESTIONS_FILE=questions.ndjson
 
 usage() {
   cat >&2 <<'EOF'
@@ -243,18 +292,21 @@ open_entries() {
     | @tsv' 2>/dev/null
 }
 
-# --- the composed answer steer ----------------------------------------------
+# --- where the answer is delivered ------------------------------------------
 
-# Single-quote a string for a shell command line, so the printed `send:` line is
-# copy-runnable whatever apostrophes the chosen option contains.
-shq() {  # <text>
-  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
-}
-
-# shellcheck disable=SC2016  # the backticks and quotes are literal steer text the worker reads, not expansions
-steer_line() {  # <question-id> <answer> <who>
-  printf 'review question %s is answered by the %s: run `no-mistakes axi answer --question %s --answer "%s" --by %s` from inside your worktree, then append `resolved [key=%s]: answered "%s"` to your status file' \
-    "$1" "$3" "$1" "$2" "$3" "$1" "$2"
+# The task's own isolated copy, which is the working directory the fork's
+# command resolves its repository from (see the header). Empty when the record
+# names none or the path is gone; that is a refusal rather than a guess, because
+# a wrong working directory would answer for whatever repository it belongs to.
+task_worktree() {  # <task-id>
+  local meta line wt=''
+  meta="$STATE/$1.meta"
+  [ -f "$meta" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in worktree=*) wt=${line#worktree=} ;; esac
+  done < "$meta"
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  printf '%s' "$wt"
 }
 
 # --- subcommands ------------------------------------------------------------
@@ -334,58 +386,128 @@ task_in_domain() {  # <meta-file>
 
 surfaced_file() { printf '%s/%s.nm-questions' "$STATE" "$1"; }
 
-# THE MARKER IS WRITTEN LAST, PER TASK, AFTER THAT TASK'S LINES ARE PRINTED.
-# The watcher runs this under a wall-clock bound, so it can be killed part way
-# through, and the order decides what a kill costs. Marking a question surfaced
-# BEFORE its line reaches the watcher would let a kill in between swallow the
-# question entirely - firstmate would never be told, and the durable record would
-# say it already had been. Printing first and marking after inverts that: a kill
-# can only ever cost the marker, so the next sweep reports the same question
-# again. A duplicate wake is cheap; a swallowed question is the failure this
-# alarm exists to prevent.
+# "<size>:<mtime>" for a path, or empty when it does not exist. Both halves are
+# taken, not just mtime: an append inside one filesystem-timestamp granule
+# changes the size even when the mtime does not move.
+path_sig() {  # <path>
+  [ -f "$1" ] || return 0
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%z:%m' "$1" 2>/dev/null
+  else
+    stat -c '%s:%Y' "$1" 2>/dev/null
+  fi
+}
+
+dir_sig() {  # <dir>
+  [ -d "$1" ] || return 0
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%m' "$1" 2>/dev/null
+  else
+    stat -c '%Y' "$1" 2>/dev/null
+  fi
+}
+
+# The cache and ledger of one task's record, read in a single pass. Last
+# occurrence wins for the two cache keys, exactly as every other record in this
+# repo treats a repeated key.
+REC_RUN=
+REC_SIG=
+REC_SEEN=
+read_task_record() {  # <task-id>
+  local f line
+  REC_RUN=; REC_SIG=; REC_SEEN=
+  f=$(surfaced_file "$1")
+  [ -f "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      run=*) REC_RUN=${line#run=} ;;
+      sig=*) REC_SIG=${line#sig=} ;;
+      '') ;;
+      *) REC_SEEN="$REC_SEEN$line$NL" ;;
+    esac
+  done < "$f"
+  return 0
+}
+
 cmd_surface() {
-  local meta id run dir qid text opts file lineno marker seen fresh any=0 nl
-  nl=$'\n'
+  local meta id run dir qfile sig marker fresh any=0 qid text opts file lineno
+  local root root_sig cached_root='' root_changed=0 root_cache
   [ -d "$STATE" ] || return 0
+  root=$(evidence_root)
+  root_sig=$(dir_sig "$root")
+  root_cache="$STATE/.nm-questions-root"
+  [ ! -f "$root_cache" ] || IFS= read -r cached_root < "$root_cache" 2>/dev/null || cached_root=''
+  [ "$root_sig" = "$cached_root" ] || root_changed=1
+
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=${meta##*/}; id=${id%.meta}
     id_valid "$id" || continue
     task_in_domain "$meta" || continue
-    run=$(run_for_task "$id")
-    [ -n "$run" ] || continue
-    dir=$(conversation_dir "$run")
-    [ -d "$dir" ] || continue
-    read_conversation "$dir" || continue
+
+    read_task_record "$id"
     marker=$(surfaced_file "$id")
-    seen=$(cat "$marker" 2>/dev/null || true)
-    [ -z "$seen" ] || seen="$seen$nl"
+    run=$REC_RUN
+    # The one database query, and only when this reader cannot already know the
+    # answer: a task it has never resolved, or an evidence root that changed and
+    # may therefore hold a run that superseded the cached one.
+    if [ -z "$run" ] || [ "$root_changed" = 1 ]; then
+      run=$(run_for_task "$id")
+      [ -n "$run" ] || continue
+      [ "$run" = "$REC_RUN" ] || printf 'run=%s\n' "$run" >> "$marker" 2>/dev/null || true
+    fi
+
+    dir=$(conversation_dir "$run")
+    qfile="$dir/$QUESTIONS_FILE"
+    sig=$(path_sig "$qfile")
+    # Nothing has been appended since the last look, so there is nothing to read.
+    # This is the branch almost every cycle takes.
+    [ "$sig" != "$REC_SIG" ] || continue
+
     fresh=''
-    while IFS=$TAB read -r qid text opts file lineno; do
-      [ -n "$qid" ] || continue
-      case "$nl$seen" in
-        *"$nl$run$TAB$qid$nl"*) continue ;;
-      esac
-      seen="$seen$run$TAB$qid$nl"
-      fresh="$fresh$run$TAB$qid$nl"
-      any=1
-      printf 'NM QUESTION: %s is waiting on an answer to review question %s: %s' "$id" "$qid" "$text"
-      [ -z "$opts" ] || printf ' (options: %s)' "$(printf '%s' "$opts" | tr "$US" '|' | sed 's/|/ | /g')"
-      printf '\n'
-    done <<EOF
+    if read_conversation "$dir"; then
+      while IFS=$TAB read -r qid text opts file lineno; do
+        [ -n "$qid" ] || continue
+        case "$NL$REC_SEEN" in
+          *"$NL$run$TAB$qid$NL"*) continue ;;
+        esac
+        REC_SEEN="$REC_SEEN$run$TAB$qid$NL"
+        fresh="$fresh$run$TAB$qid$NL"
+        any=1
+        printf 'NM QUESTION: %s is waiting on an answer to review question %s: %s' "$id" "$qid" "$text"
+        [ -z "$opts" ] || printf ' (options: %s)' "$(printf '%s' "$opts" | tr "$US" '|' | sed 's/|/ | /g')"
+        printf '\n'
+      done <<EOF
 $(open_entries)
 EOF
+    else
+      # Unreadable right now - a half-written trailing line while the reviewer is
+      # appending is the ordinary cause. The signature is deliberately NOT
+      # advanced, so the next cycle reads it again rather than treating an
+      # unread file as seen.
+      continue
+    fi
     [ -z "$fresh" ] || printf '%s' "$fresh" >> "$marker" 2>/dev/null || true
+    # LAST, and only now: every question this file holds has been printed and
+    # recorded, so it is safe to say the file has been seen at this size. A kill
+    # anywhere above leaves the signature behind and costs a re-read, never a
+    # swallowed question.
+    [ -z "$sig" ] || printf 'sig=%s\n' "$sig" >> "$marker" 2>/dev/null || true
   done
+
+  # Written at the END, so a sweep that died part way through re-resolves the
+  # run ids next cycle instead of trusting a scan it never finished.
+  [ -z "$root_sig" ] || printf '%s\n' "$root_sig" > "$root_cache" 2>/dev/null || true
+
   # EVERY line starts with the same marker, for the reason bin/fm-nm-stall.sh's
   # footer gives: a relay that allowlists lines by marker must not be able to
   # strip the remedy off a finding.
-  [ "$any" = 1 ] && printf 'NM QUESTION REMEDY: put each one to the captain as a multiple choice - bin/fm-nm-questions.sh list <task-id> prints the question and its own options - then send the answer with bin/fm-nm-questions.sh answer.\n'
+  [ "$any" = 1 ] && printf 'NM QUESTION REMEDY: put each one to the captain as a multiple choice - bin/fm-nm-questions.sh list <task-id> prints the question and its own options - then answer it with bin/fm-nm-questions.sh answer, which tells the reviewer directly.\n'
   return 0
 }
 
 cmd_answer() {  # <task-id> --question <id> --answer <text> [--by <who>] [--outcome ...]
-  local id=$1 qid='' ans='' who=captain outcome=no-change run dir found=0 qline steer
+  local id=$1 qid='' ans='' who=captain outcome=no-change run dir found=0 qline wt
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -403,43 +525,68 @@ cmd_answer() {  # <task-id> --question <id> --answer <text> [--by <who>] [--outc
     *) echo "error: --by must be captain or firstmate: an answer's authority is the captain's, or firstmate's only where the configured authority already lets it decide" >&2
        exit 2 ;;
   esac
-  # The steer is one line the worker runs verbatim, so a newline would split it
-  # and a double quote would end the composed --answer argument early. Both are
-  # refused rather than mangled; a stated option is neither.
-  case "$ans" in
-    *'"'*) echo 'error: the answer contains a double quote, which would end the composed --answer argument early; answer with one of the stated options' >&2; exit 2 ;;
-    *"$NL"*) echo 'error: the answer contains a newline; a steer is one line' >&2; exit 2 ;;
-  esac
+  # No quoting rule applies to the answer any more: it is handed to the answer
+  # command as one argument vector element and never composed into a line of
+  # shell, so a quote or an apostrophe in a stated option reaches the reviewer
+  # verbatim. The refusal that used to live here existed only for the steer this
+  # no longer writes.
 
+  # The run this answer belongs to is resolved and the question checked against
+  # its own conversation BEFORE anything is written, so an answer can never be
+  # delivered against a question the reviewer never asked or has withdrawn.
   run=$(run_for_task "$id")
-  if [ -n "$run" ]; then
-    dir=$(conversation_dir "$run")
-    if read_conversation "$dir"; then
-      while IFS=$TAB read -r qline _rest; do
-        [ "$qline" = "$qid" ] && found=1
-      done <<EOF
+  [ -n "$run" ] || {
+    echo "error: no active run for $id, so there is no reviewer waiting on an answer" >&2
+    exit 1
+  }
+  dir=$(conversation_dir "$run")
+  if read_conversation "$dir"; then
+    while IFS=$TAB read -r qline _rest; do
+      [ "$qline" = "$qid" ] && found=1
+    done <<EOF
 $(open_entries)
 EOF
-    fi
   fi
-  if [ "$found" != 1 ]; then
-    printf 'note: %s is not currently an open question on this run; the answer is still recorded, but check the id before sending the steer\n' "$qid" >&2
-  fi
+  [ "$found" = 1 ] || {
+    printf 'error: %s is not an open question on run %s; nothing was recorded and nothing was answered\n' "$qid" "$run" >&2
+    printf 'error: bin/fm-nm-questions.sh list %s prints the questions that are actually open\n' "$id" >&2
+    exit 1
+  }
 
-  # The durable half, and the one that reaches the next COLD reviewer: the
-  # decision recorder writes it into the pinned intent this task is scored
-  # against. An answer settles only the question it answers, and it leaves the
-  # branch untouched unless it says otherwise, so no-change is the default and
-  # no fresh run is owed for it.
+  wt=$(task_worktree "$id") || {
+    printf 'error: %s has no usable isolated copy recorded, and the answer command resolves its repository from the directory it runs in; refusing to answer from the wrong one\n' "$id" >&2
+    exit 1
+  }
+  command -v "$NM_BIN" >/dev/null 2>&1 || {
+    printf 'error: %s is not on PATH, so the reviewer cannot be answered\n' "$NM_BIN" >&2
+    exit 1
+  }
+
+  # RECORDED FIRST, DELIVERED SECOND, and that order is the safe one. Recording
+  # is idempotent - re-recording a key rewrites its line - so a failure after it
+  # costs nothing but a retry. The reverse order is what must not happen: an
+  # answer the reviewer has acted on with no durable trace of who decided it
+  # would reach the next cold reviewer as an unanswered question. If delivery
+  # then fails, the run simply stays parked and the merge gate keeps refusing,
+  # which is the visible, safe outcome.
+  #
+  # An answer settles only the question it answers, and it leaves the branch
+  # untouched unless it says otherwise, so no-change is the default and no fresh
+  # run is owed for it.
   "$DECISION_BIN" record "$id" \
     --finding "$qid" --key "$qid" --step review --outcome "$outcome" \
     --requires "review question $qid answered by the $who: '$ans' - this settles only that question" \
-    || { echo "error: the answer could not be recorded, so it must not be sent" >&2; exit 1; }
-
-  steer=$(steer_line "$qid" "$ans" "$who")
+    || { echo "error: the answer could not be recorded, so it was not delivered either" >&2; exit 1; }
   printf 'recorded: %s (key %s, outcome %s)\n' "$("$DECISION_BIN" path "$id")" "$qid" "$outcome"
-  printf 'steer: %s\n' "$steer"
-  printf 'send: %s/fm-send.sh %s %s\n' "$SCRIPT_DIR" "$id" "$(shq "$steer")"
+
+  # Straight to the reviewer. No steer, no worker, no middleman.
+  if ! (cd "$wt" && "$NM_BIN" axi answer --run "$run" --question "$qid" \
+        --answer "$ans" --by "$who"); then
+    printf 'error: the answer is recorded but the reviewer was NOT told: the answer command failed for run %s\n' "$run" >&2
+    printf 'error: the run stays parked and the merge gate keeps refusing, so nothing ships on it; retry this same command once the cause is fixed\n' >&2
+    exit 1
+  fi
+  printf 'answered: review question %s on run %s, by the %s\n' "$qid" "$run" "$who"
   return 0
 }
 

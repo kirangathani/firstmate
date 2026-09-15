@@ -111,6 +111,14 @@ matrix_case A22 allow '' 'no-mistakes axi sync'
 matrix_case A23 allow '' 'no-mistakes axi abort'
 matrix_case A24 allow '' 'no-mistakes axi run --help'
 matrix_case A25 allow '' 'no-mistakes --version'
+# `axi answer` is FIRSTMATE'S own command: bin/fm-nm-questions.sh runs it so the
+# captain's answer reaches the run's reviewer directly instead of through the
+# worker (captain's ruling, 2026-09-15). It records one answer and returns at
+# once, so it never produces the foreground-8m shape this gate exists to prevent.
+# Denying it here would break firstmate's own answer path, which is why it is
+# pinned rather than left to the predicate's current shape.
+matrix_case A26 allow '' 'no-mistakes axi answer --question q1 --answer "Keep behind a flag" --by captain'
+matrix_case A27 allow '' 'no-mistakes axi answer --run R1 --question q1 --answer Keep --by firstmate'
 
 # ALLOW: the bytes appear only as data, never in command position.
 matrix_case A11 allow '' "echo 'no-mistakes axi respond --action fix'"

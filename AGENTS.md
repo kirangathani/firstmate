@@ -317,8 +317,9 @@ The task worker that starts a no-mistakes run drives the pipeline and owns every
 Firstmate never responds to a gate for a crew-owned run.
 
 A review finding is fixed by the worker in its own copy and pushed, which supersedes the parked run so a fresh cold review re-checks it; test, document, and lint fixes stay the pipeline's.
-The reviewer can also ask a question while it is still working, and `bin/fm-nm-questions.sh` owns reading those questions, waking firstmate on a new one, and composing the single exact line that sends the captain's answer back through the worker.
-Put each one to the captain as the multiple choice the reviewer itself wrote, record the answer with that owner, and never write into a crew-owned run to answer it.
+The reviewer can also ask a question while it is still working, and `bin/fm-nm-questions.sh` owns reading those questions, waking firstmate on a new one, and answering the reviewer.
+Put each one to the captain as the multiple choice the reviewer itself wrote, then answer it with that owner, which records the decision and delivers it straight to the reviewer; the worker is never in that loop and owes nothing for it.
+`axi answer` is firstmate's own command and is the one exception to the worker-owns-its-run rule, because it attaches to nothing and writes only to the pipeline's own state; `axi run` and `axi respond` remain the worker's alone through `bin/fm-nm-attach.sh`.
 An answer settles only the question it answers.
 
 An ask-user finding of severity `info` or `suggestion` is answered by the worker itself under the generated brief's rule, so only `warning` and `error` findings, plus anything security-shaped at any severity, return as `needs-decision`; firstmate decides those only when the configured authority permits, otherwise escalates to the captain.

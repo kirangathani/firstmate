@@ -729,23 +729,29 @@ test_the_round_convention_is_not_a_cap() {
   pass "fm-brief.sh: the two-round guidance is a convention the worker judges, never an enforced cap"
 }
 
-# The reviewer can now ask a question mid-pass, and the answer travels back
-# through the worker, because the worker owns its own run (AGENTS.md section 7;
-# bin/fm-nm-attach.sh's header owns why firstmate never touches it).
-test_the_brief_tells_the_worker_how_to_run_an_answer() {
+# The captain's ruling of 2026-09-15: the answer goes straight from firstmate to
+# the reviewer, so the worker is not a middleman. The brief must say that plainly,
+# because a worker that sees its run resume on its own would otherwise read it as
+# something going wrong - and it must NOT hand the worker a command or a
+# `resolved` line it no longer owes.
+test_the_brief_keeps_the_worker_out_of_the_answer_loop() {
   local home id brief
   home="$TMP_ROOT/answer-verb-home"
   mkdir -p "$home/data"
   id="brief-answer-a1"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "no-mistakes axi answer --question" "$brief" \
-    "the ship brief does not name the command that records an answer"
-  assert_grep "resolved [key=<question-id>]" "$brief" \
-    "the ship brief does not tell the worker how to close the question durably"
+  assert_grep "A review QUESTION is not yours." "$brief" \
+    "the ship brief does not tell the worker that review questions are not its own"
+  assert_grep "you never run \`axi answer\` yourself" "$brief" \
+    "the ship brief does not keep the worker off firstmate's own answer command"
+  assert_grep "may therefore resume without you having done anything" "$brief" \
+    "the ship brief does not warn the worker that its run can resume without it"
   assert_grep "settles only the question it answers" "$brief" \
     "the ship brief does not carry the settles-only-this-question instruction"
-  pass "fm-brief.sh: the ship brief tells the worker exactly what to do with a relayed answer"
+  assert_no_grep "resolved [key=<question-id>]" "$brief" \
+    "the ship brief still makes the worker owe a resolved line for an answer it no longer relays"
+  pass "fm-brief.sh: the ship brief keeps the worker out of the review-answer loop"
 }
 
 test_skip_matrix_has_exactly_one_owner
@@ -774,4 +780,4 @@ test_scout_and_secondmate_scaffold
 test_commit_cadence_is_scaffold_text
 test_review_findings_are_the_authors_to_fix
 test_the_round_convention_is_not_a_cap
-test_the_brief_tells_the_worker_how_to_run_an_answer
+test_the_brief_keeps_the_worker_out_of_the_answer_loop

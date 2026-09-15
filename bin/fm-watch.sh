@@ -116,11 +116,14 @@ HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 NM_STALL_INTERVAL=${FM_NM_STALL_INTERVAL:-600}  # seconds between stalled-validation sweeps
-# Seconds between review-question sweeps. Shorter than the stall sweep because
-# this one is what puts a question in front of the captain WHILE the reviewer is
-# still working, and the whole value of the channel is that the answer arrives
-# before the rest of the pass is spent.
-NM_QUESTIONS_INTERVAL=${FM_NM_QUESTIONS_INTERVAL:-180}
+# Seconds between review-question sweeps, ZERO by default: the sweep runs on
+# every cycle, at the same cadence a crewmate's status line is picked up. A
+# separate cadence made a reviewer's question the slowest thing in the loop
+# (captain, 2026-09-15), and the sweep is built to be affordable here - an
+# unchanged conversation costs two stats and no database query at all, which
+# bin/fm-nm-questions.sh's header owns. The knob remains for an operator who
+# wants to throttle it.
+NM_QUESTIONS_INTERVAL=${FM_NM_QUESTIONS_INTERVAL:-0}
 NM_QUESTIONS_TIMEOUT=${FM_NM_QUESTIONS_TIMEOUT:-20}  # seconds bounding one review-question sweep
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
@@ -890,14 +893,16 @@ while :; do
     fi
   fi
 
-  # Slow review-question sweep: has a validating task's reviewer asked something
-  # only the captain can answer. It needs its own cadence for the same reason
-  # the stall sweep does - a validating fleet writes no status lines and shows
-  # no stale panes - and it cannot wait for the run to park, because the point
-  # of the channel is that an early answer redirects the rest of the pass.
-  # bin/fm-nm-questions.sh owns the protocol, the durable surfaced record and
-  # the wording; `surface` follows the *.check.sh contract of printing a line
-  # only when firstmate should wake, and nothing at all otherwise.
+  # Review-question sweep, EVERY cycle: has a validating task's reviewer asked
+  # something only the captain can answer. It cannot ride a slower cadence for
+  # two reasons - a validating fleet writes no status lines and shows no stale
+  # panes, so nothing else in this loop looks at it; and the value of the channel
+  # is that an early answer redirects the rest of the pass, which a three-minute
+  # wait was eating into. It is affordable here because an unchanged conversation
+  # costs two stats and no database query; bin/fm-nm-questions.sh's header owns
+  # that cost contract, the protocol, the durable record and the wording.
+  # `surface` follows the *.check.sh contract of printing a line only when
+  # firstmate should wake, and nothing at all otherwise.
   if [ "$(age_of "$STATE/.last-nm-questions")" -ge "$NM_QUESTIONS_INTERVAL" ]; then
     touch "$STATE/.last-nm-questions"
     if [ -x "$SCRIPT_DIR/fm-nm-questions.sh" ]; then

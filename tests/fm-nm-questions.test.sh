@@ -34,7 +34,28 @@ CREATE TABLE runs (
 INSERT INTO runs VALUES ('R1','repo1','fm/t1','abc','base','awaiting_approval',NULL,NULL,NULL,1000,2000);
 SQL
 
-fm_write_meta "$STATE/t1.meta" "window=w:fm-t1" "worktree=$TMP_ROOT/wt" "project=$TMP_ROOT/proj" \
+QUESTIONS="$ROOT/bin/fm-nm-questions.sh"
+
+# The task's own isolated copy: the answer command resolves its repository from
+# the directory it runs in, so the reader must run it there and nowhere else.
+WT="$TMP_ROOT/wt"
+mkdir -p "$WT"
+
+# A fake `no-mistakes` recording its argv AND its working directory, because
+# both are part of the contract: the answer must name the run this reader
+# resolved, and it must be delivered from the task's own copy.
+NM_LOG="$TMP_ROOT/nm-answer.log"
+NM_BIN_DIR="$TMP_ROOT/nmbin"
+mkdir -p "$NM_BIN_DIR"
+cat > "$NM_BIN_DIR/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+{ printf 'cwd=%s\n' "$PWD"; printf 'argv=%s\n' "$*"; } >> "$FM_TEST_NM_LOG"
+[ -z "${FM_TEST_NM_FAIL:-}" ] || exit 1
+exit 0
+SH
+chmod +x "$NM_BIN_DIR/no-mistakes"
+
+fm_write_meta "$STATE/t1.meta" "window=w:fm-t1" "worktree=$WT" "project=$TMP_ROOT/proj" \
   "harness=claude" "kind=crew" "mode=no-mistakes" "yolo=off"
 
 # The brief the decision recorder amends; its `# Task` section is the pinned
@@ -45,11 +66,10 @@ cat > "$DATA/t1/brief.md" <<'MD'
 Do the thing.
 MD
 
-QUESTIONS="$ROOT/bin/fm-nm-questions.sh"
-
 run_q() {  # <args...>
   FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_NM_QUESTIONS_DB="$DB" FM_NM_QUESTIONS_EVIDENCE_ROOT="$EVIDENCE" \
+    FM_NM_QUESTIONS_NM_BIN="$NM_BIN_DIR/no-mistakes" FM_TEST_NM_LOG="$NM_LOG" \
     "$QUESTIONS" "$@" 2>&1
 }
 
@@ -57,6 +77,7 @@ run_q_code() {  # <args...> -> sets RC and OUT
   set +e
   OUT=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_NM_QUESTIONS_DB="$DB" FM_NM_QUESTIONS_EVIDENCE_ROOT="$EVIDENCE" \
+    FM_NM_QUESTIONS_NM_BIN="$NM_BIN_DIR/no-mistakes" FM_TEST_NM_LOG="$NM_LOG" \
     "$QUESTIONS" "$@" 2>&1)
   RC=$?
   set -e
@@ -260,31 +281,93 @@ JSON
   pass "a question is printed before it is marked surfaced, so a cut-short sweep cannot swallow one"
 }
 
+# The sweep runs on EVERY watcher cycle now, so a cycle where nothing changed
+# must cost two stats and nothing else. The file is made unreadable AFTER a
+# completed sweep: if the sweep were still reading it, the read would fail and
+# the guard below would catch it; a sweep that correctly skips on an unchanged
+# signature never opens it at all.
+test_an_unchanged_questions_file_is_not_re_read() {
+  write_questions <<'JSON'
+{"id":"q1","kind":"question","question":"Keep the legacy route?","options":["Keep","Remove"],"weight":"major"}
+JSON
+  : > "$CONV/answers.ndjson"
+  rm -f "$STATE/t1.nm-questions"
+
+  local first
+  first=$(run_q surface)
+  assert_contains "$first" "q1" "precondition: the first sweep must report the question"
+  assert_grep "sig=" "$STATE/t1.nm-questions" \
+    "the sweep did not record the signature it read the file at, so every cycle would re-read it"
+  assert_grep "run=" "$STATE/t1.nm-questions" \
+    "the sweep did not cache the run id, so every cycle would query the database"
+
+  if [ "$(id -u)" = 0 ]; then
+    printf 'ok - skipped the unchanged-file case (running as root defeats the permission bit)\n'
+    return 0
+  fi
+  chmod 000 "$CONV/questions.ndjson"
+  local second rc=0
+  second=$(run_q surface) || rc=$?
+  chmod 644 "$CONV/questions.ndjson"
+  expect_code 0 "$rc" "a sweep over an unchanged file did not stay silent"
+  [ -z "$second" ] || fail "a sweep re-read an unchanged questions file: $second"
+  pass "an unchanged questions file is not re-read, so an every-cycle sweep costs two stats"
+}
+
+# The other half: once the reviewer appends, the signature moves and the sweep
+# reads again. Without this, "cheap" would just mean "blind".
+test_an_appended_question_is_read_on_the_next_sweep() {
+  write_questions <<'JSON'
+{"id":"q1","kind":"question","question":"Keep the legacy route?","options":["Keep","Remove"],"weight":"major"}
+JSON
+  : > "$CONV/answers.ndjson"
+  rm -f "$STATE/t1.nm-questions"
+  run_q surface >/dev/null
+  cat >> "$CONV/questions.ndjson" <<'JSON'
+{"id":"q2","kind":"question","question":"Is the cache bound deliberate?","options":["Deliberate","Raise it"],"weight":"major"}
+JSON
+  local out
+  out=$(run_q surface)
+  assert_contains "$out" "q2" "a question appended after the last sweep was never read"
+  assert_not_contains "$out" "q1" "the sweep repeated a question it had already reported"
+  pass "an appended question moves the signature and is read on the very next sweep"
+}
+
 test_surface_skips_a_scout() {
-  fm_write_meta "$STATE/t1.meta" "window=w:fm-t1" "worktree=$TMP_ROOT/wt" "project=$TMP_ROOT/proj" \
+  fm_write_meta "$STATE/t1.meta" "window=w:fm-t1" "worktree=$WT" "project=$TMP_ROOT/proj" \
     "harness=claude" "kind=scout" "mode=scout" "yolo=off"
   rm -f "$STATE/t1.nm-questions"
   local out
   out=$(run_q surface)
   [ -z "$out" ] || fail "the sweep reported a scout, which drives no validation: $out"
-  fm_write_meta "$STATE/t1.meta" "window=w:fm-t1" "worktree=$TMP_ROOT/wt" "project=$TMP_ROOT/proj" \
+  fm_write_meta "$STATE/t1.meta" "window=w:fm-t1" "worktree=$WT" "project=$TMP_ROOT/proj" \
     "harness=claude" "kind=crew" "mode=no-mistakes" "yolo=off"
   pass "the sweep is silent for a kind that runs no validation of its own"
 }
 
 # --- the composed answer steer ----------------------------------------------
 
-test_answer_composes_the_exact_worker_command_and_records_it() {
+# The captain's ruling of 2026-09-15: "the answer need to GO DIRECTLY TO THE
+# REVIEWER otherwise we are passing it through a middleman which is a waste of
+# time". So the reader delivers it itself, and the worker is not involved at all.
+test_answer_goes_straight_to_the_reviewer_and_is_recorded() {
   write_questions <<'JSON'
 {"id":"q1","kind":"question","question":"Keep the legacy route?","options":["Keep behind a flag","Remove it"],"weight":"major"}
 JSON
   : > "$CONV/answers.ndjson"
+  : > "$NM_LOG"
   local out
   out=$(run_q answer t1 --question q1 --answer "Keep behind a flag" --by captain)
-  assert_contains "$out" 'no-mistakes axi answer --question q1 --answer "Keep behind a flag" --by captain' \
-    "the steer does not carry the exact answer command the worker must run"
-  assert_contains "$out" 'resolved [key=q1]' "the steer does not tell the worker how to close the decision"
-  assert_contains "$out" "fm-send.sh t1 " "the steer is not paired with the command that sends it"
+
+  assert_contains "$out" "answered: review question q1" "the reader did not report answering the reviewer"
+  assert_contains "$(cat "$NM_LOG")" "argv=axi answer --run R1 --question q1 --answer Keep behind a flag --by captain" \
+    "the answer command was not called with the resolved run, the question and the captain's option"
+  assert_contains "$(cat "$NM_LOG")" "cwd=$WT" \
+    "the answer was not delivered from the task's own copy, which is where the command resolves its repository"
+  assert_not_contains "$out" "steer:" "the reader still composed a steer for a worker that is no longer in the loop"
+  assert_not_contains "$out" "fm-send.sh" "the reader still routed the answer through the worker"
+  assert_not_contains "$out" "resolved [key=" "the reader still asked someone to close a decision it settled itself"
+
   assert_grep "review question q1 answered by the captain" "$DATA/t1/decisions.md" \
     "the answer was not recorded durably"
   assert_grep "settles only that question" "$DATA/t1/decisions.md" \
@@ -293,9 +376,59 @@ JSON
     "an answer that leaves the branch alone was recorded as owing a fresh run"
   assert_grep "review question q1 answered by the captain" "$DATA/t1/brief.md" \
     "the answer did not reach the pinned intent the next cold reviewer is scored against"
-  assert_grep "(no-change)" "$DATA/t1/brief.md" \
-    "the pinned intent does not say the answer left the branch as it is"
-  pass "an answer is recorded in the pinned intent and composed as one exact worker steer"
+  pass "an answer is recorded and then delivered straight to the reviewer, with no worker in the loop"
+}
+
+# An option can contain a quote or an apostrophe. The answer is one element of an
+# argument vector now, never composed into a line of shell, so it must arrive
+# verbatim rather than being refused as it was when a steer had to carry it.
+test_an_answer_with_a_quote_reaches_the_reviewer_verbatim() {
+  : > "$NM_LOG"
+  local out
+  out=$(run_q answer t1 --question q1 --answer 'Keep it: the "legacy" route' --by captain)
+  assert_contains "$out" "answered: review question q1" "a quoted option was refused instead of delivered"
+  assert_contains "$(cat "$NM_LOG")" 'Keep it: the "legacy" route' \
+    "the quoted option did not reach the answer command verbatim"
+  pass "an option carrying a quote is delivered verbatim rather than refused"
+}
+
+# The record is written first because it is idempotent; if delivery then fails,
+# the run simply stays parked and the merge gate keeps refusing, which is the
+# visible and safe outcome. What must never happen is a silent success.
+test_a_failed_delivery_is_reported_and_not_called_success() {
+  write_questions <<'JSON'
+{"id":"q9","kind":"question","question":"Is the bound deliberate?","options":["Deliberate","Raise it"],"weight":"major"}
+JSON
+  : > "$CONV/answers.ndjson"
+  : > "$NM_LOG"
+  set +e
+  OUT=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_NM_QUESTIONS_DB="$DB" FM_NM_QUESTIONS_EVIDENCE_ROOT="$EVIDENCE" \
+    FM_NM_QUESTIONS_NM_BIN="$NM_BIN_DIR/no-mistakes" FM_TEST_NM_LOG="$NM_LOG" \
+    FM_TEST_NM_FAIL=1 "$QUESTIONS" answer t1 --question q9 --answer "Deliberate" 2>&1)
+  RC=$?
+  set -e
+  expect_code 1 "$RC" "a failed delivery was reported as success"
+  assert_contains "$OUT" "the reviewer was NOT told" "the failure does not say the reviewer never got it"
+  assert_contains "$OUT" "merge gate keeps refusing" "the failure does not say what stops it shipping"
+  pass "a delivery that fails is reported loudly and never counted as answered"
+}
+
+# Answering a question the reviewer never asked, or has withdrawn, would put a
+# line into the run's conversation that answers nothing. It is refused before
+# anything is written at all.
+test_answer_refuses_a_question_that_is_not_open() {
+  write_questions <<'JSON'
+{"id":"q1","kind":"question","question":"Keep the legacy route?","options":["Keep","Remove"],"weight":"major"}
+{"id":"q1","kind":"retract","reason":"answered by the migration note"}
+JSON
+  : > "$CONV/answers.ndjson"
+  : > "$NM_LOG"
+  run_q_code answer t1 --question q1 --answer "Keep"
+  expect_code 1 "$RC" "an answer to a withdrawn question was accepted"
+  assert_contains "$OUT" "not an open question" "the refusal does not say why"
+  [ ! -s "$NM_LOG" ] || fail "a withdrawn question was answered against the run anyway"
+  pass "a question that is not open is refused before anything is recorded or delivered"
 }
 
 test_answer_refuses_an_authority_it_cannot_speak_for() {
@@ -303,23 +436,6 @@ test_answer_refuses_an_authority_it_cannot_speak_for() {
   expect_code 2 "$RC" "an answer attributed to nobody with authority was accepted"
   assert_contains "$OUT" "captain or firstmate" "the refusal does not name the two authorities"
   pass "only the captain or firstmate can be recorded as having answered"
-}
-
-test_answer_refuses_text_that_would_break_the_one_line_steer() {
-  run_q_code answer t1 --question q1 --answer 'He said "keep it"'
-  expect_code 2 "$RC" "an answer carrying a double quote was composed into the steer anyway"
-  assert_contains "$OUT" "double quote" "the refusal does not say what is wrong"
-  pass "an answer that would break the composed command is refused, not mangled"
-}
-
-test_answer_never_writes_to_the_run() {
-  local before
-  before=$(cat "$CONV/answers.ndjson")
-  run_q answer t1 --question q1 --answer "Remove it" --by captain >/dev/null
-  assert_contains "$before$(cat "$CONV/answers.ndjson")" "$before" "unexpected"
-  [ "$(cat "$CONV/answers.ndjson")" = "$before" ] \
-    || fail "firstmate wrote into the worker's own run conversation"
-  pass "firstmate composes the answer and never touches the crew-owned run"
 }
 
 test_open_question_carries_its_own_options
@@ -333,8 +449,11 @@ test_gate_is_quiet_for_a_task_with_no_run
 test_gate_refuses_an_unreadable_conversation
 test_surface_prints_each_new_question_once
 test_a_question_is_printed_before_it_is_marked_surfaced
+test_an_unchanged_questions_file_is_not_re_read
+test_an_appended_question_is_read_on_the_next_sweep
 test_surface_skips_a_scout
-test_answer_composes_the_exact_worker_command_and_records_it
+test_answer_goes_straight_to_the_reviewer_and_is_recorded
+test_an_answer_with_a_quote_reaches_the_reviewer_verbatim
+test_a_failed_delivery_is_reported_and_not_called_success
+test_answer_refuses_a_question_that_is_not_open
 test_answer_refuses_an_authority_it_cannot_speak_for
-test_answer_refuses_text_that_would_break_the_one_line_steer
-test_answer_never_writes_to_the_run

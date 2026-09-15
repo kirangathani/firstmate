@@ -344,9 +344,8 @@ Six firstmate-specific rules layer on top of that guidance:
   A finding about a security, credential, or data-loss risk escalates no matter what severity it carries.
 - **Ask-user findings of severity \`warning\` or \`error\` are not yours to answer**: escalate to firstmate (rule 6) and stop.
   When the decision comes back, feed it to the gate with \`$NM_ATTACH_CMD $ID --respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- **A review QUESTION comes back as one exact command; run it.** The reviewer can ask a question while it works, and firstmate relays the captain's answer as a single line naming the question id and the option chosen.
-  Run the \`no-mistakes axi answer --question <id> --answer "<option>" --by <captain|firstmate>\` command exactly as sent, from inside this worktree, then append \`resolved [key=<question-id>]: answered "<option>"\` to your status file.
-  It is not a gate response: \`axi respond\` refuses \`--action answer\`, and the run releases itself once no question is left open. An answer settles only the question it answers.
+- **A review QUESTION is not yours.** The reviewer can ask a question while it works; firstmate reads it, puts it to the captain, and answers the reviewer directly with its own command. You are not in that loop: nothing is relayed to you, you owe no \`resolved\` line for it, and you never run \`axi answer\` yourself.
+  The run may therefore resume without you having done anything, which is normal. An answer settles only the question it answers.
 - Avoid \`--yes\`: it silently auto-resolves EVERY ask-user finding, including the warning and error ones the captain owns. The attach owner refuses it outright.
 - **Start, reattach and respond ONLY through the attach owner.** Never call \`no-mistakes axi run\` or \`axi respond\` yourself; a gate refuses those commands before they run.
   \`$NM_ATTACH_CMD $ID\` starts the run, or reattaches to it.
