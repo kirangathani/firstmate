@@ -36,7 +36,7 @@ Every composed line is instead a byte-exact string the tool's own test suite ass
 
 | Composed line | Asserted by |
 | --- | --- |
-| `    review,awaiting_approval,0,183573` (steps-table row form) | `v1.70.1:internal/cli/axi_test.go` `TestWriteRunObjectShape`, which pins `    steps[2]{step,status,findings,duration_ms}:` and `    test,awaiting_approval,0,0` |
+| `    review,awaiting_approval,0,183573` (steps-table row form) | `v1.70.1:internal/cli/axi_test.go` `TestWriteRunObjectShape` (line 105), which pins `    steps[2]{step,status,findings,duration_ms}:` and `    test,awaiting_approval,0,0` |
 | `gate:`, `  step: review`, `  status: awaiting_approval`, `  summary: 1 blocking issue`, `  findings[1]{id,severity,file,action,description}:` and its row | `v1.70.1:internal/cli/axi_test.go` `TestWriteGateShape` (line 348), which pins each of those strings including the finding row's quoting |
 | the `note:` text on a review gate | `v1.70.1:internal/cli/axi_render.go` `gateFieldsWithHelp` (line 538) emits it verbatim when the gate step is `review` |
 | the gate block's field ORDER, and that a gated run emits no `outcome:` | the same function builds step, status, summary, risk, note, findings in that order; `v1.70.1:internal/cli/axi_query.go` line 107 emits `outcome:`/`error:` only in the `else if terminalStatus(...)` arm, never alongside a gate |
