@@ -102,6 +102,17 @@
 #   - a second attach while one is already alive for this task
 #   - a composed intent too large to reach the daemon (see below)
 #
+# THE INTENT TRAVELS ON ARGV, and that is bounded on purpose. The follower is
+# this same script re-executed, and the intent is handed to it as one argument,
+# so it is subject to the kernel's per-argument limit (MAX_ARG_STRLEN, 131072
+# bytes on Linux; measured 2026-09-15 - 131071 execs, 131072 does not). An argv
+# payload dies at its threshold rather than degrading, which is why firstmate
+# normally keeps growing payloads off argv entirely. It is safe here only because
+# the size cap below is enforced BEFORE the exec and is far smaller: 49140 raw
+# bytes, 2.7x of headroom. tests/fm-nm-attach.test.sh probes the real limit at
+# run time and asserts the cap stays under it, so a later cap raise cannot
+# silently cross it.
+#
 # THE ONE GAP LEFT, stated rather than papered over. The hold reports on every
 # exit path once it is running, including being killed. It cannot report if it is
 # killed in the few milliseconds between this script returning and the

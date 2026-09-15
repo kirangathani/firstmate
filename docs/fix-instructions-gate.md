@@ -276,6 +276,11 @@ It has not started the attach either, so there is nothing about the run to repor
 The pinned intent travels as a base64 git push option, whose limit is 65520 bytes encoded - 49140 raw, since base64 emits 4 characters per 3-byte group.
 `INTENT_B64_LIMIT` in `bin/fm-nm-attach.sh` is the named owner, and `tests/fm-nm-attach.test.sh` sizes its boundary cases by reading that constant at run time rather than from a number that happens to fit today.
 
+The cap is also what keeps the intent safe on argv.
+The detached half is this same script re-executed and the intent is handed to it as one argument, so it is subject to the kernel's per-argument limit - `MAX_ARG_STRLEN`, 131072 bytes on Linux, measured 2026-09-15 as 131071 execing and 131072 not.
+An argv payload dies at its threshold rather than degrading, which is why firstmate normally keeps growing payloads off argv entirely; it is safe here only because the cap is enforced before the exec and leaves 2.7x of headroom.
+`tests/fm-nm-attach.test.sh` measures the real limit at run time and asserts the cap stays under it, so a later cap raise cannot silently cross it.
+
 The refusal names the measured size and points at the brief's own `## Gate decisions` subsection, which is the only part of the intent that grows without bound.
 **Compaction is deliberately not implemented here**; task `fm-nm-intent-size-cap-i6` owns it.
 This is the refusal only.
@@ -338,7 +343,7 @@ The Grok global hook is additionally proven inert for a workspace with no token 
 
 `tests/fm-nm-gate-context.test.sh` owns the intent owner, the decision record lifecycle, the intent amendment and its re-run gate, and the generated brief's contract.
 
-`tests/fm-nm-attach.test.sh` owns the attach owner: that it returns within 2 seconds while a hold that sleeps 30 is provably still running, that the hold carries `--wait 3h` and the pinned intent and never `--yes`, each classified return shape, every refusal including the size cap sized from its own named constant, and the denial through the real Claude and Grok stdin transports.
+`tests/fm-nm-attach.test.sh` owns the attach owner, in 31 cases: that it returns within 2 seconds while a hold that sleeps 30 is provably still running, that the hold carries `--wait 3h` and the pinned intent and never `--yes`, each classified return shape, every refusal including the size cap sized from its own named constant, and the denial through the real Claude and Grok stdin transports.
 Its `no-mistakes axi status` fixtures and their provenance are recorded in `tests/fixtures/nm-attach/PROVENANCE.md`, which states per fixture which bytes were captured from the installed tool and which two shapes could not be - a gate state is not durable, and no `awaiting_approval` row exists anywhere in this machine's daemon database across all 73 recorded runs, so those two are composed from strings the tool's own test suite asserts it emits, named line by line.
 
 No harness binary was spawned by either suite.

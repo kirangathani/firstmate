@@ -427,6 +427,27 @@ test_an_intent_at_the_limit_is_accepted() {
   pass "attach: an intent exactly at the limit is accepted, so the cap is not off by one"
 }
 
+test_the_intent_cap_stays_under_the_kernels_argv_limit() {
+  local limit groups raw probe n
+  # The intent reaches the detached half as ONE argv entry, and an argv payload
+  # dies at its threshold rather than degrading. So the cap has to stay under the
+  # kernel's per-argument limit, and that limit is MEASURED here rather than
+  # written down: a hardcoded number would keep passing on exactly the day a cap
+  # raise crossed the real one.
+  limit=$(sed -n 's/^INTENT_B64_LIMIT=\([0-9]*\)$/\1/p' "$ATTACH")
+  groups=$(( limit / 4 ))
+  raw=$(( groups * 3 ))
+  probe=0
+  for n in 8192 16384 32768 65536 131072 262144; do
+    /bin/true "$(head -c "$n" /dev/zero | tr '\0' 'x')" 2>/dev/null || break
+    probe=$n
+  done
+  [ "$probe" -gt 0 ] || fail "could not measure this kernel's per-argument limit at all"
+  [ "$raw" -lt "$probe" ] \
+    || fail "the intent cap allows $raw raw bytes, which this kernel cannot pass on argv (measured safe at $probe)"
+  pass "attach: the intent cap ($raw raw bytes) stays under this kernel's argv limit (measured safe at $probe)"
+}
+
 test_refuses_yes_in_a_respond() {
   local dir out rc=0
   dir=$(make_case respond-yes "$FIXTURE_TASK" "$NM_STALL_FIXTURES/axi-status-ci-advanced.toon" 0)
@@ -636,6 +657,7 @@ test_refuses_a_second_live_attach
 test_a_dead_marker_does_not_block_a_fresh_attach
 test_refuses_an_oversized_intent_with_the_measured_size
 test_an_intent_at_the_limit_is_accepted
+test_the_intent_cap_stays_under_the_kernels_argv_limit
 test_refuses_yes_in_a_respond
 test_refuses_a_fix_round_with_no_substantive_instructions
 test_a_substantive_fix_round_is_sent_and_closes_the_gate
