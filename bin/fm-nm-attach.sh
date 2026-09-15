@@ -192,11 +192,15 @@ if [ "$1" = --follow-internal ]; then
   # owns clearing the liveness marker so no path can leave one behind.
   # shellcheck disable=SC2329 # Invoked indirectly, by the EXIT trap below.
   on_follower_exit() {
+    # Marker FIRST, then the report. That order matters to anyone watching: the
+    # status line is what wakes firstmate, and the marker is what would refuse
+    # its next attach, so releasing the marker before the wake means the wake is
+    # never observable while a stale marker still blocks acting on it.
+    unlink "$MARKER" 2>/dev/null || true
     if [ "$CLASSIFIED" != 1 ]; then
       printf 'blocked [key=nm-run]: the background attach for %s stopped before it could report what the run did; read the attach log\n' \
         "$ID" >> "$STATUS_FILE"
     fi
-    unlink "$MARKER" 2>/dev/null || true
   }
   trap on_follower_exit EXIT
 
