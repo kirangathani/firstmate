@@ -187,8 +187,11 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 # start a run at all. So the resolved home is embedded, exactly as the status
 # file path above already is.
 FM_HOME_ENV="FM_HOME=$(shell_quote "$FM_HOME")"
-NM_INTENT_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-nm-intent.sh")"
 NM_DECISION_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-nm-decision.sh")"
+# The one owner of attaching to a run. It composes the pinned intent itself, so
+# the worker never assembles the raw command; a PreToolUse gate denies that
+# command outright (bin/fm-fix-instructions-policy.mjs, docs/fix-instructions-gate.md).
+NM_ATTACH_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-nm-attach.sh")"
 # The follow-up a capped fix round files belongs in THIS home's backlog, and
 # the worker's cwd is a project worktree where a bare `tasks-axi` would resolve
 # some other workspace or none at all, so the backlog file is named outright.
@@ -327,7 +330,7 @@ When you believe it is complete, append \`done: {summary}\` to the status file a
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary - with one exception, below: you never run \`axi run\` or \`axi respond\` yourself, whatever that guidance shows.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Five firstmate-specific rules layer on top of that guidance:
@@ -336,21 +339,24 @@ Five firstmate-specific rules layer on top of that guidance:
   An info finding that RE-RAISES a decision already in this brief's \`## Gate decisions\` subsection is answered by citing that key, and recorded \`--outcome no-change\`; do not re-open a settled question.
   A finding about a security, credential, or data-loss risk escalates no matter what severity it carries.
 - **Ask-user findings of severity \`warning\` or \`error\` are not yours to answer**: escalate to firstmate (rule 6) and stop.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it silently auto-resolves EVERY ask-user finding, including the warning and error ones the captain owns.
-- **Start every run with the pinned intent, never a paraphrase.** \`--intent\` is required to start a run and the pipeline's final review scores the diff against it, so it must be the goal as actually stated, not your restatement of it. Take it from its one owner:
-  \`no-mistakes axi run --intent "\$($NM_INTENT_CMD $ID)"\`
-  That prints the \`# Task\` section of this brief verbatim. Use the identical command on every re-run in this task.
-- **Every \`--action fix\` needs substantive \`--instructions\`.** The gate agent that applies a fix is not you: it sees the finding text and the diff and nothing else, and it cannot read this brief or the project's AGENTS.md. So \`--instructions\` must carry the design reasoning behind the code the finding touches, the principle the fix must preserve, and what the fix must not break or reintroduce. A bare or one-phrase \`--instructions\` is refused before it runs; that refusal is the rule working, not a tool fault, so answer it rather than routing around it.
+  When the decision comes back, feed it to the gate with \`$NM_ATTACH_CMD $ID --respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
+- Avoid \`--yes\`: it silently auto-resolves EVERY ask-user finding, including the warning and error ones the captain owns. The attach owner refuses it outright.
+- **Start, reattach and respond ONLY through the attach owner.** Never call \`no-mistakes axi run\` or \`axi respond\` yourself; a gate refuses those commands before they run.
+  \`$NM_ATTACH_CMD $ID\` starts the run, or reattaches to it.
+  \`$NM_ATTACH_CMD $ID --respond --action <approve|fix|skip> ...\` answers a gate, taking the same flags \`axi respond\` takes.
+  Run it from inside this worktree; it refuses anywhere else. It composes the pinned intent for you from its one owner - the \`# Task\` section of this brief verbatim, never a paraphrase, which matters because the pipeline's final review scores the diff against it.
+  **It returns immediately, on purpose, while the run is still going.** That is not a failure and there is nothing to wait for: it holds the attach in the background for hours, so instead of the \`error: wait of 8m0s elapsed\` you would get in the foreground several times per run, the hold returns only when the run actually reaches a gate or an outcome, and then appends ONE line to your status file. That line is what wakes firstmate, whether or not you are still watching. So do not poll it, do not re-attach to "check", and do not treat its immediate return as something to retry.
+  \`no-mistakes axi status\` is the cheap look if you want to see where the run is; \`axi logs\`, \`axi sync\` and \`axi abort\` are unaffected too.
+- **Every \`--action fix\` needs substantive \`--instructions\`.** Pass them through the attach owner like any other flag. The gate agent that applies a fix is not you: it sees the finding text and the diff and nothing else, and it cannot read this brief or the project's AGENTS.md. So \`--instructions\` must carry the design reasoning behind the code the finding touches, the principle the fix must preserve, and what the fix must not break or reintroduce. A bare or one-phrase \`--instructions\` is refused before it runs; that refusal is the rule working, not a tool fault, so answer it rather than routing around it.
 
 # Gate decisions become part of the goal
-A decision you submit at a gate changes what this branch is supposed to be, but the pipeline's final review scores the diff against \`--intent\`, which was written before that decision existed - upstream no-mistakes issue #591 (open, third-party, v1.40.0) documents a run whose later auto-fix reverted three submitted decisions and still reported \`checks-passed\`. Recording a decision closes that gap mechanically: it writes the decision into this brief's \`# Task\` section, so the pinned-intent command above already carries it the very next time you run it.
+A decision you submit at a gate changes what this branch is supposed to be, but the pipeline's final review scores the diff against \`--intent\`, which was written before that decision existed - upstream no-mistakes issue #591 (open, third-party, v1.40.0) documents a run whose later auto-fix reverted three submitted decisions and still reported \`checks-passed\`. Recording a decision closes that gap mechanically: it writes the decision into this brief's \`# Task\` section, so the attach command above already carries it the very next time you run it.
 
 1. Record every decision the moment you submit it, not later from memory:
    \`$NM_DECISION_CMD record $ID --finding <finding-id> --key <decision-key> --requires "<what the decision requires, in concrete checkable terms>" --step <step>\`
    Pass \`--outcome no-change\` when the answer leaves the branch exactly as it is - "no change needed", "already decided at \`<key>\`", a documentation wording accepted as written - and \`--outcome change\` (the default) when it changes what the branch must contain.
    Add \`--fixed "<finding ids>"\` naming the findings this round submitted a fix for; recording one of those as \`no-change\` is refused, because a round that changed code owes the re-run that re-scores it.
-2. When a run in which you recorded any \`change\` decision reaches its outcome, start a fresh run with the same pinned-intent command.
+2. When a run in which you recorded any \`change\` decision reaches its outcome, start a fresh run with the same attach command.
    That run's review is what proves the branch and the decided goal agree, and it is also the only thing that re-reviews whatever the later auto-fix steps (test, document, lint) changed.
    A round whose decisions were all \`no-change\` needs no fresh run: nothing on the branch moved, so a fresh 25-35 minute run would re-score exactly what the last one already scored.
 3. \`$NM_DECISION_CMD rerun-check $ID\` must exit 0 before you report done. It refuses while any \`change\` decision was recorded during the run that is still the most recent one, which is exactly the case where nothing has yet scored the branch against the decided goal.
@@ -369,7 +375,7 @@ Once the pipeline's \`pr\` step has opened the PR, you verify CI yourself:
 2. While it exits non-zero it names every check that is failing, unfinished, unreadable, or infrastructure. Wait 60 seconds and run it again. A PR reporting zero checks is never green and that command never calls one green, so keep polling rather than reading silence as success.
    **An \`infrastructure:\` line is not a red and is never re-run.** It means a check never delivered a verdict about your branch at all - it timed out, was cancelled, could not run, or died having written nothing. A timed-out review is an alarm, not a retry. Stop polling, append \`blocked: infrastructure - {the infrastructure line verbatim}\` to the status file, and stop. Do not re-run that check, do not push an empty commit to retrigger it, and do not keep waiting for it to pass on its own.
 3. When it exits 0 it prints \`green: {url} {sha} {n} checks\`. Run that \`rerun-check\`, then append \`done: PR {url} checks green at {sha}\` quoting the exact sha it printed, and stop. You are finished.
-4. If the run is still parked at its \`ci\` step looping on that warning once you have verified green, abort it with \`no-mistakes axi abort\` - a between-runs action, so it is yours to take - and say in your \`done:\` line that every prior step completed and only the stuck CI-monitor step was aborted.
+4. If the run is still parked at its \`ci\` step looping on that warning once you have verified green, abort it with \`no-mistakes axi abort\` - a between-runs action that returns at once, so it is yours to take directly - and say in your \`done:\` line that every prior step completed and only the stuck CI-monitor step was aborted.
 
 # The pipeline's review is worth telling the PR about
 The moment the pipeline's \`pr\` step has opened the PR, append \`review-attest needed for {full-40-char-sha} on {owner}/{repo}\` to the status file, with the PR's head commit and the owner/repo, and carry straight on driving the run - this is a note to firstmate, not a stop.

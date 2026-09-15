@@ -1,0 +1,19 @@
+run:
+  id: "01KZRQJJ2JX66ECFBTNPKPSKGH"
+  branch: fm/eln-drop-variables-w7
+  status: failed
+  head: a316b52d
+  pr: "https://github.com/kirangathani/eln/pull/19"
+  findings: 3 info
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,12
+    rebase,completed,0,2596
+    review,failed,0,500603
+    test,pending,0,0
+    document,pending,0,0
+    lint,pending,0,0
+    push,pending,0,0
+    pr,pending,0,0
+    ci,pending,0,0
+outcome: failed
+error: "step review failed: agent review: claude exited: exit status 1: "

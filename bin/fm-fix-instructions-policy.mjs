@@ -1,8 +1,28 @@
 #!/usr/bin/env node
-// Semantic policy for the fix-instructions gate: does a shell command submit a
-// no-mistakes fix round that carries no substantive --instructions?
+// Semantic policy for the no-mistakes command gate. Two questions, in this
+// order:
 //
-// Why this exists. A crewmate at a no-mistakes gate has exactly three responses:
+//   1. Does this command ATTACH to a run - `no-mistakes axi run` or
+//      `axi respond`? Those two block on the daemon until the next gate or
+//      outcome, so bin/fm-nm-attach.sh owns them and this refuses the raw form,
+//      naming that wrapper. Code `nm-raw-attach`. Rule 1 is skipped in
+//      --fix-instructions-only mode, which exists for exactly one caller: that
+//      wrapper, whose own command rule 1 would otherwise refuse.
+//   2. Does it submit a fix round with no substantive --instructions? Codes
+//      `fix-instructions-missing` and `fix-instructions-thin`. Rule 1 fires
+//      first, so through the PreToolUse gate this is now only reachable via the
+//      wrapper's own --fix-instructions-only call - which is where the floor now
+//      lives, and it is enforced there or nowhere.
+//
+// Why rule 1 exists. Read bin/fm-nm-attach.sh's header for the measurement: a
+// foreground attach returns `error: wait of 8m0s elapsed` three or four times
+// per run, each costing a turn and carrying no news, and a parked gate waits
+// indefinitely with nobody told. A hook cannot verify a command was backgrounded
+// with a long wait - it sees only the command string, and harness-native
+// background execution is not itself a policy signal - so backgrounding is owned
+// by the wrapper and this refuses everything else.
+//
+// Why rule 2 exists. A crewmate at a no-mistakes gate has exactly three responses:
 // approve, fix, skip. `--action fix` hands the work to no-mistakes' OWN gate
 // agent, which is not the crewmate. That agent sees the finding text and the
 // diff, and nothing else. It cannot see the crewmate's brief, which lives at
@@ -37,6 +57,12 @@
 import { Lexer, splitProgram, commandPosition } from "./fm-arm-command-policy.mjs";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+// The wrapper this policy redirects a raw attach to, resolved from this module's
+// own location so the denial can name an absolute path rather than a relative
+// one the worker would have to resolve itself.
+const ATTACH_WRAPPER = join(dirname(fileURLToPath(import.meta.url)), "fm-nm-attach.sh");
 
 // The substance floor, in characters of cooked instruction text after trimming.
 //
@@ -55,7 +81,11 @@ export const MIN_INSTRUCTIONS_CHARS = 120;
 const REQUIRED_CONTENT =
   "The instructions must carry, in prose: the design reasoning behind the code the finding touches, the principle the fix must preserve, and what the fix must not break or reintroduce.";
 
+const RAW_ATTACH_REASON =
+  `\`no-mistakes axi run\` and \`axi respond\` are never called directly. Both ATTACH to the branch's run in the background daemon and BLOCK until the next gate or outcome, so in the foreground they return \`error: wait of 8m0s elapsed\` several times per run - each costing a turn and carrying no news - and a gate that parks is noticed only when somebody happens to reattach. Use the one owner instead, which always detaches, always uses a multi-hour wait, returns immediately, and appends the run's own next event to this task's status line so firstmate is woken even if you are idle or gone: \`${ATTACH_WRAPPER} <task-id>\` to start or reattach, and \`${ATTACH_WRAPPER} <task-id> --respond --action <approve|fix|skip> ...\` to answer a gate. Your task id is the one in this brief's status-file command. \`axi status\`, \`axi logs\`, \`axi sync\`, \`axi abort\` and any \`--help\` are unaffected.`;
+
 const REASONS = {
+  "nm-raw-attach": RAW_ATTACH_REASON,
   "fix-instructions-missing":
     `a no-mistakes fix round was submitted with no --instructions. The gate agent that applies the fix is not you: it sees the finding text and the diff and nothing else, and it cannot read this task's brief or this repo's AGENTS.md. Re-run the same command with --instructions. ${REQUIRED_CONTENT}`,
   "fix-instructions-thin":
@@ -115,6 +145,27 @@ function parseRespondInvocation(words) {
   return { positionals, flags };
 }
 
+// Does this no-mistakes node ATTACH to a run - `axi run` or `axi respond`?
+// Those two are the only subcommands that block on the daemon, so they are the
+// only ones the wrapper has to own. `axi status`, `axi logs`, `axi sync` and
+// `axi abort` return immediately and are untouched.
+//
+// A node carrying a literal `--help` or `-h` WORD allows, and that is exact
+// rather than lenient: no-mistakes is a Cobra program, so help short-circuits
+// the command and nothing is driven. The test is on a whole word in command
+// position's argument list, so `--help` inside a flag's VALUE is a different
+// token and does not match. The generated brief itself points a worker at
+// `no-mistakes axi run --help`, so refusing it would refuse reading the docs.
+function classifyRawAttachNode(position) {
+  const words = position.words.slice(position.index + 1);
+  const { positionals } = parseRespondInvocation(words);
+  if (positionals.length < 2) return undefined;
+  if (positionals[0].value !== "axi") return undefined;
+  if (positionals[1].value !== "run" && positionals[1].value !== "respond") return undefined;
+  if (words.some((word) => word.value === "--help" || word.value === "-h")) return undefined;
+  return deny("nm-raw-attach");
+}
+
 function classifyRespondNode(position) {
   const { positionals, flags } = parseRespondInvocation(position.words.slice(position.index + 1));
   if (positionals.length < 2) return undefined;
@@ -163,7 +214,13 @@ function nestedPayloads(position) {
   return payloads;
 }
 
-function classify(command, depth) {
+// mode "all" (the PreToolUse gate) applies every rule, denying a raw attach
+// outright. mode "fix-instructions" applies only the substance floor, and is
+// what bin/fm-nm-attach.sh calls: the wrapper IS the sanctioned route, so the
+// raw-attach rule must not refuse the very command it exists to run, but the
+// floor still has to be enforced somewhere now that the gate never sees a fix
+// round again.
+function classify(command, depth, mode) {
   if (depth > MAX_DEPTH) return { decision: "allow" };
   const lexed = new Lexer(command).tokenize();
   // Fail open on syntax this classifier cannot tokenize, matching the sibling
@@ -176,32 +233,38 @@ function classify(command, depth) {
   for (const node of nodes) {
     for (const token of node) {
       if (token.type !== "group") continue;
-      const nested = classify(token.content, depth + 1);
+      const nested = classify(token.content, depth + 1, mode);
       if (nested.decision === "deny") return nested;
     }
     const position = commandPosition(node);
     if (!position.command) continue;
     if (position.command.literal && basename(position.command.value) === "no-mistakes") {
-      const verdict = classifyRespondNode(position);
+      const verdict = mode === "all"
+        ? classifyRawAttachNode(position) ?? classifyRespondNode(position)
+        : classifyRespondNode(position);
       if (verdict) return verdict;
       continue;
     }
     for (const payload of nestedPayloads(position)) {
-      const nested = classify(payload, depth + 1);
+      const nested = classify(payload, depth + 1, mode);
       if (nested.decision === "deny") return nested;
     }
   }
   return { decision: "allow" };
 }
 
-function decision(command) {
-  return classify(command, 0);
+function decision(command, mode = "all") {
+  return classify(command, 0, mode === "fix-instructions" ? mode : "all");
 }
 
 function parseArguments(argv) {
-  const result = { command: "", commandSet: false };
+  const result = { command: "", commandSet: false, mode: "all" };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
+    if (name === "--fix-instructions-only") {
+      result.mode = "fix-instructions";
+      continue;
+    }
     if (name === "--command") {
       if (i + 1 >= argv.length) throw new Error("--command requires a value");
       result.command = argv[i + 1];
@@ -236,7 +299,7 @@ if (invokedDirectly()) {
     if (!args.commandSet || !args.command) {
       process.stdout.write("allow\n");
     } else {
-      const result = decision(args.command);
+      const result = decision(args.command, args.mode);
       if (result.decision === "allow") {
         process.stdout.write("allow\n");
       } else {

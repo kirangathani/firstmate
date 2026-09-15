@@ -1,0 +1,24 @@
+run:
+  id: "01KZRQJJ2JX66ECFBTNPKPSKGH"
+  branch: fm/eln-drop-variables-w7
+  status: running
+  head: a316b52d
+  pr: "https://github.com/kirangathani/eln/pull/19"
+  findings: 1 warning
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,12
+    rebase,completed,0,2596
+    review,awaiting_approval,1,183573
+    test,pending,0,0
+    document,pending,0,0
+    lint,pending,0,0
+    push,pending,0,0
+    pr,pending,0,0
+    ci,pending,0,0
+gate:
+  step: review
+  status: awaiting_approval
+  summary: 1 blocking issue
+  note: Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed.
+  findings[1]{id,severity,file,action,description}:
+    review-1,warning,main.go,ask-user,"calls os.Exit, leaks fd"
