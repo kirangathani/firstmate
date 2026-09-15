@@ -176,7 +176,21 @@ if [ "$1" = --follow-internal ]; then
   RUN_STATUS=$(unquote "$(field status)")
   OUTCOME=$(unquote "$(field outcome)")
   RUN_ERROR=$(unquote "$(field error)")
+  RUN_BRANCH=$(unquote "$(field branch)")
   [ -n "$RUN_ID" ] || RUN_ID=unknown
+
+  # `axi status` answers with THIS task's run under the key `run:`, and with
+  # another branch's run under `other_branch_run:` (internal/cli/axi_query.go
+  # picks the key, and adds a leading `current_branch:` only in that foreign
+  # case). Both bodies carry the same `id:`/`status:` fields, so a record whose
+  # own `branch:` is not ours is discarded rather than reported as this task's
+  # run - reporting it would attribute another task's failure to this one.
+  if [ -n "$RUN_BRANCH" ] && [ "$RUN_BRANCH" != "fm/$ID" ]; then
+    say "discarding a record for $RUN_BRANCH; this task's branch is fm/$ID"
+    RUN_ID=unknown
+    RUN_STATUS=""
+    OUTCOME=""
+  fi
 
   # steps[] rows are `<step>,<status>,<findings>,<duration_ms>` (verified against
   # the installed CLI; tests/fixtures/nm-attach/ holds the captured records).
@@ -204,10 +218,13 @@ if [ "$1" = --follow-internal ]; then
   [ -n "$ACTIVE_STEP" ] || ACTIVE_STEP=$RUN_STATUS
   [ -n "$ACTIVE_STEP" ] || ACTIVE_STEP=unknown
 
-  # A daemon that did not answer at all is its own blocker. An `axi status` that
-  # answers with an empty body is NOT that case (measured: a healthy running run
-  # can print one), so only a non-zero exit or a body with no record header counts.
-  if [ "$STATUS_RC" -ne 0 ] || ! printf '%s\n' "$RUN_OUT" | grep -q '^[[:space:]]*current_branch:'; then
+  # A daemon that did not answer at all is its own blocker: a non-zero exit, or a
+  # body carrying none of the four keys every `axi status` record opens with.
+  # Deliberately NOT "an empty run body", which a healthy running run can print
+  # (bin/fm-nm-db-lib.sh's header records that measurement), and deliberately not
+  # keyed on `current_branch:` alone, which an on-branch record does not carry.
+  if [ "$STATUS_RC" -ne 0 ] \
+    || ! printf '%s\n' "$RUN_OUT" | grep -qE '^[[:space:]]*(current_branch:|run:|other_branch_run:|runs\[)'; then
     note "blocked [key=nm-daemon]: daemon unreachable while attached to run $RUN_ID"
   elif [ "$RUN_ID" = unknown ]; then
     # The daemon answered but holds no run for this branch, so the attach never
