@@ -97,6 +97,7 @@ state/               volatile runtime signals; gitignored
   <id>.stale-base-ack  written by bin/fm-stale-base.sh --ack: firstmate acted on this task's stale-base finding; keyed to the base commit, so a base that moves again re-alarms; removed by teardown
   <id>.monitor-exempt  captain-signed standing exemption from the monitoring alarm, written only by bin/fm-monitor.sh --exempt; the signature and stated reason are what make it authority, so an unsigned or hand-written record is NOT an exemption; announced at every session start while it stands; removed by teardown
   <id>.nm-attach       liveness record of the one detached no-mistakes attach bin/fm-nm-attach.sh has running for the task, holding that hold's pid and log path; that script's header owns the format and the idempotency contract; removed by teardown
+  <id>.nm-questions    review questions already surfaced to firstmate for this task's run, one `<run-id><TAB><question-id>` line each, written by bin/fm-nm-questions.sh so a question wakes firstmate once rather than every sweep; removed by teardown
   <id>.nm-progress     last observed no-mistakes step fingerprint and the window it has gone unchanged, written by bin/fm-nm-stall.sh, whose header owns the format; removed by teardown
   <id>.nm-stall-ack    written by bin/fm-nm-stall.sh --ack: firstmate acted on this task's stalled-validation finding; keyed to the frozen step, so a run that advances and freezes again re-alarms; removed by teardown
   <id>.merge-green-rounds  one line per merge-main-forward steer bin/fm-merge-green.sh has sent for this task, so its summary can report how many update rounds a branch needed; removed by teardown
@@ -297,6 +298,7 @@ Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, 
 Both refuse a landing whose commit messages or PR description carry AI attribution, with no override flag and none for `yolo` either, and `docs/attribution-gate.md` owns that contract including the exposure it cannot close.
 `bin/fm-pr-merge.sh` also refuses a landing carrying a merge whose conflict resolution deleted content one side introduced, with no override flag and none for `yolo`; a worker resolves additively on its own authority, and a deletion it believes correct is relayed to the captain as a `needs-decision` naming both candidate resolutions, then landed as its own commit rather than hidden inside a resolution, which `docs/merge-resolution-gate.md` owns along with what the check cannot catch.
 `bin/fm-pr-merge.sh` also refuses a PR whose head does not already contain the current tip of the branch it targets, with no override flag and none for `yolo`, because checks measured against a base that has since moved verified nothing that would land; the remedy is the same steer section 8 names - merge the base into the branch, never rebase, push, let CI re-run, then merge.
+`bin/fm-pr-merge.sh` also refuses a landing while any question the run's own reviewer asked is unanswered, with no override flag and none for `yolo`, because a human can approve the review gate over an open question; `bin/fm-nm-questions.sh` owns that predicate.
 `bin/fm-pr-merge.sh` also gates every merge on `bin/fm-assert-tests-kept.sh`: a test assertion the base already had that is missing or failing on the PR branch is a hard refusal, even under `yolo`.
 A base assertion the gate could not execute at all against the branch is reported as unexecuted, and it refuses only for a project the captain has enabled with a `data/exec-gate/<project>` marker; otherwise it is informational.
 A base assertion the gate could not compare because the base's own test named it differently across two runs is reported as unstable and always refuses; that is a defect in the base's test, so the fix is an ordinary test-fix task naming the assertion with a constant string, never a captain decision.
@@ -314,16 +316,22 @@ For a no-mistakes ship, trigger validation on the same worker after its implemen
 The task worker that starts a no-mistakes run drives the pipeline and owns every attach through the next gate or outcome, always through `bin/fm-nm-attach.sh`, whose header owns why the raw `axi run`/`axi respond` is denied and how its one status line per returned hold is what wakes firstmate.
 Firstmate never responds to a gate for a crew-owned run.
 
+A review finding is fixed by the worker in its own copy and pushed, which supersedes the parked run so a fresh cold review re-checks it; test, document, and lint fixes stay the pipeline's.
+The reviewer can also ask a question while it is still working, and `bin/fm-nm-questions.sh` owns reading those questions, waking firstmate on a new one, and composing the single exact line that sends the captain's answer back through the worker.
+Put each one to the captain as the multiple choice the reviewer itself wrote, record the answer with that owner, and never write into a crew-owned run to answer it.
+An answer settles only the question it answers.
+
 An ask-user finding of severity `info` or `suggestion` is answered by the worker itself under the generated brief's rule, so only `warning` and `error` findings, plus anything security-shaped at any severity, return as `needs-decision`; firstmate decides those only when the configured authority permits, otherwise escalates to the captain.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to keep driving each returned hold until completion or a genuinely new escalation.
 A recorded decision amends that task's pinned intent, so a gate round that produced any decision changing the branch ends with a fresh run scored against the decided goal rather than a separate end-of-run check that each decision survived, while a decision recorded as changing nothing is listed and owes no run.
-A worker gets at most two further fix rounds per run on the same findings and then files what is left as a follow-up backlog item and carries on, which is a normal outcome and never reported as a failure.
+There is no round cap and none may be added anywhere; a worker filing a persistent finding as a follow-up backlog item after a couple of rounds is its own convention, a normal outcome, and never reported as a failure.
 Resume fleet supervision immediately after the decision lands.
 
 Judge validation by the branch-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
 Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
-A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership; steer it back to the gate response flow.
+A worker committing and pushing a REVIEW fix during an active run is the expected path, not a fault; hand-editing a test, document, or lint finding, or aborting or restarting the run, still duplicates pipeline ownership and is steered back to the gate response flow.
+A run parked on its reviewer's own questions is waiting on answers rather than validating, which `bin/fm-crew-state.sh` names and the stalled-validation alarm never counts.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
 
 ### PR ready, landing, and teardown
