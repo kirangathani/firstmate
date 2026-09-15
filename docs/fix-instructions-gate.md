@@ -232,6 +232,10 @@ Verified 2026-09-15 against `no-mistakes version v1.70.1`:
 
 - `no-mistakes axi run --help` documents `--wait duration` (default `8m0s`) as "maximum time to block driving this run before returning so the caller can reattach", and states the 10-minute harness tool cap as the reason for that default.
 - `--wait` accepts a multi-hour value. `no-mistakes axi run --wait 3h` in a non-repo directory clears flag parsing and fails later with `error: not in a git repository`, while `--wait 3x` fails at parse time with `invalid argument "3x" for "--wait" flag: time: unknown unit "x" in duration "3x"`. The source agrees: `internal/cli/axi_drive.go:47` registers it with `cmd.Flags().DurationVar`, so the value goes through `time.ParseDuration` and has no upper bound of its own.
+
+Every source citation in this document was read with `git show v1.70.1:<path>` in the `projects/no-mistakes` clone, not from that clone's working tree.
+The distinction matters: the clone's own checkout is at `ce2d749` (`v1.75.3-1-gce2d749`), five minor versions ahead of the installed binary, so its working tree describes a renderer this machine does not run.
+`v1.70.1` resolves to `9c380d4`, the exact commit the installed tool reports.
 - `no-mistakes axi respond --help` carries the identical `--wait` flag and the identical default.
 
 ### The status line, and why each verb is the one it is
@@ -252,7 +256,7 @@ A `--respond` attach appends one further line at SEND time, `resolved [key=nm-ru
 Without it, a park opened by a previous hold would stay open behind a later `paused` or `resolved` return and firstmate would keep chasing a gate that had already been answered.
 
 A record whose own `branch:` is not `fm/<task-id>` is discarded rather than reported.
-`no-mistakes axi status` answers with another branch's run under `other_branch_run:` (`internal/cli/axi_query.go` picks the key), and that body carries the same `id:`, `status:` and `outcome:` fields, so a positional read would pin another task's failure on this one.
+`no-mistakes axi status` answers with another branch's run under `other_branch_run:` (`internal/cli/axi_query.go` lines 84-88 pick the key and add the leading `current_branch:` only in that case), and that body carries the same `id:`, `status:` and `outcome:` fields, so a positional read would pin another task's failure on this one.
 
 ### What it refuses, all before anything is launched
 
@@ -344,7 +348,7 @@ The Grok global hook is additionally proven inert for a workspace with no token 
 `tests/fm-nm-gate-context.test.sh` owns the intent owner, the decision record lifecycle, the intent amendment and its re-run gate, and the generated brief's contract.
 
 `tests/fm-nm-attach.test.sh` owns the attach owner, in 31 cases: that it returns within 2 seconds while a hold that sleeps 30 is provably still running, that the hold carries `--wait 3h` and the pinned intent and never `--yes`, each classified return shape, every refusal including the size cap sized from its own named constant, and the denial through the real Claude and Grok stdin transports.
-Its `no-mistakes axi status` fixtures and their provenance are recorded in `tests/fixtures/nm-attach/PROVENANCE.md`, which states per fixture which bytes were captured from the installed tool and which two shapes could not be - a gate state is not durable, and no `awaiting_approval` row exists anywhere in this machine's daemon database across all 73 recorded runs, so those two are composed from strings the tool's own test suite asserts it emits, named line by line.
+Its `no-mistakes axi status` fixtures and their provenance are recorded in `tests/fixtures/nm-attach/PROVENANCE.md`, which states per fixture which bytes were captured from the installed tool and which two shapes could not be - a gate state is not durable, and no `awaiting_approval` row exists anywhere in this machine's daemon database across all 73 recorded runs, so those two are composed from strings the tool's own test suite asserts it emits at `v1.70.1`, named line by line.
 
 No harness binary was spawned by either suite.
 **Live per-harness hook-loading was not confirmed for Codex, OpenCode, Pi, or Grok.**

@@ -220,11 +220,12 @@ if [ "$1" = --follow-internal ]; then
   [ -n "$RUN_ID" ] || RUN_ID=unknown
 
   # `axi status` answers with THIS task's run under the key `run:`, and with
-  # another branch's run under `other_branch_run:` (internal/cli/axi_query.go
-  # picks the key, and adds a leading `current_branch:` only in that foreign
-  # case). Both bodies carry the same `id:`/`status:` fields, so a record whose
-  # own `branch:` is not ours is discarded rather than reported as this task's
-  # run - reporting it would attribute another task's failure to this one.
+  # another branch's run under `other_branch_run:` (v1.70.1:internal/cli/
+  # axi_query.go lines 84-88 pick the key, and add a leading `current_branch:`
+  # only in that foreign case). Both bodies carry the same `id:`/`status:`
+  # fields, so a record whose own `branch:` is not ours is discarded rather than
+  # reported as this task's run - reporting it would attribute another task's
+  # failure to this one.
   if [ -n "$RUN_BRANCH" ] && [ "$RUN_BRANCH" != "fm/$ID" ]; then
     say "discarding a record for $RUN_BRANCH; this task's branch is fm/$ID"
     RUN_ID=unknown
