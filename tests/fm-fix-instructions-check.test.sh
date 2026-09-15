@@ -162,7 +162,16 @@ test_full_acceptance_matrix() {
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "${MATRIX_CODES[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
   done
-  pass "fix-instructions acceptance matrix: ${#MATRIX_IDS[@]} cases x 5 harness entry forms, block/allow all correct"
+  # The assertion NAME is a constant and the case count is reported beside it.
+  # bin/fm-assert-tests-kept.sh's check 2 compares the names two runs emitted,
+  # and can only do that while a name is stable; a count derived from the tree
+  # under test is a different string on every tree, so it landed in `unstable:`
+  # and blocked every landing. That script's header states this exact remedy:
+  # "name the assertion with a constant string and put the runtime value in its
+  # fail message". Each case's own failure already names the case, so the total
+  # goes to a diagnostic line rather than into a new assertion identifier.
+  echo "# matrix: ${#MATRIX_IDS[@]} cases x 5 harness entry forms"
+  pass "fix-instructions acceptance matrix: every case blocks or allows correctly through every harness entry form"
 }
 
 # --- the substance floor is a named constant, not a magic number ------------
@@ -185,7 +194,11 @@ test_substance_floor_is_a_named_constant() {
   expect_code 2 "$rc" "instructions one character below MIN_INSTRUCTIONS_CHARS ($floor) must be denied"
   # The constant needs its value justified in a comment, not left bare.
   assert_grep 'Justification for' "$POLICY" "MIN_INSTRUCTIONS_CHARS must carry a justification comment"
-  pass "substance floor: named constant MIN_INSTRUCTIONS_CHARS=$floor, boundary exact, justified in a comment"
+  # Constant name, for the same reason. The floor is read from the module at run
+  # time, so interpolating it made this name unverifiable by that gate; both
+  # boundary checks above already carry the value in their own fail messages.
+  echo "# substance floor: MIN_INSTRUCTIONS_CHARS=$floor"
+  pass "substance floor: named constant MIN_INSTRUCTIONS_CHARS, boundary exact, justified in a comment"
 }
 
 # --- transport fail-open behavior -------------------------------------------
