@@ -669,6 +669,73 @@ test_skip_matrix_has_exactly_one_owner() {
 }
 
 
+# --- who applies a review fix, and the round convention ---------------------
+
+# The captain's ruling of 2026-09-15: review findings are fixed by the author in
+# its own worktree and pushed - the parked run is superseded and a fresh cold
+# reviewer re-checks - so the brief must no longer forbid a mid-run commit for a
+# review finding, while the pipeline keeps owning test, document and lint fixes.
+test_review_findings_are_the_authors_to_fix() {
+  local home id brief
+  home="$TMP_ROOT/review-fix-home"
+  mkdir -p "$home/data"
+  id="brief-review-fix-r1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "REVIEW findings are yours to fix, in your own worktree" "$brief" \
+    "the ship brief does not hand review fixes to the author"
+  assert_grep "supersedes the parked run" "$brief" \
+    "the ship brief does not say what the author's push does to the parked run"
+  assert_grep "not a fault" "$brief" \
+    "the ship brief still reads a mid-run commit for a review finding as a fault"
+  assert_grep "a TEST, DOCUMENT or LINT finding is applied by the pipeline" "$brief" \
+    "the ship brief gave away the fixes the pipeline still owns"
+  assert_no_grep "Do not hand-edit, commit, or fix findings yourself while a run is active" "$brief" \
+    "the ship brief still carries the blanket no-mid-run-fix rule the ruling replaced"
+  pass "fm-brief.sh: the ship brief gives review fixes to the author and keeps the rest with the pipeline"
+}
+
+# "There is no round cap we have introduced here" (captain, 2026-09-15). The
+# convention stays as guidance for the worker's own judgement; it must not read
+# as a limit, and nothing may enforce one.
+test_the_round_convention_is_not_a_cap() {
+  local home id brief
+  home="$TMP_ROOT/round-convention-home"
+  mkdir -p "$home/data"
+  id="brief-rounds-r1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "THERE IS NO ROUND CAP" "$brief" \
+    "the ship brief does not state that there is no round cap"
+  assert_grep "a convention, not a cap" "$brief" \
+    "the round guidance does not name itself a convention"
+  assert_no_grep "At most two fix rounds per run" "$brief" \
+    "the ship brief still states the round guidance as a limit"
+  assert_no_grep "you get at most TWO further fix rounds" "$brief" \
+    "the ship brief still states the round guidance as an allowance to be spent"
+  pass "fm-brief.sh: the two-round guidance is a convention the worker judges, never an enforced cap"
+}
+
+# The reviewer can now ask a question mid-pass, and the answer travels back
+# through the worker, because the worker owns its own run (AGENTS.md section 7;
+# bin/fm-nm-attach.sh's header owns why firstmate never touches it).
+test_the_brief_tells_the_worker_how_to_run_an_answer() {
+  local home id brief
+  home="$TMP_ROOT/answer-verb-home"
+  mkdir -p "$home/data"
+  id="brief-answer-a1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "no-mistakes axi answer --question" "$brief" \
+    "the ship brief does not name the command that records an answer"
+  assert_grep "resolved [key=<question-id>]" "$brief" \
+    "the ship brief does not tell the worker how to close the question durably"
+  assert_grep "settles only the question it answers" "$brief" \
+    "the ship brief does not carry the settles-only-this-question instruction"
+  pass "fm-brief.sh: the ship brief tells the worker exactly what to do with a relayed answer"
+}
+
 test_skip_matrix_has_exactly_one_owner
 test_script_parses
 test_help_includes_entire_header
@@ -693,3 +760,6 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_commit_cadence_is_scaffold_text
+test_review_findings_are_the_authors_to_fix
+test_the_round_convention_is_not_a_cap
+test_the_brief_tells_the_worker_how_to_run_an_answer

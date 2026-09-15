@@ -329,9 +329,13 @@ The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
-You drive no-mistakes by responding to its gates, not by implementing fixes.
+You drive no-mistakes by responding to its gates.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary - with one exception, below: you never run \`axi run\` or \`axi respond\` yourself, whatever that guidance shows.
-Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+
+**REVIEW findings are yours to fix, in your own worktree.** You wrote the code, so you fix it: edit, commit and push on your branch while the run is parked at review.
+That push supersedes the parked run and a fresh, cold reviewer re-reads the result, which is the independence the pipeline is actually built on - so a mid-run commit for a review finding is the expected path, not a fault, and you do not need \`--instructions\` for a fix you apply yourself.
+Everything else the pipeline still owns: a TEST, DOCUMENT or LINT finding is applied by the pipeline's own fixer through the gate, so do not hand-edit those while a run is active.
+Escalating a decision is unchanged whichever kind it is (see the ask-user rules below).
 
 Five firstmate-specific rules layer on top of that guidance:
 
@@ -340,6 +344,9 @@ Five firstmate-specific rules layer on top of that guidance:
   A finding about a security, credential, or data-loss risk escalates no matter what severity it carries.
 - **Ask-user findings of severity \`warning\` or \`error\` are not yours to answer**: escalate to firstmate (rule 6) and stop.
   When the decision comes back, feed it to the gate with \`$NM_ATTACH_CMD $ID --respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
+- **A review QUESTION comes back as one exact command; run it.** The reviewer can ask a question while it works, and firstmate relays the captain's answer as a single line naming the question id and the option chosen.
+  Run the \`no-mistakes axi answer --question <id> --answer "<option>" --by <captain|firstmate>\` command exactly as sent, from inside this worktree, then append \`resolved [key=<question-id>]: answered "<option>"\` to your status file.
+  It is not a gate response: \`axi respond\` refuses \`--action answer\`, and the run releases itself once no question is left open. An answer settles only the question it answers.
 - Avoid \`--yes\`: it silently auto-resolves EVERY ask-user finding, including the warning and error ones the captain owns. The attach owner refuses it outright.
 - **Start, reattach and respond ONLY through the attach owner.** Never call \`no-mistakes axi run\` or \`axi respond\` yourself; a gate refuses those commands before they run.
   \`$NM_ATTACH_CMD $ID\` starts the run, or reattaches to it.
@@ -361,10 +368,12 @@ A decision you submit at a gate changes what this branch is supposed to be, but 
    A round whose decisions were all \`no-change\` needs no fresh run: nothing on the branch moved, so a fresh 25-35 minute run would re-score exactly what the last one already scored.
 3. \`$NM_DECISION_CMD rerun-check $ID\` must exit 0 before you report done. It refuses while any \`change\` decision was recorded during the run that is still the most recent one, which is exactly the case where nothing has yet scored the branch against the decided goal.
 
-# At most two fix rounds per run on the same findings
-After the first review of a run, you get at most TWO further fix rounds on the same set of findings.
-A finding that comes back a third time, or any finding still open after that second fix round, becomes a follow-up instead of a third attempt: file it with \`$TASKS_ADD_CMD "<title from the finding>" --mint --blocked-by $ID\`, which prints the id it minted; name it in the PR description under a \`Deferred to follow-up\` heading with its finding id and the new task id, and carry on with the run.
-This is a normal outcome, not a failure: do not append \`failed:\` or \`blocked:\` for a capped finding, and do not abort the run over one.
+# Two fix rounds on the same findings, then file a follow-up - a convention, not a cap
+THERE IS NO ROUND CAP. Nothing in the pipeline limits fix rounds, nothing here adds one, and none may be added.
+What follows is a working convention for your own judgement: after about two further rounds on the SAME set of findings, a finding that keeps coming back is usually better as a follow-up than as a third attempt.
+When you judge that, file it with \`$TASKS_ADD_CMD "<title from the finding>" --mint --blocked-by $ID\`, which prints the id it minted; name it in the PR description under a \`Deferred to follow-up\` heading with its finding id and the new task id, and carry on with the run.
+This is a normal outcome, not a failure: do not append \`failed:\` or \`blocked:\` for a deferred finding, and do not abort the run over one.
+Equally, a finding you are genuinely converging on is yours to keep working; the convention never forces you to stop.
 
 # Reporting done: verify CI green yourself, on the PR
 Do NOT wait for the pipeline to report CI green. Its \`ci\` step cannot see your PR go green: it polls \`gh pr checks\` with no PR number from a detached-HEAD worktree, so gh exits 1 on every poll with \`could not determine current branch\` and the step loops on \`warning: could not check CI: gh pr checks: exit status 1\` for up to 168 hours while the PR is green on GitHub. Reproduced 2026-09-07 on two separate PRs.
