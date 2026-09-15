@@ -269,6 +269,156 @@ test_lock_rejects_unknown_arguments_without_touching_state() {
   pass "fm-lock.sh: an unknown argument prints the usage and exits 2, creating nothing"
 }
 
+# --- what fm-session-lock-lib.sh accepts as a harness -------------------------
+
+# Start one process from a fake VERSIONED Claude install, running <body> one
+# shell level below itself and then staying alive so the recorded holder is still
+# live when the caller asserts. Echoes the harness pid; the caller kills it.
+#
+# The shape is the incident's own, captured by the scout from the real processes
+# and reproduced here with a copy of bash: comm is the VERSION string
+# (`2.1.273`), while argv0 and /proc/<pid>/exe both sit under a directory named
+# `claude`. That is what a Claude Code session launched by its own daemon looks
+# like, and what the acquire walk could not see. The launch scrubs CLAUDE_PID for
+# the whole chain, so the operator's own session cannot leak into the fixture.
+start_versioned_harness() {  # <dir> <body>
+  local dir=$1 body=$2 bin
+  bin="$dir/claude/versions/2.1.273"
+  mkdir -p "$dir/claude/versions"
+  cp /bin/bash "$bin"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '%s\n' "$body"
+    printf 'touch "%s/chain.done"\n' "$dir"
+  } > "$dir/chain.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'bash "%s/chain.sh"\n' "$dir"
+    printf 'sleep 300\n'
+  } > "$dir/harness-body.sh"
+  env -u CLAUDE_PID "$bin" "$dir/harness-body.sh" \
+    --session-id 00000000-0000-4000-8000-000000000000 --fork-session >/dev/null 2>&1 &
+  printf '%s\n' "$!"
+}
+
+wait_for_chain() {  # <dir>
+  local dir=$1 i=0
+  while [ "$i" -lt 150 ]; do
+    [ -e "$dir/chain.done" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+stop_harness() {  # <pid>
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+  return 0
+}
+
+# A live process shaped like a Claude Code BASH TOOL SHELL. The argument string
+# is the real one, captured on 2026-09-15 from this repo's own crewmate session
+# (`ps -o args= -p $$` inside a Bash tool call), with the snapshot path pointed at
+# the fixture and the eval'd command replaced by a sleep. What matters is that it
+# names `.claude/shell-snapshots/`, because the old holder check grepped the
+# harness regex over the whole argument line and therefore read every tool shell
+# as a live harness.
+start_tool_shell_session() {  # <dir>
+  local dir=$1 snap
+  snap="$dir/.claude/shell-snapshots/snapshot-bash-1789510754725-53yowz.sh"
+  mkdir -p "$dir/.claude/shell-snapshots"
+  : > "$snap"
+  /bin/bash -c "source $snap 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && eval 'sleep 300' < /dev/null && pwd -P >| $dir/tool-shell-cwd" >/dev/null 2>&1 &
+  printf '%s\n' "$!"
+}
+
+test_acquire_records_a_version_named_harness_process() {
+  local dir state hpid recorded
+  # The incident, exactly: a Claude Code session launched by its own daemon has
+  # no `claude`-comm process of its own, so the acquire walk matched nothing and
+  # printed `cannot locate harness process in ancestry`. That is what
+  # bin/fm-lock.sh printed at 21:33 on 2026-09-15, with supervision already off
+  # and no way to turn it back on from inside the session.
+  dir=$(make_case lock-versioned-comm)
+  state="$dir/state"
+  hpid=$(start_versioned_harness "$dir" "
+export FM_STATE_OVERRIDE='$state'
+'$LOCK_CLI' > '$dir/acquire.out' 2>&1
+'$LOCK_CLI' status > '$dir/status.out' 2>&1
+bash -c \"'$LOCK_CLI' ownership\" > '$dir/ownership.out' 2>&1
+")
+  wait_for_chain "$dir" || { stop_harness "$hpid"; fail "the versioned-harness chain never finished"; }
+
+  recorded=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+  assert_contains "$(cat "$dir/acquire.out")" "lock acquired: harness pid $hpid" \
+    "acquire must find the version-named harness and record it: $(cat "$dir/acquire.out")"
+  [ "$recorded" = "$hpid" ] || fail "the lock must name the version-named harness $hpid, got: $recorded"
+  assert_contains "$(cat "$dir/status.out")" "lock: held by live harness pid $hpid" \
+    "the holder check must accept the same process the finder recorded"
+  [ "$(cat "$dir/ownership.out")" = owned ] \
+    || fail "a shell below the recorded harness must read owned, got: $(cat "$dir/ownership.out")"
+  stop_harness "$hpid"
+  pass "fm-session-lock-lib: a harness named by version, not by command name, is found and recorded"
+}
+
+test_a_bash_tool_shell_is_not_a_live_harness() {
+  local dir state tool hpid out recorded
+  # The other half of the same asymmetry. The holder check grepped the harness
+  # regex over the WHOLE `ps -o args=` line, and every Claude Code tool shell's
+  # arguments name ~/.claude/shell-snapshots, so a lock left naming a tool shell
+  # read as a live harness and would have been defended as a rival session.
+  dir=$(make_case lock-tool-shell)
+  state="$dir/state"
+  tool=$(start_tool_shell_session "$dir")
+  printf '%s\n' "$tool" > "$state/.lock"
+
+  out=$(FM_STATE_OVERRIDE="$state" "$LOCK_CLI" status 2>&1)
+  assert_contains "$out" "lock: stale" "a bash tool shell must not read as a live harness holder: $out"
+  assert_not_contains "$out" "held by live harness" "a bash tool shell must not be reported as a live holder"
+
+  # A stale lock is overwritable, so a real session takes the home back without
+  # an operator editing the file.
+  hpid=$(start_versioned_harness "$dir" "
+export FM_STATE_OVERRIDE='$state'
+'$LOCK_CLI' > '$dir/acquire.out' 2>&1
+")
+  wait_for_chain "$dir" || { stop_harness "$hpid"; stop_harness "$tool"; fail "the versioned-harness chain never finished"; }
+  recorded=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+  stop_harness "$hpid"
+  stop_harness "$tool"
+  [ "$recorded" = "$hpid" ] || fail "acquire must overwrite a lock naming a tool shell, got: $recorded"
+  pass "fm-session-lock-lib: a bash tool shell is not a harness, so a lock naming one is stale and overwritable"
+}
+
+test_the_harness_predicate_has_exactly_one_implementation() {
+  local definitions leftovers names count alternatives name
+  # The finder and the holder check each used to carry their own idea of what a
+  # harness is, and the two were wrong in opposite directions. One definition is
+  # what keeps them from drifting apart again.
+  definitions=$(grep -rl 'fm_session_pid_is_harness()' "$ROOT/bin" 2>/dev/null | wc -l | tr -d '[:space:]')
+  [ "$definitions" = 1 ] || fail "expected exactly one harness predicate, found $definitions"
+
+  leftovers=$(grep -rn 'grep -qE "\$FM_SESSION_HARNESS_RE"' "$ROOT/bin" 2>/dev/null \
+    | grep -v 'fm-session-lock-lib.sh' | wc -l | tr -d '[:space:]')
+  [ "$leftovers" = 0 ] || fail "the harness regex is matched outside the predicate in $leftovers place(s)"
+
+  # The predicate needs the harness list in two forms: a loose regex for a
+  # basename, and a plain name list for the exact directory-component test. They
+  # are two copies of one fact, so pin them to each other.
+  names=$(bash -c '. "$1"; printf "%s\n" "$FM_SESSION_HARNESS_NAMES"' _ "$ROOT/bin/fm-session-lock-lib.sh")
+  count=$(printf '%s\n' "$names" | tr ' ' '\n' | grep -c .)
+  alternatives=$(bash -c '. "$1"; printf "%s\n" "$FM_SESSION_HARNESS_RE"' _ "$ROOT/bin/fm-session-lock-lib.sh" \
+    | tr '|' '\n' | grep -c .)
+  [ "$count" = "$alternatives" ] \
+    || fail "FM_SESSION_HARNESS_NAMES has $count names but FM_SESSION_HARNESS_RE has $alternatives alternatives"
+  for name in $names; do
+    bash -c '. "$1"; fm_session_name_is_harness "$2"' _ "$ROOT/bin/fm-session-lock-lib.sh" "$name" \
+      || fail "harness name $name is in the list but does not match the regex"
+  done
+  pass "fm-session-lock-lib: one harness predicate, and its two forms of the harness list agree"
+}
+
 # --- bin/fm-watch-arm.sh gate ------------------------------------------------
 
 test_arm_refuses_when_another_session_owns_the_fleet() {
@@ -753,6 +903,9 @@ test_ownership_cli_classifies_and_writes_nothing
 test_lock_holder_identity_and_file_format
 test_lock_refusal_describes_the_holder_and_names_a_remedy
 test_lock_rejects_unknown_arguments_without_touching_state
+test_acquire_records_a_version_named_harness_process
+test_a_bash_tool_shell_is_not_a_live_harness
+test_the_harness_predicate_has_exactly_one_implementation
 test_arm_refuses_when_another_session_owns_the_fleet
 test_arm_refuses_restart_when_another_session_owns_the_fleet
 test_arm_starts_for_the_owning_session

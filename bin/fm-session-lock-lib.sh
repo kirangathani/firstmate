@@ -29,7 +29,13 @@
 FM_SESSION_LOCK_ANCESTRY_DEPTH=8
 
 # Known harness command names; extend when a new adapter is verified.
+# The same list in two forms, because the two questions are different. The regex
+# matches a BASENAME and is deliberately loose, which is the acquire rule this
+# library has always applied. The name list is for the exact directory-component
+# test in fm_session_path_is_harness, where a loose match would accept `.claude`,
+# the config directory every tool shell's arguments mention.
 FM_SESSION_HARNESS_RE='claude|codex|opencode|grok|^pi$'
+FM_SESSION_HARNESS_NAMES='claude codex opencode grok pi'
 
 # --- process start-tick identity ---------------------------------------------
 # The kernel's own start time for a pid, in clock ticks since boot. It is the
@@ -106,6 +112,86 @@ fm_pid_ancestry_contains() {
     i=$((i + 1))
   done
   [ "$pid" = "$target" ]
+}
+
+# --- what counts as a harness process ----------------------------------------
+# ONE predicate, used by both halves of this library: fm_session_harness_pid,
+# which finds the pid to RECORD, and fm_session_lock_holder_is_harness, which
+# judges the pid already recorded. They used to disagree, and both were wrong in
+# opposite directions. The finder matched `basename(comm)` only, so it could not
+# see a Claude Code session launched by its own daemon, whose processes run the
+# VERSIONED binary directly and are therefore named `2.1.273` rather than
+# `claude`; on 2026-09-15 that left a home with no way to re-acquire its own lock
+# from inside the session. The judge grepped the harness regex over the whole
+# `ps -o args=` line, so any bash tool shell - whose arguments name
+# `~/.claude/shell-snapshots/...` - read as a live harness.
+#
+# A process is a harness when any of these holds:
+#   - basename(comm) matches FM_SESSION_HARNESS_RE, the rule the finder already
+#     applied, kept unchanged;
+#   - basename(argv0), or basename of /proc/<pid>/exe, matches it;
+#   - a DIRECTORY component of argv0 or of exe is EXACTLY a harness name, which
+#     is the versioned install layout ~/.local/share/claude/versions/<version>;
+#   - comm is a bare interpreter (node, python) and argv[1], the script it runs,
+#     satisfies either path rule above.
+# The substring grep over the whole argument line is gone deliberately: it is
+# what made a tool shell readable as a harness, and nothing replaces it.
+#
+# Residual false-positive surface: a process whose executable or script lives
+# under a directory named exactly `claude`, `codex`, `opencode`, `grok`, or `pi`,
+# AND that sits in the ancestry of a firstmate shell. Ancestors are shells,
+# terminal multiplexers, init, and harnesses, so that is accepted.
+
+# True when basename $1 is a harness command name.
+fm_session_name_is_harness() {
+  printf '%s' "$1" | grep -qE "$FM_SESSION_HARNESS_RE"
+}
+
+# True when path $1 names a harness, either by its basename or because one of
+# its directory components is exactly a harness name. Wrapping the path in
+# slashes makes the first and last components testable with the one pattern, and
+# requiring the slashes is what keeps `.claude` from matching `claude`.
+fm_session_path_is_harness() {
+  local path=$1 name
+  [ -n "$path" ] || return 1
+  fm_session_name_is_harness "${path##*/}" && return 0
+  for name in $FM_SESSION_HARNESS_NAMES; do
+    case "/$path/" in
+      */"$name"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# True when pid $1 is a harness process. Liveness is NOT part of this answer;
+# callers that need it ask separately, because a dead pid and a live non-harness
+# are different verdicts to them.
+fm_session_pid_is_harness() {
+  local pid=$1 comm args exe rest
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  [ -n "$comm" ] || return 1
+  fm_session_name_is_harness "${comm##*/}" && return 0
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  fm_session_path_is_harness "${args%% *}" && return 0
+  # /proc/<pid>/exe is the kernel's own answer and is readable for a same-user
+  # process whatever its comm says. A versions directory pruned by a later
+  # upgrade leaves a ` (deleted)` suffix on the link, which must come off before
+  # the path is read.
+  exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
+  exe=${exe% (deleted)}
+  fm_session_path_is_harness "$exe" && return 0
+  # Bare interpreter: the harness is the SCRIPT it runs, which is argv[1].
+  case "${comm##*/}" in
+    *node*|*python*)
+      rest=${args#* }
+      [ "$rest" != "$args" ] || return 1
+      fm_session_path_is_harness "${rest%% *}" && return 0
+      ;;
+  esac
+  return 1
 }
 
 # --- the session lock file ---------------------------------------------------
@@ -215,21 +301,21 @@ fm_session_lock_owned() {
 # --- acquisition-side helpers (bin/fm-lock.sh) -------------------------------
 # Acquiring writes the HARNESS pid found by walking the shell's ancestry, which
 # lives as long as the firstmate session - unlike the transient subshell pid of
-# any one tool call, which is dead moments after it is written.
+# any one tool call, which is dead moments after it is written. Both helpers here
+# decide what a harness is through fm_session_pid_is_harness above, so the finder
+# and the judge cannot drift apart again.
 
+# Walk up from $1 (default: this process) and return the NEAREST harness. Nearest
+# matters: the incident's chain had a `claude`-comm daemon above the session's own
+# two version-named processes, and recording the daemon is what made ownership
+# depend on a process Claude Code restarts on every auto-update.
 fm_session_harness_pid() {
-  local pid=${1:-$$} comm args i=0
+  local pid=${1:-$$} i=0
   while [ "$i" -lt "$FM_SESSION_LOCK_ANCESTRY_DEPTH" ]; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if printf '%s' "$(basename "$comm")" | grep -qE "$FM_SESSION_HARNESS_RE"; then
+    if fm_session_pid_is_harness "$pid"; then
       printf '%s\n' "$pid"
       return 0
     fi
-    # Bare interpreter (e.g. node): match the harness name in its script path.
-    case "$comm" in
-      *node*|*python*) printf '%s' "$args" | grep -qE "$FM_SESSION_HARNESS_RE" && { printf '%s\n' "$pid"; return 0; } ;;
-    esac
     pid=$(fm_pid_parent "$pid") || return 1
     i=$((i + 1))
   done
@@ -241,11 +327,10 @@ fm_session_harness_pid() {
 # start-tick identity fm_session_lock_ownership applies, so the two halves of
 # this library cannot disagree about whether one lock file is stale.
 fm_session_lock_holder_is_harness() {
-  local pid=$1 recorded=${2:-} comm
+  local pid=$1 recorded=${2:-}
   kill -0 "$pid" 2>/dev/null || return 1
   fm_session_lock_identity_matches "$pid" "$recorded" || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$FM_SESSION_HARNESS_RE"
+  fm_session_pid_is_harness "$pid"
 }
 
 # --- describing the holder ----------------------------------------------------
