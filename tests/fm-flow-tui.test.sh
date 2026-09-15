@@ -511,19 +511,68 @@ printf '%s\n' "$out" | grep -qE '[┌└+][─-]{3,}' &&
   fail "a worker with no pipeline was drawn box borders"
 pass "a worker with no pipeline gets no pipeline step boxes"
 
-# What the compact row does carry: its kind, its window, and the state read
-# through bin/fm-crew-state.sh by the collector.
+# What the compact row does carry: its kind, its window, and - for a scout -
+# the fixed caption this view now draws instead of the crew's own status line.
+#
+# The captain's ruling, 2026-09-15: a scout row must never show its raw status
+# text - he read "working · captain ruled in-window - no round cap (decision
+# review-round-cap answered: none); question routing..." and asked "what is
+# this random text". The state word is `scouting`, blue, and the detail is the
+# fixed sentence below, whatever the underlying crew-state read actually said -
+# the SCOUT fixture above carries a real "working"/"harness busy" read and it
+# must not reach the screen.
 assert_contains "$out" "scout" "the compact row did not say what kind of worker it is"
 assert_contains "$out" "fm:nm-ci-duplication-of-effort" "the compact row did not name the window"
-assert_contains "$out" "working" "the compact row did not carry the reported state"
-assert_contains "$out" "harness busy" "the compact row dropped the evidence behind the state"
-pass "a compact row carries the id, kind, window and reported state"
+assert_contains "$out" "scouting" "the compact row did not draw a scout's own state word"
+assert_contains "$out" "no pipeline view as this is a scout agent" "the compact row did not draw a scout's fixed caption"
+assert_not_contains "$out" "harness busy" "a scout row leaked its raw status text onto the screen"
+pass "a scout row carries the id, kind, window and the fixed no-pipeline caption"
 
-# A read that failed says so, and never falls back to something it does not know.
-UNREAD=$(compact "quiet-scout" scout '{"ok":false,"value":"","source":"","detail":"","reason":"current-state read failed or timed out"}')
+# The word is drawn in a slot of its own, blue rather than sharing green with
+# `working`: a scout is never "working" in the pipeline sense this view
+# otherwise means by that word.
+colored=$(render "$(snap "[$SCOUT]")")
+assert_contains "$colored" $'\x1b[94m''scouting' "scouting was not drawn in its own blue slot"
+pass "a scout's state word is drawn in a palette slot of its own, not shared with working"
+
+# A read that failed still says so for a worker that is NOT a scout: only a
+# scout's caption is fixed and unconditional, and a secondmate with a genuinely
+# unread state must not be told apart from one by squinting.
+UNREAD=$(compact "quiet-sm" secondmate '{"ok":false,"value":"","source":"","detail":"","reason":"current-state read failed or timed out"}')
 out=$(render "$(snap "[$UNREAD]")" | sed 's/\x1b\[[0-9;]*m//g')
 assert_contains "$out" "state not read" "an unread state was not stated as unread"
 pass "a state that could not be read is stated rather than guessed"
+
+# --- the captain-driving marker: one meaning, drawn on any kind of row -------
+#
+# `captain_driving` is true exactly when the collector found
+# state/<id>.monitor-exempt for that task - the captain has taken the window
+# himself. It means the same thing whatever kind of row carries it, so it is
+# drawn the same way everywhere: appended to the row's own detail with the
+# same words.
+
+DRIVEN_SCOUT=$(printf '%s' "$SCOUT" | jq '.captain_driving = true')
+out=$(render "$(snap "[$DRIVEN_SCOUT]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$out" "no pipeline view as this is a scout agent · captain driving directly in the window" \
+  "a captain-driven scout did not carry the marker after its fixed caption"
+pass "a captain-driven scout carries the marker after its fixed caption"
+
+NOT_DRIVEN=$(render "$(snap "[$SCOUT]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_not_contains "$NOT_DRIVEN" "captain driving" "a scout with no exemption record was drawn as captain-driven"
+pass "a scout with no exemption record carries no captain-driving marker"
+
+DRIVEN_MATE=$(printf '%s' "$MATE" | jq '.captain_driving = true')
+out=$(render "$(snap "[$DRIVEN_MATE]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$out" "captain driving directly in the window" \
+  "a captain-driven second mate did not carry the marker despite its otherwise-empty idle detail"
+pass "the marker reaches an idle row even when its ordinary detail is empty"
+
+DRIVEN_SHIP=$(agent_with driven1 "$(steps_all running)" '{"captain_driving":true}')
+out=$(render "$(snap "[$DRIVEN_SHIP]")" | sed 's/\x1b\[[0-9;]*m//g')
+head=$(printf '%s' "$out" | grep -F 'Agent 1  driven1')
+assert_contains "$head" "captain driving directly in the window" \
+  "a captain-driven ship row did not carry the marker on its own head"
+pass "the same marker reaches a ship row's head when the captain is driving it"
 
 # --- a quiet second mate is healthy, and is not painted as a fault -----------
 #
@@ -1318,11 +1367,26 @@ timers=$(printf '%s' "$out" | awk '/building/ { getline; getline; print; exit }'
 build_cell=$(printf '%s' "$timers" | awk '{ print $1 }')
 assert_contains "$build_cell" "10m" "a finished building phase did not state its duration"
 assert_not_contains "$build_cell" "running" "building was still running with the PR open"
-# The marker rides the SECOND timer line, under the push+PR box.
+# The marker rides the SECOND timer line, under the push+PR box. 7400000ms is
+# 2h03m, and `since PR 2h03m` is 14 columns against an 11-column cell, so the
+# captain's own drop-rather-than-truncate rule applies: the marker says only
+# `since PR`, never an ellipsis-cut duration.
 marker=$(printf '%s' "$out" | awk '/building/ { getline; getline; getline; print; exit }')
-assert_contains "$marker" "rework" "post-PR work left no marker under push+PR"
-assert_contains "$marker" "2h" "the rework marker did not state how long it has been going"
+assert_contains "$marker" "since PR" "post-PR work left no marker under push+PR"
+assert_not_contains "$marker" "…" "a duration that does not fit the cell was truncated instead of dropped"
 pass "a direct-PR row ends building at its PR and marks the work after it under push+PR"
+
+# The plain-words case: a duration short enough to fit rides the same marker,
+# rounded to bare minutes rather than the old `rework 2m03s` seconds precision
+# the captain could not read at a glance.
+FITS=$(agent_with dp4 \
+  '[{"step":"building","status":"completed","findings":0,"duration_ms":600000}]' \
+  '{"mode":"direct-PR","pr":{"url":"https://github.com/o/r/pull/32","number":32},
+    "rework":{"active_ms":125000}}')
+out=$(render "$(snap "[$FITS]")" | sed 's/\x1b\[[0-9;]*m//g')
+marker=$(printf '%s' "$out" | awk '/building/ { getline; getline; getline; print; exit }')
+assert_contains "$marker" "since PR 2m" "a duration that fits the cell was not shown in plain words"
+pass "a since-PR duration that fits the cell reads in plain words, rounded to its coarsest unit"
 
 # The row still has exactly the stages it had: the aftermath earned a marker,
 # not a column.
