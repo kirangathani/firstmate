@@ -49,6 +49,14 @@ mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# The wall-clock bound the slow sweeps below use, probed rather than sourced
+# unconditionally for the reason bin/fm-nm-stall.sh gives: an unconditional `.`
+# of a missing sibling prints to stderr.
+if [ -r "$SCRIPT_DIR/fm-bounded-lib.sh" ]; then
+  # shellcheck source=bin/fm-bounded-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-bounded-lib.sh"
+fi
 # Shared wake classifier (captain-relevant verbs + signal/stale/heartbeat
 # predicates), the SAME library the away-mode daemon uses, so the triage policy
 # has one definition.
@@ -113,6 +121,7 @@ NM_STALL_INTERVAL=${FM_NM_STALL_INTERVAL:-600}  # seconds between stalled-valida
 # still working, and the whole value of the channel is that the answer arrives
 # before the rest of the pass is spent.
 NM_QUESTIONS_INTERVAL=${FM_NM_QUESTIONS_INTERVAL:-180}
+NM_QUESTIONS_TIMEOUT=${FM_NM_QUESTIONS_TIMEOUT:-20}  # seconds bounding one review-question sweep
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -892,8 +901,19 @@ while :; do
   if [ "$(age_of "$STATE/.last-nm-questions")" -ge "$NM_QUESTIONS_INTERVAL" ]; then
     touch "$STATE/.last-nm-questions"
     if [ -x "$SCRIPT_DIR/fm-nm-questions.sh" ]; then
-      nm_q_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-        "$SCRIPT_DIR/fm-nm-questions.sh" surface 2>/dev/null || true)
+      # Wall-clock bounded like the stall sweep's own reads: this runs inside the
+      # watcher's cycle, and a cycle that stretches is what breaks the timing the
+      # stale and pause classifications depend on. A sweep cut short reports
+      # nothing this cycle and the next one picks the question up, which only
+      # ever delays a wake rather than losing it - the durable record is what
+      # decides whether a question has been surfaced, not this run.
+      if command -v fm_bounded_available >/dev/null 2>&1 && fm_bounded_available; then
+        nm_q_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+          fm_bounded_run "$NM_QUESTIONS_TIMEOUT" "$SCRIPT_DIR/fm-nm-questions.sh" surface 2>/dev/null || true)
+      else
+        nm_q_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+          "$SCRIPT_DIR/fm-nm-questions.sh" surface 2>/dev/null || true)
+      fi
       if [ -n "$nm_q_out" ]; then
         reason="check: $(printf '%s' "$nm_q_out" | tr '\n' ' ')"
         fm_wake_append check nm-questions "$reason" || exit 1
