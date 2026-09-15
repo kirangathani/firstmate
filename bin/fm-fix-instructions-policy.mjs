@@ -37,6 +37,12 @@
 import { Lexer, splitProgram, commandPosition } from "./fm-arm-command-policy.mjs";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+// The wrapper this policy redirects a raw attach to, resolved from this module's
+// own location so the denial can name an absolute path rather than a relative
+// one the worker would have to resolve itself.
+const ATTACH_WRAPPER = join(dirname(fileURLToPath(import.meta.url)), "fm-nm-attach.sh");
 
 // The substance floor, in characters of cooked instruction text after trimming.
 //
@@ -55,7 +61,11 @@ export const MIN_INSTRUCTIONS_CHARS = 120;
 const REQUIRED_CONTENT =
   "The instructions must carry, in prose: the design reasoning behind the code the finding touches, the principle the fix must preserve, and what the fix must not break or reintroduce.";
 
+const RAW_ATTACH_REASON =
+  `\`no-mistakes axi run\` and \`axi respond\` are never called directly. Both ATTACH to the branch's run in the background daemon and BLOCK until the next gate or outcome, so in the foreground they return \`error: wait of 8m0s elapsed\` several times per run - each costing a turn and carrying no news - and a gate that parks is noticed only when somebody happens to reattach. Use the one owner instead, which always detaches, always uses a multi-hour wait, returns immediately, and appends the run's own next event to this task's status line so firstmate is woken even if you are idle or gone: \`${ATTACH_WRAPPER} <task-id>\` to start or reattach, and \`${ATTACH_WRAPPER} <task-id> --respond --action <approve|fix|skip> ...\` to answer a gate. Your task id is the one in this brief's status-file command. \`axi status\`, \`axi logs\`, \`axi sync\`, \`axi abort\` and any \`--help\` are unaffected.`;
+
 const REASONS = {
+  "nm-raw-attach": RAW_ATTACH_REASON,
   "fix-instructions-missing":
     `a no-mistakes fix round was submitted with no --instructions. The gate agent that applies the fix is not you: it sees the finding text and the diff and nothing else, and it cannot read this task's brief or this repo's AGENTS.md. Re-run the same command with --instructions. ${REQUIRED_CONTENT}`,
   "fix-instructions-thin":
@@ -115,6 +125,22 @@ function parseRespondInvocation(words) {
   return { positionals, flags };
 }
 
+// Does this no-mistakes node ATTACH to a run - `axi run` or `axi respond`?
+// Those two are the only subcommands that block on the daemon, so they are the
+// only ones the wrapper has to own. `axi status`, `axi logs`, `axi sync` and
+// `axi abort` return immediately and are untouched, and a node asking for help
+// is reading documentation the generated brief itself points at, never driving a
+// run, so it is allowed at any depth.
+function classifyRawAttachNode(position) {
+  const words = position.words.slice(position.index + 1);
+  const { positionals } = parseRespondInvocation(words);
+  if (positionals.length < 2) return undefined;
+  if (positionals[0].value !== "axi") return undefined;
+  if (positionals[1].value !== "run" && positionals[1].value !== "respond") return undefined;
+  if (words.some((word) => word.value === "--help" || word.value === "-h")) return undefined;
+  return deny("nm-raw-attach");
+}
+
 function classifyRespondNode(position) {
   const { positionals, flags } = parseRespondInvocation(position.words.slice(position.index + 1));
   if (positionals.length < 2) return undefined;
@@ -163,7 +189,13 @@ function nestedPayloads(position) {
   return payloads;
 }
 
-function classify(command, depth) {
+// mode "all" (the PreToolUse gate) applies every rule, denying a raw attach
+// outright. mode "fix-instructions" applies only the substance floor, and is
+// what bin/fm-nm-attach.sh calls: the wrapper IS the sanctioned route, so the
+// raw-attach rule must not refuse the very command it exists to run, but the
+// floor still has to be enforced somewhere now that the gate never sees a fix
+// round again.
+function classify(command, depth, mode) {
   if (depth > MAX_DEPTH) return { decision: "allow" };
   const lexed = new Lexer(command).tokenize();
   // Fail open on syntax this classifier cannot tokenize, matching the sibling
@@ -176,32 +208,38 @@ function classify(command, depth) {
   for (const node of nodes) {
     for (const token of node) {
       if (token.type !== "group") continue;
-      const nested = classify(token.content, depth + 1);
+      const nested = classify(token.content, depth + 1, mode);
       if (nested.decision === "deny") return nested;
     }
     const position = commandPosition(node);
     if (!position.command) continue;
     if (position.command.literal && basename(position.command.value) === "no-mistakes") {
-      const verdict = classifyRespondNode(position);
+      const verdict = mode === "all"
+        ? classifyRawAttachNode(position) ?? classifyRespondNode(position)
+        : classifyRespondNode(position);
       if (verdict) return verdict;
       continue;
     }
     for (const payload of nestedPayloads(position)) {
-      const nested = classify(payload, depth + 1);
+      const nested = classify(payload, depth + 1, mode);
       if (nested.decision === "deny") return nested;
     }
   }
   return { decision: "allow" };
 }
 
-function decision(command) {
-  return classify(command, 0);
+function decision(command, mode = "all") {
+  return classify(command, 0, mode === "fix-instructions" ? mode : "all");
 }
 
 function parseArguments(argv) {
-  const result = { command: "", commandSet: false };
+  const result = { command: "", commandSet: false, mode: "all" };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
+    if (name === "--fix-instructions-only") {
+      result.mode = "fix-instructions";
+      continue;
+    }
     if (name === "--command") {
       if (i + 1 >= argv.length) throw new Error("--command requires a value");
       result.command = argv[i + 1];
@@ -236,7 +274,7 @@ if (invokedDirectly()) {
     if (!args.commandSet || !args.command) {
       process.stdout.write("allow\n");
     } else {
-      const result = decision(args.command);
+      const result = decision(args.command, args.mode);
       if (result.decision === "allow") {
         process.stdout.write("allow\n");
       } else {
