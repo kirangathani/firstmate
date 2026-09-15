@@ -36,8 +36,9 @@
 #     made PRs 71 and 73 each pay two update cycles on 2026-09-08; each branch
 #     should need exactly one, and the summary prints how many each has needed.
 #   - A candidate refused for its OWN reasons (red checks, attribution, a
-#     resolution that deleted content) does not stop the queue: it is reported
-#     and the run moves to the next candidate. It is not waiting on main.
+#     resolution that deleted content, a review question nobody answered) does
+#     not stop the queue: it is reported and the run moves to the next
+#     candidate. It is not waiting on main.
 #
 # ONLY A RECORDED PR IS IN THE QUEUE. A task whose branch is pushed but has no
 # `pr=` has never been validated and nothing is waiting on it to land, so it is
@@ -337,6 +338,10 @@ while IFS="$TAB" read -r _at id <&9; do
     checks-green)     record not-green "$id" "$url"; refused_own=1 ;;
     attribution)      record refused-attribution "$id" "$url"; refused_own=1 ;;
     merge-resolution) record refused-merge-resolution "$id" "$url"; refused_own=1 ;;
+    # A question the branch's own reviewer asked and nobody answered. That is
+    # the branch's own business, not main having moved, so the queue continues
+    # past it and the answer is owed through bin/fm-nm-questions.sh.
+    open-review-question) record refused-open-review-question "$id" "$url"; refused_own=1 ;;
     '')
       # No code means no gate reached a verdict: a usage failure, an unreadable
       # PR, a local copy that does not resolve, or the merge command itself
