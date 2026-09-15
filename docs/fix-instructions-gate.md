@@ -223,6 +223,8 @@ Three guarantees are what make it worth having, and none of them is an instructi
 1. **It always detaches and always returns immediately.**
    The attach runs in its own process group and session (`setsid`, `nohup` where absent) with stdin closed and both streams in the task's own temp root, and the caller gets the log path and control back at once.
    A worker cannot obtain the foreground shape from it.
+   It sets job control off first, exactly as `bin/fm-watch-arm.sh` does and for the same reason: with bash's `monitor` option on, a background job becomes its own process-group leader, which makes `setsid` fork rather than exec, so `$!` names the short-lived `setsid` process and the liveness marker records a pid that dies at once - which would let a second attach race a hold still running.
+   `setsid` is absent on macOS, and the `nohup` fallback still survives the parent exiting and SIGHUP but stays in the caller's process group; that is stated rather than engineered around, because the fleet this defends runs on Linux.
 2. **It always uses a multi-hour wait.**
    `FM_NM_ATTACH_WAIT` defaults to `3h`, comfortably past a 25-35 minute run, so the hold returns on a real event rather than on the clock.
 3. **The hold's return becomes a wake, not a thing to notice.**
@@ -347,7 +349,7 @@ The Grok global hook is additionally proven inert for a workspace with no token 
 
 `tests/fm-nm-gate-context.test.sh` owns the intent owner, the decision record lifecycle, the intent amendment and its re-run gate, and the generated brief's contract.
 
-`tests/fm-nm-attach.test.sh` owns the attach owner, in 31 cases: that it returns within 2 seconds while a hold that sleeps 30 is provably still running, that the hold carries `--wait 3h` and the pinned intent and never `--yes`, each classified return shape, every refusal including the size cap sized from its own named constant, and the denial through the real Claude and Grok stdin transports.
+`tests/fm-nm-attach.test.sh` owns the attach owner, in 32 cases: that it returns within 2 seconds while a hold that sleeps 30 is provably still running, that the hold carries `--wait 3h` and the pinned intent and never `--yes`, each classified return shape, every refusal including the size cap sized from its own named constant, and the denial through the real Claude and Grok stdin transports.
 Its `no-mistakes axi status` fixtures and their provenance are recorded in `tests/fixtures/nm-attach/PROVENANCE.md`, which states per fixture which bytes were captured from the installed tool and which two shapes could not be - a gate state is not durable, and no `awaiting_approval` row exists anywhere in this machine's daemon database across all 73 recorded runs, so those two are composed from strings the tool's own test suite asserts it emits at `v1.70.1`, named line by line.
 
 No harness binary was spawned by either suite.
