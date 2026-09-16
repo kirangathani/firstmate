@@ -377,7 +377,8 @@ SH
 test_real_operator_status_line_still_renders_every_segment() {
   local case_dir home workspace config rendered
   if [ ! -x "$REAL_STATUSLINE" ]; then
-    pass "SKIP (no $REAL_STATUSLINE on this machine): live capture-fidelity check"
+    printf '# SKIP: %s is not present on this machine\n' "$REAL_STATUSLINE"
+    pass "render: SKIP the live capture-fidelity check, the operator status line is absent"
     return 0
   fi
   case_dir="$TMP_ROOT/live"

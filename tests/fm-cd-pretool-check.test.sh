@@ -200,7 +200,8 @@ test_full_acceptance_matrix() {
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
   done
-  pass "cd-guard acceptance matrix: ${#MATRIX_IDS[@]} cases x 5 harness entry forms, block/allow all correct"
+  printf '# cd-guard matrix: %s cases x 5 harness entry forms\n' "${#MATRIX_IDS[@]}"
+  pass "cd-guard acceptance matrix: every case blocks or allows correctly through all five harness entry forms"
 }
 
 # --- primary-checkout scoping ----------------------------------------------
