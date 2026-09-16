@@ -286,7 +286,7 @@ The path's worker, automated gates, and captain approval remain authoritative:
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
 The project registry answers which of those a task takes, and when a brief sends one task down a different path - an upstream port that raises its PR through the pipeline from a `direct-PR` project is the shape that recurs - pass that task's own path as `bin/fm-spawn.sh --mode <mode>` at dispatch.
-Prose in a brief does not reach the record, and everything downstream reads the record: the generated definition of done, the testing-skip matrix, the merge gates, and the fleet view, which draws six stages as a captain-authorized skip on the strength of it.
+Prose in a brief does not reach the record, and everything downstream reads the record: the generated definition of done, the testing-skip matrix, the merge gates, and the fleet view, which draws six stages as skipped on the strength of it.
 
 Testing skips are a third orthogonal axis that only the captain authorizes, never `yolo` and never a worker: `bin/fm-spawn.sh` is the one place a skip is passed, and its `--skip-testing`, `--local-skip`, `--ci-skip`, and `--all-testing-skip` are enforced by code and by a keyed signature rather than by an instruction a worker could decline.
 Prefer `--skip-testing`, which resolves to the most the project's delivery mode can honour; that one flag also rewrites the worker's own brief, so there is no second invocation to keep in agreement and a partially specified skip cannot produce an ordinary task.
