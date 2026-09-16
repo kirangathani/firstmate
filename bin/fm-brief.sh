@@ -219,9 +219,21 @@ BRIEF_REGION_RULE_END='<!-- /fm:rule-1 -->'
 BRIEF_REGION_DOD_PREFIX='<!-- fm:definition-of-done'
 BRIEF_REGION_DOD_END='<!-- /fm:definition-of-done -->'
 
-# brief_skip_state <local on|off> <ci on|off>: the skip state recorded on the
-# definition-of-done marker, so a brief states which skip it was written for and
-# an apply can tell "already correct" from "needs rewriting" without guessing.
+# The definition-of-done marker records BOTH axes the three regions are a function
+# of - `<!-- fm:definition-of-done mode=<delivery-mode> skip=<state> -->` - so an
+# apply can tell "already correct" from "needs rewriting" without guessing. It
+# carried only the skip state until 2026-09-16, and the missing half was not
+# cosmetic: bin/fm-spawn.sh's --mode may now dispatch one task under a mode its
+# project is not registered for, and a marker that recorded only the skip made an
+# unflagged dispatch of an unflagged brief compare equal on the one axis it could
+# see and exit without rewriting, handing the worker the definition of done for the
+# OTHER mode. A marker with no `mode=` is a brief written before this contract; it
+# can prove nothing about which mode it was rendered for, so it is always rewritten
+# from the dispatch. That costs a hand adjustment to these three machine-owned
+# regions on the first respawn of such a brief, which is the safe direction: the
+# alternative is assuming it agrees and shipping the disagreement.
+
+# brief_skip_state <local on|off> <ci on|off>: the skip half of that marker.
 brief_skip_state() {
   if [ "${1}" = on ] && [ "${2}" = on ]; then printf 'all'
   elif [ "${1}" = on ]; then printf 'local'
@@ -460,13 +472,17 @@ if [ "$APPLY_SKIP" -eq 1 ]; then
     exit 1
   fi
 
-  HAVE_STATE=$(sed -n "s|^$BRIEF_REGION_DOD_PREFIX skip=\([a-z]*\) -->\$|\1|p" "$BRIEF")
-  if [ "$HAVE_STATE" = "$WANT_STATE" ]; then
+  HAVE_MARKER=$(sed -n "s|^$BRIEF_REGION_DOD_PREFIX \(.*\) -->\$|\1|p" "$BRIEF")
+  HAVE_MODE=$(printf '%s\n' "$HAVE_MARKER" | sed -n 's|^mode=\([^ ]*\) skip=[a-z]*$|\1|p')
+  HAVE_STATE=$(printf '%s\n' "$HAVE_MARKER" | sed -n 's|^.*skip=\([a-z]*\)$|\1|p')
+  if [ -n "$HAVE_MODE" ] && [ "$HAVE_MODE" = "$APPLY_MODE" ] && [ "$HAVE_STATE" = "$WANT_STATE" ]; then
     # Byte-identical is not merely an optimization: an unchanged brief is never
     # rewritten, so a respawn cannot silently revert an adjustment firstmate made
-    # by hand to a region it happens to own.
+    # by hand to a region it happens to own. Both axes have to agree to earn that:
+    # see the marker contract above for why an absent `mode=` never does.
     exit 0
   fi
+  [ -n "$HAVE_MODE" ] || HAVE_MODE='(unrecorded)'
 
   render_ship_regions "$APPLY_MODE" "$LOCAL_SKIP" "$CI_SKIP"
   TMPD="$BRIEF.apply.$$"
@@ -478,14 +494,14 @@ if [ "$APPLY_SKIP" -eq 1 ]; then
   awk -v sb="$BRIEF_REGION_SETUP_BEGIN" -v se="$BRIEF_REGION_SETUP_END" \
       -v rb="$BRIEF_REGION_RULE_BEGIN" -v re="$BRIEF_REGION_RULE_END" \
       -v dp="$BRIEF_REGION_DOD_PREFIX" -v de="$BRIEF_REGION_DOD_END" \
-      -v state="$WANT_STATE" \
+      -v state="$WANT_STATE" -v mode="$APPLY_MODE" \
       -v sf="$TMPD/setup" -v rf="$TMPD/rule" -v df="$TMPD/dod" '
     function emit(f,   line) { while ((getline line < f) > 0) print line; close(f) }
     skipping && $0 == endmark { print; skipping = 0; next }
     skipping { next }
     $0 == sb { print; emit(sf); endmark = se; skipping = 1; next }
     $0 == rb { print; emit(rf); endmark = re; skipping = 1; next }
-    index($0, dp " ") == 1 { print dp " skip=" state " -->"; emit(df); endmark = de; skipping = 1; next }
+    index($0, dp " ") == 1 { print dp " mode=" mode " skip=" state " -->"; emit(df); endmark = de; skipping = 1; next }
     { print }
   ' "$BRIEF" > "$TMPD/out"
   # A brief that lost its closing markers on the way out would leave the next
@@ -501,7 +517,7 @@ if [ "$APPLY_SKIP" -eq 1 ]; then
   # can never leave the worker a truncated brief; the temp dir is a sibling, so
   # the rename is atomic.
   mv "$TMPD/out" "$BRIEF"
-  echo "applied: $BRIEF (mode=$APPLY_MODE, testing skip $HAVE_STATE -> $WANT_STATE)"
+  echo "applied: $BRIEF (delivery mode $HAVE_MODE -> $APPLY_MODE, testing skip $HAVE_STATE -> $WANT_STATE)"
   exit 0
 fi
 
@@ -743,7 +759,7 @@ For anything the codebase already shows, prefer a pointer to the authoritative f
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
-$BRIEF_REGION_DOD_PREFIX skip=$SKIP_STATE -->
+$BRIEF_REGION_DOD_PREFIX mode=$MODE skip=$SKIP_STATE -->
 $DOD_REGION
 $BRIEF_REGION_DOD_END
 EOF

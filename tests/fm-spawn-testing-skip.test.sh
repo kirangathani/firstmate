@@ -295,8 +295,8 @@ test_one_flag_writes_both_halves() {
     "the dispatch minted a CI-skip authorization but never told the worker how to use it"
   assert_grep "local testing skipped" "$brief" \
     "the dispatch switched the local pipeline off but the brief still reads as an ordinary task"
-  assert_grep '<!-- fm:definition-of-done skip=all -->' "$brief" \
-    "the brief does not record the skip its dispatch was authorized for"
+  assert_grep '<!-- fm:definition-of-done mode=no-mistakes skip=all -->' "$brief" \
+    "the brief does not record the mode and skip its dispatch was authorized for"
   pass "one flag at dispatch writes both the authorization and the worker's own instructions"
 }
 

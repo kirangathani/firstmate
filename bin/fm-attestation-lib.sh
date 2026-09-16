@@ -50,6 +50,25 @@
 #   that needs those globals for a different record must copy them out first, as
 #   bin/fm-flow-snapshot.sh's agent_json already does.
 #
+# THE REGISTRY IS THE SOURCE FOR THE DELIVERY-MODE AUTHORITY, AND THE TASK'S OWN
+# RECORD MAY ONLY WITHDRAW IT. bin/fm-pr-merge.sh's header owns why that authority
+# reads $FM_HOME/data/projects.md: it is firstmate's private navigation record, and
+# no brief or status protocol ever points a worker at it, unlike state/<id>.meta,
+# which sits in the directory a worker appends its own status lines to. So the
+# exemption is never GRANTED from the meta - a worker could write `mode=direct-PR`
+# into its own record and excuse its own missing-pipeline check.
+#
+# Since 2026-09-16 bin/fm-spawn.sh's --mode can dispatch one task under a mode its
+# project is not registered for, which is the case this asymmetry has to answer: a
+# port to an upstream repository from a fork registered direct-PR runs the full
+# pipeline, so its PR carries the attestation on its own merits and needs no
+# exemption. Reading the meta only to WITHDRAW the registry's exemption is safe in
+# the same way this file's check-name mismatch already is: a forged value there can
+# only ever cost a merge, never gain one. The reverse override - a direct-PR task on
+# a project registered no-mistakes - deliberately gets no exemption, because
+# granting one from a worker-writable field is the direction that cannot be made
+# safe without a signature, and nothing has asked for it.
+#
 # fm_attestation_authority <task-id> <meta-file> <config-dir> <fm-home> <bin-dir>
 #   Prints the newline-delimited authority lines that excuse that one check for
 #   that one task, and returns 0 iff there is at least one. Empty output plus a
@@ -143,7 +162,7 @@ fm_signed_local_skip() {  # <task-id> <meta-file> <secret-file>
 
 fm_attestation_authority() {  # <task-id> <meta-file> <config-dir> <fm-home> <bin-dir>
   local id=$1 meta=$2 config=$3 home=$4 bindir=$5
-  local out='' secret mode yolo proj_path proj_name
+  local out='' secret mode yolo proj_path proj_name task_mode
 
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
 
@@ -166,7 +185,10 @@ fm_attestation_authority() {  # <task-id> <meta-file> <config-dir> <fm-home> <bi
 $(FM_HOME="$home" "$bindir/fm-project-mode.sh" "$proj_name")
 EOF_MODE
     : "$yolo"
-    if [ "$mode" = direct-PR ]; then
+    task_mode=$(grep '^mode=' "$meta" | tail -1 | cut -d= -f2- || true)
+    if [ "$mode" = direct-PR ] && [ "$task_mode" != direct-PR ] && [ -n "$task_mode" ]; then
+      fm_attestation_note "note: $proj_name is registered direct-PR, but this task's record says it was dispatched mode=$task_mode, so that registration does not excuse its missing pipeline attestation"
+    elif [ "$mode" = direct-PR ]; then
       out="${out}${out:+
 }$proj_name is registered as a direct-PR project, whose PRs are raised without the pipeline by design"
     fi
