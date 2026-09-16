@@ -34,6 +34,9 @@ Choose the delivery mode when adding or creating the project:
 - `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
 
+Register the shape the project's ordinary work takes.
+A single task that genuinely delivers differently is dispatched with `bin/fm-spawn.sh --mode <delivery-mode>` instead, which overrides the registry for that one task; re-registering the project to accommodate one task misdescribes every other task on it.
+
 The optional `+yolo` posture changes routine approval authority but does not change the delivery mode.
 Default it off, and enable it only on the captain's explicit instruction.
 Destructive, irreversible, and security-sensitive decisions still require captain approval when it is on.
