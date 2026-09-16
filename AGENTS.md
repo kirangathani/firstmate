@@ -313,7 +313,8 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 ### Validate
 
 For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
-The task worker that starts a no-mistakes run drives the pipeline and owns every attach through the next gate or outcome, always through `bin/fm-nm-attach.sh`, whose header owns why the raw `axi run`/`axi respond` is denied and how its one status line per returned hold is what wakes firstmate.
+The task worker that starts a no-mistakes run drives it to a terminal outcome by re-attaching after every returned hold, always through `bin/fm-nm-attach.sh`, whose header owns why the raw `axi run`/`axi respond` is denied and how its one status line per returned hold is what wakes firstmate.
+One attach covers one return, so nothing is attached once that line is appended and a run parked with no live attach is a stalled run that nothing will resume on its own.
 Firstmate never responds to a gate for a crew-owned run.
 
 A review finding is fixed by the worker in its own copy and pushed, which supersedes the parked run so a fresh cold review re-checks it; test, document, and lint fixes stay the pipeline's.
