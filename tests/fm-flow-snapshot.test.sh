@@ -1641,3 +1641,117 @@ got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .captain_driving' "$
 got=$(jq -r '.agents[] | select(.id=="idle-sm-z2") | .captain_driving' "$TMP_ROOT/driving.json")
 [ "$got" = false ] || fail "a worker with no exemption record of its own read captain_driving true: $got"
 pass "captain_driving reads true only for the agent whose own exemption record exists"
+
+# --- the PR's own lifecycle rides the same read as its checks ----------------
+#
+# A merged PR's checks stay green forever, so a check tally alone cannot tell an
+# open PR from a landed one. The read used to ask for the rollup and the head
+# commit only, and the view then drew the captain's own already-taken decision
+# back at him: on 2026-09-16, PR 92 - merged at 23:17:58Z the night before -
+# rendered `11/12 passed` beside `pre-merge your word` and was counted in
+# `1 ready to merge`.
+#
+# The fixture is that exact PR, exact bytes, captured with
+#   gh pr view 92 --repo kirangathani/firstmate \
+#     --json state,headRefOid,statusCheckRollup
+# on 2026-09-16 into tests/fixtures/flow-snapshot/gh-pr-92-merged.json. Its
+# twelve checks are the eleven that passed plus the one attestation failure
+# firstmate's direct-PR registration excuses, which is what made the captain's
+# row read as a clean green one.
+# The excusal is resolved from the project registry, which is keyed on the
+# project directory's own name, so the fixture project is a directory named
+# firstmate rather than a registry row pointing at an unrelated path.
+MERGED_HOME="$TMP_ROOT/home-merged"
+FM_PROJECT="$TMP_ROOT/firstmate"
+mkdir -p "$MERGED_HOME/state" "$MERGED_HOME/data" "$FM_PROJECT"
+printf '# Projects\n\n- firstmate [direct-PR] - the supervisor repo itself\n' \
+  > "$MERGED_HOME/data/projects.md"
+printf 'window=fm:1\nworktree=/wt/1\nproject=%s\nkind=ship\nmode=direct-PR\nspawned_at=1780000000\npr=%s\n' \
+  "$FM_PROJECT" "https://github.com/kirangathani/firstmate/pull/92" \
+  > "$MERGED_HOME/state/landed-l8.meta"
+
+jq -n --arg p "$FM_PROJECT" --arg h "$MERGED_HOME" '{tasks:[
+  {id:"landed-l8",kind:"ship",mode:"direct-PR",project:$p,
+   paths:{worktree:{path:"/wt/1"},meta:{path:($h+"/state/landed-l8.meta"),present:true}},
+   endpoint:{target:"fm:1",exists:true},
+   pr:{url:"https://github.com/kirangathani/firstmate/pull/92"}}
+]}' > "$TMP_ROOT/merged-fleet.json"
+
+MERGEDOUT="$TMP_ROOT/merged-out.json"
+PATH="$FAKEBIN:$PATH" FM_HOME="$MERGED_HOME" \
+  FM_TEST_ROLLUP="$ROOT/tests/fixtures/flow-snapshot/gh-pr-92-merged.json" \
+  FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/merged-fleet.json" \
+  "$SNAPSHOT" --json > "$MERGEDOUT" 2>/dev/null
+expect_code 0 $? "the merged-PR snapshot exits clean"
+
+got=$(jq -r '.agents[] | select(.id=="landed-l8") | .ci.pr_state' "$MERGEDOUT")
+[ "$got" = "MERGED" ] || fail "the PR's own state did not reach the wire: $got"
+# And the tally the captain compared it against is unchanged by carrying it.
+got=$(jq -r '.agents[] | select(.id=="landed-l8")
+  | "\(.ci.passed)/\(.ci.total) excused \(.ci.excused) failed \(.ci.failed)"' "$MERGEDOUT")
+[ "$got" = "11/12 excused 1 failed 0" ] ||
+  fail "the merged PR's check tally changed: $got"
+pass "a PR's own merged state reaches the wire beside its checks"
+
+# A rollup GitHub answered without the field - which is what every reply looked
+# like before this read asked for it - is a state that was NOT READ, and the
+# renderer has to be able to tell that from an open PR. Empty is that claim;
+# "OPEN" would be a guess.
+got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$MERGED_HOME" \
+  FM_TEST_ROLLUP="$TMP_ROOT/ci-rollup.json" \
+  FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/merged-fleet.json" \
+  "$SNAPSHOT" --json 2>/dev/null |
+  jq -r '.agents[] | select(.id=="landed-l8") | .ci.pr_state')
+[ "$got" = "" ] || fail "a reply carrying no state was given one: $got"
+pass "a reply that carries no PR state leaves it unread rather than assuming open"
+
+# Under --no-ci there is no GitHub read at all, so the field is unread for the
+# same reason every other check fact is.
+got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$MERGED_HOME" \
+  FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/merged-fleet.json" \
+  "$SNAPSHOT" --json --no-ci 2>/dev/null |
+  jq -r '.agents[] | select(.id=="landed-l8") | "\(.ci.collection.ok)/\(.ci.pr_state)"')
+[ "$got" = "false/" ] || fail "the local-only snapshot claimed a PR state: $got"
+pass "the local-only snapshot claims no PR state"
+
+# --- one row, one answer about whether a PR exists --------------------------
+#
+# The stage cell's end-of-building and the PR, checks and pre-merge cells used
+# to ask two different sources: the building phase grepped state/<id>.meta for
+# `^pr=` itself while the PR cells took the fleet document's resolved link. On
+# 2026-09-16 those disagreed on one row, which reported both "no PR exists" and
+# "this PR is awaiting your word".
+#
+# With no PR resolved, building stays open and nothing downstream is drawn - and
+# the meta's own modification time, which is what dates a recorded PR, must not
+# be read as one.
+NOPR_HOME="$TMP_ROOT/home-nopr"
+mkdir -p "$NOPR_HOME/state"
+printf 'window=fm:1\nworktree=/wt/1\nproject=%s\nkind=ship\nmode=direct-PR\nspawned_at=1780000000\n' \
+  "$PROJECT" > "$NOPR_HOME/state/respawned-r9.meta"
+touch -d "@1780000600" "$NOPR_HOME/state/respawned-r9.meta"
+jq -n --arg p "$PROJECT" --arg h "$NOPR_HOME" '{tasks:[
+  {id:"respawned-r9",kind:"ship",mode:"direct-PR",project:$p,
+   paths:{worktree:{path:"/wt/1"},meta:{path:($h+"/state/respawned-r9.meta"),present:true}},
+   endpoint:{target:"fm:1",exists:true},
+   pr:{url:null}}
+]}' > "$TMP_ROOT/nopr-fleet.json"
+
+NOPROUT="$TMP_ROOT/nopr-out.json"
+PATH="$FAKEBIN:$PATH" FM_HOME="$NOPR_HOME" \
+  FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/nopr-fleet.json" \
+  FM_FLOW_SNAPSHOT_NOW_EPOCH=1780008000 \
+  "$SNAPSHOT" --json > "$NOPROUT" 2>/dev/null
+expect_code 0 $? "the no-PR snapshot exits clean"
+got=$(jq -r '.agents[] | select(.id=="respawned-r9")
+  | .steps[] | select(.step=="building") | "\(.status)/\(.duration_ms)"' "$NOPROUT")
+[ "$got" = "running/0" ] ||
+  fail "building ended for a task with no PR resolved: $got"
+got=$(jq -r '.agents[] | select(.id=="respawned-r9") | "\(.pr.url)/\(.rework)"' "$NOPROUT")
+[ "$got" = "null/null" ] ||
+  fail "a task with no PR resolved was given one, or work after it: $got"
+pass "with no PR resolved the building phase stays open and no PR is invented for the row"

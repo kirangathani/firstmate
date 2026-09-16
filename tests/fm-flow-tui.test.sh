@@ -61,12 +61,19 @@ steps_all() {  # <status>
 # A CI rollup result in the shape bin/fm-flow-snapshot.sh emits, with a PR to
 # hang it on. Every class is named so a case can never accidentally leave one
 # undefined and assert against a default.
-ci_result() {  # <total> <passed> <failed> <pending> <skipped> <excused>
+#
+# `pr_state` is the PR's OWN lifecycle, which the collector reads in the same
+# call as the checks, and it defaults to the open PR every case below describes:
+# a check tally is only a decision for the captain while the PR is still open,
+# and the merged and closed cases are asserted in their own block further down.
+ci_result() {  # <total> <passed> <failed> <pending> <skipped> <excused> [<pr-state>]
   jq -n --argjson t "$1" --argjson p "$2" --argjson f "$3" \
-        --argjson w "$4" --argjson s "$5" --argjson x "$6" '{
+        --argjson w "$4" --argjson s "$5" --argjson x "$6" \
+        --arg state "${7:-OPEN}" '{
     pr:{url:"https://github.com/kirangathani/firstmate/pull/51",number:51},
     ci:{collection:{ok:true,reason:""},checks:[],
         total:$t,passed:$p,failed:$f,pending:$w,skipped:$s,excused:$x,
+        pr_state:$state,
         excused_authority:(if $x > 0
           then ["firstmate is registered as a direct-PR project, whose PRs are raised without the pipeline by design"]
           else [] end)}
@@ -166,10 +173,13 @@ out=$(render "$(snap "[$(agent_with c1 "$(steps_all completed)" "$withpr")]")")
 assert_contains "$out" "not read" "uncollected CI on a PR was not marked unread"
 pass "CI that was not collected is distinguished from CI that has not started"
 
-# A PR whose checks are all green parks IN the CI box asking for the captain,
-# because the pre-merge gate does not run until a merge is attempted.
+# A PR whose checks are all green, and which GitHub still reports OPEN, parks on
+# the pre-merge box asking for the captain, because that gate does not run until
+# a merge is attempted. Both halves are needed: green checks on a PR that has
+# already landed are not a decision, and the merged case is asserted below.
 green='{"pr":{"url":"https://github.com/o/r/pull/7","number":7},
-        "ci":{"collection":{"ok":true,"reason":""},"checks":[],"total":9,"passed":9,"failed":0,"pending":0}}'
+        "ci":{"collection":{"ok":true,"reason":""},"checks":[],"total":9,"passed":9,"failed":0,"pending":0,
+              "pr_state":"OPEN"}}'
 out=$(render "$(snap "[$(agent_with c2 "$(steps_all completed)" "$green")]")")
 assert_contains "$out" "your word" "all-green CI did not wait on the captain"
 pass "all checks green waits for the captain rather than advancing"
@@ -324,7 +334,8 @@ pass "the two shell-out flags are refused outside watch mode"
 # phrase that produced the report must now fit whole.
 
 green11='{"pr":{"url":"https://github.com/o/r/pull/7","number":7},
-          "ci":{"collection":{"ok":true,"reason":""},"checks":[],"total":11,"passed":11,"failed":0,"pending":0}}'
+          "ci":{"collection":{"ok":true,"reason":""},"checks":[],"total":11,"passed":11,"failed":0,"pending":0,
+                "pr_state":"OPEN"}}'
 out=$(render "$(snap "[$(agent_with t1 "$(steps_all completed)" "$green11")]")" | sed 's/\x1b\[[0-9;]*m//g')
 assert_contains "$out" "11/11 passed" "the all-green summary still does not fit its cell"
 assert_not_contains "$out" "passe…" "the all-green summary is being shortened when it fits"
@@ -1581,7 +1592,7 @@ pass "the run counter renders in red after the agent id on both header variants"
 # moves to the pre-merge box; every finished box is the runner's centre green.
 
 cat >"$TMP_ROOT/verdicts.mjs" <<'JS'
-const { render, layout, CELL_WIDTHS, STEPS, BLOCK, ciVerdict, dur } = await import(process.argv[2]);
+const { render, layout, CELL_WIDTHS, STEPS, BLOCK, ciVerdict, premergeVerdict, dur } = await import(process.argv[2]);
 const base = JSON.parse(process.argv[3]);
 const COLS = 200, ROWS = 60;
 let bad = 0;
@@ -1685,7 +1696,8 @@ const live = {
   active_steps: [{ step: "review", status: "fixing", active_for: "31m44s", active_ms: 1904000,
                    last_activity: "", agent_pid: "", round: "2", model: "claude-opus-5", effort: "high" }],
   ci: { collection: { ok: true, reason: "" }, checks: [], total: 4, passed: 4, failed: 0, pending: 0,
-        skipped: 0, excused: 0, excused_authority: [], head: CI_HEAD, superseded: null },
+        skipped: 0, excused: 0, excused_authority: [], head: CI_HEAD, pr_state: "OPEN",
+        superseded: null },
 };
 const sup = (s) => ({ ...live, id: `sup-${Object.keys(s).filter((k) => s[k]).join("-") || "unknown"}`,
                       ci: { ...live.ci, superseded: { reason: "", ...s } } });
@@ -1736,6 +1748,53 @@ expectCI(sup({ main_moved: null, new_commits: null, reason: "the run has no copy
   const red = sup({ main_moved: true, new_commits: true });
   red.ci = { ...red.ci, failed: 1, passed: 3 };
   if (ciVerdict(red) !== "failed") say(`a failed check on a superseded head read as ${ciVerdict(red)}`);
+}
+// --- case 3: a PR that is no longer the captain's to decide -----------------
+//
+// PR 92 merged at 2026-09-15 23:17:58Z, and the next morning the view drew it
+// as `11/12 passed` beside `pre-merge your word` and counted `1 ready to
+// merge`. A merged PR's checks stay green forever, so the tally cannot be what
+// decides this: the PR's own state is.
+{
+  const landed = (state, id) => ({ ...live, id, ci: { ...live.ci, head: RUN_HEAD, superseded: null, pr_state: state } });
+
+  // The drawn frame is asserted BEFORE the readiness owner is called, so a tree
+  // where that owner does not exist yet still fails on what the captain sees
+  // rather than only on a missing export.
+  const merged = landed("MERGED", "merged-pr");
+  const rm = rowsFor(merged);
+  if (rm.words[PRE] !== "merged") say(`a merged PR's pre-merge cell says "${rm.words[PRE]}"`);
+  if (!rm.header.includes("0 ready to merge")) say(`the header counted a merged PR: ${rm.header}`);
+  // The checks it passed are still the checks it passed; what changed is
+  // whether anyone is being asked about them.
+  if (rm.words[CI] !== "4/4 passed") say(`a merged PR's checks stopped being reported: "${rm.words[CI]}"`);
+
+  const closed = landed("CLOSED", "closed-pr");
+  const rc = rowsFor(closed);
+  if (rc.words[PRE] !== "closed" || rc.times[PRE] !== "not merged") {
+    say(`a closed PR's pre-merge cell says "${rc.words[PRE]}" / "${rc.times[PRE]}"`);
+  }
+  if (!rc.header.includes("0 ready to merge")) say(`the header counted a closed PR: ${rc.header}`);
+  if (premergeVerdict(merged) !== "merged") say(`a merged PR read as ${premergeVerdict(merged)}`);
+  if (premergeVerdict(closed) !== "closed") say(`a closed PR read as ${premergeVerdict(closed)}`);
+
+  // A lifecycle that could not be read is said, not drawn clean: an empty
+  // pre-merge cell reads as "not reached", which is a different claim from
+  // "nobody could find out whether this is still open".
+  const unread = landed("", "unread-state");
+  const ru = rowsFor(unread);
+  if (ru.words[PRE] !== "not read") say(`an unread PR state drew "${ru.words[PRE]}"`);
+  if (ru.mid(PRE) !== "95") say(`an unread PR state is not drawn in the unknown colour: ${ru.mid(PRE)}`);
+  if (!ru.header.includes("0 ready to merge")) say(`the header counted a PR of unknown state: ${ru.header}`);
+
+  if (premergeVerdict(unread) !== "unknown") say(`an unread PR state read as ${premergeVerdict(unread)}`);
+
+  // And the whole point: a merged PR is terminal whatever its checks did, so
+  // the readiness answer never falls through to them.
+  for (const [state, want] of [["MERGED", "merged"], ["CLOSED", "closed"]]) {
+    const a = { ...landed(state, `red-${state}`), ci: { ...live.ci, head: RUN_HEAD, superseded: null, pr_state: state, failed: 1, passed: 3 } };
+    if (premergeVerdict(a) !== want) say(`a ${state} PR with a red check read as ${premergeVerdict(a)}`);
+  }
 }
 if (BLOCK !== 12) say(`BLOCK is ${BLOCK}; the five detail rows need 12`);
 process.exit(bad ? 1 : 0);
