@@ -524,7 +524,7 @@ case "$(fm_session_lock_ownership "$STATE")" in
     # background one was forked from, or the Claude Code daemon between them - it
     # is the migration, so every running home converges at its first arm after
     # this lands, with no operator step, and stops depending on a process Claude
-    # Code restarts on every auto-update (data/lock-loss-diagnosis-2026-09-15.md).
+    # Code restarts on every auto-update - the 2026-09-15 lock-loss incident.
     #
     # A failure is deliberately silent. Ownership is already intact by the
     # verdict above, so an unconvergeable home loses only the improvement; a
