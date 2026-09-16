@@ -44,7 +44,7 @@ test_bare_shell_glyphs_are_unknown() {
     [ "$out" = unknown ] \
       || fail "bare shell glyph '$g' must read unknown (dead shell, unsafe), got '$out'"
   done
-  pass "fm_composer_classify_content: a bare shell prompt glyph (>/\$/%/#) reads unknown, never empty"
+  pass "fm_composer_classify_content: a bare shell prompt glyph reads unknown, never empty"
 }
 
 test_stripped_unbordered_content_uses_plain_content() {
