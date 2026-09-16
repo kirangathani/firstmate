@@ -29,6 +29,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$ROOT/bin/fm-classify-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-nm-attach)
 ATTACH="$ROOT/bin/fm-nm-attach.sh"
@@ -100,7 +102,19 @@ run_attach() {  # <case-dir> <task-id> [args...]
        "$ATTACH" "$id" "$@" )
 }
 
+# The status log with each line's "[t=<epoch>] " report-time prefix stripped,
+# so the shape assertions below stay anchored on the verb they are about.
+# bin/fm-classify-lib.sh owns that grammar, and status_of uses its parser rather
+# than a second copy of the strip. test_every_appended_line_is_stamped asserts
+# the prefix is actually there on the raw file.
 status_of() {  # <case-dir> <task-id>
+  local line
+  while IFS= read -r line; do
+    printf '%s\n' "$(status_line_body "$line")"
+  done < "$1/home/state/$2.status" 2>/dev/null || true
+}
+
+status_raw_of() {  # <case-dir> <task-id>
   cat "$1/home/state/$2.status" 2>/dev/null || true
 }
 
@@ -215,6 +229,24 @@ classify_case() {  # <slug> <fixture> [attach-rc] -> echoes the status line
   run_attach "$dir" "$FIXTURE_TASK" >/dev/null || fail "attach refused in case $1"
   await_status "$dir" "$FIXTURE_TASK" 15 || fail "case $1 never classified its return"
   status_of "$dir" "$FIXTURE_TASK"
+}
+
+# Every line this hold appends is a report firstmate has to answer, so every one
+# of them has to carry the time it was written or the answer cannot be timed.
+test_every_appended_line_is_stamped() {
+  local dir raw line
+  dir=$(make_case stamped "$FIXTURE_TASK" "$FIXTURES/axi-status-parked.toon")
+  run_attach "$dir" "$FIXTURE_TASK" >/dev/null || fail "attach refused"
+  await_status "$dir" "$FIXTURE_TASK" 15 || fail "the hold never classified its return"
+  raw=$(status_raw_of "$dir" "$FIXTURE_TASK")
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    [ -n "$(status_line_epoch "$line")" ] \
+      || fail "an appended status line carries no report-time stamp: $line"
+  done <<EOF
+$raw
+EOF
+  pass "attach: every status line the hold appends carries its report time"
 }
 
 test_a_parked_gate_opens_a_keyed_decision() {
@@ -677,6 +709,7 @@ test_the_transport_denies_on_the_grok_payload() {
   pass "gate: denies through the grok stdin transport"
 }
 
+test_every_appended_line_is_stamped
 test_scripts_are_shellcheck_clean() {
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
   shellcheck "$ATTACH" >/dev/null 2>&1 || fail "bin/fm-nm-attach.sh is not shellcheck-clean"
