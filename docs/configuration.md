@@ -263,6 +263,18 @@ That job runs the branch's own scripts by construction, so two properties keep t
 It is a step rather than a second job because a required job that `needs:` another is skipped when that one fails, and a skipped required check never reports at all; keeping it in one job removes that hazard instead of repairing it with a job-level condition.
 The step reads the PR body live from the API rather than from the event payload, because an approval always arrives as an edit to an open PR and a re-run replays the payload the PR had before it.
 
+## Per-task delivery mode (bin/fm-spawn.sh --mode)
+
+`bin/fm-project-mode.sh` resolves a delivery mode from `data/projects.md`, which answers per PROJECT, while delivery mode is a property of the TASK.
+One project can legitimately host tasks of two shapes: a port to an upstream repository drives the full pipeline, while the fork it was dispatched from is registered `direct-PR` because its own PRs are raised by hand.
+`bin/fm-spawn.sh --mode <no-mistakes|direct-PR|local-only>` overrides the registry for one dispatch and records the result as the ordinary `mode=` line in `state/<id>.meta`, so every reader of that field follows the task with no second field to teach them: the pipeline view, both snapshots, teardown's unlanded-work test, the timeline ledger, `bin/fm-merge-local.sh`, and the worker's own definition of done.
+Nothing else changes - `yolo` is a per-project approval posture and is untouched, and the flag is refused on a secondmate, whose `mode=secondmate` is what marks its record as a secondmate's at all.
+
+The flag records a delivery mode; it is not an authority and grants nothing.
+The testing-skip matrix below judges the mode the task will actually run under, and the attestation exemption in `bin/fm-attestation-lib.sh` still reads the REGISTRY, never this field, because `state/<id>.meta` sits in the directory a worker appends its own status lines to.
+That library reads the field only to WITHDRAW the registry's `direct-PR` exemption when a task says it ran the pipeline, which a forged value can only ever cost a merge by, never gain one.
+So a task dispatched under the pipeline whose PR failed the attestation check refuses, which is the point: on that task the check has something real to say.
+
 ## Testing skips (bin/fm-spawn.sh --skip-testing / --local-skip / --ci-skip / --all-testing-skip)
 
 A ship task can be dispatched with testing switched off, but only by the captain and only mechanically: the skip is enforced by code and by a keyed signature, never by an instruction a worker can decline and never by a string a worker can type.
@@ -271,7 +283,7 @@ They are a third axis, orthogonal to delivery mode and to `yolo`, and `yolo` nev
 **A skip is one action, at dispatch.** `bin/fm-spawn.sh` is the only script that takes a skip flag; `bin/fm-brief.sh` refuses one and names the dispatch instead.
 The dispatch mints the authorization AND writes the worker-facing half, by calling `bin/fm-brief.sh --apply-testing-skip` with the flag it just resolved, so there is no second invocation to keep in agreement.
 That apply runs on every ship spawn, flagged or not, so an unflagged dispatch of a brief that still carries skip text puts the ordinary instructions back, and a brief that has no such regions refuses the dispatch outright rather than launching a worker whose instructions and whose record disagree.
-The regions are delimited in the brief by `<!-- fm:... -->` markers whose definition-of-done marker records the skip it was written for; `bin/fm-brief.sh`'s header owns them, and an apply that would change nothing rewrites nothing.
+The regions are delimited in the brief by `<!-- fm:... -->` markers whose definition-of-done marker records both axes the regions are a function of - the delivery mode and the skip - so an apply that would change nothing rewrites nothing and an apply that changes either one does; `bin/fm-brief.sh`'s header owns them.
 `bin/fm-testing-skip-lib.sh` remains the single owner of the flags, the accepted matrix, and every refusal.
 
 `--skip-testing` is the flag to reach for when the intent is simply "skip the testing": it resolves, once the project's delivery mode is known, to the most that mode can honour, states on stderr what it resolved to, and needs no knowledge of the matrix below.
