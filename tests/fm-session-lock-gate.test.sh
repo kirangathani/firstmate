@@ -523,12 +523,28 @@ start_claude_over_versioned_harness() {  # <dir> <phase1 body> <phase2 body>
   mkdir -p "$dir/bin" "$dir/claude/versions"
   cp /bin/bash "$dir/bin/claude"
   cp /bin/bash "$dir/claude/versions/2.1.273"
+  # The phase gate is its own script rather than a loop written into the chain,
+  # so the generated chain needs no shell expansions of its own: a `printf`
+  # format carrying them has to be single-quoted to survive generation, which is
+  # exactly what shellcheck reads as a mistake (SC2016). A quoted heredoc is
+  # literal by construction, the same way install_fake_ps_claude above writes its
+  # stub, so the bound stays real and the suite stays clean without a disable.
+  cat > "$dir/await.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+i=0
+while [ ! -e "$1" ] && [ "$i" -lt 300 ]; do
+  sleep 0.1
+  i=$((i + 1))
+done
+SH
+  chmod +x "$dir/await.sh"
   {
     printf '#!/usr/bin/env bash\n'
-    printf 'i=0; while [ ! -e "%s/go1" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done\n' "$dir"
+    printf '"%s/await.sh" "%s/go1"\n' "$dir" "$dir"
     printf '%s\n' "$phase1"
     printf 'touch "%s/phase1.done"\n' "$dir"
-    printf 'i=0; while [ ! -e "%s/go2" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done\n' "$dir"
+    printf '"%s/await.sh" "%s/go2"\n' "$dir" "$dir"
     printf '%s\n' "$phase2"
     printf 'touch "%s/chain.done"\n' "$dir"
   } > "$dir/chain.sh"
