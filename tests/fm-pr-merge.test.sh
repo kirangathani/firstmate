@@ -220,6 +220,10 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      # fm-pr-check.sh reads the PR's head BRANCH in its own call, to guard its
+      # refusal of a PR missing work the task has already committed. These cases
+      # all work the fm/task-x1 branch the fixture worktree is on.
+      *headRefName*) printf '%s\n' 'fm/task-x1' ; exit 0 ;;
       *baseRefName*) printf '%s\n' 'main' ; exit 0 ;;
       *" body "*)
         # The AI-attribution gate's one API read: the PR description as raw
