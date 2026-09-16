@@ -75,7 +75,8 @@
 #   (r3) the override lands BEFORE the testing-skip matrix, so a skip is judged
 #        against the mode the task will actually run under
 #   (r4) an unrecognised mode refuses before any backend or worktree work
-#   (r5) --mode refuses on --secondmate, whose mode=secondmate is structural
+#   (r5) --mode refuses on a scout and a secondmate, neither of which delivers a
+#        change for a delivery mode to describe
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -251,11 +252,12 @@ test_secondmate_refuses_a_skip_flag() {
   pass "a secondmate spawn refuses every testing-skip flag"
 }
 
-# (r5) A secondmate is not a delivery, and mode=secondmate in its record is what
-# marks it as one - bin/fm-teardown.sh and bin/fm-fleet-snapshot.sh both branch on
-# it. So --mode has nothing to override there and refuses rather than overwriting
-# the field that says what the record IS.
-test_secondmate_refuses_a_mode_override() {
+# (r5) A delivery mode describes how a finished CHANGE reaches main, and neither a
+# secondmate nor a scout delivers one - a secondmate is not a delivery at all, and
+# mode=secondmate in its record is what marks the record as a secondmate's, while a
+# scout's deliverable is a report. So --mode refuses on both, exactly as the skips
+# do, rather than writing a delivery shape onto a task that will never take one.
+test_a_scout_and_a_secondmate_refuse_a_mode_override() {
   local out status
   make_case sm-mode no-mistakes
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_HOME" FM_STATE_OVERRIDE="$CASE_HOME/state" \
@@ -264,9 +266,16 @@ test_secondmate_refuses_a_mode_override() {
     "$SPAWN" sm-mode "$CASE_HOME/sub" --secondmate --mode direct-PR 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a secondmate spawn should refuse --mode"$'\n'"$out"
-  assert_contains "$out" "does not apply to --secondmate" "the refusal did not name the rule"
+  assert_contains "$out" "applies only to a ship task" "the secondmate refusal did not name the rule"
   assert_absent "$CASE_HOME/state/sm-mode.meta" "a refused secondmate spawn wrote a record"
-  pass "a secondmate spawn refuses a delivery-mode override"
+
+  make_case scout-mode no-mistakes
+  out=$(run_spawn scout-mode --scout --mode direct-PR)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout spawn should refuse --mode"$'\n'"$out"
+  assert_contains "$out" "applies only to a ship task" "the scout refusal did not name the rule"
+  assert_absent "$CASE_HOME/state/scout-mode.meta" "a refused scout spawn wrote a record"
+  pass "a scout and a secondmate both refuse a delivery-mode override"
 }
 
 # --- recorded state ---------------------------------------------------------
@@ -749,7 +758,7 @@ test_an_unrecognised_mode_refuses_before_any_backend_work() {
 
 test_refused_combinations
 test_secondmate_refuses_a_skip_flag
-test_secondmate_refuses_a_mode_override
+test_a_scout_and_a_secondmate_refuse_a_mode_override
 test_recorded_skips_read_back_through_their_owner
 test_a_planted_temp_root_symlink_is_refused
 test_meta_records_only_the_flags_that_were_passed

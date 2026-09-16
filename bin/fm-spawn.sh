@@ -81,7 +81,8 @@
 #   field - the pipeline view, both snapshots, teardown's unlanded-work test, the
 #   timeline ledger, bin/fm-merge-local.sh, and the worker's own definition of done
 #   through --apply-testing-skip below - follows the task rather than the project with
-#   no second field to teach them. Refused with --secondmate, whose mode is structural.
+#   no second field to teach them. Refused on a scout and a secondmate, neither of
+#   which delivers a change for a mode to describe.
 #
 #   captain's testing skips, orthogonal to delivery mode and yolo. THIS IS THE
 #   ONE PLACE A TESTING SKIP IS AUTHORIZED: the flag is passed here and nowhere
@@ -281,9 +282,14 @@ case "$MODE_ARG" in
   *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE_ARG')" >&2; exit 1 ;;
 esac
 # Argument-only, like the testing-skip rules below, so it costs no filesystem or
-# backend work: a secondmate is not a delivery, and mode=secondmate in its record
-# is what marks the record as a secondmate's at all.
-[ -z "$MODE_ARG" ] || [ "$KIND" != secondmate ] || { echo "error: --mode does not apply to --secondmate: a secondmate is not a delivery, and its record's mode=secondmate is what marks it as one" >&2; exit 1; }
+# backend work. Both refusals are for the same reason the skips refuse them: a
+# delivery mode describes how a finished CHANGE reaches main, and neither of these
+# delivers one. A secondmate is not a delivery at all, and mode=secondmate in its
+# record is what marks the record as a secondmate's. A scout's deliverable is a
+# report, so the field decides nothing for it - but the pipeline view does draw
+# stages from it, so an override would put a delivery shape on screen that no part
+# of that task will ever take.
+[ -z "$MODE_ARG" ] || [ "$KIND" = ship ] || { echo "error: --mode applies only to a ship task: a $KIND delivers no change, so it has no delivery mode to override" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
