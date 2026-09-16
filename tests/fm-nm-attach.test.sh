@@ -477,7 +477,11 @@ test_the_intent_cap_stays_under_the_kernels_argv_limit() {
   [ "$probe" -gt 0 ] || fail "could not measure this kernel's per-argument limit at all"
   [ "$raw" -lt "$probe" ] \
     || fail "the intent cap allows $raw raw bytes, which this kernel cannot pass on argv (measured safe at $probe)"
-  pass "attach: the intent cap ($raw raw bytes) stays under this kernel's argv limit (measured safe at $probe)"
+  # The measured numbers go in the OUTPUT, never in the assertion's name: a name
+  # built from a runtime value is a different string on every run, which
+  # bin/fm-assert-tests-kept.sh reports as `unstable:` and refuses to merge over.
+  printf '# intent cap allows %s raw bytes; this kernel passed %s on argv\n' "$raw" "$probe"
+  pass "attach: the intent cap stays under this kernel's argv limit"
 }
 
 test_refuses_yes_in_a_respond() {

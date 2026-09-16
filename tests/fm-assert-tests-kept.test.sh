@@ -419,7 +419,7 @@ pr_base_test_file() {
 #!/usr/bin/env bash
 pass() { printf 'ok - %s\n' "\$1"; }
 fail() { printf 'not ok - %s\n' "\$1" >&2; exit 1; }
-pass "$1"
+pass "$1" # fm-fixture-label
 EOF
 }
 
@@ -2174,7 +2174,7 @@ test_moving_assertion_name_is_unstable_not_a_vanished_assertion() {
   # passing assertion. Nothing vanished and nothing failed; the identity moved.
   # shellcheck disable=SC2016 # the fixture body is the generated test's own shell text; $tag must stay literal.
   dir=$(make_moving_name_repo moving-name '
-pass "tag is readable ($tag)"
+pass "tag is readable ($tag)" # fm-fixture-label
 pass "unrelated assertion holds"
 ')
   printf 'K\n' > "$dir/tag.txt"
@@ -2214,7 +2214,7 @@ test_unstable_name_does_not_swallow_a_real_failing_assertion() {
   # not blind check 2 to the second.
   # shellcheck disable=SC2016 # the fixture body is the generated test's own shell text; $tag must stay literal.
   dir=$(make_moving_name_repo unstable-plus-failing '
-pass "tag is readable ($tag)"
+pass "tag is readable ($tag)" # fm-fixture-label
 observed=$(bash ./app.sh)
 [ "$observed" = Z ] || fail "app produces Z"
 pass "app produces Z"
@@ -2242,7 +2242,7 @@ test_unstable_name_does_not_mask_a_deleted_assertion() {
   # also holds a moving name. Check 1 must still report the deletion.
   # shellcheck disable=SC2016 # the fixture body is the generated test's own shell text; $tag must stay literal.
   dir=$(make_moving_name_repo unstable-plus-missing '
-pass "tag is readable ($tag)"
+pass "tag is readable ($tag)" # fm-fixture-label
 pass "assertion the branch deletes"
 ')
   printf 'K\n' > "$dir/tag.txt"
@@ -2319,7 +2319,7 @@ make_counting_repo() {  # <slug> <total> <changed>
     cat > "$dir/tests/t$i.test.sh" <<EOF
 #!/usr/bin/env bash
 pass() { printf 'ok - %s\n' "\$1"; }
-pass "assertion $i holds"
+pass "assertion $i holds" # fm-fixture-label
 EOF
     i=$((i + 1))
   done
@@ -2408,6 +2408,44 @@ test_executed_files_never_counts_a_file_that_could_not_run() {
   pass "executed-files never counts a base test file whose baseline could not run"
 }
 
+
+# --- the suite's own assertion labels are constant --------------------------
+#
+# Check 2 compares the names the base file's two runs EMITTED against check 1's
+# STATIC extraction of that same file, so a label whose emitted text differs
+# from its source text is never verified, and one that also differs between the
+# two runs is reported `unstable:` and refuses the merge outright, with no
+# override and none under yolo. Both come from the same defect: a `pass` label
+# that is not a constant string. That refusal surfaces only at merge time,
+# against a branch that did nothing wrong, so this catches it here instead.
+#
+# A label is constant when its source text between the quotes survives bash
+# unchanged: no expansion (`$`, backtick), and no escape (`\`) for bash to
+# consume. Runtime values belong in the assertion's OUTPUT - a printf line
+# before it - or in its fail message, never in its name.
+#
+# A `pass "..."` that is FIXTURE TEXT, written into a generated test file rather
+# than called by this suite, carries a trailing `# fm-fixture-label` marker and
+# is exempt: it is the generated file's label, not this one's.
+test_every_assertion_label_in_the_suite_is_a_constant_string() {
+  local offenders
+  # The same lexical extraction bin/fm-assert-tests-kept.sh's extract_shell
+  # performs, so this flags exactly what that gate would read as an identifier.
+  offenders=$(find "$ROOT/tests" -name '*.test.sh' -type f -print0 \
+    | xargs -0 awk '
+        /fm-fixture-label/ { next }
+        match($0, /(^|[^A-Za-z0-9_])pass[ \t]+"[^"]+"/) {
+          s = substr($0, RSTART, RLENGTH)
+          sub(/^.*pass[ \t]+"/, "", s)
+          sub(/"$/, "", s)
+          if (s ~ /[$`\\]/) printf "%s:%d: %s\n", FILENAME, FNR, s
+        }
+      ')
+  [ -z "$offenders" ] || fail \
+    "an assertion label is not a constant string, so the merge gate cannot compare it:"$'\n'"$offenders"$'\n'"put the runtime value in a printf line before the assertion, or in its fail message"
+  pass "every assertion label in firstmate's own suite is a constant string the merge gate can compare"
+}
+
 test_pr_base_branch_is_compared_against_the_pr_target
 test_unreadable_pr_base_refuses_rather_than_assuming_default
 test_pr_in_another_github_repo_refuses_before_any_fetch
@@ -2463,3 +2501,5 @@ test_constant_name_over_a_changed_value_is_fully_verified
 test_executed_files_counts_only_the_files_actually_run
 test_executed_files_is_zero_when_every_file_was_skipped
 test_executed_files_never_counts_a_file_that_could_not_run
+test_every_assertion_label_in_the_suite_is_a_constant_string
+

@@ -231,7 +231,7 @@ test_backend_detect_precedence() {
     || fail "fm_backend_detect should succeed with all three markers present"
   [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first with all three markers (tmux wins), got '$out'"
 
-  pass "fm_backend_detect: no markers -> undetected, HERDR_ENV=1 -> herdr, \$TMUX -> tmux, CMUX_WORKSPACE_ID -> cmux, nested combinations resolve innermost-first"
+  pass "fm_backend_detect: no markers -> undetected, HERDR_ENV=1 -> herdr, TMUX -> tmux, CMUX_WORKSPACE_ID -> cmux, nested combinations resolve innermost-first"
 }
 
 # fm_backend_detect's cmux FALLBACK signals (docs/cmux-backend.md "Runtime
@@ -290,7 +290,7 @@ test_backend_detect_cmux_fallback_tmux_nested_false_positive() {
     || fail "fm_backend_detect should still succeed with HERDR_ENV=1 plus an inherited cmux bundle id"
   [ "$out" = herdr ] || fail "HERDR_ENV=1 must win over an inherited cmux bundle id (herdr-inside-cmux pane), got '$out'"
 
-  pass "fm_backend_detect: an inherited cmux bundle id never outranks \$TMUX or HERDR_ENV (tmux/herdr-inside-cmux false positive absorbed)"
+  pass "fm_backend_detect: an inherited cmux bundle id never outranks TMUX or HERDR_ENV (tmux/herdr-inside-cmux false positive absorbed)"
 }
 
 test_backend_detect_cmux_fallback_ancestry_pid_match() {
