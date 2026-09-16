@@ -49,10 +49,63 @@ fi
 
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
+PR_BRANCH=
 if [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
+  fi
+  # A SEPARATE read, deliberately, rather than one --json headRefOid,headRefName.
+  # The recorded pr_head= above is the older contract and several suites stub gh
+  # by matching that exact projection, so widening it would change what every
+  # one of those fixtures answers - and a fixture that stops matching answers
+  # empty, which reads as "unknown" and silently disables a check rather than
+  # failing. The branch name is only ever a guard on the comparison below, so it
+  # costs one call on an already-network-bound path and nothing when it fails.
+  PR_BRANCH=$(cd "$WT" && gh pr view "$URL" --json headRefName -q .headRefName 2>/dev/null || true)
+fi
+
+# REFUSE A PR THAT DOES NOT CARRY THE WORK ITS TASK HAS ALREADY COMMITTED.
+# This is the other end of the defect bin/fm-brief.sh's definition of done
+# addresses: a worker that commits a fix, reports `done: PR <url>`, and stops
+# without pushing. Measured 2026-09-16 on fm-brief-attach-ownership-a3, whose
+# fix commit 0b16c1b3 never reached PR 97 while its head stayed at 8b2da7d5.
+# Firstmate read the resulting red as a verdict on the branch when it was a
+# verdict on the version before the fix, and only caught it by hand-comparing
+# the two shas - a step nothing required it to take. This is the moment both
+# facts are in hand, and it is before the merge poll is armed, which matters
+# most under the standing merge rule: arming a poll on a PR missing the fix is
+# arming an auto-merge of the wrong commit.
+#
+# IT REFUSES ONLY ON POSITIVE EVIDENCE, and is silent otherwise, because every
+# uncertainty here has an innocent reading:
+#   - No gh, no worktree, or an unreadable PR leaves PR_HEAD empty: unknown, not
+#     wrong, and already the condition under which pr_head= is simply not
+#     recorded.
+#   - A worktree on a DIFFERENT branch than the PR's head ref is the upstream-PR
+#     shape, where the local branch is not what the PR carries at all.
+#   - BEHIND IS FINE and must stay fine. A no-mistakes PR is pushed by the
+#     pipeline from its own worktree under ~/.no-mistakes/worktrees/, so the
+#     task's own copy legitimately lags the PR head; refusing on that would
+#     break every pipeline task. The refusal is specifically that the local
+#     branch holds commits the PR head does not contain.
+#   - A PR head the local repository has never heard of is left alone rather
+#     than fetched. Nothing here may make an unbounded network call: this path
+#     runs while firstmate is recording a report, and the case being caught -
+#     work committed locally and never pushed - always already has the PR head
+#     locally, because that head was pushed from this same copy.
+if [ -n "$PR_HEAD" ] && [ -n "$PR_BRANCH" ]; then
+  LOCAL_BRANCH=$(cd "$WT" && git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [ -n "$LOCAL_BRANCH" ] && [ "$LOCAL_BRANCH" = "$PR_BRANCH" ]; then
+    LOCAL_TIP=$(cd "$WT" && git rev-parse HEAD 2>/dev/null || true)
+    if fm_pr_head_valid "$LOCAL_TIP" && [ "$LOCAL_TIP" != "$PR_HEAD" ]; then
+      if (cd "$WT" && git cat-file -e "$PR_HEAD^{commit}" 2>/dev/null) \
+        && ! (cd "$WT" && git merge-base --is-ancestor "$LOCAL_TIP" "$PR_HEAD" 2>/dev/null); then
+        echo "error: $URL does not carry this task's committed work: its head is $PR_HEAD, but the branch $LOCAL_BRANCH is at $LOCAL_TIP, which that head does not contain" >&2
+        echo "error: the PR's checks therefore describe the version before those commits, so nothing is recorded and no merge poll is armed; steer the worker to push $LOCAL_BRANCH, let the checks re-run, then run this again" >&2
+        exit 1
+      fi
+    fi
   fi
 fi
 
