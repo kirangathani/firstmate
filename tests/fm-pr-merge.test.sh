@@ -1916,10 +1916,13 @@ mint_dispatch_token() {
 # write_projects_registry <case_dir> <mode>: the private fleet registry
 # bin/fm-project-mode.sh resolves a delivery mode from. make_case's project dir
 # is always basenamed "project".
-# What bin/fm-spawn.sh recorded as THIS task's delivery mode, which is the
-# registry's answer unless the dispatch overrode it with --mode.
+# What bin/fm-spawn.sh recorded as THIS task's delivery mode. A real dispatch
+# takes it from the registry, so write_projects_registry sets both and the two
+# only diverge where a case deliberately makes them, for a task dispatched down
+# a path its project does not usually take.
 set_task_mode() {  # <case-dir> <mode>
   local meta="$1/state/task-x1.meta" mode=$2 tmp="$1/state/.meta.tmp"
+  [ -f "$meta" ] || return 0
   grep -v '^mode=' "$meta" > "$tmp"
   printf 'mode=%s\n' "$mode" >> "$tmp"
   mv "$tmp" "$meta"
@@ -1932,6 +1935,7 @@ write_projects_registry() {
     printf '%s\n' '# Projects'
     printf -- '- project [%s] - test project (added 2026-08-09)\n' "$mode"
   } > "$case_dir/fmhome/data/projects.md"
+  set_task_mode "$case_dir" "$mode"
 }
 
 # make_attestation_case <name> <mode> [<extra rollup line>...]: a case whose PR
@@ -1945,10 +1949,6 @@ make_attestation_case() {
   add_gh_mocks "$case_dir" c0ffee0000000000000000000000000000000001
   : > "$case_dir/gh-axi.log"
   write_projects_registry "$case_dir" "$mode"
-  # The task's own record says the same, because a real dispatch writes it from
-  # the same registry. The two only differ for a task dispatched down a path its
-  # project does not usually take, which is its own case below.
-  set_task_mode "$case_dir" "$mode"
   write_pr_checks "$case_dir" \
     $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts' \
     "$(attestation_failed_line)" \

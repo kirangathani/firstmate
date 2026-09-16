@@ -95,12 +95,24 @@ EOF
 # write_projects_registry <case_dir> <mode>: the private registry
 # bin/fm-project-mode.sh resolves a delivery mode from.
 write_projects_registry() {
-  local case_dir=$1 mode=$2
+  local case_dir=$1 mode=$2 meta tmp
   mkdir -p "$case_dir/fmhome/data"
   {
     printf '%s\n' '# Projects'
     printf -- '- project [%s] - test project (added 2026-09-08)\n' "$mode"
   } > "$case_dir/fmhome/data/projects.md"
+  # The task's own record carries the same mode, because a real dispatch takes
+  # it from this registry. It matters at the merge gate: the project's
+  # attestation excusal is withdrawn by a task recorded on a different delivery
+  # path (bin/fm-attestation-lib.sh), so a fixture whose two halves disagree
+  # exercises that withdrawal rather than the case it means to.
+  tmp="$case_dir/state/.meta.tmp"
+  for meta in "$case_dir"/state/*.meta; do
+    [ -f "$meta" ] || continue
+    grep -v '^mode=' "$meta" > "$tmp"
+    printf 'mode=%s\n' "$mode" >> "$tmp"
+    mv "$tmp" "$meta"
+  done
 }
 
 # write_pr_checks <case_dir> <pr-number> <tsv line...>: the rollup answer for
