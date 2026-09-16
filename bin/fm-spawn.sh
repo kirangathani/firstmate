@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout] [--skip-testing|--local-skip|--ci-skip|--all-testing-skip]
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--mode <delivery-mode>] [--scout] [--skip-testing|--local-skip|--ci-skip|--all-testing-skip]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -9,6 +9,15 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --mode <no-mistakes|direct-PR|local-only> records THIS task's delivery mode
+#   when it deviates from the one data/projects.md gives its project - the
+#   upstream-port shape, where a direct-PR project's task raises its PR through
+#   the pipeline pointed at another repository. Without it the registry's answer
+#   stands, which is right for every ordinary task. It is refused for a
+#   --secondmate spawn and refused as a shared batch flag; the body below owns
+#   why, and the mode it records then governs the brief's definition of done,
+#   the testing-skip matrix, the merge gates, and the fleet view exactly as a
+#   registry mode does.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
@@ -143,7 +152,8 @@
 # is still that task's before it terminates anything in it.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # followed by " local_skip=on" and/or " ci_skip=on" only when a testing skip is active.
-# mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
+# mode/yolo are resolved per-project from data/projects.md for ship/scout tasks,
+# with --mode overriding the mode half for this one task;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
 
@@ -196,11 +206,13 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+MODE_ARG=
 fm_testing_skip_reset
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+MODE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -213,6 +225,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      mode) MODE_ARG=$a; MODE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -230,6 +243,8 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --mode) want_value=mode ;;
+    --mode=*) MODE_ARG=${a#--mode=}; MODE_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -238,6 +253,11 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$MODE_SET" -eq 0 ] || [ -n "$MODE_ARG" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
+case "$MODE_ARG" in
+  ''|no-mistakes|direct-PR|local-only) ;;
+  *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only" >&2; exit 1 ;;
+esac
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -353,6 +373,11 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
   fi
+  # --mode is NOT a shared batch flag. It names one task's deviation from its
+  # project's usual delivery path, and a batch spans several projects whose
+  # usual paths differ, so one shared value would quietly misdescribe the rest.
+  # A deviating task is dispatched on its own.
+  [ "$MODE_SET" -eq 0 ] || { echo "error: --mode names one task's deviation, so it cannot be shared across a batch; dispatch that task on its own" >&2; exit 1; }
   rc=0
   shared_args=()
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
@@ -762,6 +787,7 @@ fi
 # leaving an orphaned window behind.
 SECONDMATE_PROJECTS=
 if [ "$KIND" = secondmate ]; then
+  [ "$MODE_SET" -eq 0 ] || { echo "error: --mode does not apply to a --secondmate spawn" >&2; exit 1; }
   MODE=secondmate
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
@@ -770,6 +796,26 @@ else
   read -r MODE YOLO <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
+  # THE PER-TASK OVERRIDE. The registry answers "how does this project's work
+  # normally reach main", which is the right answer for almost every task and
+  # the wrong one for a task whose brief sends it somewhere else. The override
+  # is what puts that deviation ON THE RECORD, because everything downstream
+  # reads the record and nothing reads the brief's prose: bin/fm-brief.sh writes
+  # this task's definition of done from it, bin/fm-pr-merge.sh decides from it
+  # whether the no-mistakes attestation check is excusable, and the fleet view
+  # draws six stages as skipped on the strength of it.
+  #
+  # It exists because prose could not do that job. On 2026-09-16 the captain
+  # watched a task that was on its eighth pipeline run drawn with intent,
+  # rebase, review, test, docs and lint all `skipped`: its project ships
+  # direct-PR, its brief told it to raise the PR through the pipeline pointed at
+  # an upstream repository, and the record had no way to say so. `skipped`
+  # means a deliberate skip, so the view was asserting a testing posture the
+  # task did not have - and it was reading the record faithfully.
+  if [ "$MODE_SET" -eq 1 ] && [ "$MODE_ARG" != "$MODE" ]; then
+    echo "note: $ID is dispatched as $MODE_ARG, not this project's usual $MODE" >&2
+    MODE=$MODE_ARG
+  fi
 fi
 
 # Testing-skip validation, part 2: which skip a delivery mode can honour. Each

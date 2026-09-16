@@ -897,9 +897,19 @@ export function ciTally(agent) {
   // between the skip sentence sharing this line finishing and being cut at 130
   // columns, and the distinction that matters here is against "not read" -
   // nobody looked - which the other branch states in full.
-  const why = !agent.pr?.url
-    ? "no PR"
-    : `not read: ${ci?.collection?.reason || "no reason recorded"}`;
+  //
+  // "no PR" is a CLAIM, and it is only made from evidence. A task's PR reaches
+  // this row two ways: firstmate's own record of it, and the pipeline run's own
+  // `pr:` field. When that run could not be read at all, neither has answered,
+  // and the honest word is that nobody knows rather than that there is none.
+  // The captain's 2026-09-15 ruling that these captions be plain English
+  // applies to certainty too: say it does not know, rather than assert
+  // something that may be false.
+  const why = agent.pr?.url
+    ? `not read: ${ci?.collection?.reason || "no reason recorded"}`
+    : agent.collection?.ok === false
+      ? "PR unknown: could not read this task's pipeline"
+      : "no PR";
   return `CI checks:  ${counts}  (${why})`;
 }
 
