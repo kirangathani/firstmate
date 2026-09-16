@@ -19,12 +19,23 @@ test_worker_owns_synchronous_driver() {
   local contract
   contract=$(validate_contract)
 
-  assert_contains "$contract" 'The task worker that starts a no-mistakes run drives the pipeline' \
+  assert_contains "$contract" 'The task worker that starts a no-mistakes run drives it to a terminal outcome' \
     "Validate contract does not assign the run to its initiating task worker"
-  assert_contains "$contract" 'owns every attach through the next gate or outcome' \
+  assert_contains "$contract" 're-attaching after every returned hold' \
     "Validate contract does not assign every attach to the task worker"
   assert_contains "$contract" 'keep driving each returned hold until completion or a genuinely new escalation' \
     "Validate contract does not require the task worker to keep driving each returned hold"
+  # The two assertions above used to pin 'drives the pipeline and owns every
+  # attach through the next gate or outcome'. Superseded 2026-09-16 with the
+  # captain's approval (data/supersessions/firstmate.md, task
+  # fm-brief-attach-ownership-a3): they pinned PHRASING, and the word "owns" was
+  # itself the defect - three workers in one day read it as an authority claim
+  # rather than a liveness obligation and idled on a parked run, one of them for
+  # four hours. The obligation is unchanged and is asserted here more precisely.
+  # This last one is what makes that concrete, so the contract cannot go back to
+  # implying something else keeps a parked run alive.
+  assert_contains "$contract" 'a run parked with no live attach is a stalled run' \
+    "Validate contract does not state that a run left unattached stalls silently"
   pass "Validate contract assigns the complete driver loop to the initiating task worker"
 }
 

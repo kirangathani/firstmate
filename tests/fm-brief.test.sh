@@ -195,6 +195,66 @@ test_no_mistakes_dod_lets_the_run_watch_ci() {
   pass "fm-brief.sh: the no-mistakes DOD lets the run's own ci step watch the PR"
 }
 
+# The re-attach loop must be stated as a MECHANISM in the generated brief, not
+# left implicit in a sentence about who OWNS the run. Measured 2026-09-16: three
+# workers (eln-sidebar-toggle-key-s3, eln-gantt-bar-centre-highlight-g7,
+# nm-upstream-port-review-conversation-g3) each started a run and then went idle
+# with it parked at a gate, g3 for four hours, each saying in its own pane that
+# it would wait to be woken. The brief they read said the hold "appends ONE line
+# to your status file. That line is what wakes firstmate", which is true and
+# which a worker can faithfully read as "something else is watching this now".
+# Nothing was: bin/fm-nm-attach.sh's hold ends when it appends that line, its
+# `--wait` defaults to 3h, and bin/fm-nm-stall.sh is deliberately silent on a
+# parked run, so the four-hour gap is one elapsed hold nobody re-attached.
+#
+# SIZED FROM THE LIMIT IT GUARDS: the non-terminal status verbs are read out of
+# bin/fm-nm-attach.sh itself, so a verb added or renamed there fails this test
+# until the brief teaches the worker what to do about it, rather than pinning a
+# list that rots the moment the attach owner gains a case.
+test_no_mistakes_dod_states_the_reattach_loop_as_a_mechanism() {
+  local home id brief verb verbs
+  home="$TMP_ROOT/reattach-loop-home"
+  mkdir -p "$home/data"
+  id="brief-reattach-loop-a3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  # Every non-terminal `[key=nm-run]` verb the attach owner can append is a
+  # point the worker must act from, so the brief has to name each one.
+  verbs=$(grep -oE 'note "(needs-decision|paused) \[key=nm-run\]' "$ROOT/bin/fm-nm-attach.sh" \
+    | sed -e 's/^note "//' -e 's/ .*//' | sort -u)
+  [ -n "$verbs" ] || fail "could not read the non-terminal status verbs out of bin/fm-nm-attach.sh"
+  for verb in $verbs; do
+    assert_grep "\`$verb [key=nm-run]" "$brief" \
+      "no-mistakes DOD does not tell the worker what to do on a \`$verb\` return from the attach owner"
+  done
+
+  # The bound itself: one hold covers one return, and nothing is attached after.
+  assert_grep "ONE ATTACH COVERS EXACTLY ONE RETURN" "$brief" \
+    "no-mistakes DOD no longer bounds a hold to a single return"
+  assert_grep "nothing is attached to this run at all" "$brief" \
+    "no-mistakes DOD does not say the run is left unattended once the hold returns"
+  assert_grep "never stop here and wait to be woken" "$brief" \
+    "no-mistakes DOD does not forbid the idle-until-woken reading that stalled three runs"
+
+  # The `paused` return is the silent one: firstmate deliberately leaves a
+  # paused pane alone (bin/fm-classify-lib.sh's declared-external-wait case), so
+  # the brief must say that line is the worker's to act on and not firstmate's.
+  assert_grep "addressed to YOU, not to firstmate" "$brief" \
+    "no-mistakes DOD does not tell the worker the elapsed-wait line is its own to act on"
+
+  # The old unbounded framing, in the exact shape a worker quoted back, must not
+  # return anywhere in the brief.
+  assert_no_grep "do not re-attach to \"check\"" "$brief" \
+    "no-mistakes DOD carries the unqualified no-re-attach instruction again"
+
+  # AGENTS.md section 7 states the same rule and must not drift from the brief.
+  assert_grep "One attach covers one return" "$ROOT/AGENTS.md" \
+    "AGENTS.md's Validate section no longer carries the one-return bound the brief teaches"
+  pass "fm-brief.sh: the no-mistakes DOD states the re-attach loop as a mechanism"
+}
+
 # A testing skip is authorized at DISPATCH and nowhere else, so scaffolding takes
 # no skip flag at all. This is what removes the silent half-specified skip: there
 # is no longer a second invocation that could be given the flag on its own and
@@ -762,6 +822,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_generated_brief_tells_a_worker_to_rebase
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_lets_the_run_watch_ci
+test_no_mistakes_dod_states_the_reattach_loop_as_a_mechanism
 test_scaffold_refuses_every_testing_skip_flag
 test_ship_brief_carries_labelled_skip_regions
 test_applied_testing_skip_briefs
