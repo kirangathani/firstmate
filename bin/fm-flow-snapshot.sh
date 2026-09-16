@@ -324,7 +324,7 @@ toon_field() {  # <axi-status-output> <key>
     }'
 }
 
-CI_EMPTY='{"collection":{"ok":false,"reason":""},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"excused":0,"excused_authority":[],"head":"","superseded":null}'
+CI_EMPTY='{"collection":{"ok":false,"reason":""},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"excused":0,"excused_authority":[],"head":"","pr_state":"","superseded":null}'
 ci_unread() {  # <reason>
   printf '%s' "$CI_EMPTY" | jq --arg r "$1" '.collection.reason = $r'
 }
@@ -353,7 +353,14 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
   # headRefOid rides the same call: it is the commit these checks describe, and
   # the renderer compares it with the run's own head to tell checks that passed
   # on a head the run will replace from checks on the head that will land.
-  raw=$(run_bounded "$GH_TIMEOUT" gh pr view "$num" --repo "$owner/$repo" --json statusCheckRollup,headRefOid 2>/dev/null) || raw=
+  #
+  # `state` rides it too, and it is the PR's OWN lifecycle rather than anything
+  # about its checks: OPEN, MERGED or CLOSED. Without it a merged PR whose
+  # checks were green read exactly like an open green one, so the view parked
+  # amber asking for a decision the captain had already made and the header
+  # counted it ready to merge - seen 2026-09-16 on PR 92, merged the night
+  # before. A green check tally is not evidence that anything is still open.
+  raw=$(run_bounded "$GH_TIMEOUT" gh pr view "$num" --repo "$owner/$repo" --json statusCheckRollup,headRefOid,state 2>/dev/null) || raw=
   if [ -z "$raw" ]; then
     ci_unread "gh read failed or timed out"
     return
@@ -437,11 +444,15 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
     fi
   fi
 
-  local head
+  local head pr_state
   head=$(printf '%s' "$raw" | jq -r '.headRefOid // ""' 2>/dev/null) || head=
+  # Empty when GitHub did not report it, which the renderer treats as a state it
+  # could not read rather than as an open PR.
+  pr_state=$(printf '%s' "$raw" | jq -r '.state // ""' 2>/dev/null) || pr_state=
   printf '%s' "$norm" | jq \
     --arg attest "$FM_ATTESTATION_CHECK_NAME" \
     --arg head "$head" \
+    --arg pr_state "$pr_state" \
     --argjson excuse "$excuse" \
     --argjson authority "$authority" '
     map(if $excuse and .verdict == "failed" and .name == $attest
@@ -457,6 +468,7 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
         excused: (map(select(.verdict == "excused")) | length),
         excused_authority: $authority,
         head: $head,
+        pr_state: $pr_state,
         superseded: null
       }'
 }
@@ -678,14 +690,20 @@ axi_error() {  # <stdout> <stderr-file>
 # two readings are two halves of one fact about the same file rather than two
 # independent guesses.
 #
+# It answers WHEN only. WHETHER there is a PR at all is asked of the resolved
+# link this row's PR, checks and pre-merge cells were all drawn from, at the one
+# call site below, and never re-derived here: this function used to grep the same
+# meta for `^pr=` itself, which made the stage cell a second answer to a question
+# the fleet document already owns - and on 2026-09-16 the two answers differed,
+# one row reporting both "no PR exists" and "this PR awaits your word".
+#
 # It is the record's time, not GitHub's `createdAt`: GitHub's is exact but is
 # only read on the CI-bearing cadence, and a building cell that ended at one
 # time on the slow refresh and at another on the fast one would move on screen
-# for no reason the captain could see. Nothing is invented - a meta with no
-# recorded PR yields nothing, and the building phase then stays open.
+# for no reason the captain could see. Nothing is invented - an unreadable
+# record yields nothing, and the building phase then stays open.
 pr_recorded_at() {  # <meta-path> -> epoch seconds, or empty
   [ -e "$1" ] || return 0
-  grep -q '^pr=' "$1" 2>/dev/null || return 0
   stat -c %Y "$1" 2>/dev/null || true
 }
 
@@ -911,7 +929,7 @@ agent_json() {  # <task-json>
   # task is in it only before its run exists, where there is no PR yet either.
   local build_end=${run_created:-0}
   local pr_at=''
-  if [ "${run_created:-0}" -le 0 ]; then
+  if [ "${run_created:-0}" -le 0 ] && [ -n "$pr_url" ]; then
     pr_at=$(pr_recorded_at "$meta")
     if [ -n "$pr_at" ] && [ -n "$built_at" ] && [ "$pr_at" -gt "$built_at" ]; then
       build_end=$pr_at

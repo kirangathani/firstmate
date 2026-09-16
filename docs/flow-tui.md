@@ -426,6 +426,7 @@ Both are additive `v2` fields: a consumer that ignores them reads exactly the do
           "firstmate is registered as a direct-PR project, whose PRs are raised without the pipeline by design"
         ],
         "head": "bb73f233e0c0d1a4a0f3d3a2f6d0b4c8e1a2b3c4",
+        "pr_state": "OPEN",
         "superseded": null
       }
     },
@@ -506,6 +507,14 @@ Guarantees the renderer is entitled to rely on:
   Both are additive fields on the same schema.
 - `run.head` is the run's own head commit from the daemon's record, and `ci.head` is the commit GitHub reports the PR's checks for, read in the same call as the rollup.
   They differ exactly when the checks describe a head the run has not yet pushed.
+- `ci.pr_state` is the PR's OWN lifecycle as GitHub reports it - `OPEN`, `MERGED` or `CLOSED` - read in the same call as the rollup and the head.
+  Present and empty means the collector looked and got nothing back: under `--no-ci`, for a link the PR parser refuses, for a failed or timed-out read, and for a reply that carried no such field.
+  Present and empty is never read as open, because a merged PR's checks stay green forever and a check tally alone cannot tell a landed PR from one still waiting.
+  The key being ABSENT is a different fact and makes no claim either way: it comes from a document whose collector never asked the question, and the renderer then falls through to the checks rather than reporting a read that never happened as a failed one.
+  The collector always writes the key, so only a hand-written document can carry an absent one: `bin/fm-flow-snapshot.sh` has exactly two constructors of the `ci` object, and `CI_EMPTY` bakes in `pr_state:""` for every unread reason while `ci_json` passes it explicitly.
+  See "A merged or closed PR is not the captain's decision" below for what is drawn from it.
+- A task's PR reaches this document from `bin/fm-fleet-snapshot.sh`, which resolves it from the `pr=` in the task's own `state/<id>.meta` and from nothing else, and every cell of a row reads that one value - including the end of the `building` phase, which asks the resolved link rather than re-reading the record itself.
+  A crewmate's status log is not a source: it is free prose, so grepping it for a PR link answered with the FIRST link it contained, which on a task that opens several PRs in sequence is the one that has already landed.
 - `ci.superseded` is `null` when the checks describe the head that will land, or the question was not asked - under `--no-ci`, with no run, with a run that has ended or not yet completed its `rebase`, or for a gone worker.
   Otherwise it is `{ "main_moved": bool, "new_commits": bool, "reason": "" }`: whether the two heads sit on different bases against the default branch, and whether the branch's own content changed, read with `git merge-base` and `git patch-id` in the run's own worktree.
   When that comparison could not be made both booleans are `null` and `reason` says why; the renderer then states only what is certain.
@@ -727,6 +736,26 @@ The source is never silent.
 
 `unreadable` now means both sources failed, and `collection.reason` names each: `axi printed nothing; db: no steps recorded for <run>`.
 
+## A merged or closed PR is not the captain's decision
+
+On 2026-09-16 the view drew PR 92 - merged at 23:17:58Z the night before - as `GITHUB CI 11/12 passed` beside `pre-merge your word`, and the header counted `1 ready to merge`.
+A merged PR's checks stay green forever, so nothing in a check tally can tell a landed PR from one still waiting; the collector had never asked for the PR's own state, only for its rollup and its head.
+
+The PR's state now rides that same read (`ci.pr_state`), and ONE function decides whether the PR is still the captain's to decide: `premergeVerdict` in `bin/fm-flow-tui.mjs`.
+The pre-merge cell and the header's ready-to-merge count both read it, so a row cannot park on a decision the line above it has not counted, or the other way round.
+
+| PR state | pre-merge cell | counted ready | why |
+|---|---|---|---|
+| `MERGED` | green `merged` | no | the merge is what this box was waiting for, so it reports it |
+| `CLOSED` | `closed` / `not merged`, in the unknown colour | no | not a check failure and not a pass, so it gets neither colour and the words say what happened |
+| present and empty, with every check green | `not read`, in the unknown colour | no | the collector looked and got nothing back, and an empty cell reads as "not reached", which is a different claim from "nobody could find out whether this is still open" |
+| absent, with every check green | amber `your word` | yes | no claim either way, from a document whose collector never asked, so the checks decide as they always did |
+| `OPEN`, with every check green on the head that will land | amber `your word` | yes | the only state that is a decision |
+| anything, with checks that are not a pass | empty, `pending` | no | unchanged |
+
+The PR's own lifecycle is asked FIRST, so a merged or closed PR carrying a red check still reports what happened to it rather than a verdict about checks nobody is acting on.
+The `GITHUB CI` cell beside it is unchanged in every case: the checks it reports are the checks that ran, and what moved is only whether anyone is being asked about them.
+
 ## The CI cell's colour is its verdict, and a superseded head is yellow
 
 Two things the captain saw on 2026-09-15 came from one cell carrying two meanings.
@@ -743,7 +772,7 @@ The captain's ruling, recorded here as the contract:
 | passed, or running, on a head the live run will replace | yellow | the sentences below | never bright green, so nobody is tempted to merge a head that will not land |
 | not read, no PR, nothing ran | unchanged | | |
 
-Waiting on the captain's word is a separate fact from the checks' verdict, and it moves to the box that actually waits for it: when the cell is green, `pre-merge` draws amber with `your word`.
+Waiting on the captain's word is a separate fact from the checks' verdict, and it moves to the box that actually waits for it: when the cell is green and the PR is still open, `pre-merge` draws amber with `your word` (see the section above).
 Yellow is unambiguous on the CI cell only because that phrase has left it.
 
 The superseded cell says, in the captain's own words and nothing else, `main moved, must retest` and/or `new branch commit, must retest`, both in that order when both hold, wrapped at word boundaries over the cell's detail rows and never shortened.
