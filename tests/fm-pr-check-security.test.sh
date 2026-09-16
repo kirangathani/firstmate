@@ -82,11 +82,6 @@ case " $* " in
   # fm-assert-tests-kept.sh reads the PR's own base branch rather than assuming
   # the default; these fixtures all build their project on main.
   *" baseRefName "*) printf '%s\n' "${FM_TEST_GH_BASE:-main}" ;;
-  # fm-pr-check.sh reads the PR's head BRANCH in its own call, separate from the
-  # headRefOid projection above, to guard its refusal of a PR missing work the
-  # task has already committed. tests/fm-pr-check-head.test.sh owns that
-  # refusal's own cases; here it only has to be answerable.
-  *" headRefName "*) printf '%s\n' "${FM_TEST_GH_BRANCH:-fm/task-a}" ;;
   # fm-pr-merge.sh's AI-attribution gate reads the PR description as raw text
   # (docs/attribution-gate.md). An empty answer means an empty description,
   # which carries no attribution; this suite exercises URL/ID safety rather than

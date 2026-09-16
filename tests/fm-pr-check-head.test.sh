@@ -15,8 +15,9 @@
 # THE SILENT CASES ARE THE POINT, not padding. `behind` above all: a no-mistakes
 # PR is pushed by the pipeline from its own worktree under ~/.no-mistakes/, so
 # the task's own copy legitimately lags the PR head. Refusing on that would break
-# every pipeline task, so the refusal is specifically that the LOCAL branch holds
-# commits the PR head does not contain.
+# every pipeline task. The refusal asks one ancestry question in the direction
+# that needs no second fact - is the PR head a strict ancestor of this copy's
+# tip - so a moved-on branch refuses while behind and unrelated stay silent.
 #
 # These live in their own file rather than in tests/fm-pr-check-security.test.sh,
 # which owns URL/ID safety: that suite runs concurrency and watcher cases and
@@ -48,11 +49,12 @@ make_head_case() {
 
   # The two reads are separate calls on purpose (see fm-pr-check.sh), so the
   # stub answers each projection on its own, exactly as gh does.
+  # fm-pr-check.sh reads exactly one projection, the same headRefOid every other
+  # suite's mock already answers. Nothing here has to know a branch name.
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
-  *" headRefOid "*)  printf '%s\n' "${FM_TEST_GH_HEAD:?}" ;;
-  *" headRefName "*) printf '%s\n' "${FM_TEST_GH_BRANCH:?}" ;;
+  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:?}" ;;
 esac
 SH
   chmod +x "$fakebin/gh"
@@ -89,7 +91,7 @@ test_refuses_a_pr_that_predates_the_tasks_commit() {
   base=$(git -C "$dir/wt" rev-parse HEAD~1)
 
   set +e
-  out=$(FM_TEST_GH_HEAD="$base" FM_TEST_GH_BRANCH="fm/task-a" \
+  out=$(FM_TEST_GH_HEAD="$base" \
     run_check "$dir" task-a "https://github.com/o/r/pull/1" 2>&1)
   status=$?
   set -e
@@ -111,7 +113,7 @@ test_records_a_pr_at_the_branch_tip() {
   local dir tip status
   read -r dir tip < <(make_head_case equal)
   set +e
-  FM_TEST_GH_HEAD="$tip" FM_TEST_GH_BRANCH="fm/task-a" \
+  FM_TEST_GH_HEAD="$tip" \
     run_check "$dir" task-a "https://github.com/o/r/pull/1" >/dev/null 2>&1
   status=$?
   set -e
@@ -128,7 +130,7 @@ test_records_a_pr_ahead_of_the_tasks_own_copy() {
   read -r dir tip < <(make_head_case behind)
   git -C "$dir/wt" reset -q --hard HEAD~1
   set +e
-  FM_TEST_GH_HEAD="$tip" FM_TEST_GH_BRANCH="fm/task-a" \
+  FM_TEST_GH_HEAD="$tip" \
     run_check "$dir" task-a "https://github.com/o/r/pull/1" >/dev/null 2>&1
   status=$?
   set -e
@@ -136,22 +138,31 @@ test_records_a_pr_ahead_of_the_tasks_own_copy() {
   pass "fm-pr-check.sh: a PR ahead of the task's own copy is recorded"
 }
 
-# The upstream-PR shape: the worktree's branch is not what the PR carries, so the
-# two tips are not comparable and nothing may be concluded from them.
-test_does_not_compare_a_pr_on_another_branch() {
-  local dir tip base status
-  read -r dir tip < <(make_head_case otherbranch)
-  base=$(git -C "$dir/wt" rev-parse HEAD~1)
+# The upstream-PR shape: the worktree drives a branch that is not what this PR
+# carries, so neither tip contains the other and nothing may be concluded from
+# the pair. An unrelated head is the honest fixture for it - a branch NAME would
+# not be, because the refusal never reads one.
+test_does_not_compare_an_unrelated_pr_head() {
+  local dir tip unrelated status
+  read -r dir tip < <(make_head_case unrelated)
+  # A commit on its own root, sharing no history with the task's branch.
+  git -C "$dir/project" checkout -q --orphan other
+  git -C "$dir/project" rm -rq --cached . 2>/dev/null || true
+  printf 'elsewhere\n' > "$dir/project/other.txt"
+  git -C "$dir/project" add other.txt
+  git -C "$dir/project" commit -qm "unrelated history"
+  unrelated=$(git -C "$dir/project" rev-parse HEAD)
+
   set +e
-  FM_TEST_GH_HEAD="$base" FM_TEST_GH_BRANCH="somebody-elses-branch" \
+  FM_TEST_GH_HEAD="$unrelated" \
     run_check "$dir" task-a "https://github.com/o/r/pull/1" >/dev/null 2>&1
   status=$?
   set -e
-  expect_code 0 "$status" "a PR on a different branch must not be compared"
-  pass "fm-pr-check.sh: a PR on another branch is never compared to this one"
+  expect_code 0 "$status" "an unrelated PR head must not be compared to this branch"
+  pass "fm-pr-check.sh: an unrelated PR head is never compared to this branch"
 }
 
 test_refuses_a_pr_that_predates_the_tasks_commit
 test_records_a_pr_at_the_branch_tip
 test_records_a_pr_ahead_of_the_tasks_own_copy
-test_does_not_compare_a_pr_on_another_branch
+test_does_not_compare_an_unrelated_pr_head
