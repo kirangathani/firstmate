@@ -280,6 +280,10 @@ case "$MODE_ARG" in
   ''|no-mistakes|direct-PR|local-only) ;;
   *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE_ARG')" >&2; exit 1 ;;
 esac
+# Argument-only, like the testing-skip rules below, so it costs no filesystem or
+# backend work: a secondmate is not a delivery, and mode=secondmate in its record
+# is what marks the record as a secondmate's at all.
+[ -z "$MODE_ARG" ] || [ "$KIND" != secondmate ] || { echo "error: --mode does not apply to --secondmate: a secondmate is not a delivery, and its record's mode=secondmate is what marks it as one" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -809,7 +813,6 @@ fi
 SECONDMATE_PROJECTS=
 MODE_OVERRIDDEN=0
 if [ "$KIND" = secondmate ]; then
-  [ -z "$MODE_ARG" ] || { echo "error: --mode does not apply to --secondmate: a secondmate is not a delivery, and its record's mode=secondmate is what marks it as one" >&2; exit 1; }
   MODE=secondmate
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
