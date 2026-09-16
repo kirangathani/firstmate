@@ -30,10 +30,11 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v sqlite3 >/dev/null 2>&1 || { echo "skip: sqlite3 not found"; exit 0; }
 
 # A real directory, created here rather than a path that happens to exist on one
-# machine. The collector now runs `no-mistakes axi status --run` from the task's
-# own project - that command resolves the repository from its working directory -
-# so a fixture project that does not exist is a fixture whose run cannot be read
-# at all. This used to be a hardcoded absolute path, which existed on the author's
+# machine. The collector runs `no-mistakes axi status --run` from the directory
+# the RUN's own record names, falling back to the task's project - that command
+# resolves the repository from its working directory - and this fixture's runs
+# are recorded against this path, so a project that does not exist is a fixture
+# whose run cannot be read at all. This used to be a hardcoded absolute path, which existed on the author's
 # machine and on no CI runner, and every assertion about a step reaching the wire
 # failed there and nowhere else.
 PROJECT="$TMP_ROOT/project"
@@ -1001,6 +1002,11 @@ got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.ok' "$CW
     jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.reason' "$CWDOUT")"
 got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .steps | length' "$CWDOUT")
 [ "$got" = 10 ] || fail "the run read from the project produced $got steps"
+# Named as the base names it. What this case guarantees is unchanged - the read
+# does not inherit whatever directory the view was opened from - and this
+# fixture records its run against the task's own project, so the base's own
+# wording is still true of it. The run-versus-project distinction has its own
+# case below, under its own name.
 pass "the run read happens in the task's own project, whatever directory the view was opened from"
 
 # One task's directory must not be carried into the next: the collector reads
@@ -1033,6 +1039,96 @@ got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$GONE_HOME" \
   fail "a task whose project directory is gone was refused its run read: $got"
 sqlite3 "$NM_DB" "UPDATE repos SET working_path='$PROJECT' WHERE id='repo1';"
 pass "a task whose recorded project is gone still gets its run read, from where we already are"
+
+# --- the run read happens where the RUN lives, not where the task's project is
+#
+# The upstream-port shape. The task's project is its fork clone under
+# projects/, but the pipeline was pointed at a different repository, so it ran
+# in a scratch clone under the task's own temp root and `repos.working_path`
+# records THAT. `no-mistakes axi status --run` still resolves the repository
+# from its working directory, so cd-ing to the task's project is cd-ing to a
+# repository the run is not in.
+#
+# The fake below answers only from the scratch clone, exactly as the real binary
+# does from a repository holding the run, and refuses everywhere else with the
+# words it printed on this host on 2026-09-07.
+
+WL_ROOT="$TMP_ROOT/wrong-repo"
+WL_HOME="$WL_ROOT/home"
+WL_PROJECT="$WL_ROOT/fork-clone"
+WL_SCRATCH="$WL_ROOT/scratchpad/upstream-clone"
+mkdir -p "$WL_HOME/state" "$WL_PROJECT" "$WL_SCRATCH" "$WL_ROOT/no-transcripts"
+WL_PROJECT=$(cd "$WL_PROJECT" && pwd -P)
+WL_SCRATCH=$(cd "$WL_SCRATCH" && pwd -P)
+
+WL_DB="$WL_ROOT/state.sqlite"
+sqlite3 "$WL_DB" <<SQL
+CREATE TABLE repos (
+  id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE, upstream_url TEXT NOT NULL,
+  fork_url TEXT, default_branch TEXT NOT NULL DEFAULT 'main', created_at INTEGER NOT NULL);
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repos(id), branch TEXT NOT NULL,
+  head_sha TEXT NOT NULL, base_sha TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+  pr_url TEXT, error TEXT, awaiting_agent_since INTEGER,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, worktree_dir TEXT);
+INSERT INTO repos VALUES ('up1','$WL_SCRATCH','git@github.com:upstream/tool.git',NULL,'main',1000);
+INSERT INTO runs VALUES
+  ('WLRUN1','up1','fm/upstream-port-u7','h1','base','running',NULL,NULL,NULL,3000,3100,NULL);
+SQL
+
+WLBIN=$(fm_fakebin "$WL_ROOT/bin")
+cat > "$WLBIN/no-mistakes" <<SH
+#!/usr/bin/env bash
+set -u
+printf 'A new version of no-mistakes is available\n' >&2
+if [ "\$(pwd -P)" != "$WL_SCRATCH" ]; then
+  printf "error: repo not initialized (run 'no-mistakes init' first)\n"
+  exit 1
+fi
+cat "$WL_ROOT/axi.txt"
+SH
+chmod 755 "$WLBIN/no-mistakes"
+
+cat > "$WL_ROOT/axi.txt" <<'TOON'
+run:
+  id: "WLRUN1"
+  branch: fm/upstream-port-u7
+  status: running
+  head: h1
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,22
+    rebase,completed,0,981
+    review,running,0,0
+    test,pending,0,0
+    document,pending,0,0
+    lint,pending,0,0
+    push,pending,0,0
+    pr,pending,0,0
+    ci,pending,0,0
+TOON
+
+jq -n --arg p "$WL_PROJECT" '{tasks:[
+  {id:"upstream-port-u7",kind:"ship",mode:"no-mistakes",project:$p,
+   paths:{worktree:{path:"/wt/70"}},endpoint:{target:"fm:70",exists:true},pr:{url:null}}
+]}' > "$WL_ROOT/fleet.json"
+
+WLOUT="$WL_ROOT/out.json"
+( cd "$WL_PROJECT" && PATH="$WLBIN:$PATH" FM_HOME="$WL_HOME" \
+  FM_FLOW_SNAPSHOT_NOW_EPOCH=10000 \
+  FM_FLOW_SNAPSHOT_DB="$WL_DB" \
+  FM_FLOW_SNAPSHOT_FLEET_JSON="$WL_ROOT/fleet.json" \
+  FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT="$WL_ROOT/no-transcripts" \
+  "$SNAPSHOT" --json --no-ci ) > "$WLOUT" 2>/dev/null
+expect_code 0 $? "the upstream-port snapshot exits clean"
+
+got=$(jq -r '.agents[] | select(.id=="upstream-port-u7") | .run.id' "$WLOUT")
+[ "$got" = "WLRUN1" ] ||
+  fail "a run recorded against a scratch clone was not found from the task's branch: $got"
+got=$(jq -r '.agents[] | select(.id=="upstream-port-u7") | "\(.collection.ok)/\(.steps|length)"' "$WLOUT")
+[ "$got" = "true/10" ] ||
+  fail "the run was not read from the directory its own record names: $got ($(
+    jq -r '.agents[] | select(.id=="upstream-port-u7") | .collection.reason' "$WLOUT"))"
+pass "a run is read from the repository its own record names, not from the task's project"
 
 # A failure that is real still says why, in the command's own words. An exit
 # code alone is what hid the defect above for as long as it did. The version
@@ -1195,7 +1291,11 @@ ok=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .collection.ok' "$SILEN
 [ "$ok" = "false" ] || fail "a run neither source could answer for was reported readable"
 reason=$(jq -r '.agents[] | select(.id=="stale-runner-s9") | .collection.reason' "$SILENTOUT")
 assert_contains "$reason" "axi printed nothing" "the silent CLI failure was not named"
-assert_contains "$reason" "db: " "the database failure was not named"
+# The database half must name its OWN failure, not just carry the label. The
+# library states it in FM_NM_DB_REASON, and reading the fallback through a
+# command substitution would lose that assignment to the subshell and leave a
+# bare `db: ` behind.
+assert_contains "$reason" "db: no steps recorded for" "the database failure was not named"
 pass "only both sources failing is unreadable, and the reason names each failure"
 
 # --- a task with no pipeline run ends building at its PR ---------------------
@@ -1294,9 +1394,14 @@ pass "a gone worker is not counted as reworking its PR"
 # `no-mistakes axi run` - so a run that fails and is restarted from building is
 # the next number, and the auto-fix rounds inside one run are not.
 #
-# The count is scoped by repository, not by branch name, because `fm/<id>` is
-# only unique within a project: two clones can hold an identically named branch
-# and their runs must never be added together.
+# The count is scoped by BRANCH NAME, because `fm/<task-id>` names exactly one
+# task: task ids are unique across the fleet by construction, so no two tasks
+# can present the same branch here. It deliberately spans repositories, because
+# one task's runs genuinely do. A task that raises its PR against an upstream
+# repository runs the pipeline in a scratch clone under its own temp root, and
+# a respawn puts the next run in a DIFFERENT clone, so the daemon records those
+# runs against two `repos` rows for one branch. Scoping the count to one of them
+# would call the fourth run #3.
 
 RC_DB="$TMP_ROOT/runcount.sqlite"
 RC_P1="$TMP_ROOT/rc-project-1"
@@ -1320,6 +1425,7 @@ INSERT INTO runs VALUES
   ('RCA2','rc1','fm/run-count-r3','h2','base','cancelled',NULL,NULL,NULL,2000,2100,NULL),
   ('RCA3','rc1','fm/run-count-r3','h3','base','running',NULL,NULL,NULL,3000,3100,NULL),
   ('RCB1','rc2','fm/run-count-r3','h4','base','running',NULL,NULL,NULL,3500,3600,NULL),
+  ('RCB2','rc2','fm/other-branch-z1','h6','base','running',NULL,NULL,NULL,4500,4600,NULL),
   ('RCA9','rc1','fm/other-branch-z1','h5','base','running',NULL,NULL,NULL,4000,4100,NULL);
 SQL
 
@@ -1340,11 +1446,20 @@ rc_run_number() {  # <project-path>
 }
 
 got=$(rc_run_number "$RC_P1")
-[ "$got" = "3" ] || fail "three runs on the branch did not report Run #3: $got"
-got=$(rc_run_number "$RC_P2")
-[ "$got" = "1" ] ||
-  fail "an identically named branch in another project did not count on its own: $got"
-pass "run_number counts this branch's runs, scoped to its own repository"
+[ "$got" = "4" ] ||
+  fail "four runs on the branch, across two scratch clones, did not report Run #4: $got"
+pass "run_number counts every run this task's branch has had, across the repositories they were recorded in"
+
+# THE UPSTREAM-PORT SHAPE, and the defect this replaced. The task's recorded
+# project is the fork clone under projects/, while every run lives in a scratch
+# clone of the repository the PR targets, so NO repos row matches the project.
+# Keying the lookup on the project as well as the branch found nothing, and the
+# view drew a task on its eighth run as having no pipeline run at all (the
+# captain, 2026-09-16). The branch alone finds them.
+got=$(rc_run_number "$TMP_ROOT/a-project-no-run-was-recorded-against")
+[ "$got" = "4" ] ||
+  fail "a task whose runs live outside its own project was reported as having none: $got"
+pass "a run recorded against a scratch clone is found by the task's branch"
 
 # A branch the daemon has no run for gets no number at all. Never 0: zero is a
 # count, and the snapshot has no count to state here.
