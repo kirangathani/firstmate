@@ -101,6 +101,23 @@ if [ -f "$status" ] && { exec 3< "$status"; } 2>/dev/null; then
   done <&3
   exec 3<&-
 fi
+# A status line MAY carry a leading "[t=<epoch>] " report-time prefix, and both
+# forms stay valid permanently - bin/fm-classify-lib.sh owns that grammar and
+# says why. This poll is a standalone static program copied to
+# state/<id>.check.sh, so it cannot source that library and strips the token
+# itself. Exactly "[t=" digits "]" is a prefix; anything else is left alone, so
+# a note that merely starts with a bracket still reads as it always did.
+case "$last" in
+  \[t=*\]*)
+    poll_tok=${last#\[t=}
+    poll_rest=${poll_tok#*\]}
+    poll_tok=${poll_tok%%\]*}
+    case "$poll_tok" in
+      ''|*[!0-9]*) ;;
+      *) last=${poll_rest#"${poll_rest%%[![:space:]]*}"} ;;
+    esac
+    ;;
+esac
 case "$last" in
   ''|done:*) ;;
   *) exit 0 ;;
