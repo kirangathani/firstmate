@@ -824,7 +824,7 @@ test_tmux_composer_state_bare_shell_is_unknown() {
     [ "$out" = unknown ] \
       || fail "bare shell prompt '$g' must classify unknown (dead shell, unsafe), got '$out'"
   done
-  pass "fm_tmux_composer_state: a bare shell prompt (\$/%/#/>) reads unknown, never empty (dead-shell injection safety)"
+  pass "fm_tmux_composer_state: a bare shell prompt reads unknown, never empty (dead-shell injection safety)"
 }
 
 # The other side of the fix: a bordered composer box (the harness draws its own
@@ -1217,7 +1217,7 @@ test_wedge_alarm_command_channel_receives_summary() {
     wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
   [ "$(cat "$out_argv" 2>/dev/null)" = "away-mode WEDGED 900s" ] || fail "command channel did not receive the summary on \$1"
   grep -F 'away-mode WEDGED 900s' "$out_stdin" >/dev/null || fail "command channel did not receive the summary on stdin"
-  pass "command channel runs the captain command with the summary on \$1 and on stdin"
+  pass "command channel runs the captain command with the summary on its first argument and on stdin"
 }
 
 test_wedge_alarm_command_failure_hides_configured_command() {
