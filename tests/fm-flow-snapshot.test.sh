@@ -1002,7 +1002,12 @@ got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.ok' "$CW
     jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.reason' "$CWDOUT")"
 got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .steps | length' "$CWDOUT")
 [ "$got" = 10 ] || fail "the run read from the project produced $got steps"
-pass "the run read happens in the repository the run belongs to, whatever directory the view was opened from"
+# Named as the base names it. What this case guarantees is unchanged - the read
+# does not inherit whatever directory the view was opened from - and this
+# fixture records its run against the task's own project, so the base's own
+# wording is still true of it. The run-versus-project distinction has its own
+# case below, under its own name.
+pass "the run read happens in the task's own project, whatever directory the view was opened from"
 
 # One task's directory must not be carried into the next: the collector reads
 # several tasks in one pass, and the change of directory is scoped to the read.
