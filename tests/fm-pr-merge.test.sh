@@ -1967,6 +1967,74 @@ test_direct_pr_project_merges_past_a_failed_attestation() {
   pass "a direct-PR project merges past the failed attestation check, and says so"
 }
 
+# The registry grants the delivery-mode exemption and the task's own record may
+# only WITHDRAW it, which is the asymmetry bin/fm-attestation-lib.sh's header
+# owns. This is the withdrawal half, and it is what keeps bin/fm-spawn.sh --mode
+# honest: a port to an upstream repository, dispatched under the pipeline from a
+# fork registered direct-PR, RUNS the pipeline, so a failed attestation on its PR
+# means the pipeline did not raise it - the one thing this check exists to catch.
+# Without the withdrawal, the project's registration would merge it anyway.
+#
+# The trigger is the `mode_override=on` line the dispatch writes, not the record
+# and the registry disagreeing: every other case in this file disagrees too
+# (make_case seeds mode=no-mistakes and these cases register direct-PR) and must
+# keep its exemption, which is the distinction this case exists to hold.
+test_a_task_dispatched_under_the_pipeline_loses_the_registrations_exemption() {
+  local case_dir rc
+  case_dir=$(make_case attest-mode-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" c0ffee0000000000000000000000000000000004
+  : > "$case_dir/gh-axi.log"
+  write_projects_registry "$case_dir" direct-PR
+  printf 'mode_override=on\n' >> "$case_dir/state/task-x1.meta"
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts' \
+    "$(attestation_failed_line)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/126 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attest-mode-override: a task dispatched under the pipeline must not merge on its project's direct-PR registration"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attest-mode-override: the PR was merged despite the withdrawn exemption"
+  assert_grep 'dispatched --mode no-mistakes' "$case_dir/stderr" \
+    "attest-mode-override: the refusal did not name the task record that withdrew the exemption"
+  pass "a task dispatched under the pipeline cannot merge on its project's direct-PR registration"
+}
+
+# The other direction of the same asymmetry, and the reason the meta is read only
+# to withdraw. state/<id>.meta sits in the directory a worker appends its own
+# status lines to, so a worker CAN write both of these lines; what it must never
+# do is buy an exemption with them. The registry says no-mistakes here, so a
+# forged `mode=direct-PR` plus its override line grants nothing and the merge
+# still refuses.
+test_a_task_record_cannot_grant_an_exemption_its_project_does_not() {
+  local case_dir rc
+  case_dir=$(make_case attest-forged-mode)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" c0ffee0000000000000000000000000000000005
+  : > "$case_dir/gh-axi.log"
+  write_projects_registry "$case_dir" no-mistakes
+  printf 'mode=direct-PR\nmode_override=on\n' >> "$case_dir/state/task-x1.meta"
+  write_pr_checks "$case_dir" \
+    $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts' \
+    "$(attestation_failed_line)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/127 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attest-forged-mode: a mode= line in the task record must not buy an exemption its project does not have"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attest-forged-mode: the PR was merged on a worker-writable field"
+  pass "a task record cannot grant an attestation exemption its project does not have"
+}
+
 test_another_failing_check_refuses_under_the_exemption() {
   local case_dir rc
   case_dir=$(make_attestation_case attest-other-red direct-PR \
@@ -2469,6 +2537,8 @@ test_waiver_does_not_excuse_a_red_pr
 test_waiver_does_not_excuse_zero_checks
 test_kept_tests_gate_still_runs_under_every_skip
 test_direct_pr_project_merges_past_a_failed_attestation
+test_a_task_dispatched_under_the_pipeline_loses_the_registrations_exemption
+test_a_task_record_cannot_grant_an_exemption_its_project_does_not
 test_another_failing_check_refuses_under_the_exemption
 test_pending_check_refuses_under_the_exemption
 test_signed_skip_merges_past_a_failed_attestation

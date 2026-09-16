@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout] [--skip-testing|--local-skip|--ci-skip|--all-testing-skip]
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--mode <delivery-mode>] [--scout] [--skip-testing|--local-skip|--ci-skip|--all-testing-skip]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -58,6 +58,32 @@
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
 #   --skip-testing, --local-skip, --ci-skip, and --all-testing-skip are the
+#   --mode <no-mistakes|direct-PR|local-only> overrides, for THIS ONE TASK, the
+#   delivery mode bin/fm-project-mode.sh resolves from data/projects.md. It exists
+#   because that registry answers per PROJECT, while delivery mode is a property of
+#   the TASK: one project can legitimately host tasks of two shapes. The case that
+#   forced it is a port to an upstream repository - the fork is registered direct-PR
+#   because its own PRs are raised by hand, and a port to upstream drives the full
+#   pipeline. The registry was right about the project and wrong about the task, and
+#   nothing could say so.
+#
+#   This flag records a delivery mode; it is NOT an authority and grants nothing.
+#   Every gate that could be relaxed by a mode - the testing-skip matrix below, the
+#   attestation exemption in bin/fm-attestation-lib.sh - is unchanged or tightened by
+#   it. In particular the attestation exemption still reads the REGISTRY, never this
+#   field, because state/<id>.meta sits in the directory a worker appends its own
+#   status lines to: a worker that could write `mode=direct-PR` into its own record
+#   would excuse its own missing-pipeline check. That library reads this field only
+#   to WITHDRAW the registry's exemption when a task says it ran the pipeline, which
+#   a forged value can only ever cost a merge by, never gain one.
+#
+#   Recorded in state/<id>.meta as the ordinary `mode=` line, so every reader of that
+#   field - the pipeline view, both snapshots, teardown's unlanded-work test, the
+#   timeline ledger, bin/fm-merge-local.sh, and the worker's own definition of done
+#   through --apply-testing-skip below - follows the task rather than the project with
+#   no second field to teach them. Refused on a scout and a secondmate, neither of
+#   which delivers a change for a mode to describe.
+#
 #   captain's testing skips, orthogonal to delivery mode and yolo. THIS IS THE
 #   ONE PLACE A TESTING SKIP IS AUTHORIZED: the flag is passed here and nowhere
 #   else, and this script both mints the authorization and rewrites the worker's
@@ -143,7 +169,9 @@
 # is still that task's before it terminates anything in it.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # followed by " local_skip=on" and/or " ci_skip=on" only when a testing skip is active.
-# mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
+# mode/yolo are resolved per-project from data/projects.md for ship/scout tasks,
+# and mode alone may be overridden for one task with --mode, which appends
+# " (--mode override)" to that line so the dispatch says so out loud;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
 
@@ -196,11 +224,13 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+MODE_ARG=
 fm_testing_skip_reset
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+MODE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -213,6 +243,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      mode) MODE_ARG=$a; MODE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -230,6 +261,8 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --mode) want_value=mode ;;
+    --mode=*) MODE_ARG=${a#--mode=}; MODE_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -238,6 +271,25 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$MODE_SET" -eq 0 ] || [ -n "$MODE_ARG" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
+# Validated against the same three names bin/fm-project-mode.sh resolves to. That
+# script WARNS and falls back to no-mistakes on an unknown mode, because a registry
+# typo must not silently drop a project's gate; here the captain is naming one mode
+# for one dispatch, so an unrecognised name is a typo in this command and refusing
+# it costs nothing but a re-run.
+case "$MODE_ARG" in
+  ''|no-mistakes|direct-PR|local-only) ;;
+  *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE_ARG')" >&2; exit 1 ;;
+esac
+# Argument-only, like the testing-skip rules below, so it costs no filesystem or
+# backend work. Both refusals are for the same reason the skips refuse them: a
+# delivery mode describes how a finished CHANGE reaches main, and neither of these
+# delivers one. A secondmate is not a delivery at all, and mode=secondmate in its
+# record is what marks the record as a secondmate's. A scout's deliverable is a
+# report, so the field decides nothing for it - but the pipeline view does draw
+# stages from it, so an override would put a delivery shape on screen that no part
+# of that task will ever take.
+[ -z "$MODE_ARG" ] || [ "$KIND" = ship ] || { echo "error: --mode applies only to a ship task: a $KIND delivers no change, so it has no delivery mode to override" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -359,6 +411,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  # One --mode applies to every pair, like the axes above. Each re-exec applies it
+  # to its own project, so a batch that spans projects is dispatching them all as
+  # that one shape deliberately.
+  [ -z "$MODE_ARG" ] || shared_args+=(--mode "$MODE_ARG")
   # The single validated skip flag applies to every pair in the batch, exactly
   # like --harness/--model/--effort. Each re-exec re-validates it against its own
   # project's delivery mode, so one unsuitable project fails its pair alone.
@@ -761,6 +817,7 @@ fi
 # testing-skip validation below can refuse an unsuitable combination without
 # leaving an orphaned window behind.
 SECONDMATE_PROJECTS=
+MODE_OVERRIDDEN=0
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
@@ -770,6 +827,17 @@ else
   read -r MODE YOLO <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
+  # The per-task override lands HERE, after the registry answered, so everything
+  # downstream - the testing-skip matrix, the brief rewrite, the meta line, and
+  # through it every reader of that field - sees one resolved mode and never has to
+  # know which of the two sources produced it. yolo is untouched: it is approval
+  # authority, a genuinely per-project posture, and nothing about the shape of one
+  # task's delivery changes who approves it.
+  if [ -n "$MODE_ARG" ] && [ "$MODE_ARG" != "$MODE" ]; then
+    echo "note: $PROJ_NAME is registered $MODE; this task is dispatched --mode $MODE_ARG" >&2
+    MODE=$MODE_ARG
+    MODE_OVERRIDDEN=1
+  fi
 fi
 
 # Testing-skip validation, part 2: which skip a delivery mode can honour. Each
@@ -1452,6 +1520,14 @@ META_WINDOW=$T
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   echo "mode=$MODE"
+  # Provenance for the line above, and the ONLY thing bin/fm-attestation-lib.sh
+  # withdraws the registry's direct-PR exemption on. A disagreement between this
+  # record and the registry is not enough on its own: a project re-registered
+  # after dispatch disagrees too, and so does a hand-made record, and neither is
+  # a task the captain dispatched under another mode. Written only when --mode
+  # actually changed the answer, so an ordinary dispatch's record is byte-
+  # identical to one from before this flag existed.
+  [ "$MODE_OVERRIDDEN" -eq 0 ] || echo "mode_override=on"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
   # The one durable record of WHEN this task was dispatched. The file's mtime
@@ -1572,4 +1648,5 @@ spawn_send_key "$T" Enter
 SKIP_SUMMARY=
 [ "$LOCAL_SKIP" = off ] || SKIP_SUMMARY="${SKIP_SUMMARY} local_skip=on"
 [ "$CI_SKIP" = off ] || SKIP_SUMMARY="${SKIP_SUMMARY} ci_skip=on"
+[ "$MODE_OVERRIDDEN" -eq 0 ] || SKIP_SUMMARY="${SKIP_SUMMARY} (--mode override)"
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT$SKIP_SUMMARY"
