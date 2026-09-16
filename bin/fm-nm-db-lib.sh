@@ -38,8 +38,22 @@
 # which maps to the same verdicts. Nothing here invents a fact the database does
 # not state.
 #
+# WHERE A RUN LIVES IS ITS OWN FACT, not the task's. `no-mistakes axi status`
+# and `no-mistakes axi answer` both refuse outside a git repository, so every
+# caller has to be inside one before it asks, and the obvious directory - the
+# task's recorded project - is wrong whenever the pipeline was pointed somewhere
+# else. A task that raises its PR against an upstream repository runs the
+# pipeline in a scratch clone under its own temp root, and `repos.working_path`
+# records THAT, not the project. Verified 2026-09-16 on branch
+# `fm/nm-upstream-port-review-conversation-g3`: all eight of its runs are
+# recorded against `.../scratchpad/nmpr-g3/upstream-clone`, so a reader keyed on
+# the task's project found none of them and a viewer reported the task as having
+# no pipeline at all. fm_nm_db_working_path is the one owner of that answer, so
+# no caller repeats the join.
+#
 # Functions, all setting FM_NM_DB_REASON to why they returned nothing:
 #   fm_nm_db_run_for_branch <db> <branch>   -> newest run id on that branch
+#   fm_nm_db_working_path <db> <run-id>     -> the directory that run ran in
 #   fm_nm_db_toon <db> <run-id>             -> that run's TOON on stdout
 #
 # Environment:
@@ -83,6 +97,30 @@ fm_nm_db_run_for_branch() {  # <db> <branch> -> run id, or empty
     return 1
   fi
   printf '%s' "$id"
+}
+
+fm_nm_db_working_path() {  # <db> <run-id> -> the run's repo directory, or empty
+  fm_nm_db_ready "$1" || return 1
+  local path
+  path=$(sqlite3 "file:$1?mode=ro" \
+    "SELECT COALESCE(p.working_path, '') FROM runs r JOIN repos p ON p.id = r.repo_id
+      WHERE r.id = '$(fm_nm_db_lit "$2")';" 2>/dev/null) || {
+    FM_NM_DB_REASON='database unreadable'
+    return 1
+  }
+  if [ -z "$path" ]; then
+    FM_NM_DB_REASON="no repository recorded for $2"
+    return 1
+  fi
+  # A directory that is gone is not a directory to run in. The scratch clones
+  # this answer most often names live under a task temp root that is deleted at
+  # teardown, so a caller told to cd there would fail where running where it
+  # already is would have worked.
+  if [ ! -d "$path" ]; then
+    FM_NM_DB_REASON="recorded repository no longer exists: $path"
+    return 1
+  fi
+  printf '%s' "$path"
 }
 
 fm_nm_db_toon() {  # <db> <run-id> -> TOON on stdout

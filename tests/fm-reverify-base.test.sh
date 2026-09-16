@@ -690,7 +690,7 @@ make_repo() {  # <slug> <base-value> <branch-value> [<branch test body>]
 #!/usr/bin/env bash
 pass() { printf 'ok - %s\n' "\$1"; }
 [ "\$(bash app.sh)" = "$base_value" ] || { printf 'not ok - app emits $base_value\n'; exit 1; }
-pass "app emits $base_value"
+pass "app emits $base_value" # fm-fixture-label
 EOF
   cat > "$dir/tests/constant.test.sh" <<'EOF'
 #!/usr/bin/env bash

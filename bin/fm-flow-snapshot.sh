@@ -169,9 +169,27 @@ run_bounded() {  # <seconds> <command...>
   fi
 }
 
-# The run index, and the ONLY read of the no-mistakes database. Four columns
-# plus the branch's run count, keyed on the primary checkout path and the
-# task's own fm/<id> branch.
+# The run index, the read that finds this task's pipeline run. Four columns plus
+# the branch's run count, keyed on the task's own fm/<id> branch and nothing
+# else.
+#
+# THE BRANCH IS THE WHOLE KEY. This used to require `repos.working_path` to
+# equal the task's recorded project as well, on the reasoning that two projects
+# could hold an identically named branch. They cannot: `fm/<task-id>` carries a
+# unique task id by construction, so the branch alone already distinguishes
+# them, and the extra predicate only ever removed true rows. It removed them on
+# 2026-09-16, when the captain watched a task on its EIGHTH run drawn as having
+# no pipeline run at all: it raises its PR against an upstream repository, so
+# the pipeline runs in a scratch clone and `working_path` records that clone
+# rather than the project. bin/fm-nm-db-lib.sh's header carries the evidence and
+# owns the read of where a run actually lives.
+#
+# The count and the previous run's end are scoped by branch alone for the same
+# reason, and it matters for exactly this shape: those eight runs are spread
+# across TWO `repos` rows, because the worker was respawned into a different
+# scratch clone partway through, so scoping either to the newest run's repo
+# would have called the eighth run #5 and started its building phase at the
+# wrong run's last write.
 #
 # Every fact that reaches the screen is read afterwards through
 # `no-mistakes axi status --run <id>`, the tool's documented CLI. step_results
@@ -196,7 +214,7 @@ run_index_has() {  # <column> -> 0 when the runs table has it
   return 1
 }
 
-run_index() {  # <project-path> <branch> -> "<id>|<status>|<updated_at>|<created_at>|<count>|<prev_ended>|<head>|<worktree>|<default_branch>|<error>" or empty
+run_index() {  # <branch> -> "<id>|<status>|<updated_at>|<created_at>|<count>|<prev_ended>|<head>|<worktree>|<default_branch>|<error>" or empty
   [ -f "$NM_DB" ] || return 0
   command -v sqlite3 >/dev/null 2>&1 || return 0
   # created_at is read as well as updated_at because it is the one machine
@@ -204,9 +222,7 @@ run_index() {  # <project-path> <branch> -> "<id>|<status>|<updated_at>|<created
   # the building step. `no-mistakes axi status` states no such time.
   #
   # The fifth column is how many runs this branch has had, which is the run
-  # number the view puts beside the agent. It is counted in the SAME statement,
-  # scoped by r.repo_id rather than by the branch name alone, so two projects
-  # holding an identically named branch never share a count.
+  # number the view puts beside the agent. It is counted in the SAME statement.
   #
   # The sixth column is when the run BEFORE this one ended - its last write -
   # which is where this run's building phase starts: the captain's rule is that
@@ -228,17 +244,14 @@ run_index() {  # <project-path> <branch> -> "<id>|<status>|<updated_at>|<created
   fi
   sqlite3 "file:$NM_DB?mode=ro" \
     "SELECT r.id, r.status, r.updated_at, r.created_at,
-            (SELECT COUNT(*) FROM runs c
-              WHERE c.repo_id = r.repo_id AND c.branch = r.branch),
+            (SELECT COUNT(*) FROM runs c WHERE c.branch = r.branch),
             COALESCE((SELECT c.updated_at FROM runs c
-                       WHERE c.repo_id = r.repo_id AND c.branch = r.branch
-                         AND c.created_at < r.created_at
+                       WHERE c.branch = r.branch AND c.created_at < r.created_at
                        ORDER BY c.created_at DESC LIMIT 1), 0),
             COALESCE(r.head_sha, ''), $wt_col,
             COALESCE(p.default_branch, 'main'), COALESCE(r.error, '')
        FROM runs r JOIN repos p ON p.id = r.repo_id
-      WHERE p.working_path = '$(printf '%s' "$1" | sed "s/'/''/g")'
-        AND r.branch = '$(printf '%s' "$2" | sed "s/'/''/g")'
+      WHERE r.branch = '$(printf '%s' "$1" | sed "s/'/''/g")'
       ORDER BY r.created_at DESC LIMIT 1;" 2>/dev/null | head -1
 }
 
@@ -633,10 +646,13 @@ attribute_models() {  # <actives-json> <sessions-json> <now-epoch>
 # That is what the captain saw as `unreadable: axi status failed (exit 1)` on
 # every row at once, from a view opened in the home directory.
 #
-# The task's own recorded project path is the repository the run belongs to -
-# it is the same value the run index above is keyed on - so the read is done
-# from there. The subshell keeps the change local: this collector reads several
-# tasks in one pass and must not carry one task's directory into the next.
+# The repository the RUN belongs to is where the read is done, and the run's own
+# record is what names it: a task that points the pipeline at another repository
+# runs it in a scratch clone, which is not the task's project. The task's
+# project is the fallback for a run whose recorded directory is gone.
+# bin/fm-nm-db-lib.sh owns that resolution. The subshell keeps the change local:
+# this collector reads several tasks in one pass and must not carry one task's
+# directory into the next.
 #
 # The diagnosis is on STDOUT, not stderr. Stderr carries only the version-update
 # banner, which is written on every call including the ones that work, so a
@@ -653,9 +669,11 @@ attribute_models() {  # <actives-json> <sessions-json> <now-epoch>
 # to do than run where we already are, which is exactly what this did before and
 # is no worse. What it must never do is `cd` nowhere silently and call that the
 # project, so the two cases are written out rather than leaning on `cd ... ||`.
-axi_read() {  # <project-path> <run-id> <stderr-file>
-  if [ -d "$1" ]; then
-    ( cd "$1" && run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$2" 2>"$3" )
+axi_read() {  # <fallback-dir> <run-id> <stderr-file>
+  local dir
+  dir=$(fm_nm_db_working_path "$NM_DB" "$2") || dir=$1
+  if [ -d "$dir" ]; then
+    ( cd "$dir" && run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$2" 2>"$3" )
   else
     run_bounded "$NM_TIMEOUT" no-mistakes axi status --run "$2" 2>"$3"
   fi
@@ -813,7 +831,7 @@ agent_json() {  # <task-json>
   default_branch=main
   local collect_ok=true collect_reason='' collect_source=axi
 
-  idx=$(run_index "$project" "$branch")
+  idx=$(run_index "$branch")
   if [ -z "$idx" ]; then
     collect_reason='no pipeline run for this branch'
   else
@@ -862,14 +880,19 @@ agent_json() {  # <task-json>
       # must NOT fall back to the last known state or to pending: pending reads
       # as "not started yet", which is a different claim from "we could not
       # find out", and that claim is only made when BOTH sources fail.
-      local db_toon
-      if db_toon=$(fm_nm_db_toon "$NM_DB" "$run_id"); then
-        axi=$db_toon
+      # Through a FILE, not a command substitution. The library states why it
+      # returned nothing in FM_NM_DB_REASON, and a substitution runs in a
+      # subshell, so that assignment dies with it and the captain is handed a
+      # bare `db: ` where the reason should be.
+      local db_out="${TMPDIR:-/tmp}/fm-flow-db.$$.$id"
+      if fm_nm_db_toon "$NM_DB" "$run_id" > "$db_out" 2>/dev/null; then
+        axi=$(cat "$db_out")
         collect_source=db
       else
         collect_ok=false
-        collect_reason="$why; db: $FM_NM_DB_REASON"
+        collect_reason="$why; db: ${FM_NM_DB_REASON:-no reason recorded}"
       fi
+      rm -f "$db_out"
     fi
     rm -f "$axi_err"
     if [ "$collect_ok" = true ]; then
