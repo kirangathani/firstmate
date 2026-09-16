@@ -150,9 +150,10 @@ status_is_paused_or_captain_held() {  # <status-line>
 #
 #   [t=1789580411] needs-decision [key=api-shape]: which shape?
 #
-# This is the ONE statement of that token's grammar; bin/fm-brief.sh's status
-# protocol is the template crews copy, and docs/latency-ledger.md says what the
-# time is used for. It sits BEFORE the verb rather than after the note because
+# This is the ONE statement of that token's grammar, and bin/fm-brief.sh's
+# status protocol is the template crews copy. The time is there so firstmate's
+# own records can say how long it took to answer a crew, which nothing before
+# this could derive. It sits BEFORE the verb rather than after the note because
 # the note is the only free-text cell on the line, and a trailing field would
 # have to be delimited out of arbitrary prose; epoch seconds carry no colon, so
 # a leading token also cannot disturb the "<verb>: <note>" split below.

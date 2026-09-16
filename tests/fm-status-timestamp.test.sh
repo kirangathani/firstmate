@@ -165,6 +165,10 @@ test_brief_template_carries_the_stamp() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" stamp-t1 proj >/dev/null
   brief="$home/data/stamp-t1/brief.md"
   assert_present "$brief" "fm-brief.sh wrote no brief"
+  # The literal the brief must carry: the crew evaluates $(date +%s) at report
+  # time, so this assertion is about the UNEXPANDED text and the single quotes
+  # are the point.
+  # shellcheck disable=SC2016
   assert_grep '[t=$(date +%s)] {state}: {one short line}' "$brief" \
     "the ship brief's status template lost the report-time stamp"
   # The stamp must be UNEXPANDED in the brief: the crew evaluates it at report
