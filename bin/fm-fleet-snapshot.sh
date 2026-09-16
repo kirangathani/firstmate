@@ -29,6 +29,11 @@
 #     endpoint.exists is the cheap backend endpoint-presence read.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
+#     pr is the ONE answer to whether this task has a PR and which one: {url,
+#     source}, resolved from the `pr=` in the task's own state/<id>.meta and from
+#     nothing else, with source "meta" when it is recorded and "absent" when it
+#     is not. Never derived from a crewmate's status prose - see the comment at
+#     that read.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   secondmate_current: {records[],total,shown,truncated} - bounded current summaries
 #     for registered secondmates, selected from validated structured state inside
