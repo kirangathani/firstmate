@@ -1778,9 +1778,11 @@ expectCI(sup({ main_moved: null, new_commits: null, reason: "the run has no copy
   if (premergeVerdict(merged) !== "merged") say(`a merged PR read as ${premergeVerdict(merged)}`);
   if (premergeVerdict(closed) !== "closed") say(`a closed PR read as ${premergeVerdict(closed)}`);
 
-  // A lifecycle that could not be read is said, not drawn clean: an empty
-  // pre-merge cell reads as "not reached", which is a different claim from
-  // "nobody could find out whether this is still open".
+  // A lifecycle the collector LOOKED FOR and could not read is said, not drawn
+  // clean: an empty pre-merge cell reads as "not reached", which is a different
+  // claim from "nobody could find out whether this is still open". The
+  // collector states that by writing the key with an empty value, which every
+  // one of its unread reasons does.
   const unread = landed("", "unread-state");
   const ru = rowsFor(unread);
   if (ru.words[PRE] !== "not read") say(`an unread PR state drew "${ru.words[PRE]}"`);
@@ -1788,6 +1790,31 @@ expectCI(sup({ main_moved: null, new_commits: null, reason: "the run has no copy
   if (!ru.header.includes("0 ready to merge")) say(`the header counted a PR of unknown state: ${ru.header}`);
 
   if (premergeVerdict(unread) !== "unknown") say(`an unread PR state read as ${premergeVerdict(unread)}`);
+
+  // And the other direction, which is a DIFFERENT fact from the one above: a
+  // document with NO pr_state key at all makes no claim either way - it comes
+  // from a collector that never asked - so it falls through to the checks
+  // rather than reporting a read that never happened as a failed one. Both
+  // halves are pinned here because one expression reading `pr_state ?? ""`
+  // silently re-conflates them, which is what it did before 2026-09-16.
+  {
+    const noKey = { ...live, id: "no-state-key", ci: { ...live.ci, head: RUN_HEAD, superseded: null } };
+    delete noKey.ci.pr_state;
+    if ("pr_state" in noKey.ci) say("the absent-key case still carries the key");
+    const rn = rowsFor(noKey);
+    if (premergeVerdict(noKey) !== "ready") say(`an absent PR state read as ${premergeVerdict(noKey)}`);
+    if (rn.words[PRE] !== "your word") say(`an absent PR state drew "${rn.words[PRE]}"`);
+    if (!rn.header.includes("1 ready to merge")) say(`the header did not count a green PR of no stated state: ${rn.header}`);
+    // A null value is no claim either, for the same reason: the collector
+    // writes a string or nothing, so a null can only come from a hand-written
+    // document and says as little as an absent key.
+    const nulled = { ...noKey, id: "null-state", ci: { ...noKey.ci, pr_state: null } };
+    if (premergeVerdict(nulled) !== "ready") say(`a null PR state read as ${premergeVerdict(nulled)}`);
+    // The terminal states are still terminal on the same document shape, so
+    // falling through to the checks can never swallow a merged PR.
+    const mergedNoOthers = { ...noKey, id: "merged-again", ci: { ...noKey.ci, pr_state: "MERGED" } };
+    if (premergeVerdict(mergedNoOthers) !== "merged") say(`a merged PR read as ${premergeVerdict(mergedNoOthers)} on that shape`);
+  }
 
   // And the whole point: a merged PR is terminal whatever its checks did, so
   // the readiness answer never falls through to them.

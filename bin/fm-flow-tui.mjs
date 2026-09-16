@@ -915,18 +915,34 @@ export function ciTally(agent) {
 //
 //   merged / closed  the PR's own lifecycle, from GitHub. Terminal: there is
 //                    nothing left to decide, whatever the checks say.
-//   unknown          a recorded PR whose lifecycle could not be read. Said
-//                    plainly rather than drawn as a clean cell, because a
-//                    pre-merge box with nothing in it reads as "not reached".
+//   unknown          a recorded PR whose lifecycle the collector LOOKED FOR and
+//                    could not read. Said plainly rather than drawn as a clean
+//                    cell, because a pre-merge box with nothing in it reads as
+//                    "not reached".
 //   ready            every check passed on the head that will land AND GitHub
 //                    reports the PR open. Only then.
 //   pending          not reached: no PR, or its checks are not a pass yet.
+//
+// A `pr_state` that is PRESENT and empty is not the same fact as one that is
+// ABSENT, and conflating them is what `?? ""` used to do here.
+// Present-and-empty is the collector's own statement that it looked and got
+// nothing back, which is the "unknown" above. An absent key is no claim either
+// way - it comes from a document whose collector never asked the question - so
+// it falls through to the checks rather than reporting a read that never
+// happened as a failed one.
+// The distinction is observable in hand-written documents only:
+// bin/fm-flow-snapshot.sh has exactly two constructors of the `ci` object and
+// both always write the key, `CI_EMPTY` baking in `pr_state:""` for every
+// unread reason and `ci_json` passing it explicitly, so a collected document
+// can never carry an absent one.
 export function premergeVerdict(agent) {
-  const state = String(agent?.ci?.pr_state ?? "").toUpperCase();
+  const raw = agent?.ci?.pr_state;
+  const state = String(raw ?? "").toUpperCase();
   if (state === "MERGED") return "merged";
   if (state === "CLOSED") return "closed";
   if (ciVerdict(agent) !== "ready") return "pending";
-  return state === "OPEN" ? "ready" : "unknown";
+  if (state === "OPEN") return "ready";
+  return raw === undefined || raw === null ? "ready" : "unknown";
 }
 
 // The final box is the pre-merge check: the base branch's own assertions run

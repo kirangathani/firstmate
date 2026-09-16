@@ -508,8 +508,10 @@ Guarantees the renderer is entitled to rely on:
 - `run.head` is the run's own head commit from the daemon's record, and `ci.head` is the commit GitHub reports the PR's checks for, read in the same call as the rollup.
   They differ exactly when the checks describe a head the run has not yet pushed.
 - `ci.pr_state` is the PR's OWN lifecycle as GitHub reports it - `OPEN`, `MERGED` or `CLOSED` - read in the same call as the rollup and the head.
-  Empty means it was not read: under `--no-ci`, for a link the PR parser refuses, for a failed or timed-out read, and for a reply that carried no such field.
-  Empty is never read as open, because a merged PR's checks stay green forever and a check tally alone cannot tell a landed PR from one still waiting.
+  Present and empty means the collector looked and got nothing back: under `--no-ci`, for a link the PR parser refuses, for a failed or timed-out read, and for a reply that carried no such field.
+  Present and empty is never read as open, because a merged PR's checks stay green forever and a check tally alone cannot tell a landed PR from one still waiting.
+  The key being ABSENT is a different fact and makes no claim either way: it comes from a document whose collector never asked the question, and the renderer then falls through to the checks rather than reporting a read that never happened as a failed one.
+  The collector always writes the key, so only a hand-written document can carry an absent one: `bin/fm-flow-snapshot.sh` has exactly two constructors of the `ci` object, and `CI_EMPTY` bakes in `pr_state:""` for every unread reason while `ci_json` passes it explicitly.
   See "A merged or closed PR is not the captain's decision" below for what is drawn from it.
 - A task's PR reaches this document from `bin/fm-fleet-snapshot.sh`, which resolves it from the `pr=` in the task's own `state/<id>.meta` and from nothing else, and every cell of a row reads that one value - including the end of the `building` phase, which asks the resolved link rather than re-reading the record itself.
   A crewmate's status log is not a source: it is free prose, so grepping it for a PR link answered with the FIRST link it contained, which on a task that opens several PRs in sequence is the one that has already landed.
@@ -746,7 +748,8 @@ The pre-merge cell and the header's ready-to-merge count both read it, so a row 
 |---|---|---|---|
 | `MERGED` | green `merged` | no | the merge is what this box was waiting for, so it reports it |
 | `CLOSED` | `closed` / `not merged`, in the unknown colour | no | not a check failure and not a pass, so it gets neither colour and the words say what happened |
-| not read, with every check green | `not read`, in the unknown colour | no | an empty cell reads as "not reached", which is a different claim from "nobody could find out whether this is still open" |
+| present and empty, with every check green | `not read`, in the unknown colour | no | the collector looked and got nothing back, and an empty cell reads as "not reached", which is a different claim from "nobody could find out whether this is still open" |
+| absent, with every check green | amber `your word` | yes | no claim either way, from a document whose collector never asked, so the checks decide as they always did |
 | `OPEN`, with every check green on the head that will land | amber `your word` | yes | the only state that is a decision |
 | anything, with checks that are not a pass | empty, `pending` | no | unchanged |
 
