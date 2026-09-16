@@ -386,15 +386,21 @@ fm_session_lock_owned() {
 # two version-named processes, and recording the daemon is what made ownership
 # depend on a process Claude Code restarts on every auto-update.
 fm_session_harness_pid() {
-  local pid=${1:-$$} i=0 marker
+  local pid=${1:-$$} i=0 found
   # Fast path: the harness's own marker, validated. It is consulted before the
   # walk because it is independent of how the harness process happens to be
   # NAMED: the incident's session processes were called `2.1.272`, and a future
   # launch shape could be unrecognisable to the predicate below while the marker
   # still identifies the session exactly. The walk remains the answer for every
   # harness that sets no marker.
-  if marker=$(fm_session_marker_harness_pid "$pid"); then
-    printf '%s\n' "$marker"
+  # The local is deliberately not called `marker`: bin/fm-wake-lib.sh carries a
+  # `# shellcheck source=` directive for this library, so shellcheck follows the
+  # chain into here from files that source fm-wake-lib.sh inside a subshell, and
+  # a name shared with one of THEIR variables is reported against them. A local
+  # called `marker` here put three SC2031 findings on tests/fm-afk-launch.test.sh,
+  # a file this change never touched.
+  if found=$(fm_session_marker_harness_pid "$pid"); then
+    printf '%s\n' "$found"
     return 0
   fi
   while [ "$i" -lt "$FM_SESSION_LOCK_ANCESTRY_DEPTH" ]; do
