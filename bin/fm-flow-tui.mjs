@@ -239,6 +239,30 @@ export const LOCAL_SKIP_STAGES = new Set(["intent", "rebase", "review", "test", 
 // wedged worker and a pipeline that has not started yet look like.
 export const isDirectPR = (agent) => agent?.mode === "direct-PR";
 
+// A RECORD THAT REALITY REFUTES LOSES. Both reasons above say the same thing
+// about the world - no validation pipeline runs for this task - so a pipeline
+// run the collector actually READ for this branch is not a detail beside them,
+// it is the claim being false. The row then draws the stages the run reports
+// and nothing is overridden.
+//
+// This is the opposite of inferring the mode from an ABSENT run, which the
+// comment above rightly refuses: absence is also what a wedged worker and a
+// pipeline that has not started yet look like, so it says nothing. A run that
+// was read, with steps on it, says something and nothing else has to be
+// guessed. `collection.ok` false is excluded for the same reason: a read that
+// failed observed nothing, so it refutes nothing.
+//
+// The captain watched the two disagree on 2026-09-16 and the record win: a task
+// live on its eighth run, at the review step, drawn with intent, rebase,
+// review, test, docs and lint all `skipped`, because its project ships
+// direct-PR while its instructions sent it through the pipeline against another
+// repository. bin/fm-spawn.sh --mode is how that dispatch now records what it
+// actually is; this is what the view does about a record already written.
+const ranThePipeline = (agent) =>
+  agent?.run?.present === true &&
+  agent?.collection?.ok !== false &&
+  (agent.steps ?? []).some((s) => LOCAL_SKIP_STAGES.has(s?.step));
+
 // What authorised the short journey this row draws, named in the title so the
 // skipped cells are never a mystery. The delivery mode comes first because it
 // is the reason the stages are gone; a testing skip is a separate axis and is
@@ -246,7 +270,9 @@ export const isDirectPR = (agent) => agent?.mode === "direct-PR";
 // captain can match what is on screen against what they signed.
 export function skipAuthority(agent) {
   const parts = [];
-  if (isDirectPR(agent)) parts.push("direct-PR");
+  // Not while a run of its own is on the row: the word explains stages that are
+  // missing, and under a real pipeline run none of them are.
+  if (isDirectPR(agent) && !ranThePipeline(agent)) parts.push("direct-PR");
   const s = skipsOf(agent);
   if (s.local) parts.push("--local-skip");
   if (s.ci) parts.push("--ci-skip");
@@ -257,6 +283,7 @@ export function skipAuthority(agent) {
 // header's `skipped` legend is shown for.
 export const drawsSkippedStages = (agent) =>
   (isDirectPR(agent) || skipsOf(agent).local) &&
+  !ranThePipeline(agent) &&
   STEPS.some((spec) => LOCAL_SKIP_STAGES.has(spec.key));
 
 export function skipsOf(agent) {
@@ -620,6 +647,9 @@ function reworkFor(agent) {
 
 function skipOverride(agent, spec) {
   if (!skipsOf(agent).local && !isDirectPR(agent)) return null;
+  // Every branch below, `by hand` included: a run that pushed and opened the PR
+  // itself did not do it by hand either.
+  if (ranThePipeline(agent)) return null;
   if (LOCAL_SKIP_STAGES.has(spec.key)) return { state: "skipped", timer: "skipped" };
   if (spec.key === "pr") {
     // The pipeline did not push or open this PR, but somebody did: the brief

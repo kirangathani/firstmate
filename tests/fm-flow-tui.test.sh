@@ -793,6 +793,70 @@ assert_contains "$line" "PR unknown" \
   "a row that could not read its pipeline did not say the PR is unknown"
 pass "a PR nobody could look for is reported unknown, never as no PR"
 
+# --- a record reality refutes loses -----------------------------------------
+#
+# `direct-PR` and `local_skip` both say the same thing about the world: no
+# validation pipeline runs for this task. A pipeline run the collector actually
+# READ for this branch is therefore not a detail beside them, it is that claim
+# being false, and the row draws what the run reports.
+#
+# This is the opposite of inferring a mode from an ABSENT run, which the
+# renderer rightly refuses: absence is also what a wedged worker and a pipeline
+# that has not started yet look like. A run that was read says something.
+#
+# The captain watched the record win on 2026-09-16: a task live on its eighth
+# run, at the review step, drawn with intent, rebase, review, test, docs and
+# lint all `skipped`, because its project ships direct-PR while its instructions
+# sent it through the pipeline against another repository.
+
+PIPELINE_STEPS='[{"step":"intent","status":"completed","findings":0,"duration_ms":288},
+ {"step":"rebase","status":"completed","findings":0,"duration_ms":4066},
+ {"step":"review","status":"fixing","findings":1,"duration_ms":0},
+ {"step":"test","status":"pending","findings":0,"duration_ms":0},
+ {"step":"document","status":"pending","findings":0,"duration_ms":0},
+ {"step":"lint","status":"pending","findings":0,"duration_ms":0},
+ {"step":"push","status":"pending","findings":0,"duration_ms":0},
+ {"step":"pr","status":"pending","findings":0,"duration_ms":0},
+ {"step":"ci","status":"pending","findings":0,"duration_ms":0}]'
+
+# The two exported predicates, asked directly, so the assertion is over the
+# decision rather than over whichever line of the frame happens to spell it.
+# The agent travels in the environment, not in argv: importing the module runs
+# its own argument parsing, and a stray positional is an unknown argument to it.
+skip_predicates() {  # <agent-json> -> "<authority>|<legend>"
+  FM_TEST_AGENT="$1" node --input-type=module -e '
+    const m = await import(process.argv[1]);
+    const a = JSON.parse(process.env.FM_TEST_AGENT);
+    process.stdout.write((m.skipAuthority(a) || "-") + "|" +
+      (m.drawsSkippedStages(a) ? "legend" : "no-legend"));
+  ' "$TUI"
+}
+
+RAN_AGENT=$(agent_with ex6 "$PIPELINE_STEPS" '{"mode":"direct-PR"}')
+got=$(skip_predicates "$RAN_AGENT")
+[ "$got" = "-|no-legend" ] ||
+  fail "a task whose own run reports stages still claimed a short journey: $got"
+frame=$(render "$(snap "[$RAN_AGENT]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_not_contains "$frame" "by hand" \
+  "a PR the pipeline opened was reported as a hand-run delivery"
+# `fixing` is a LIVE step, so its box reads `running`. Under the override every
+# one of these stages would read `skipped` and no stage would be running at all.
+assert_contains "$frame" "running" \
+  "the review stage its own run reports as live was not drawn"
+pass "stages a real pipeline run reports are drawn, not overridden by a record that denies the run"
+
+# The other direction is untouched: a direct-PR task with no run of its own
+# still draws the short journey, because nothing refutes its record. An absent
+# run is also what a wedged worker looks like, so it is never read as evidence.
+NORUN_AGENT=$(agent_with ex7 '[]' '{"mode":"direct-PR"}')
+got=$(skip_predicates "$NORUN_AGENT")
+[ "$got" = "direct-PR|legend" ] ||
+  fail "a direct-PR task with no run of its own stopped drawing its short journey: $got"
+frame=$(render "$(snap "[$NORUN_AGENT]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$frame" "by hand" \
+  "a direct-PR task with no run stopped reporting its hand-run delivery"
+pass "a direct-PR task with no run of its own still draws the short journey its mode removes"
+
 # --- a captain-authorised skip is drawn as skipped, and said out loud --------
 #
 # The captain's words: a task dispatched with a skip flag "wouldn't actually run

@@ -850,6 +850,17 @@ It reads `by hand` instead.
 
 The header carries a blue `skipped` legend exactly when a skipped cell is on screen, and never otherwise.
 
+### A record reality refutes loses
+
+That fixes every dispatch from here on and nothing already written, so the renderer has one rule for the contradiction itself.
+`direct-PR` and `local_skip` both make the same claim about the world - no validation pipeline runs for this task - so a pipeline run the collector actually READ for this branch is not a detail beside that claim, it is the claim being false.
+The row then draws the stages the run reports, and the title stops naming `direct-PR` as what removed them, because none of them are missing.
+`push+PR` loses its `by hand` for the same reason: a run that pushed and opened the PR did not do it by hand.
+
+This is the opposite of inferring the mode from an ABSENT run, which the paragraph above rightly refuses.
+Absence is also what a wedged worker and a pipeline that has not started yet look like, so it says nothing; a run that was read, with steps on it, says something, and nothing else has to be guessed.
+A read that FAILED is excluded on the same test: it observed nothing, so it refutes nothing, and that row is drawn unknown as before.
+
 ## Cost
 
 Measured 2026-08-08 on this host, no-mistakes v1.37.0.
