@@ -880,14 +880,19 @@ agent_json() {  # <task-json>
       # must NOT fall back to the last known state or to pending: pending reads
       # as "not started yet", which is a different claim from "we could not
       # find out", and that claim is only made when BOTH sources fail.
-      local db_toon
-      if db_toon=$(fm_nm_db_toon "$NM_DB" "$run_id"); then
-        axi=$db_toon
+      # Through a FILE, not a command substitution. The library states why it
+      # returned nothing in FM_NM_DB_REASON, and a substitution runs in a
+      # subshell, so that assignment dies with it and the captain is handed a
+      # bare `db: ` where the reason should be.
+      local db_out="${TMPDIR:-/tmp}/fm-flow-db.$$.$id"
+      if fm_nm_db_toon "$NM_DB" "$run_id" > "$db_out" 2>/dev/null; then
+        axi=$(cat "$db_out")
         collect_source=db
       else
         collect_ok=false
-        collect_reason="$why; db: $FM_NM_DB_REASON"
+        collect_reason="$why; db: ${FM_NM_DB_REASON:-no reason recorded}"
       fi
+      rm -f "$db_out"
     fi
     rm -f "$axi_err"
     if [ "$collect_ok" = true ]; then

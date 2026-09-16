@@ -774,6 +774,25 @@ dashes=$(printf '%s\n' "$noci" | grep -o 'CI checks:.*')
   fail "an unevaluated row did not render dashes with its reason: $dashes"
 pass "a class that was never evaluated renders as a dash and says why"
 
+# "no PR" is a CLAIM, and it is only made when the row actually knows. A task's
+# PR reaches this row two ways - firstmate's own record of it, and the pipeline
+# run's own pr: field - so when the pipeline could not be read at all, neither
+# has answered and the honest word is that nobody knows.
+#
+# The captain watched this assert the opposite on 2026-09-16: a task with an
+# open upstream PR was drawn "(no PR)" because the collector had been looking
+# for its run in the wrong repository and found nothing at all to read it from.
+unknown=$(render "$(snap "[$(agent_with ex5 "$(steps_all pending)" \
+  '{"collection":{"ok":false,"reason":"axi status failed (exit 1)"}}')]")" |
+  sed 's/\x1b\[[0-9;]*m//g')
+line=$(printf '%s\n' "$unknown" | grep -o 'CI checks:.*')
+[ -n "$line" ] || fail "the unreadable row rendered no CI tally line at all"
+assert_not_contains "$line" "(no PR)" \
+  "a row that could not read its pipeline still claimed the task has no PR"
+assert_contains "$line" "PR unknown" \
+  "a row that could not read its pipeline did not say the PR is unknown"
+pass "a PR nobody could look for is reported unknown, never as no PR"
+
 # --- a captain-authorised skip is drawn as skipped, and said out loud --------
 #
 # The captain's words: a task dispatched with a skip flag "wouldn't actually run
