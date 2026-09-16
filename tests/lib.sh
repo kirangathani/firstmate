@@ -56,6 +56,15 @@ export FM_NM_QUESTIONS_DB="${FM_NM_QUESTIONS_DB:-/nonexistent/fm-tests-no-nm-dat
 # it explicitly for its own invocation, which wins over this baseline.
 unset CLAUDE_PID
 
+# Keep the self-latency ledger (bin/fm-latency-lib.sh) out of the operator's own
+# home. Several suites run the real hooks and the real fm-send/fm-ack/fm-peek,
+# and on a plain checkout those resolve to the captain's REAL data/latency.tsv,
+# so a suite run would write test invocations into the record the captain reads
+# as firstmate's live latency. Off for the whole process and every child; the
+# suite whose subject IS the ledger clears it for its own invocations, which
+# wins over this baseline.
+export FM_LATENCY_OFF=1
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
