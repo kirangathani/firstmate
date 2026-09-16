@@ -1520,6 +1520,14 @@ META_WINDOW=$T
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   echo "mode=$MODE"
+  # Provenance for the line above, and the ONLY thing bin/fm-attestation-lib.sh
+  # withdraws the registry's direct-PR exemption on. A disagreement between this
+  # record and the registry is not enough on its own: a project re-registered
+  # after dispatch disagrees too, and so does a hand-made record, and neither is
+  # a task the captain dispatched under another mode. Written only when --mode
+  # actually changed the answer, so an ordinary dispatch's record is byte-
+  # identical to one from before this flag existed.
+  [ "$MODE_OVERRIDDEN" -eq 0 ] || echo "mode_override=on"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
   # The one durable record of WHEN this task was dispatched. The file's mtime

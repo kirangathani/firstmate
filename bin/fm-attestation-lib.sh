@@ -61,13 +61,22 @@
 # Since 2026-09-16 bin/fm-spawn.sh's --mode can dispatch one task under a mode its
 # project is not registered for, which is the case this asymmetry has to answer: a
 # port to an upstream repository from a fork registered direct-PR runs the full
-# pipeline, so its PR carries the attestation on its own merits and needs no
-# exemption. Reading the meta only to WITHDRAW the registry's exemption is safe in
-# the same way this file's check-name mismatch already is: a forged value there can
-# only ever cost a merge, never gain one. The reverse override - a direct-PR task on
-# a project registered no-mistakes - deliberately gets no exemption, because
-# granting one from a worker-writable field is the direction that cannot be made
-# safe without a signature, and nothing has asked for it.
+# pipeline, so a failed attestation on ITS PR means the pipeline did not raise it,
+# which is the one thing that check exists to catch. Reading the meta only to
+# WITHDRAW the registry's exemption is safe in the same way this file's check-name
+# mismatch already is: a forged value there can only ever cost a merge, never gain
+# one. The reverse override - a direct-PR task on a project registered no-mistakes -
+# deliberately gets no exemption, because granting one from a worker-writable field
+# is the direction that cannot be made safe without a signature, and nothing has
+# asked for it.
+#
+# The withdrawal keys on the `mode_override=on` line bin/fm-spawn.sh writes when
+# --mode actually changed the answer, NOT on the record and the registry merely
+# disagreeing. Those are different facts, and only the first one names a task the
+# captain dispatched under another mode. A project re-registered after its tasks
+# were dispatched disagrees too, and so does a record written by hand or by a test
+# fixture; withdrawing on any of those would change the answer for tasks that never
+# used this flag at all.
 #
 # fm_attestation_authority <task-id> <meta-file> <config-dir> <fm-home> <bin-dir>
 #   Prints the newline-delimited authority lines that excuse that one check for
@@ -162,7 +171,7 @@ fm_signed_local_skip() {  # <task-id> <meta-file> <secret-file>
 
 fm_attestation_authority() {  # <task-id> <meta-file> <config-dir> <fm-home> <bin-dir>
   local id=$1 meta=$2 config=$3 home=$4 bindir=$5
-  local out='' secret mode yolo proj_path proj_name task_mode
+  local out='' secret mode yolo proj_path proj_name task_mode task_override
 
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
 
@@ -186,8 +195,9 @@ $(FM_HOME="$home" "$bindir/fm-project-mode.sh" "$proj_name")
 EOF_MODE
     : "$yolo"
     task_mode=$(grep '^mode=' "$meta" | tail -1 | cut -d= -f2- || true)
-    if [ "$mode" = direct-PR ] && [ "$task_mode" != direct-PR ] && [ -n "$task_mode" ]; then
-      fm_attestation_note "note: $proj_name is registered direct-PR, but this task's record says it was dispatched mode=$task_mode, so that registration does not excuse its missing pipeline attestation"
+    task_override=$(grep -cx 'mode_override=on' "$meta" || true)
+    if [ "$mode" = direct-PR ] && [ "$task_override" != 0 ] && [ "$task_mode" != direct-PR ]; then
+      fm_attestation_note "note: $proj_name is registered direct-PR, but this task was dispatched --mode $task_mode, so that registration does not excuse its missing pipeline attestation"
     elif [ "$mode" = direct-PR ]; then
       out="${out}${out:+
 }$proj_name is registered as a direct-PR project, whose PRs are raised without the pipeline by design"

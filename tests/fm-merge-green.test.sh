@@ -92,29 +92,15 @@ EOF
   printf '%s\n' "$case_dir"
 }
 
-# write_projects_registry <case_dir> <registry-mode> [<task-mode>]: the private
-# registry bin/fm-project-mode.sh resolves a delivery mode from.
-#
-# It brings every task record in the case into agreement by default, because that
-# is what a real dispatch produces: bin/fm-spawn.sh resolves the mode from this
-# same registry and writes it straight into state/<id>.meta. The case builder
-# above seeds them all `mode=no-mistakes` for the ordinary cases, so leaving them
-# alone here would have a direct-PR case silently exercise the one shape only
-# bin/fm-spawn.sh --mode can produce - a task dispatched under a mode its project
-# is not registered for, which withdraws that registration's attestation
-# exemption. Pass a third argument to build that shape deliberately.
+# write_projects_registry <case_dir> <mode>: the private registry
+# bin/fm-project-mode.sh resolves a delivery mode from.
 write_projects_registry() {
-  local case_dir=$1 mode=$2 task_mode=${3:-$2} meta
+  local case_dir=$1 mode=$2
   mkdir -p "$case_dir/fmhome/data"
   {
     printf '%s\n' '# Projects'
     printf -- '- project [%s] - test project (added 2026-09-08)\n' "$mode"
   } > "$case_dir/fmhome/data/projects.md"
-  for meta in "$case_dir"/state/*.meta; do
-    [ -f "$meta" ] || continue
-    sed "s|^mode=.*|mode=$task_mode|" "$meta" > "$meta.tmp"
-    mv "$meta.tmp" "$meta"
-  done
 }
 
 # write_pr_checks <case_dir> <pr-number> <tsv line...>: the rollup answer for

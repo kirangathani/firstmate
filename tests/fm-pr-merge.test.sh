@@ -1913,29 +1913,16 @@ mint_dispatch_token() {
     < "$case_dir/fmhome/config/ci-waiver-secret"
 }
 
-# write_projects_registry <case_dir> <registry-mode> [<task-mode>]: the private
-# fleet registry bin/fm-project-mode.sh resolves a delivery mode from.
-# make_case's project dir is always basenamed "project".
-#
-# It brings the task's OWN recorded mode into agreement by default, because that
-# is what a real dispatch produces: bin/fm-spawn.sh resolves the mode from this
-# same registry and writes it straight into state/<id>.meta. make_case seeds
-# every record `mode=no-mistakes` for the unrelated cases, so leaving it alone
-# here would have every attestation case silently exercise the one shape that
-# only bin/fm-spawn.sh --mode can produce - a task dispatched under a mode its
-# project is not registered for. Pass a third argument to build that shape
-# deliberately.
+# write_projects_registry <case_dir> <mode>: the private fleet registry
+# bin/fm-project-mode.sh resolves a delivery mode from. make_case's project dir
+# is always basenamed "project".
 write_projects_registry() {
-  local case_dir=$1 mode=$2 task_mode=${3:-$2} meta
+  local case_dir=$1 mode=$2
   mkdir -p "$case_dir/fmhome/data"
   {
     printf '%s\n' '# Projects'
     printf -- '- project [%s] - test project (added 2026-08-09)\n' "$mode"
   } > "$case_dir/fmhome/data/projects.md"
-  meta="$case_dir/state/task-x1.meta"
-  [ -f "$meta" ] || return 0
-  sed "s|^mode=.*|mode=$task_mode|" "$meta" > "$meta.tmp"
-  mv "$meta.tmp" "$meta"
 }
 
 # make_attestation_case <name> <mode> [<extra rollup line>...]: a case whose PR
@@ -1987,13 +1974,19 @@ test_direct_pr_project_merges_past_a_failed_attestation() {
 # fork registered direct-PR, RUNS the pipeline, so a failed attestation on its PR
 # means the pipeline did not raise it - the one thing this check exists to catch.
 # Without the withdrawal, the project's registration would merge it anyway.
+#
+# The trigger is the `mode_override=on` line the dispatch writes, not the record
+# and the registry disagreeing: every other case in this file disagrees too
+# (make_case seeds mode=no-mistakes and these cases register direct-PR) and must
+# keep its exemption, which is the distinction this case exists to hold.
 test_a_task_dispatched_under_the_pipeline_loses_the_registrations_exemption() {
   local case_dir rc
   case_dir=$(make_case attest-mode-override)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" c0ffee0000000000000000000000000000000004
   : > "$case_dir/gh-axi.log"
-  write_projects_registry "$case_dir" direct-PR no-mistakes
+  write_projects_registry "$case_dir" direct-PR
+  printf 'mode_override=on\n' >> "$case_dir/state/task-x1.meta"
   write_pr_checks "$case_dir" \
     $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts' \
     "$(attestation_failed_line)"
@@ -2007,23 +2000,25 @@ test_a_task_dispatched_under_the_pipeline_loses_the_registrations_exemption() {
   expect_code 1 "$rc" "attest-mode-override: a task dispatched under the pipeline must not merge on its project's direct-PR registration"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "attest-mode-override: the PR was merged despite the withdrawn exemption"
-  assert_grep 'dispatched mode=no-mistakes' "$case_dir/stderr" \
+  assert_grep 'dispatched --mode no-mistakes' "$case_dir/stderr" \
     "attest-mode-override: the refusal did not name the task record that withdrew the exemption"
   pass "a task dispatched under the pipeline cannot merge on its project's direct-PR registration"
 }
 
 # The other direction of the same asymmetry, and the reason the meta is read only
 # to withdraw. state/<id>.meta sits in the directory a worker appends its own
-# status lines to, so a worker CAN write this line; what it must never do is buy
-# an exemption with it. The registry says no-mistakes here, so the forged
-# `mode=direct-PR` grants nothing and the merge still refuses.
+# status lines to, so a worker CAN write both of these lines; what it must never
+# do is buy an exemption with them. The registry says no-mistakes here, so a
+# forged `mode=direct-PR` plus its override line grants nothing and the merge
+# still refuses.
 test_a_task_record_cannot_grant_an_exemption_its_project_does_not() {
   local case_dir rc
   case_dir=$(make_case attest-forged-mode)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" c0ffee0000000000000000000000000000000005
   : > "$case_dir/gh-axi.log"
-  write_projects_registry "$case_dir" no-mistakes direct-PR
+  write_projects_registry "$case_dir" no-mistakes
+  printf 'mode=direct-PR\nmode_override=on\n' >> "$case_dir/state/task-x1.meta"
   write_pr_checks "$case_dir" \
     $'CheckRun\tCOMPLETED\tSUCCESS\t-\t2026-09-09T15:26:32Z\t2026-09-09T15:33:28Z\tLint shell scripts' \
     "$(attestation_failed_line)"
