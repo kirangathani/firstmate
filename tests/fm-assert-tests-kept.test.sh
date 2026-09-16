@@ -2431,6 +2431,7 @@ test_every_assertion_label_in_the_suite_is_a_constant_string() {
   local offenders
   # The same lexical extraction bin/fm-assert-tests-kept.sh's extract_shell
   # performs, so this flags exactly what that gate would read as an identifier.
+  # shellcheck disable=SC2016 # the awk program is awk's, not shell's; nothing here expands.
   offenders=$(find "$ROOT/tests" -name '*.test.sh' -type f -print0 \
     | xargs -0 awk '
         /fm-fixture-label/ { next }
