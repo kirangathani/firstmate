@@ -285,6 +285,9 @@ The path's worker, automated gates, and captain approval remain authoritative:
 - **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
+The registry answers per project, but delivery mode is a property of the task, and one project can legitimately host tasks of two shapes: a port to an upstream repository runs the full pipeline while the fork it was dispatched from raises its own PRs by hand.
+Dispatch that task with `bin/fm-spawn.sh --mode <delivery-mode>`, which records the mode the task actually runs under so the pipeline view, the merge gates, and the worker's own instructions all follow the task; never re-register the project to change one task's shape.
+
 Testing skips are a third orthogonal axis that only the captain authorizes, never `yolo` and never a worker: `bin/fm-spawn.sh` is the one place a skip is passed, and its `--skip-testing`, `--local-skip`, `--ci-skip`, and `--all-testing-skip` are enforced by code and by a keyed signature rather than by an instruction a worker could decline.
 Prefer `--skip-testing`, which resolves to the most the project's delivery mode can honour; that one flag also rewrites the worker's own brief, so there is no second invocation to keep in agreement and a partially specified skip cannot produce an ordinary task.
 A worker can neither flag its own task nor obtain a signature for an unflagged one, no skip flag ever disables the kept-tests gate, and a skipped PR is always disclosed at merge.
@@ -313,7 +316,8 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 ### Validate
 
 For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
-The task worker that starts a no-mistakes run drives the pipeline and owns every attach through the next gate or outcome, always through `bin/fm-nm-attach.sh`, whose header owns why the raw `axi run`/`axi respond` is denied and how its one status line per returned hold is what wakes firstmate.
+The task worker that starts a no-mistakes run drives it to a terminal outcome by re-attaching after every returned hold, always through `bin/fm-nm-attach.sh`, whose header owns why the raw `axi run`/`axi respond` is denied and how its one status line per returned hold is what wakes firstmate.
+One attach covers one return, so nothing is attached once that line is appended and a run parked with no live attach is a stalled run that nothing will resume on its own.
 Firstmate never responds to a gate for a crew-owned run.
 
 A review finding is fixed by the worker in its own copy and pushed, which supersedes the parked run so a fresh cold review re-checks it; test, document, and lint fixes stay the pipeline's.

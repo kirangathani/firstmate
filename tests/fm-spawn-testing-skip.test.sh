@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# tests/fm-spawn-testing-skip.test.sh - behavior tests for bin/fm-spawn.sh's
-# testing-skip flags (--local-skip, --ci-skip, --all-testing-skip).
+# tests/fm-spawn-testing-skip.test.sh - behavior tests for the bin/fm-spawn.sh
+# flags that decide how one dispatch delivers: the testing skips (--local-skip,
+# --ci-skip, --all-testing-skip, --skip-testing) and the delivery mode (--mode).
+#
+# The two share this file because they are one decision. A testing skip is
+# accepted or refused BY the delivery mode, and --mode is what that matrix
+# resolves against, so a case for either has to build the same fixture: a
+# registry naming a mode, a real scaffolded brief, and a full spawn.
 #
 # The load-bearing case is (l): --local-skip must ENFORCE the skip, not request
 # it, so that test does not assert the shim exists - it runs the real thing
@@ -56,6 +62,21 @@
 #        worktree, terminal, or temp root exists
 #   (q6) a relaunch that forgets the flag names the authorized skip it is
 #        dropping, since the record is rewritten wholesale
+#
+# The delivery mode (--mode), which the registry answers per PROJECT while the
+# mode is a property of the TASK:
+#   (r1) an override records the mode it was dispatched under, and writes the
+#        worker the definition of done for THAT mode - which is the whole defect,
+#        because the brief's marker recorded only the skip, so an unflagged
+#        dispatch of an unflagged brief compared equal on the one axis it could
+#        see and left the other mode's instructions in place
+#   (r2) an unflagged dispatch still records the registry's answer, so the
+#        override is opt-in and nothing drifts without being asked for
+#   (r3) the override lands BEFORE the testing-skip matrix, so a skip is judged
+#        against the mode the task will actually run under
+#   (r4) an unrecognised mode refuses before any backend or worktree work
+#   (r5) --mode refuses on a scout and a secondmate, neither of which delivers a
+#        change for a delivery mode to describe
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -229,6 +250,32 @@ test_secondmate_refuses_a_skip_flag() {
   [ "$status" -ne 0 ] || fail "a secondmate spawn should refuse a skip flag"
   assert_contains "$out" "applies only to a ship task" "secondmate refusal did not name the ship-only rule"
   pass "a secondmate spawn refuses every testing-skip flag"
+}
+
+# (r5) A delivery mode describes how a finished CHANGE reaches main, and neither a
+# secondmate nor a scout delivers one - a secondmate is not a delivery at all, and
+# mode=secondmate in its record is what marks the record as a secondmate's, while a
+# scout's deliverable is a report. So --mode refuses on both, exactly as the skips
+# do, rather than writing a delivery shape onto a task that will never take one.
+test_a_scout_and_a_secondmate_refuse_a_mode_override() {
+  local out status
+  make_case sm-mode no-mistakes
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_HOME" FM_STATE_OVERRIDE="$CASE_HOME/state" \
+    FM_DATA_OVERRIDE="$CASE_HOME/data" FM_CONFIG_OVERRIDE="$CASE_HOME/config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux \
+    "$SPAWN" sm-mode "$CASE_HOME/sub" --secondmate --mode direct-PR 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a secondmate spawn should refuse --mode"$'\n'"$out"
+  assert_contains "$out" "applies only to a ship task" "the secondmate refusal did not name the rule"
+  assert_absent "$CASE_HOME/state/sm-mode.meta" "a refused secondmate spawn wrote a record"
+
+  make_case scout-mode no-mistakes
+  out=$(run_spawn scout-mode --scout --mode direct-PR)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout spawn should refuse --mode"$'\n'"$out"
+  assert_contains "$out" "applies only to a ship task" "the scout refusal did not name the rule"
+  assert_absent "$CASE_HOME/state/scout-mode.meta" "a refused scout spawn wrote a record"
+  pass "a scout and a secondmate both refuse a delivery-mode override"
 }
 
 # --- recorded state ---------------------------------------------------------
@@ -614,8 +661,104 @@ test_recorded_skips_read_back_through_their_owner() {
   pass "what the spawn records is what the flags' own owner reads back, in all three shapes"
 }
 
+# --- delivery mode (--mode) -------------------------------------------------
+
+# meta_mode <id>: the one delivery-mode line the dispatch recorded, read the way
+# bin/fm-teardown.sh and bin/fm-merge-local.sh read it.
+meta_mode() {
+  grep '^mode=' "$CASE_HOME/state/$1.meta" | cut -d= -f2-
+}
+
+# (r1) The defect this flag was added for, end to end. The fork of a project is
+# registered direct-PR because its own PRs are raised by hand; a port to the
+# upstream repository drives the full pipeline. Both halves of the dispatch have
+# to follow the task: the record every reader of that field consults, and the
+# instructions the worker actually reads.
+test_a_mode_override_records_and_briefs_the_mode_it_was_dispatched_under() {
+  local out got brief
+  make_case modeoverride direct-PR
+  arm_orca_success
+  brief="$CASE_HOME/data/modeoverride/brief.md"
+
+  # Born in the registry's shape, which is what makes the rewrite below a rewrite.
+  assert_grep 'ships **direct-PR**' "$brief" \
+    "the scaffold did not write the registry's own delivery mode"
+
+  out=$(run_spawn modeoverride --mode no-mistakes)
+  expect_code 0 $? "a --mode override should spawn"$'\n'"$out"
+
+  got=$(meta_mode modeoverride)
+  [ "$got" = no-mistakes ] || fail "the record says mode=$got, so every reader of that field still follows the project, not the task"
+  assert_contains "$out" "mode override" \
+    "the dispatch did not say out loud that it overrode the project's mode"
+  assert_grep '<!-- fm:delivery-mode no-mistakes -->' "$brief" \
+    "the brief does not record the delivery mode its dispatch was run under"
+  assert_grep 'Firstmate will then instruct you to run /no-mistakes' "$brief" \
+    "the worker was still told to raise the PR itself, on a task dispatched to run the pipeline"
+  assert_no_grep 'Do NOT run /no-mistakes' "$brief" \
+    "the brief kept the other mode's instruction not to run the pipeline"
+  pass "a --mode override reaches both the task's record and the worker's own definition of done"
+}
+
+# (r2) The other direction: the override is opt-in, so an unflagged dispatch of
+# the same project records exactly what the registry says and rewrites nothing.
+test_an_unflagged_dispatch_still_records_the_registrys_mode() {
+  local out got
+  make_case modedefault direct-PR
+  arm_orca_success
+  out=$(run_spawn modedefault)
+  expect_code 0 $? "an unflagged spawn should succeed"$'\n'"$out"
+  got=$(meta_mode modedefault)
+  [ "$got" = direct-PR ] || fail "an unflagged dispatch recorded mode=$got instead of the project's registered mode"
+  assert_not_contains "$out" "mode override" \
+    "an unflagged dispatch reported an override it was never asked for"
+  assert_grep 'ships **direct-PR**' "$CASE_HOME/data/modedefault/brief.md" \
+    "an unflagged dispatch changed the brief's delivery mode"
+  pass "an unflagged dispatch records the registry's mode and leaves the brief alone"
+}
+
+# (r3) Ordering. The matrix refuses --local-skip on direct-PR, because that mode
+# runs no local pipeline for a skip to remove. A task dispatched --mode direct-PR
+# must hit that same refusal even though its PROJECT is registered no-mistakes,
+# which is only true if the override lands before the matrix.
+test_the_override_is_what_the_testing_skip_matrix_judges() {
+  local out status
+  make_case modeorder no-mistakes
+  give_case_a_waiver_secret
+  out=$(run_spawn modeorder --mode direct-PR --local-skip)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--local-skip was accepted for a task dispatched --mode direct-PR"$'\n'"$out"
+  assert_contains "$out" "already runs no local pipeline" \
+    "the refusal was not the direct-PR row of the matrix, so the override landed after it"
+  assert_absent "$CASE_HOME/state/modeorder.meta" "a refused spawn wrote task metadata"
+  pass "a testing skip is judged against the mode the task will actually run under"
+}
+
+# (r4) An unrecognised mode is a typo in this one command, so it refuses rather
+# than falling back the way bin/fm-project-mode.sh does for a registry typo -
+# there the fallback keeps a stray edit from silently dropping a project's gate;
+# here there is nothing to protect and a re-run costs nothing.
+test_an_unrecognised_mode_refuses_before_any_backend_work() {
+  local out status
+  make_case modebogus no-mistakes
+  out=$(run_spawn modebogus --mode upstream-PR)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unrecognised --mode value was accepted"$'\n'"$out"
+  assert_contains "$out" "must be one of no-mistakes, direct-PR, local-only" \
+    "the refusal did not name the modes it accepts"
+  assert_absent "$CASE_HOME/state/modebogus.meta" "an unrecognised mode left a record behind"
+  assert_not_contains "$(cat "$CASE_LOG")" "worktree" "an unrecognised mode refused only after creating a worktree"
+
+  out=$(run_spawn modebogus --mode)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--mode with no value was accepted"$'\n'"$out"
+  assert_contains "$out" "requires a value" "--mode with no value did not say so"
+  pass "an unrecognised or valueless --mode refuses before any backend or worktree work"
+}
+
 test_refused_combinations
 test_secondmate_refuses_a_skip_flag
+test_a_scout_and_a_secondmate_refuse_a_mode_override
 test_recorded_skips_read_back_through_their_owner
 test_a_planted_temp_root_symlink_is_refused
 test_meta_records_only_the_flags_that_were_passed
@@ -629,3 +772,7 @@ test_ci_skip_without_a_secret_refuses
 test_local_skip_records_its_own_dispatch_authorization
 test_local_skip_without_a_secret_warns_but_still_spawns
 test_local_skip_cannot_be_run_around
+test_a_mode_override_records_and_briefs_the_mode_it_was_dispatched_under
+test_an_unflagged_dispatch_still_records_the_registrys_mode
+test_the_override_is_what_the_testing_skip_matrix_judges
+test_an_unrecognised_mode_refuses_before_any_backend_work
