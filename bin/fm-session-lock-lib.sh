@@ -26,7 +26,7 @@
 # watcher <- bash <- bash <- claude), so a parent-only check would fail for every
 # harness. Eight parents is the depth the adapters and docs/sessionstart-nudge.md
 # already record.
-FM_SESSION_LOCK_ANCESTRY_DEPTH=8
+FM_SESSION_LOCK_ANCESTRY_DEPTH=${FM_SESSION_LOCK_ANCESTRY_DEPTH:-8}
 
 # Known harness command names; extend when a new adapter is verified.
 # The same list in two forms, because the two questions are different. The regex
@@ -36,6 +36,21 @@ FM_SESSION_LOCK_ANCESTRY_DEPTH=8
 # the config directory every tool shell's arguments mention.
 FM_SESSION_HARNESS_RE='claude|codex|opencode|grok|^pi$'
 FM_SESSION_HARNESS_NAMES='claude codex opencode grok pi'
+
+# Environment variables in which a harness advertises the pid of the process
+# running THIS session, in the order they are consulted. Claude Code sets
+# CLAUDE_PID in every process it spawns for a session - tool shells, hooks, and
+# the status line - which is how a session can name its own process even when no
+# ancestor of it is recognisable by name. Extend this list only when another
+# harness's marker has been VERIFIED; .agents/skills/harness-adapters owns the
+# evidence.
+#
+# A marker is never believed on its own. It can be inherited STALE by a process
+# the harness did not spawn: a tmux server started by one session hands its
+# CLAUDE_PID to every pane opened later, including panes belonging to a
+# different session (verified 2026-09-15, scout report section 2.1). Every read
+# of it goes through fm_session_marker_names_pid below.
+FM_SESSION_HARNESS_PID_ENV='CLAUDE_PID'
 
 # --- process start-tick identity ---------------------------------------------
 # The kernel's own start time for a pid, in clock ticks since boot. It is the
@@ -112,6 +127,56 @@ fm_pid_ancestry_contains() {
     i=$((i + 1))
   done
   [ "$pid" = "$target" ]
+}
+
+# --- the harness's own claim about which process runs this session ------------
+# ONE validated reader for every marker in FM_SESSION_HARNESS_PID_ENV, used by
+# both the finder (fm_session_harness_pid) and the ownership resolver
+# (fm_session_lock_ownership), so a marker cannot be trusted on one path and
+# distrusted on the other.
+#
+# True when a marker names pid $1, walking ancestry from $2 (default: this
+# process). A marker is believed only when all four hold:
+#   - it is numeric;
+#   - it names the pid asked about;
+#   - that pid is alive;
+#   - that pid is a harness, and is this process or one of its ancestors.
+# The last two are what make a stale inherited marker harmless. Dropping the
+# ancestry check would make this cheaper - the marker alone would answer the
+# question with no ps forks at all - but it would also let a pane that merely
+# INHERITED another session's CLAUDE_PID claim ownership of that session's home,
+# which is the split brain this whole change exists to remove.
+fm_session_marker_names_pid() {
+  local target=$1 start=${2:-$$} var value
+  case "$target" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  for var in $FM_SESSION_HARNESS_PID_ENV; do
+    value=${!var:-}
+    case "$value" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ "$value" = "$target" ] || continue
+    kill -0 "$value" 2>/dev/null || continue
+    fm_session_pid_is_harness "$value" || continue
+    fm_pid_ancestry_contains "$value" "$start" || continue
+    return 0
+  done
+  return 1
+}
+
+# The pid a validated marker names, walking ancestry from $1, or failure when no
+# marker is set, or none of them survives validation.
+fm_session_marker_harness_pid() {
+  local start=${1:-$$} var value
+  for var in $FM_SESSION_HARNESS_PID_ENV; do
+    value=${!var:-}
+    if fm_session_marker_names_pid "$value" "$start"; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done
+  return 1
 }
 
 # --- what counts as a harness process ----------------------------------------
@@ -282,6 +347,17 @@ fm_session_lock_ownership() {
     printf 'missing\n'
     return 0
   fi
+  # There is deliberately NO marker shortcut here, though a marker naming the
+  # holder looks like one. Validating it means asking whether the marker is in
+  # this process's ancestry, and the marker would BE the holder, so the question
+  # is character-for-character the walk on the next line: the branch could only
+  # ever answer owned where that walk already does, at the cost of two extra
+  # process reads on the hottest path in this library. An UNVALIDATED marker
+  # would be cheaper and would answer more often, which is exactly the problem -
+  # it would hand a pane that merely inherited another session's CLAUDE_PID the
+  # verdict `owned` for that session's home. The marker earns its place on the
+  # acquisition side (fm_session_harness_pid), where the question is "which pid
+  # should I record?" rather than "is this recorded pid mine?".
   if fm_pid_ancestry_contains "$holder" "$start"; then
     printf 'owned\n'
     return 0
@@ -310,7 +386,23 @@ fm_session_lock_owned() {
 # two version-named processes, and recording the daemon is what made ownership
 # depend on a process Claude Code restarts on every auto-update.
 fm_session_harness_pid() {
-  local pid=${1:-$$} i=0
+  local pid=${1:-$$} i=0 found
+  # Fast path: the harness's own marker, validated. It is consulted before the
+  # walk because it is independent of how the harness process happens to be
+  # NAMED: the incident's session processes were called `2.1.272`, and a future
+  # launch shape could be unrecognisable to the predicate below while the marker
+  # still identifies the session exactly. The walk remains the answer for every
+  # harness that sets no marker.
+  # The local is deliberately not called `marker`: bin/fm-wake-lib.sh carries a
+  # `# shellcheck source=` directive for this library, so shellcheck follows the
+  # chain into here from files that source fm-wake-lib.sh inside a subshell, and
+  # a name shared with one of THEIR variables is reported against them. A local
+  # called `marker` here put three SC2031 findings on tests/fm-afk-launch.test.sh,
+  # a file this change never touched.
+  if found=$(fm_session_marker_harness_pid "$pid"); then
+    printf '%s\n' "$found"
+    return 0
+  fi
   while [ "$i" -lt "$FM_SESSION_LOCK_ANCESTRY_DEPTH" ]; do
     if fm_session_pid_is_harness "$pid"; then
       printf '%s\n' "$pid"
