@@ -344,7 +344,10 @@
 #     and no brief, scaffold, or status protocol ever points a worker at it, so
 #     unlike the flag line above it is not a file a worker is invited to touch.
 #     An unregistered project, an unknown mode, or an absent registry all resolve
-#     to no-mistakes, which grants nothing.
+#     to no-mistakes, which grants nothing. A task whose own record names a
+#     DIFFERENT mode - bin/fm-spawn.sh --mode, for a task dispatched down a path
+#     its project does not usually take - withdraws this excusal and is held to
+#     the check; bin/fm-attestation-lib.sh owns why that read is one-directional.
 #
 # WHAT IT DOES NOT GRANT, all enforced below:
 #   - Any OTHER failing check still refuses, including a second failing check on

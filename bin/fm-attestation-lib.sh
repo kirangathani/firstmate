@@ -143,7 +143,7 @@ fm_signed_local_skip() {  # <task-id> <meta-file> <secret-file>
 
 fm_attestation_authority() {  # <task-id> <meta-file> <config-dir> <fm-home> <bin-dir>
   local id=$1 meta=$2 config=$3 home=$4 bindir=$5
-  local out='' secret mode yolo proj_path proj_name
+  local out='' secret mode yolo proj_path proj_name task_mode
 
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
 
@@ -166,7 +166,24 @@ fm_attestation_authority() {  # <task-id> <meta-file> <config-dir> <fm-home> <bi
 $(FM_HOME="$home" "$bindir/fm-project-mode.sh" "$proj_name")
 EOF_MODE
     : "$yolo"
-    if [ "$mode" = direct-PR ]; then
+    # The task's own dispatch record can WITHDRAW this excusal, never grant it.
+    # bin/fm-spawn.sh --mode records a task dispatched down a path its project
+    # does not usually take, and the shape that recurs is the opposite of an
+    # excusal: a direct-PR project's task that raises its PR THROUGH the
+    # pipeline, against another repository. Its PR carries a genuine attestation
+    # and must be held to it, so the registry's blanket "this project never uses
+    # the pipeline" no longer describes it.
+    #
+    # One direction only, and that asymmetry is the whole safety argument. The
+    # registry is firstmate's own private file and no worker is ever pointed at
+    # it, while state/<id>.meta sits in the directory workers append their status
+    # lines to, so a line there is not authority. Read restrictively it does not
+    # need to be: the only thing a forged mode= can do is hold that task's own
+    # merge to a check it would otherwise have skipped.
+    task_mode=$(grep -m1 '^mode=' "$meta" | cut -d= -f2- || true)
+    if [ "$mode" = direct-PR ] && [ "${task_mode:-direct-PR}" != direct-PR ]; then
+      fm_attestation_note "note: $proj_name ships direct-PR, but this task was dispatched as $task_mode, so its PR is held to the attestation check"
+    elif [ "$mode" = direct-PR ]; then
       out="${out}${out:+
 }$proj_name is registered as a direct-PR project, whose PRs are raised without the pipeline by design"
     fi
