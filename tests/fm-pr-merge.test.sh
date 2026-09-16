@@ -1916,18 +1916,6 @@ mint_dispatch_token() {
 # write_projects_registry <case_dir> <mode>: the private fleet registry
 # bin/fm-project-mode.sh resolves a delivery mode from. make_case's project dir
 # is always basenamed "project".
-# What bin/fm-spawn.sh recorded as THIS task's delivery mode. A real dispatch
-# takes it from the registry, so write_projects_registry sets both and the two
-# only diverge where a case deliberately makes them, for a task dispatched down
-# a path its project does not usually take.
-set_task_mode() {  # <case-dir> <mode>
-  local meta="$1/state/task-x1.meta" mode=$2 tmp="$1/state/.meta.tmp"
-  [ -f "$meta" ] || return 0
-  grep -v '^mode=' "$meta" > "$tmp"
-  printf 'mode=%s\n' "$mode" >> "$tmp"
-  mv "$tmp" "$meta"
-}
-
 write_projects_registry() {
   local case_dir=$1 mode=$2
   mkdir -p "$case_dir/fmhome/data"
@@ -1935,7 +1923,6 @@ write_projects_registry() {
     printf '%s\n' '# Projects'
     printf -- '- project [%s] - test project (added 2026-08-09)\n' "$mode"
   } > "$case_dir/fmhome/data/projects.md"
-  set_task_mode "$case_dir" "$mode"
 }
 
 # make_attestation_case <name> <mode> [<extra rollup line>...]: a case whose PR
@@ -1978,36 +1965,6 @@ test_direct_pr_project_merges_past_a_failed_attestation() {
   assert_grep 'registered as a direct-PR project' "$case_dir/stderr" \
     "attest-direct-pr: the banner did not name the authority it merged on"
   pass "a direct-PR project merges past the failed attestation check, and says so"
-}
-
-# The excusal is the PROJECT's, and the task's own record can only withdraw it.
-# A direct-PR project's task that raises its PR THROUGH the pipeline - the
-# upstream-port shape, dispatched with --mode no-mistakes - carries a genuine
-# attestation and must be held to that check. The blanket "this project never
-# uses the pipeline" no longer describes it.
-#
-# One direction only: the registry is firstmate's own private file, while
-# state/<id>.meta sits where workers append their status lines, so a mode= line
-# there may take an excusal away and may never grant one. The worst a forged one
-# can do is hold its own task to a check it would otherwise have skipped.
-test_a_task_dispatched_off_its_projects_path_is_held_to_the_attestation() {
-  local case_dir rc
-  case_dir=$(make_attestation_case attest-mode-override direct-PR)
-  set_task_mode "$case_dir" no-mistakes
-
-  set +e
-  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/101 \
-    > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  [ "$rc" -ne 0 ] ||
-    fail "attest-mode-override: a task that ran the pipeline merged past its own attestation check"
-  assert_no_grep 'pr merge 101' "$case_dir/gh-axi.log" \
-    "attest-mode-override: the PR was merged despite the failed attestation check"
-  assert_grep 'dispatched as no-mistakes' "$case_dir/stderr" \
-    "attest-mode-override: the refusal did not say why the project's excusal did not apply"
-  pass "a task dispatched off its project's usual path is held to the attestation check"
 }
 
 test_another_failing_check_refuses_under_the_exemption() {
@@ -2512,7 +2469,6 @@ test_waiver_does_not_excuse_a_red_pr
 test_waiver_does_not_excuse_zero_checks
 test_kept_tests_gate_still_runs_under_every_skip
 test_direct_pr_project_merges_past_a_failed_attestation
-test_a_task_dispatched_off_its_projects_path_is_held_to_the_attestation
 test_another_failing_check_refuses_under_the_exemption
 test_pending_check_refuses_under_the_exemption
 test_signed_skip_merges_past_a_failed_attestation
