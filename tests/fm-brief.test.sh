@@ -780,4 +780,82 @@ test_scout_and_secondmate_scaffold
 test_commit_cadence_is_scaffold_text
 test_review_findings_are_the_authors_to_fix
 test_the_round_convention_is_not_a_cap
+
+# A PR-raising ship brief must define done as PUSHED AND VERIFIED, and must state
+# it as a loop over every change to the branch rather than a first-pass sequence.
+# Measured 2026-09-16 on fm-brief-attach-ownership-a3: the worker made its fix
+# commit 0b16c1b3, reported `done: PR .../97`, and stopped with the PR's head
+# still at the pre-fix 8b2da7d5, so firstmate read a red that was CI's verdict on
+# the version BEFORE the fix. The brief had told it completion was "committed on
+# your branch", and its only push instruction was welded to opening the PR - an
+# event that happens once, so a later fix round was addressed by nothing at all.
+# The `done:` line must therefore be owed to bin/fm-pr-green.sh's verdict, which
+# reads the PR's OWN head commit and so cannot be satisfied by an unpushed fix.
+test_pr_briefs_define_done_as_pushed_and_verified() {
+  local home id proj brief
+  home="$TMP_ROOT/done-pushed-home"
+  write_registry "$home"
+
+  for id_proj in "brief-done-nm-d1:no-registry-proj" "brief-done-dpr-d2:direct-proj"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "fm-pr-green.sh" "$brief" \
+      "$id: the brief must owe its done line to fm-pr-green.sh's verdict"
+    assert_grep 'done: PR {url} checks green at {sha}' "$brief" \
+      "$id: the brief must require the verified done line quoting the confirmed sha"
+  done
+
+  # The direct-PR brief is the one the incident happened on: it has no pipeline
+  # pushing for it, so both defects have to be gone from its own text.
+  brief="$home/data/brief-done-dpr-d2/brief.md"
+  assert_no_grep "The task is complete only when committed on your branch." "$brief" \
+    "direct-PR: completion must not be defined as merely committed"
+  assert_grep "PUSHED and the PR carrying it is green" "$brief" \
+    "direct-PR: completion must be defined as pushed and green"
+  assert_grep "the same loop applies, not just the first time" "$brief" \
+    "direct-PR: the push-and-confirm rule must be stated as a loop over later changes"
+  pass "fm-brief.sh: a PR brief defines done as pushed and verified, as a loop"
+}
+
+# The local-only brief is the one mode where "committed, never pushed" is right:
+# it has no remote at all. The loop above must not have leaked into it.
+test_local_only_brief_still_stops_at_committed() {
+  local home brief
+  home="$TMP_ROOT/done-local-home"
+  write_registry "$home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-done-lo-d3 local-proj >/dev/null 2>&1
+  brief="$home/data/brief-done-lo-d3/brief.md"
+  assert_grep "Do NOT push, do NOT open a PR, do NOT merge." "$brief" \
+    "local-only: the brief must still forbid pushing"
+  assert_no_grep "fm-pr-green.sh" "$brief" \
+    "local-only: a mode with no PR must not be sent to confirm one"
+  pass "fm-brief.sh: the local-only brief still completes at committed"
+}
+
+# On a CI-waived task the waiver line has to be in the PR body BEFORE the push
+# that starts CI, because editing a body afterwards re-runs nothing. So the
+# loop's own push order must defer to the handshake rather than state a second,
+# wrong order ("commit, push") for exactly the later rounds it exists to address.
+test_waived_brief_states_one_push_order_for_later_rounds() {
+  local home brief
+  home="$TMP_ROOT/done-waived-home"
+  write_registry "$home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-done-ci-d4 direct-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --apply-testing-skip brief-done-ci-d4 \
+    --mode direct-PR --ci-skip >/dev/null 2>&1
+  brief="$home/data/brief-done-ci-d4/brief.md"
+  assert_grep "take the handshake step 5 below" "$brief" \
+    "waived: the later-round loop must defer its push order to the waiver handshake"
+  assert_no_grep "the same first time: commit, push," "$brief" \
+    "waived: the loop must not state a bare push order beside the handshake's"
+  assert_grep "and only THEN push." "$brief" \
+    "waived: step 5 must put the fresh waiver line in the body before the push"
+  pass "fm-brief.sh: a waived brief states one push order for later rounds"
+}
+
 test_the_brief_keeps_the_worker_out_of_the_answer_loop
+test_pr_briefs_define_done_as_pushed_and_verified
+test_local_only_brief_still_stops_at_committed
+test_waived_brief_states_one_push_order_for_later_rounds

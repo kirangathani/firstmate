@@ -341,8 +341,10 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 
 ### PR ready, landing, and teardown
 
-For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-A no-mistakes worker reports that green when its own run reaches its CI-green outcome, which reaches it through the one attach owner `bin/fm-nm-attach.sh`, and confirms it with one read of `bin/fm-pr-green.sh <task-id> [<pr-url>]`, which reads the PR's own head commit and that commit's checks by link; firstmate runs the same command to confirm a reported green.
+For PR-based ship tasks in both modes, the ready signal is `done: PR <url> checks green at <sha>`, and a worker reports it only once its work is pushed and the PR carrying it is green.
+A commit is never a ready signal, and every later change to the branch repeats that push-and-confirm loop rather than riding the PR's first verdict; a fix reported while still unpushed leaves the PR's checks describing the version before it, which reads as a real failure of code that is already fixed.
+Both modes confirm the green with one read of `bin/fm-pr-green.sh <task-id> [<pr-url>]`, which reads the PR's own head commit and that commit's checks by link, so an unpushed fix cannot be reported as green; firstmate runs the same command to confirm a reported green.
+A no-mistakes worker reports it when its own run reaches its CI-green outcome, which reaches it through the one attach owner `bin/fm-nm-attach.sh`.
 A worker never aborts a run to shortcut its CI step: that step watches the PR it opened by PR number, so it sees the PR go green from the worker's isolated copy.
 The `PR must be raised via no-mistakes` check is red by design on a direct-PR project's PR and on a task carrying a signed testing skip, so that command excuses it through the same owner `bin/fm-pr-merge.sh` excuses it through and names the reason alongside its green verdict; both authorities are read from the task's own record, so it must be run against the home that dispatched the task and it says so rather than reporting a verdict when it cannot read one.
 That command reports a check that never delivered a verdict about the branch - it timed out, was cancelled, could not run, or died having written nothing - as a distinct `infrastructure` outcome rather than a red, and a worker reports one and stops rather than re-running it, because a timed-out review is an alarm and a re-run hides it.
