@@ -218,10 +218,34 @@ BRIEF_REGION_RULE_BEGIN='<!-- fm:rule-1 -->'
 BRIEF_REGION_RULE_END='<!-- /fm:rule-1 -->'
 BRIEF_REGION_DOD_PREFIX='<!-- fm:definition-of-done'
 BRIEF_REGION_DOD_END='<!-- /fm:definition-of-done -->'
+BRIEF_REGION_MODE_PREFIX='<!-- fm:delivery-mode'
 
-# brief_skip_state <local on|off> <ci on|off>: the skip state recorded on the
-# definition-of-done marker, so a brief states which skip it was written for and
-# an apply can tell "already correct" from "needs rewriting" without guessing.
+# The three regions are a function of TWO axes, and each records its own on its own
+# marker, immediately above the definition of done:
+#   <!-- fm:delivery-mode <mode> -->
+#   <!-- fm:definition-of-done skip=<state> -->
+# Together they let an apply tell "already correct" from "needs rewriting" without
+# guessing. Only the skip was recorded until 2026-09-16, and the missing half was
+# not cosmetic: bin/fm-spawn.sh's --mode may now dispatch one task under a mode its
+# project is not registered for, and with only the skip recorded, an unflagged
+# dispatch of an unflagged brief compared equal on the one axis it could see and
+# exited without rewriting, handing the worker the definition of done for the OTHER
+# mode.
+#
+# The delivery mode gets its own line rather than a second field on the
+# definition-of-done marker, because that marker's exact text is an asserted
+# contract of the base's own tests; widening it in place would supersede those
+# assertions to record a fact that reads perfectly well on a line of its own.
+#
+# A brief with no delivery-mode marker was written before this contract. It can
+# prove nothing about which mode it was rendered for, so it is always rewritten
+# from the dispatch, which also restores the marker. That costs a hand adjustment
+# to these machine-owned regions on the first respawn of such a brief, and is the
+# safe direction: the alternative is assuming it agrees and shipping the
+# disagreement. It is deliberately NOT part of the structural marker count below,
+# so a legacy brief is rewritten rather than refused.
+
+# brief_skip_state <local on|off> <ci on|off>: the skip half of that pair.
 brief_skip_state() {
   if [ "${1}" = on ] && [ "${2}" = on ]; then printf 'all'
   elif [ "${1}" = on ]; then printf 'local'
@@ -460,13 +484,17 @@ if [ "$APPLY_SKIP" -eq 1 ]; then
     exit 1
   fi
 
+  HAVE_MODE=$(sed -n "s|^$BRIEF_REGION_MODE_PREFIX \([^ ]*\) -->\$|\1|p" "$BRIEF")
   HAVE_STATE=$(sed -n "s|^$BRIEF_REGION_DOD_PREFIX skip=\([a-z]*\) -->\$|\1|p" "$BRIEF")
-  if [ "$HAVE_STATE" = "$WANT_STATE" ]; then
+  if [ -n "$HAVE_MODE" ] && [ "$HAVE_MODE" = "$APPLY_MODE" ] && [ "$HAVE_STATE" = "$WANT_STATE" ]; then
     # Byte-identical is not merely an optimization: an unchanged brief is never
     # rewritten, so a respawn cannot silently revert an adjustment firstmate made
-    # by hand to a region it happens to own.
+    # by hand to a region it happens to own. Both axes have to agree to earn that:
+    # see the marker contract above for why an absent delivery-mode marker never
+    # does.
     exit 0
   fi
+  [ -n "$HAVE_MODE" ] || HAVE_MODE='(unrecorded)'
 
   render_ship_regions "$APPLY_MODE" "$LOCAL_SKIP" "$CI_SKIP"
   TMPD="$BRIEF.apply.$$"
@@ -478,19 +506,25 @@ if [ "$APPLY_SKIP" -eq 1 ]; then
   awk -v sb="$BRIEF_REGION_SETUP_BEGIN" -v se="$BRIEF_REGION_SETUP_END" \
       -v rb="$BRIEF_REGION_RULE_BEGIN" -v re="$BRIEF_REGION_RULE_END" \
       -v dp="$BRIEF_REGION_DOD_PREFIX" -v de="$BRIEF_REGION_DOD_END" \
-      -v state="$WANT_STATE" \
+      -v mp="$BRIEF_REGION_MODE_PREFIX" \
+      -v state="$WANT_STATE" -v mode="$APPLY_MODE" \
       -v sf="$TMPD/setup" -v rf="$TMPD/rule" -v df="$TMPD/dod" '
     function emit(f,   line) { while ((getline line < f) > 0) print line; close(f) }
     skipping && $0 == endmark { print; skipping = 0; next }
     skipping { next }
     $0 == sb { print; emit(sf); endmark = se; skipping = 1; next }
     $0 == rb { print; emit(rf); endmark = re; skipping = 1; next }
-    index($0, dp " ") == 1 { print dp " skip=" state " -->"; emit(df); endmark = de; skipping = 1; next }
+    index($0, mp " ") == 1 { next }
+    index($0, dp " ") == 1 { print mp " " mode " -->"; print dp " skip=" state " -->"; emit(df); endmark = de; skipping = 1; next }
     { print }
   ' "$BRIEF" > "$TMPD/out"
   # A brief that lost its closing markers on the way out would leave the next
   # apply unable to find its regions, so the result is re-checked before it
   # replaces the original rather than after.
+  grep -qFx -- "$BRIEF_REGION_MODE_PREFIX $APPLY_MODE -->" "$TMPD/out" || {
+    echo "error: rewriting $BRIEF did not record the delivery mode it was rendered for; the original is unchanged" >&2
+    exit 1
+  }
   for m in "$BRIEF_REGION_SETUP_END" "$BRIEF_REGION_RULE_END" "$BRIEF_REGION_DOD_END"; do
     grep -qFx -- "$m" "$TMPD/out" || {
       echo "error: rewriting $BRIEF lost the '$m' marker; the original is unchanged" >&2
@@ -501,7 +535,7 @@ if [ "$APPLY_SKIP" -eq 1 ]; then
   # can never leave the worker a truncated brief; the temp dir is a sibling, so
   # the rename is atomic.
   mv "$TMPD/out" "$BRIEF"
-  echo "applied: $BRIEF (mode=$APPLY_MODE, testing skip $HAVE_STATE -> $WANT_STATE)"
+  echo "applied: $BRIEF (delivery mode $HAVE_MODE -> $APPLY_MODE, testing skip $HAVE_STATE -> $WANT_STATE)"
   exit 0
 fi
 
@@ -743,6 +777,7 @@ For anything the codebase already shows, prefer a pointer to the authoritative f
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
+$BRIEF_REGION_MODE_PREFIX $MODE -->
 $BRIEF_REGION_DOD_PREFIX skip=$SKIP_STATE -->
 $DOD_REGION
 $BRIEF_REGION_DOD_END

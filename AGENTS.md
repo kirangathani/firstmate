@@ -285,6 +285,9 @@ The path's worker, automated gates, and captain approval remain authoritative:
 - **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
+The registry answers per project, but delivery mode is a property of the task, and one project can legitimately host tasks of two shapes: a port to an upstream repository runs the full pipeline while the fork it was dispatched from raises its own PRs by hand.
+Dispatch that task with `bin/fm-spawn.sh --mode <delivery-mode>`, which records the mode the task actually runs under so the pipeline view, the merge gates, and the worker's own instructions all follow the task; never re-register the project to change one task's shape.
+
 Testing skips are a third orthogonal axis that only the captain authorizes, never `yolo` and never a worker: `bin/fm-spawn.sh` is the one place a skip is passed, and its `--skip-testing`, `--local-skip`, `--ci-skip`, and `--all-testing-skip` are enforced by code and by a keyed signature rather than by an instruction a worker could decline.
 Prefer `--skip-testing`, which resolves to the most the project's delivery mode can honour; that one flag also rewrites the worker's own brief, so there is no second invocation to keep in agreement and a partially specified skip cannot produce an ordinary task.
 A worker can neither flag its own task nor obtain a signature for an unflagged one, no skip flag ever disables the kept-tests gate, and a skipped PR is always disclosed at merge.
