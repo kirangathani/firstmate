@@ -56,6 +56,16 @@
 #        worktree, terminal, or temp root exists
 #   (q6) a relaunch that forgets the flag names the authorized skip it is
 #        dropping, since the record is rewritten wholesale
+#
+# --mode shares this file because the skip matrix is validated against the
+# resolved delivery mode, so a per-task mode override and the flags above are
+# one decision, not two:
+#   (r1) --mode records THIS task's delivery mode instead of its project's, says
+#        so on stderr, and writes the brief's definition of done from it
+#   (r2) the skip matrix is checked against the overridden mode, not the
+#        registry's, in both directions
+#   (r3) an unknown mode refuses rather than falling back to one
+#   (r4) --mode is refused for a secondmate and as a shared batch flag
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -614,6 +624,110 @@ test_recorded_skips_read_back_through_their_owner() {
   pass "what the spawn records is what the flags' own owner reads back, in all three shapes"
 }
 
+# --- the per-task delivery mode ---------------------------------------------
+#
+# data/projects.md answers "how does this project's work normally reach main",
+# and for a task whose brief sends it somewhere else that answer is wrong. On
+# 2026-09-16 the captain watched a task on its EIGHTH pipeline run drawn with
+# intent, rebase, review, test, docs and lint all `skipped`: its project ships
+# direct-PR, its brief told it to raise the PR through the pipeline pointed at
+# an upstream repository, and the record had no way to say so. `skipped` means a
+# deliberate skip, so the view asserted a testing posture the task did not have,
+# reading a record that was simply wrong. --mode is how that deviation gets on
+# the record.
+
+test_mode_override_records_this_tasks_own_delivery_mode() {
+  local out
+  make_case modeover direct-PR
+  arm_orca_success
+  out=$(run_spawn modeover --mode no-mistakes)
+  expect_code 0 $? "a spawn with --mode should succeed"$'\n'"$out"
+  assert_grep "mode=no-mistakes" "$CASE_HOME/state/modeover.meta" \
+    "the dispatch recorded the project's usual mode instead of this task's"
+  assert_contains "$out" "not this project's usual direct-PR" \
+    "a task dispatched off its project's usual path said nothing about it"
+  # The brief is written from the mode too, so the worker's own definition of
+  # done cannot disagree with the record everything downstream reads.
+  assert_grep "no-mistakes" "$CASE_HOME/data/modeover/brief.md" \
+    "the brief was written from the registry's mode, not this task's"
+  pass "--mode records this task's own delivery mode and writes its brief from it"
+}
+
+# Without the flag nothing changes: the registry still answers, and it is still
+# right for every ordinary task.
+test_an_unflagged_dispatch_keeps_the_projects_mode() {
+  local out
+  make_case modeplain direct-PR
+  arm_orca_success
+  out=$(run_spawn modeplain)
+  expect_code 0 $? "an unflagged spawn should succeed"$'\n'"$out"
+  assert_grep "mode=direct-PR" "$CASE_HOME/state/modeplain.meta" \
+    "an unflagged dispatch did not record the project's own mode"
+  assert_not_contains "$out" "not this project's usual" \
+    "an unflagged dispatch announced a deviation it did not make"
+  pass "without --mode the project registry still answers, silently"
+}
+
+# The skip matrix is checked against the mode the task ACTUALLY has. Both
+# directions, because an override that only widened what is accepted would let a
+# skip through that the task's real delivery path cannot honour.
+test_the_skip_matrix_is_checked_against_the_overridden_mode() {
+  local out status
+  # direct-PR normally refuses --local-skip; under --mode no-mistakes it is the
+  # accepted combination.
+  make_case modeskip1 direct-PR
+  give_case_a_waiver_secret
+  arm_orca_success
+  out=$(run_spawn modeskip1 --mode no-mistakes --local-skip)
+  expect_code 0 $? "--local-skip under an overridden no-mistakes mode should be accepted"$'\n'"$out"
+  assert_grep "local_skip=on" "$CASE_HOME/state/modeskip1.meta" \
+    "the accepted skip was not recorded"
+
+  # And the other way: no-mistakes refuses --ci-skip alone, so a task overridden
+  # INTO that mode must refuse it too.
+  make_case modeskip2 direct-PR
+  give_case_a_waiver_secret
+  out=$(run_spawn modeskip2 --mode no-mistakes --ci-skip)
+  status=$?
+  [ "$status" -ne 0 ] ||
+    fail "--ci-skip was accepted against the registry's mode rather than this task's"$'\n'"$out"
+  pass "the skip matrix is checked against the mode this task was dispatched with"
+}
+
+test_an_unknown_mode_refuses() {
+  local out status
+  make_case modebad no-mistakes
+  out=$(run_spawn modebad --mode no-mistake)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a misspelled mode was accepted"$'\n'"$out"
+  assert_contains "$out" "--mode must be one of" "the refusal did not name the accepted modes"
+  assert_absent "$CASE_HOME/state/modebad.meta" "a refused dispatch still wrote a record"
+  pass "an unknown delivery mode refuses instead of falling back to one"
+}
+
+# A secondmate has no delivery mode of its own, and a batch spans projects whose
+# usual paths differ, so one shared value would quietly misdescribe the rest.
+test_mode_is_refused_where_it_cannot_mean_one_task() {
+  local out status
+  make_case mode-sm no-mistakes
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_HOME" FM_STATE_OVERRIDE="$CASE_HOME/state" \
+    FM_DATA_OVERRIDE="$CASE_HOME/data" FM_CONFIG_OVERRIDE="$CASE_HOME/config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux \
+    "$SPAWN" mode-sm "$CASE_HOME/sub" --secondmate --mode no-mistakes 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a secondmate spawn accepted --mode"$'\n'"$out"
+  assert_contains "$out" "does not apply to a --secondmate spawn" \
+    "the secondmate refusal did not say why"
+
+  make_case mode-batch no-mistakes
+  out=$(run_spawn "mode-batch=$CASE_PROJ" --mode no-mistakes)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a batch dispatch accepted a shared --mode"$'\n'"$out"
+  assert_contains "$out" "cannot be shared across a batch" \
+    "the batch refusal did not say why"
+  pass "--mode is refused for a secondmate and as a shared batch flag"
+}
+
 test_refused_combinations
 test_secondmate_refuses_a_skip_flag
 test_recorded_skips_read_back_through_their_owner
@@ -629,3 +743,8 @@ test_ci_skip_without_a_secret_refuses
 test_local_skip_records_its_own_dispatch_authorization
 test_local_skip_without_a_secret_warns_but_still_spawns
 test_local_skip_cannot_be_run_around
+test_mode_override_records_this_tasks_own_delivery_mode
+test_an_unflagged_dispatch_keeps_the_projects_mode
+test_the_skip_matrix_is_checked_against_the_overridden_mode
+test_an_unknown_mode_refuses
+test_mode_is_refused_where_it_cannot_mean_one_task

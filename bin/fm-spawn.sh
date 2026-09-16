@@ -258,6 +258,11 @@ case "$MODE_ARG" in
   ''|no-mistakes|direct-PR|local-only) ;;
   *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only" >&2; exit 1 ;;
 esac
+# A secondmate has no delivery mode of its own - it is a home, not a change on
+# its way to main - so the flag has nothing to name. Refused here, with the
+# other argument-only rules, so a malformed dispatch costs no filesystem work.
+[ "$MODE_SET" -eq 0 ] || [ "$KIND" != secondmate ] ||
+  { echo "error: --mode does not apply to a --secondmate spawn, which delivers nothing of its own" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -787,7 +792,6 @@ fi
 # leaving an orphaned window behind.
 SECONDMATE_PROJECTS=
 if [ "$KIND" = secondmate ]; then
-  [ "$MODE_SET" -eq 0 ] || { echo "error: --mode does not apply to a --secondmate spawn" >&2; exit 1; }
   MODE=secondmate
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
