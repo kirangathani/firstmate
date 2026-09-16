@@ -656,8 +656,67 @@ test_snapshot_survives_payload_past_arg_max() {
   pass "snapshot and secondmate home summary survive a payload past the host's ARG_MAX"
 }
 
+# The ONE answer to "does this task have a PR, and which one" is the `pr=` in
+# the task's own state/<id>.meta. The snapshot used to fall back, when that was
+# absent, to a grep over the crewmate's free-text status log for the first PR
+# link in it - so on 2026-09-16 a respawned task, whose fresh metadata carried
+# no `pr=`, resolved to the oldest PR its worker had ever mentioned: PR 92,
+# merged the night before, which the pipeline view then drew as open and
+# awaiting the captain's word.
+#
+# The status log below is the real one captured from
+# state/fm-lock-lineage-fix-l8.status on 2026-09-16, not a shortened stand-in:
+# what makes the old fallback wrong is that a task opens its PRs in sequence and
+# the FIRST link in the prose is the one that has already landed, so the fixture
+# has to be a log that actually mentions more than one state of more than one
+# PR. The pass condition is that neither link reaches the document.
+test_pr_url_comes_only_from_the_recorded_metadata() {
+  local home fakebin out
+  home=$(make_home pr-provenance)
+  mkdir -p "$home/projects/respawned-worktree" "$home/projects/recorded-worktree"
+  fakebin=$(make_fakebin "$home")
+  fm_write_meta "$home/state/respawned-task.meta" \
+    "window=firstmate:fm-respawned-task" \
+    "worktree=$home/projects/respawned-worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=direct-PR"
+  cat > "$home/state/respawned-task.status" <<'STATUS'
+done: PR https://github.com/kirangathani/firstmate/pull/92 (step 1 of 7)
+paused [key=await-merge-1]: PR https://github.com/kirangathani/firstmate/pull/92 open, waiting for the landing before step 2
+resolved [key=await-merge-1]: PR 92 merged; starting step 2 of 7
+paused [key=captain-pause]: step 2 code+tests complete and committed on fm/fm-lock-lineage-fix-l8-pr2 at 248840bc (lock-gate suite green, lint clean, the 4 parallel-run failures reproduce as pass when run serially); not pushed, no PR opened, awaiting resume
+working: took over fm-lock-lineage-fix-l8; step-2 branch recovered at 248840bc, lock-gate suite and lint green, full suite running
+STATUS
+  # The same shape WITH the record, so the assertion below pins that the PR
+  # still reaches the document by the one route it is allowed to.
+  fm_write_meta "$home/state/recorded-task.meta" \
+    "window=firstmate:fm-recorded-task" \
+    "worktree=$home/projects/recorded-worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=direct-PR" \
+    "pr=https://github.com/kirangathani/firstmate/pull/93"
+  printf 'done: PR https://github.com/kirangathani/firstmate/pull/92\n' \
+    > "$home/state/recorded-task.status"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "respawned-task")
+    | .pr.url == null and .pr.source == "absent"
+  ' >/dev/null || fail "a PR link in the status prose reached the document: $(printf '%s' "$out" | jq -c '.tasks[] | select(.id == "respawned-task") | .pr')"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "recorded-task")
+    | .pr.url == "https://github.com/kirangathani/firstmate/pull/93" and .pr.source == "meta"
+  ' >/dev/null || fail "the recorded pr= did not reach the document"
+  pass "a task PR reaches the document only from its recorded metadata, never from status prose"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_pr_url_comes_only_from_the_recorded_metadata
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint
