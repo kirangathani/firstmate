@@ -250,7 +250,7 @@ test_no_mistakes_dod_states_the_reattach_loop_as_a_mechanism() {
     "no-mistakes DOD carries the unqualified no-re-attach instruction again"
 
   # AGENTS.md section 7 states the same rule and must not drift from the brief.
-  assert_grep "one attach covers one return" "$ROOT/AGENTS.md" \
+  assert_grep "One attach covers one return" "$ROOT/AGENTS.md" \
     "AGENTS.md's Validate section no longer carries the one-return bound the brief teaches"
   pass "fm-brief.sh: the no-mistakes DOD states the re-attach loop as a mechanism"
 }
