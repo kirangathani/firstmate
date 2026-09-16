@@ -290,11 +290,11 @@ scaffold_ship() {
 }
 
 # Every ship brief is born in its ordinary shape, with the three regions a
-# dispatch may rewrite delimited and labelled with BOTH axes they were written
-# for - the delivery mode and the skip. The label is what lets an apply tell
-# "already correct" from "needs rewriting", so a dispatch that changes nothing
-# rewrites nothing, and a label that named only one axis let a dispatch that
-# changed the OTHER one rewrite nothing either.
+# dispatch may rewrite delimited, and labelled with BOTH axes they were written
+# for - the delivery mode on its own marker, the skip on the definition-of-done
+# one. The labels are what let an apply tell "already correct" from "needs
+# rewriting", so a dispatch that changes nothing rewrites nothing, and recording
+# only one axis let a dispatch that changed the OTHER one rewrite nothing either.
 test_ship_brief_carries_labelled_skip_regions() {
   local home brief
   home="$TMP_ROOT/skip-regions-home"
@@ -305,8 +305,10 @@ test_ship_brief_carries_labelled_skip_regions() {
   assert_grep '<!-- /fm:setup-steps -->' "$brief" "ship brief lost the setup-steps region end"
   assert_grep '<!-- fm:rule-1 -->' "$brief" "ship brief lost the rule-1 region"
   assert_grep '<!-- /fm:rule-1 -->' "$brief" "ship brief lost the rule-1 region end"
-  assert_grep '<!-- fm:definition-of-done mode=no-mistakes skip=none -->' "$brief" \
-    "a freshly scaffolded ship brief must record the mode and skip it was written for"
+  assert_grep '<!-- fm:definition-of-done skip=none -->' "$brief" \
+    "a freshly scaffolded ship brief must record that it carries no testing skip"
+  assert_grep '<!-- fm:delivery-mode no-mistakes -->' "$brief" \
+    "a freshly scaffolded ship brief must record the delivery mode it was written for"
   assert_grep '<!-- /fm:definition-of-done -->' "$brief" "ship brief lost the definition-of-done region end"
   pass "fm-brief.sh: a ship brief carries the three machine-owned regions, labelled with its skip"
 }
@@ -329,8 +331,10 @@ test_applied_testing_skip_briefs() {
   assert_no_grep "no-mistakes doctor" "$brief" "--local-skip brief kept the pipeline setup step"
   assert_no_grep "CI waiver handshake" "$brief" "--local-skip alone must not add the CI handshake"
   assert_no_grep "EOF" "$brief" "--local-skip brief leaked a heredoc marker"
-  assert_grep '<!-- fm:definition-of-done mode=no-mistakes skip=local -->' "$brief" \
-    "the applied brief did not record which mode and skip it now carries"
+  assert_grep '<!-- fm:definition-of-done skip=local -->' "$brief" \
+    "the applied brief did not record which skip it now carries"
+  assert_grep '<!-- fm:delivery-mode no-mistakes -->' "$brief" \
+    "the applied brief did not record which delivery mode it now carries"
 
   scaffold_ship "$home" brief-ciskip-c2 direct-proj
   brief="$home/data/brief-ciskip-c2/brief.md"

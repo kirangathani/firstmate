@@ -342,8 +342,8 @@ test_one_flag_writes_both_halves() {
     "the dispatch minted a CI-skip authorization but never told the worker how to use it"
   assert_grep "local testing skipped" "$brief" \
     "the dispatch switched the local pipeline off but the brief still reads as an ordinary task"
-  assert_grep '<!-- fm:definition-of-done mode=no-mistakes skip=all -->' "$brief" \
-    "the brief does not record the mode and skip its dispatch was authorized for"
+  assert_grep '<!-- fm:definition-of-done skip=all -->' "$brief" \
+    "the brief does not record the skip its dispatch was authorized for"
   pass "one flag at dispatch writes both the authorization and the worker's own instructions"
 }
 
@@ -691,7 +691,7 @@ test_a_mode_override_records_and_briefs_the_mode_it_was_dispatched_under() {
   [ "$got" = no-mistakes ] || fail "the record says mode=$got, so every reader of that field still follows the project, not the task"
   assert_contains "$out" "mode override" \
     "the dispatch did not say out loud that it overrode the project's mode"
-  assert_grep '<!-- fm:definition-of-done mode=no-mistakes skip=none -->' "$brief" \
+  assert_grep '<!-- fm:delivery-mode no-mistakes -->' "$brief" \
     "the brief does not record the delivery mode its dispatch was run under"
   assert_grep 'Firstmate will then instruct you to run /no-mistakes' "$brief" \
     "the worker was still told to raise the PR itself, on a task dispatched to run the pipeline"
