@@ -30,10 +30,11 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v sqlite3 >/dev/null 2>&1 || { echo "skip: sqlite3 not found"; exit 0; }
 
 # A real directory, created here rather than a path that happens to exist on one
-# machine. The collector now runs `no-mistakes axi status --run` from the task's
-# own project - that command resolves the repository from its working directory -
-# so a fixture project that does not exist is a fixture whose run cannot be read
-# at all. This used to be a hardcoded absolute path, which existed on the author's
+# machine. The collector runs `no-mistakes axi status --run` from the directory
+# the RUN's own record names, falling back to the task's project - that command
+# resolves the repository from its working directory - and this fixture's runs
+# are recorded against this path, so a project that does not exist is a fixture
+# whose run cannot be read at all. This used to be a hardcoded absolute path, which existed on the author's
 # machine and on no CI runner, and every assertion about a step reaching the wire
 # failed there and nowhere else.
 PROJECT="$TMP_ROOT/project"
@@ -1001,7 +1002,7 @@ got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.ok' "$CW
     jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .collection.reason' "$CWDOUT")"
 got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .steps | length' "$CWDOUT")
 [ "$got" = 10 ] || fail "the run read from the project produced $got steps"
-pass "the run read happens in the task's own project, whatever directory the view was opened from"
+pass "the run read happens in the repository the run belongs to, whatever directory the view was opened from"
 
 # One task's directory must not be carried into the next: the collector reads
 # several tasks in one pass, and the change of directory is scoped to the read.
