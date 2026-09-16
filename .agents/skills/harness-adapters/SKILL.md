@@ -153,6 +153,28 @@ A project-level `.claude/settings.json` only takes effect when Claude Code's pro
 After those settings are loaded, hook command resolution is still cwd-sensitive because Claude Code runs commands through `/bin/sh` against the session's current cwd; keep the tracked command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh` and see `docs/turnend-guard.md` for the verified Stop-hook details.
 Claude Code's primary watcher protocol is the lowest-friction path: run `bin/fm-watch-arm.sh` as its own Claude Code background task and treat background-task completion as the wake.
 
+**Session-pid marker facts (verified 2026-09-15 on Claude Code 2.1.272/2.1.273; re-verified 2026-09-16 on 2.1.273).**
+`bin/fm-session-lock-lib.sh` reads `CLAUDE_PID` to find the harness process a session lock should record, through `FM_SESSION_HARNESS_PID_ENV`.
+Extend that list only with facts verified the way these were.
+
+- Claude Code sets `CLAUDE_PID` to the pid of the claude process running the session in every process it spawns for that session: tool shells, hooks, and the status line.
+  Verified in a tool shell with `ps -o args= -p $$` alongside `echo "$CLAUDE_PID"`, and against the session process with `ps -o comm= -p "$CLAUDE_PID"` (`claude`) and `readlink /proc/$CLAUDE_PID/exe` (`/home/kiran/.local/share/claude/versions/2.1.273`).
+  The source is the binary's own env builder, `Pze(e)` returning `CLAUDE_PID:String(process.pid)` among `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, and `CLAUDE_CODE_SESSION_ATTENDED`.
+- A marker is NOT proof on its own, because it is inherited by processes Claude Code did not spawn for that session.
+  A tmux server started by one session passes its `CLAUDE_PID` to every pane opened later, including panes running a different session.
+  Verified 2026-09-16 on a live firstmate crewmate: session process 2134860 (comm `claude`, exe `versions/2.1.273`) carried `CLAUDE_PID=1900746` in its own `/proc/<pid>/environ`, and 1900746 was a different live claude (`claude --resume`) reached through the tmux server four levels above.
+  That stale value was alive AND matched the harness predicate, so liveness and process shape both accepted it; only the ancestry check rejected it (`fm_pid_ancestry_contains 1900746 $$` false), and the ancestry walk then returned the correct 2134860.
+  Never use the marker without that ancestry check.
+- A session process's own environ may therefore carry a marker naming a DIFFERENT session, or no marker at all.
+  The 2026-09-15 scout recorded a daemon-launched background session whose own environ had no `CLAUDE_PID` (only `CLAUDE_CODE_SESSION_KIND=bg`, `CLAUDE_BG_BACKEND=daemon`, `CLAUDE_JOB_DIR=...`), which is consistent with per-child injection; the 2026-09-16 tmux-launched case above shows the other outcome.
+  Read the marker as a claim to validate, never as the session's identity.
+- `CLAUDE_CODE_SESSION_ID` is the CONVERSATION id and changes on `/clear`, so it cannot identify a session across one.
+  Verified 2026-09-16: session process 2134860's own environ read `CLAUDE_CODE_SESSION_ID=95bf2bd5-...` while its tool shells read `b2869b2b-...` in the same live session.
+- `CLAUDE_CODE_EXECPATH` is not reliable outside tool shells: on 2026-09-15 hooks and the status line reported `versions/2.1.272` for a session whose tool shell and `/proc/<pid>/exe` both said `2.1.273`.
+  Do not build a harness predicate on it.
+- A session Claude Code's daemon launches runs the VERSIONED binary directly, so its `comm` is the version string (`2.1.272`), not `claude`, while argv0 and `/proc/<pid>/exe` sit under `~/.local/share/claude/versions/`.
+  The daemon self-restarts on every auto-update, which is what severed one home's lock ancestry on 2026-09-15; `data/lock-loss-diagnosis-2026-09-15.md` is the incident record.
+
 ## codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
 
 | Fact | Value |

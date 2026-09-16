@@ -45,6 +45,17 @@ export FM_GATE_REFUSE_BYPASS=1
 # this at its own fixture database explicitly.
 export FM_NM_QUESTIONS_DB="${FM_NM_QUESTIONS_DB:-/nonexistent/fm-tests-no-nm-database.sqlite}"
 
+# Scrub the harness session-pid markers bin/fm-session-lock-lib.sh reads
+# (FM_SESSION_HARNESS_PID_ENV). Claude Code sets CLAUDE_PID in every process it
+# spawns, so a suite run from a Claude Code tool shell inherits the OPERATOR's
+# real session pid, and the session-lock finder would then record that pid
+# instead of the fixture's - measuring the machine the suite happens to run on
+# rather than the code. Scrubbing here rather than per call site makes it
+# impossible for a new case to forget: sourcing this library removes it for the
+# whole process and every child. A case whose SUBJECT is the marker still sets
+# it explicitly for its own invocation, which wins over this baseline.
+unset CLAUDE_PID
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

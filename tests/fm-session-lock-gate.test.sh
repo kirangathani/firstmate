@@ -391,6 +391,72 @@ export FM_STATE_OVERRIDE='$state'
   pass "fm-session-lock-lib: a bash tool shell is not a harness, so a lock naming one is stale and overwritable"
 }
 
+test_the_marker_finds_the_session_the_ancestry_walk_cannot_reach() {
+  local dir state hpid recorded depth
+  # The marker (CLAUDE_PID) exists so that ownership does not depend on the
+  # harness process being RECOGNISABLE. The predicate learns launch shapes one at
+  # a time; the marker names the session's own process outright.
+  #
+  # The discrimination is made exact rather than assumed. In this fixture the
+  # harness sits exactly two hops above fm-lock.sh (harness -> chain shell ->
+  # fm-lock.sh), and the finder's walk tests the depth it is given WITHOUT a
+  # trailing hop, so a depth of 2 cannot reach it. The same case therefore asserts
+  # both halves at that one depth: with the marker the harness is recorded, and
+  # with the marker scrubbed the acquire fails outright. If the walk could reach
+  # the harness anyway, the second half would pass and this test would fail.
+  dir=$(make_case lock-marker-fast-path)
+  state="$dir/state"
+  depth=2
+  hpid=$(start_versioned_harness "$dir" "
+export FM_STATE_OVERRIDE='$state'
+export FM_SESSION_LOCK_ANCESTRY_DEPTH=$depth
+env -u CLAUDE_PID '$LOCK_CLI' > '$dir/no-marker.out' 2>&1
+env CLAUDE_PID=\"\$PPID\" '$LOCK_CLI' > '$dir/marker.out' 2>&1
+")
+  wait_for_chain "$dir" || { stop_harness "$hpid"; fail "the versioned-harness chain never finished"; }
+  recorded=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+  stop_harness "$hpid"
+
+  assert_contains "$(cat "$dir/no-marker.out")" "cannot locate harness process in ancestry" \
+    "at depth $depth the walk must NOT reach the harness, or this case proves nothing: $(cat "$dir/no-marker.out")"
+  assert_contains "$(cat "$dir/marker.out")" "lock acquired: harness pid $hpid" \
+    "the marker must name the session the walk could not reach: $(cat "$dir/marker.out")"
+  [ "$recorded" = "$hpid" ] || fail "the lock must name the marker's harness $hpid, got: $recorded"
+  pass "fm-session-lock-lib: a validated harness marker names a session the ancestry walk cannot reach"
+}
+
+test_an_inherited_marker_for_another_session_is_ignored() {
+  local dir state hpid rival recorded
+  # A marker can be inherited STALE by a process the harness never spawned: a
+  # tmux server started by one session hands its CLAUDE_PID to panes opened
+  # later, which belong to other sessions (verified 2026-09-15 on this box, scout
+  # report 2.1 - the scout's own claude process carried a CLAUDE_PID naming the
+  # interactive session two levels of indirection away).
+  #
+  # The rival here is a SECOND versioned harness: alive and harness-shaped, so
+  # the only gate left to reject it is ancestry. That is what makes this a test of
+  # the ancestry validation rather than of the harness predicate.
+  dir=$(make_case lock-marker-stale)
+  state="$dir/state"
+  rival=$(start_versioned_harness "$dir/rival" "true")
+  wait_for_chain "$dir/rival" || { stop_harness "$rival"; fail "the rival harness never started"; }
+
+  hpid=$(start_versioned_harness "$dir" "
+export FM_STATE_OVERRIDE='$state'
+env CLAUDE_PID=$rival '$LOCK_CLI' > '$dir/acquire.out' 2>&1
+")
+  wait_for_chain "$dir" || { stop_harness "$hpid"; stop_harness "$rival"; fail "the versioned-harness chain never finished"; }
+  recorded=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+  stop_harness "$hpid"
+  stop_harness "$rival"
+
+  [ "$recorded" != "$rival" ] \
+    || fail "a marker naming a live harness OUTSIDE this ancestry was believed; the lock names the rival $rival"
+  [ "$recorded" = "$hpid" ] \
+    || fail "the walk must find this session's own harness $hpid when the marker is not ours, got: $recorded"
+  pass "fm-session-lock-lib: a marker naming a live harness outside this ancestry is ignored, and the walk answers instead"
+}
+
 test_the_harness_predicate_has_exactly_one_implementation() {
   local definitions leftovers names count alternatives name
   # The finder and the holder check each used to carry their own idea of what a
@@ -907,6 +973,8 @@ test_lock_rejects_unknown_arguments_without_touching_state
 test_acquire_records_a_version_named_harness_process
 test_a_bash_tool_shell_is_not_a_live_harness
 test_the_harness_predicate_has_exactly_one_implementation
+test_the_marker_finds_the_session_the_ancestry_walk_cannot_reach
+test_an_inherited_marker_for_another_session_is_ignored
 test_arm_refuses_when_another_session_owns_the_fleet
 test_arm_refuses_restart_when_another_session_owns_the_fleet
 test_arm_starts_for_the_owning_session
