@@ -903,17 +903,63 @@ export function ciTally(agent) {
   return `CI checks:  ${counts}  (${why})`;
 }
 
+// Whether this PR is still the captain's to decide, which is a DIFFERENT
+// question from what its checks did: a merged PR's checks are green forever,
+// and a green tally is no evidence that anything is still open. The view once
+// asked only the checks, and on 2026-09-16 it drew PR 92 - merged the night
+// before - as parked on the captain's word and counted it `1 ready to merge`.
+//
+// One function answers it, and the pre-merge cell and the header's
+// "ready to merge" count both read THIS one, so a row cannot park on a decision
+// the line above it has not counted, or the other way round.
+//
+//   merged / closed  the PR's own lifecycle, from GitHub. Terminal: there is
+//                    nothing left to decide, whatever the checks say.
+//   unknown          a recorded PR whose lifecycle could not be read. Said
+//                    plainly rather than drawn as a clean cell, because a
+//                    pre-merge box with nothing in it reads as "not reached".
+//   ready            every check passed on the head that will land AND GitHub
+//                    reports the PR open. Only then.
+//   pending          not reached: no PR, or its checks are not a pass yet.
+export function premergeVerdict(agent) {
+  const state = String(agent?.ci?.pr_state ?? "").toUpperCase();
+  if (state === "MERGED") return "merged";
+  if (state === "CLOSED") return "closed";
+  if (ciVerdict(agent) !== "ready") return "pending";
+  return state === "OPEN" ? "ready" : "unknown";
+}
+
 // The final box is the pre-merge check: the base branch's own assertions run
 // against this branch. It cannot show a verdict before the captain acts,
 // because it does not run until a merge is attempted - so when every check has
-// passed on the head that will land, THIS is the box that parks amber and asks
-// for the captain's word. The CI cell beside it keeps its verdict colour.
+// passed on the head that will land and the PR is still open, THIS is the box
+// that parks amber and asks for the captain's word. The CI cell beside it keeps
+// its verdict colour.
 function premergeBox(agent) {
-  if (ciVerdict(agent) === "ready") {
-    const b = box("pre-merge", "waiting", MW, { timer: "your word" });
-    return { ...b, timer: yellow(b.timer) };
+  switch (premergeVerdict(agent)) {
+    case "ready": {
+      const b = box("pre-merge", "waiting", MW, { timer: "your word" });
+      return { ...b, timer: yellow(b.timer) };
+    }
+    // Landed. Green, and the only cell on the row that says so, because the
+    // merge is what this box was waiting for.
+    case "merged": {
+      const b = box("pre-merge", "passed", MW, { timer: "merged" });
+      return { ...b, timer: green(b.timer) };
+    }
+    // Closed without merging. Not a check failure and not a pass, so it gets
+    // neither colour: the words say what happened and the box stays neutral.
+    case "closed": {
+      const b = box("pre-merge", "unknown", MW, { timer: "closed", timer2: "not merged" });
+      return { ...b, timer: magenta(b.timer), timer2: magenta(b.timer2) };
+    }
+    case "unknown": {
+      const b = box("pre-merge", "unknown", MW, { timer: "not read" });
+      return { ...b, timer: magenta(b.timer) };
+    }
+    default:
+      return box("pre-merge", "pending", MW);
   }
-  return box("pre-merge", "pending", MW);
 }
 
 // The number the snapshot derived from the recorded PR link, which
@@ -1309,7 +1355,7 @@ export function render(snap, opts) {
   // The data age must be honest and prominent. A green box that is thirty
   // seconds stale is a lie the captain has no way to detect.
   const ageSec = opts.ageSeconds ?? 0;
-  const needs = agents.filter((a) => ciVerdict(a) === "ready").length;
+  const needs = agents.filter((a) => premergeVerdict(a) === "ready").length;
   const broken = agents.filter((a) => a.collection?.ok === false).length;
   // Records the collector held back because nothing is running behind them.
   // Stated, never drawn: they are not agents, so counting them in "N agents"

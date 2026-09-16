@@ -244,11 +244,6 @@ status_event_json() {  # <status-log>
     '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
 }
 
-first_pr_url_in_file() {  # <file>
-  [ -f "$1" ] || return 1
-  grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
-}
-
 backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   local backlog=${1:-$BACKLOG}
   if [ ! -f "$backlog" ]; then
@@ -376,7 +371,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
   local pr pr_source event_json current_json endpoint_exists expected_label agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
+  local last_event_raw current_state current_source pending_decision blocked_event report_present=0
   local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
@@ -395,14 +390,31 @@ task_json_lines() {
     target=$(fm_backend_target_of_meta "$meta")
     status_log="$STATE/$id.status"
     report_path="$DATA/$id/report.md"
+    # The ONE answer to "does this task have a PR, and which one": the `pr=`
+    # bin/fm-pr-check.sh records in the task's own state/<id>.meta. Every reader
+    # of this document - the fleet view, the bearings report, the pipeline view's
+    # PR, checks and pre-merge cells, and its building-phase end - takes the PR
+    # from here, so no two cells of one row can disagree about whether a PR
+    # exists.
+    #
+    # The crewmate's status log is NOT a second source, and reading it was a
+    # defect rather than a gap: it is free prose, so the fallback grepped it for
+    # the FIRST PR link it contained and kept that answer forever. On a task that
+    # opens several PRs in sequence, the first link is the oldest - on
+    # 2026-09-16 a respawn left state/fm-lock-lineage-fix-l8.meta with no `pr=`,
+    # and the row then drew the already-merged PR 92 as open and awaiting the
+    # captain's word while its own stage cell said, correctly, that no PR
+    # existed. A machine-consumed fact is never derived from an agent's prose
+    # (data/captain.md, "Enforcement must be mechanistic, never a prompt",
+    # extended to DATA 2026-08-08).
+    #
+    # No record yet means no PR yet, which is the honest answer and a distinct
+    # one on screen: the view draws "no PR" for it, never a guess and never the
+    # "not read" it reserves for a PR nobody could look up.
     pr=$(meta_value "$meta" pr)
-    pr_source=meta
-    if [ -z "$pr" ]; then
-      pr_from_status=$(first_pr_url_in_file "$status_log" || true)
-      pr=$pr_from_status
-      pr_source=status_event
-    fi
-    if [ -z "$pr" ]; then
+    if [ -n "$pr" ]; then
+      pr_source=meta
+    else
       pr_source=absent
     fi
 
