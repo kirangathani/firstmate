@@ -63,6 +63,14 @@
 #   this task id, and the registry is firstmate's own private navigation record
 #   that no brief or status protocol ever points a worker at.
 #
+#   The task's own mode= is read ONE-DIRECTIONALLY, and only against the
+#   registry's direct-PR excusal: a task dispatched down a path its project does
+#   not usually take (bin/fm-spawn.sh --mode) withdraws that excusal and is held
+#   to the check, and no mode= line can ever grant one. That asymmetry is what
+#   makes reading a file in the worker-writable state directory safe here: the
+#   worst a forged line can do is hold its own task to a check it would
+#   otherwise have skipped.
+#
 # Diagnostics go to stderr, and every one of them explains a refusal rather than
 # a grant. FM_ATTESTATION_QUIET=1 suppresses them for a caller that re-resolves
 # on a timer and would otherwise repeat the same note every refresh; it changes
