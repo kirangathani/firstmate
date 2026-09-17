@@ -149,6 +149,8 @@ An `ABSENT` captain, shared-captain, secondmate, or learnings file means the fir
 
 If the session lock is refused, tell the captain another active session is managing the fleet and remain read-only.
 A lock-refused session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.
+`bin/fm-lock.sh take-over <pid>` displaces that holder, and it is the CAPTAIN's alone: nothing in the code can tell a captain from an agent, so this rule is the only thing enforcing it.
+Never run it on your own initiative, and relay the refusal to the captain instead.
 
 1. **Lock** - acquires the per-home session lock first, before anything mutates shared state.
 2. **Bootstrap** - detect-only checks (tool/version problems, the shared no-mistakes daemon's liveness, GitHub auth, the worktree-tangle check, harness override, dispatch-profile validation, backlog-backend status) always run, but routine confirmations stay silent by default.
