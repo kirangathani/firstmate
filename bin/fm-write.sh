@@ -274,7 +274,7 @@ report() {
   # One line, because under a Monitor one line is one notification. It is also
   # recorded so a Monitor that expires before delivering it does not take it.
   printf '%s\n' "$1"
-  printf '%s\n' "$1" | "$SCRIPT_DIR/fm-wake-pending.sh" --result 2>/dev/null || true
+  printf '%s\n' "$1" | FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-wake-pending.sh" --result 2>/dev/null || true
 }
 
 if [ "$rc" -eq 124 ]; then
