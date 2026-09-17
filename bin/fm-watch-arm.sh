@@ -90,8 +90,8 @@
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
-# lock identity before and after close, the cycle_outcome classification, and
-# successor disposition. The separate
+# lock identity before and after close, the cycle_outcome classification, the
+# pool depth at the handover, and successor disposition. The separate
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
 #
@@ -514,6 +514,42 @@ watch_output_has_wake() {
   grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null
 }
 
+# Drain the durable wake queue here, on the way out, so the model is never asked
+# to decide to drain. It always drains, so the decision was never a decision -
+# just a model call, about five seconds of it, spent on every single wake.
+#
+# bin/fm-wake-drain.sh is called rather than reimplemented: it owns the atomic
+# move, the print-before-delete no-loss boundary, and the dedupe, and a second
+# copy of that boundary is exactly the thing that must not exist twice.
+#
+# The rows are ALSO appended to a durable pending log before they are printed
+# here. This arm's stdout is the harness's task output, and nothing guarantees
+# the model ever reads it: the task can be stopped, the session can end, the
+# notification can be missed. The queue file itself is gone by then - the drain
+# deleted it, correctly - so without this the words would exist only in a buffer
+# nobody is obliged to look at. bin/fm-wake-pending.sh owns that log and hands
+# back anything a session never picked up.
+# It is written BEFORE the print and never fails this arm: a wake that reaches
+# the model but not the log is merely repeated later, while a wake that reaches
+# neither is lost, so the ordering is the one that can only over-deliver.
+drain_wake_queue_on_exit() {
+  local rows records
+  rows=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>/dev/null) || return 0
+  [ -n "$rows" ] || return 0
+  # Only the wake RECORDS are kept for replay. The drain also prints annotations
+  # and whatever the liveness assertion it ends with has to say, which are useful
+  # to read once and meaningless to hand a later session as unread wakes. A record
+  # is "<epoch>\t<seq>\t..." by construction (bin/fm-wake-lib.sh's fm_wake_append),
+  # and nothing else the drain prints starts with two numeric tab-separated fields.
+  records=$(printf '%s\n' "$rows" | grep -E '^[0-9]+	[0-9]+	' || true)
+  if [ -n "$records" ]; then
+    "$SCRIPT_DIR/fm-wake-pending.sh" --record <<EOF 2>/dev/null || true
+$records
+EOF
+  fi
+  printf '%s\n' "$rows"
+}
+
 watch_output_reason_type() {
   local out=$1 line
   line=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null | head -1 || true)
@@ -759,6 +795,7 @@ owned_child_finished() {
     reason_type=$(watch_output_reason_type "$child_out")
     cycle_log_append "$rc" "$signal" "$reason_type" none
     print_watch_output "$child_out"
+    drain_wake_queue_on_exit
     rm -f "$child_out" 2>/dev/null || true
     child=
     child_out=
@@ -768,7 +805,13 @@ owned_child_finished() {
   if [ "$rc" -eq 0 ]; then
     if wait_for_healthy_successor; then
       cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$HEALTHY_PID"
-      print_watch_output "$child_out"
+      # A dormant arm that lost the singleton race says nothing. Its child's
+      # "watcher: already running pid N" is the CORRECT and expected outcome for
+      # five arms out of six, and every line an arm prints is a notification the
+      # model has to read: printing it would put five non-events in front of the
+      # captain's supervisor on every single handover. The ledger still records
+      # the cycle, so nothing is lost to anyone looking for it.
+      [ "$dormant" -eq 0 ] && print_watch_output "$child_out"
       rm -f "$child_out" 2>/dev/null || true
       child=
       child_out=

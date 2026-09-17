@@ -115,7 +115,8 @@ state/               volatile runtime signals; gitignored
   x-context/         generated X-mode durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
-  .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
+  .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload; a signal record's payload carries the crewmate's own appended lines, prefixed by its id
+  .wake-pending      wakes already drained by the arm on its way out but not yet read by any session, replayed once at session start; also the opt-in delivery route for a backgrounded firstmate command's own result line (bin/fm-wake-pending.sh owns the format, the bound, and the print-before-clear boundary)
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .handoff-unread    path of a handoff document no session has read yet; armed by bin/fm-handoff.sh, announced by its SessionStart pickup hook, cleared only by consume
   .lock              session lock: the pid and start ticks of the OWN harness process of the one session controlling this home's fleet, and the gate on arming supervision; a session that acquires or arms while its ancestor holds the lock inherits it, so a lock naming an ancestor migrates on its own and only a live holder outside that ancestry is a rival; never the .watch.lock singleton below (bin/fm-session-lock-lib.sh)
