@@ -314,8 +314,8 @@ rule='━━━━━━━━━━━━━━━━━━━━━━━━�
         # say firstmate failed to act. What it owes is a look at the pane and a
         # re-verification of the premise the worker stated, because that premise
         # is the thing nobody has checked (bin/fm-ack-lib.sh).
-        printf '●  %s has been paused %s without a recheck (state: %s).\n' \
-          "$u_id" "$(fm_ack_duration "$u_age")" "$u_verdict"
+        printf '●  %s has been paused %s without a recheck.\n' \
+          "$u_id" "$(fm_ack_duration "$u_age")"
         printf '●      %s\n' "$u_last"
         printf '●      read the pane and re-verify what it is waiting on, then bin/fm-ack.sh %s "<what you verified>"\n' \
           "$u_id"
