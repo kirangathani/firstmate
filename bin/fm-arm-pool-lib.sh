@@ -19,6 +19,14 @@
 # a floor drift the moment one is edited, and a pool that believes it is full
 # when it is empty is a fleet nobody is watching.
 #
+# Every member also carries a SLOT NUMBER, 1..FM_ARM_POOL_TARGET, and that number
+# is the member's name everywhere anybody writes one: the Monitor description the
+# model types for it, and the arm's own wake line. The captain's chat showed
+# `dormant arm 2` beside `dormant arm A` on 2026-09-17 because each refill invented
+# its own labels, and two writers only agree on a name that neither of them makes
+# up. The lowest FREE number is always the next one handed out, so a refill reuses
+# the numbers the wakes just spent instead of counting upward forever.
+#
 # Pid liveness, pid identity, and $STATE come from bin/fm-wake-lib.sh and are
 # deliberately not redefined here.
 
@@ -29,6 +37,7 @@
 FM_ARM_POOL_TARGET=${FM_ARM_POOL_TARGET:-6}
 FM_ARM_POOL_FLOOR=${FM_ARM_POOL_FLOOR:-2}
 FM_ARM_POOL_JOINED=${FM_ARM_POOL_JOINED:-}
+FM_ARM_POOL_SLOT=${FM_ARM_POOL_SLOT:-}
 # The record separator, held as a value so the splitting below reads as an
 # ordinary expansion rather than an escape a future edit can mangle.
 fm_arm_pool_tab=$(printf '\t')
@@ -90,12 +99,19 @@ fm_arm_pool_discard_record() {
   command rm -f -- "$1" 2>/dev/null || true
 }
 
-# Join the pool as $1 (a role word, recorded for the ledger only) and record the
-# membership so the counters below can see it. The record is named by pid and
-# carries the pid's own identity, so a recycled pid can never be mistaken for a
-# live member that never cleaned up after itself.
+# Join the pool as $1 (a role word, recorded for the ledger only), in slot $2 when
+# one is asked for, and record the membership so the counters below can see it.
+# The record is named by pid and carries the pid's own identity, so a recycled pid
+# can never be mistaken for a live member that never cleaned up after itself.
+#
+# The slot resolves to the requested number when it is free, and to the lowest
+# free number otherwise, so a model that labels its Monitors 1..6 gets exactly
+# those numbers while a refill that names nothing still lands on the freed ones.
+# Allocation and the write are inside one lock: two members that picked the same
+# number would be the very ambiguity this numbering exists to remove. The
+# resolved number is left in FM_ARM_POOL_SLOT for the caller to report.
 fm_arm_pool_join() {
-  local role=${1:-dormant} dir pid identity
+  local role=${1:-dormant} requested=${2:-} dir pid identity slot i=0
   dir=$(fm_arm_pool_dir)
   mkdir -p "$dir" 2>/dev/null || return 1
   # Read BASHPID directly, NEVER through a command substitution. Inside `$( )`
@@ -105,9 +121,17 @@ fm_arm_pool_join() {
   # and the pool would read empty however many arms were really waiting.
   pid=${BASHPID:-$$}
   identity=$(fm_arm_pool_identity "$pid")
-  printf '%s\t%s\t%s\t%s\n' "$identity" "$(fm_arm_pool_session)" "$(date +%s)" "$role" \
-    > "$dir/$pid" 2>/dev/null || return 1
+  while ! fm_lock_try_acquire "$(fm_arm_pool_lock)"; do
+    [ "$i" -lt 50 ] || break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  slot=$(fm_arm_pool_resolve_slot "$pid" "$requested")
+  printf '%s\t%s\t%s\t%s\t%s\n' "$identity" "$(fm_arm_pool_session)" "$(date +%s)" "$role" "$slot" \
+    > "$dir/$pid" 2>/dev/null || { fm_lock_release "$(fm_arm_pool_lock)"; return 1; }
+  fm_lock_release "$(fm_arm_pool_lock)"
   FM_ARM_POOL_JOINED=$pid
+  FM_ARM_POOL_SLOT=$slot
   return 0
 }
 
@@ -117,16 +141,24 @@ fm_arm_pool_leave() {
   dir=$(fm_arm_pool_dir)
   fm_arm_pool_discard_record "$dir/$FM_ARM_POOL_JOINED"
   FM_ARM_POOL_JOINED=
+  FM_ARM_POOL_SLOT=
 }
 
-# How many live members this session has, pruning the records that no longer
-# name one. Pruning needs no lock because it only ever discards a record whose
-# pid is dead or whose identity no longer matches, and the process that would
-# have rewritten it is by definition gone.
-fm_arm_pool_count() {
-  local dir session record pid record_line record_rest recorded_identity recorded_session count=0
+fm_arm_pool_lock() {
+  printf '%s.lock\n' "$(fm_arm_pool_dir)"
+}
+
+# One line of "<pid><TAB><slot>" per LIVE member of this session, pruning the
+# records that no longer name one. Every question below - how many ears there
+# are, which numbers are taken - is this same read, so it exists once: two walks
+# of the same directory drift the moment only one learns a new way a record can
+# lie. Pruning needs no lock because it only ever discards a record whose pid is
+# dead or whose identity no longer matches, and the process that would have
+# rewritten it is by definition gone.
+fm_arm_pool_live_records() {
+  local dir session record pid record_line record_rest recorded_identity recorded_session slot
   dir=$(fm_arm_pool_dir)
-  [ -d "$dir" ] || { printf '0\n'; return 0; }
+  [ -d "$dir" ] || return 0
   session=$(fm_arm_pool_session)
   for record in "$dir"/*; do
     [ -f "$record" ] || continue
@@ -160,9 +192,70 @@ fm_arm_pool_count() {
     # on disk rather than discarded: it is not ours to reap, and its own process
     # removes it when it exits.
     [ "$recorded_session" = "$session" ] || continue
-    count=$((count + 1))
+    # The slot is the fifth field and the only optional one: a record written by
+    # a member that predates numbering has four, and reads as "no slot" rather
+    # than as the role field wearing a number's place.
+    record_rest=${record_rest#*"$fm_arm_pool_tab"}
+    record_rest=${record_rest#*"$fm_arm_pool_tab"}
+    case "$record_rest" in
+      *"$fm_arm_pool_tab"*) slot=${record_rest#*"$fm_arm_pool_tab"} ;;
+      *) slot= ;;
+    esac
+    case "$slot" in ''|*[!0-9]*) slot= ;; esac
+    printf '%s\t%s\n' "$pid" "$slot"
   done
-  printf '%s\n' "$count"
+}
+
+fm_arm_pool_count() {
+  fm_arm_pool_live_records | grep -c . || true
+}
+
+# The slot numbers live members of this session hold, one per line.
+fm_arm_pool_taken_slots() {
+  fm_arm_pool_live_records | while IFS="$fm_arm_pool_tab" read -r _pid slot; do
+    [ -n "$slot" ] && printf '%s\n' "$slot"
+  done
+}
+
+# The numbers in 1..FM_ARM_POOL_TARGET nobody holds, lowest first. This is what a
+# refill labels its Monitors with, and it is why the numbers get reused: a slot
+# is free the moment its member exits and withdraws its record.
+fm_arm_pool_free_slots() {
+  local taken n
+  taken=$(fm_arm_pool_taken_slots)
+  n=1
+  while [ "$n" -le "$FM_ARM_POOL_TARGET" ]; do
+    printf '%s\n' "$taken" | grep -qx "$n" || printf '%s\n' "$n"
+    n=$((n + 1))
+  done
+}
+
+# The slot this join gets. A pid that is already a member keeps the number it
+# has, so re-entering the wait (bin/fm-watch-arm.sh's dormant_reenter, which
+# execs and keeps its pid) never renames a member mid-life.
+# Numbers above the target are reachable only when the pool is over its size,
+# which is not an error worth refusing a member over; it just means one arm is
+# briefly named past the end of the range.
+fm_arm_pool_resolve_slot() {  # <pid> [<requested>]
+  local pid=$1 requested=${2:-} taken n
+  taken=$(fm_arm_pool_taken_slots_excluding "$pid")
+  case "$requested" in
+    ''|*[!0-9]*|0) ;;
+    *) printf '%s\n' "$taken" | grep -qx "$requested" || { printf '%s' "$requested"; return 0; } ;;
+  esac
+  n=1
+  while :; do
+    printf '%s\n' "$taken" | grep -qx "$n" || { printf '%s' "$n"; return 0; }
+    n=$((n + 1))
+  done
+}
+
+fm_arm_pool_taken_slots_excluding() {  # <pid>
+  local pid=$1
+  fm_arm_pool_live_records | while IFS="$fm_arm_pool_tab" read -r member slot; do
+    [ "$member" = "$pid" ] && continue
+    [ -n "$slot" ] && printf '%s\n' "$slot"
+  done
 }
 
 # True when the pool has room, i.e. when a command that has finished its real

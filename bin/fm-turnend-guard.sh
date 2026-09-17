@@ -262,6 +262,11 @@ fi
 # wakes have nobody waiting to take over". The refill answers both.
 POOL_DEPTH=$(fm_arm_pool_count 2>/dev/null || printf '')
 POOL_SHORT=
+# The numbers a refill should reuse, so the model does not have to invent labels
+# and end up with `dormant arm 2` beside `dormant arm A` in the captain's chat.
+# bin/fm-arm-pool-lib.sh owns which numbers are free and why they get reused.
+POOL_FREE_SLOTS=$(fm_arm_pool_free_slots 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+[ -n "$POOL_FREE_SLOTS" ] || POOL_FREE_SLOTS='(could not be read - use 1 upward and skip any number a waiting arm already reports)'
 case "$POOL_DEPTH" in
   ''|*[!0-9]*)
     # The count could not be read at all. Reported rather than read as an
@@ -342,8 +347,10 @@ EOF
       printf '●  %s waiting background arm(s) left, below the floor of %s. Each wake spends one.\n' \
         "$POOL_DEPTH" "$FM_ARM_POOL_FLOOR"
     fi
-    printf '●  Issue %s waiting arms in ONE reply, each as its own long-running watch running exactly this and nothing else:\n' "$FM_ARM_POOL_TARGET"
-    printf '●      bin/fm-watch-arm.sh --dormant 2>&1\n'
+    printf '●  Issue one waiting arm per free number below, in ONE reply, each as its own long-running watch running exactly this and nothing else:\n'
+    printf '●      bin/fm-watch-arm.sh --dormant <N> 2>&1\n'
+    printf '●  Free numbers to reuse: %s\n' "$POOL_FREE_SLOTS"
+    printf '●  Label each watch exactly "dormant arm <N>" with the same number. The arms still waiting keep theirs.\n'
     printf '●  They wait their turn; one takes over the moment the current watcher fires.\n'
     printf '●  The session-start operating block for this harness names the exact mechanism to launch them with.\n'
   fi

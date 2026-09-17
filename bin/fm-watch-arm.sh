@@ -129,8 +129,10 @@
 # `watcher: attached ...` down the successor chain, and the harness's own
 # stream-end notice for the finished Monitor.
 # So a member prints exactly one line, and only on its own wake:
-#   watcher exited, firstmate woken, watcher replenished from the pool, <N> dormant watchers lurking - <the crewmate's words>
-# N is the ears still asleep after the handover (pool_lurking_count), and the
+#   dormant arm <S>: watcher exited, firstmate woken, watcher replenished from the pool, <N> dormant watchers lurking - <the crewmate's words>
+# S is this member's own pool slot, the same number the Monitor running it is
+# labelled with (`--dormant <S>`; bin/fm-arm-pool-lib.sh owns the numbering), and
+# N is the ears still asleep after the handover (pool_lurking_count). The
 # successor is confirmed before the line claims one. Handover lines go to
 # state/.watch-arm.log instead of stdout (announce/arm_log below), and the drain
 # at exit still runs but prints nothing, because every record it holds is the
@@ -432,7 +434,7 @@ healthy_watcher() {
 # look up.
 arm_log() {
   local sz
-  printf '[%s] pid=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$ARM_PID" "$1" >> "$ARM_LOG" 2>/dev/null || return 0
+  printf '[%s] pid=%s slot=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$ARM_PID" "${FM_ARM_POOL_SLOT:-none}" "$1" >> "$ARM_LOG" 2>/dev/null || return 0
   sz=$(wc -c < "$ARM_LOG" 2>/dev/null | tr -d '[:space:]')
   case "$sz" in ''|*[!0-9]*) return 0 ;; esac
   if [ "$sz" -ge "$ARM_LOG_MAX_BYTES" ]; then
@@ -657,6 +659,10 @@ wake_words() {
 # that handover so it names the ears actually left asleep.
 report_pool_wake() {
   local out=$1 words
+  # Named by its own slot, the same number the Monitor running it is labelled
+  # with, so a wake in the captain's chat is traceable to the arm that produced
+  # it instead of to one of six identical lines.
+  printf 'dormant arm %s: ' "${FM_ARM_POOL_SLOT:-?}"
   if wait_for_healthy_successor; then
     printf 'watcher exited, firstmate woken, watcher replenished from the pool, %s dormant watchers lurking' "$(pool_lurking_count 1)"
   else
@@ -703,11 +709,25 @@ print_watch_output() {
 # watching, the others waiting - rather than collapsing into a queue of followers
 # that all die together when the holder fires.
 mode=arm
+# The slot number this member asks the pool for. The model labels each Monitor
+# `dormant arm <N>` and passes the same N here, so the label on the task and the
+# number in the wake line are one number rather than two guesses. Omitting it is
+# still valid - bin/fm-send.sh --refill and bin/fm-ack.sh --refill become members
+# without one - and the pool then hands out the lowest free number.
+slot_request=
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
-  --dormant) mode=arm; dormant=1 ;;
+  --dormant)
+    mode=arm
+    dormant=1
+    case "${2:-}" in
+      '') ;;
+      *[!0-9]*|0) echo "usage: $(basename "$0") [--dormant [<slot>]|--restart]" >&2; exit 2 ;;
+      *) slot_request=$2 ;;
+    esac
+    ;;
   --restart) mode=restart ;;
-  *) echo "usage: $(basename "$0") [--dormant|--restart]" >&2; exit 2 ;;
+  *) echo "usage: $(basename "$0") [--dormant [<slot>]|--restart]" >&2; exit 2 ;;
 esac
 
 # Leaving the pool is tied to the process ending rather than to any one exit
@@ -747,7 +767,7 @@ dormant_reenter() {
     command rm -f -- "$child_out" 2>/dev/null || true
     child_out=
   fi
-  exec "$0" --dormant
+  exec "$0" --dormant "${FM_ARM_POOL_SLOT:-}"
 }
 
 # Session-lock gate, before --restart can stop anything and before any attach:
@@ -795,7 +815,7 @@ esac
 # already declined above, and counting it would let that session's idle shells
 # stand in for ears the owning session does not have.
 if [ "$dormant" -eq 1 ]; then
-  fm_arm_pool_join dormant || true
+  fm_arm_pool_join dormant "$slot_request" || true
   dormant_wait_for_free_lock
 fi
 
