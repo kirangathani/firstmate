@@ -1276,6 +1276,35 @@ test_statusline_is_wired_into_claude_settings() {
 
 # --- one implementation only -------------------------------------------------
 
+# The lock write has to REPLACE the file rather than truncate it in place. A
+# reader that lands inside a truncate window reads a short file, and since
+# bin/fm-watch.sh's per-poll check turns a `missing` verdict into a re-acquire
+# and possibly a stand-down, a torn read became a way to lose supervision on a
+# perfectly healthy home. A race is not reproducible on demand, so this asserts
+# the mechanism that removes it: the file's inode changes across a write, which
+# is true of a rename and false of a truncate, and nothing is left behind.
+test_lock_write_replaces_the_file_instead_of_truncating_it() {
+  local dir state before after leftovers
+  dir=$(make_case lock-write-atomic)
+  state="$dir/state"
+  mkdir -p "$state"
+  bash -c '. "$1"; fm_session_lock_write "$2" "$3"' _ "$ROOT/bin/fm-session-lock-lib.sh" "$state" "$$" \
+    || fail "the first lock write failed"
+  before=$(stat -c %i "$state/.lock" 2>/dev/null || true)
+  [ -n "$before" ] || fail "test setup: the first write produced no lock to compare against"
+  bash -c '. "$1"; fm_session_lock_write "$2" "$3"' _ "$ROOT/bin/fm-session-lock-lib.sh" "$state" "$$" \
+    || fail "the second lock write failed"
+  after=$(stat -c %i "$state/.lock" 2>/dev/null || true)
+  [ -n "$after" ] || fail "the second write left no lock file at all"
+  [ "$before" != "$after" ] \
+    || fail "the lock was written in place, so a concurrent reader can still see a half-written file"
+  [ "$(sed -n '1p' "$state/.lock")" = "$$" ] \
+    || fail "the replaced lock does not name the pid that was written"
+  leftovers=$(find "$state" -maxdepth 1 -name '.lock.tmp.*' | wc -l | tr -d '[:space:]')
+  [ "$leftovers" = 0 ] || fail "the lock write left $leftovers temporary file(s) behind"
+  pass "the session lock is replaced rather than truncated in place"
+}
+
 test_ownership_walk_has_exactly_one_implementation() {
   local definitions file text adapter
   # Four near-identical private copies of this walk are how the current drift
@@ -1329,4 +1358,5 @@ test_statusline_base_reaches_a_worktree_that_has_no_config_dir
 test_statusline_fixtures_are_isolated_from_an_inherited_base
 test_statusline_other_branch_names_a_remedy
 test_statusline_is_wired_into_claude_settings
+test_lock_write_replaces_the_file_instead_of_truncating_it
 test_ownership_walk_has_exactly_one_implementation
