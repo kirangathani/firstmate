@@ -108,9 +108,9 @@
 #
 # --dormant: join the dormant-arm pool and wait for a turn instead of arming at
 # once. bin/fm-arm-pool-lib.sh owns the pool's size, floor, and membership; this
-# flag owns only the waiting. Six of these are issued as six background tasks in
-# one reply at session start: one wins the singleton and becomes the watcher, the
-# rest sleep on the lock. When the holder fires and exits - which is what wakes
+# flag owns only the waiting. Six of these are issued in one reply at session
+# start, numbered `--dormant 1` through `--dormant 6`: one wins the singleton and
+# becomes the watcher, the rest sleep on the lock. When the holder fires and exits - which is what wakes
 # the model - the next member has the lock within a fraction of a second, with no
 # model call in between. That is the whole point: supervision continues without
 # firstmate spending a turn on it.
@@ -132,8 +132,10 @@
 #   dormant arm <S>: watcher exited, firstmate woken, watcher replenished from the pool, <N> dormant watchers lurking - <the crewmate's words>
 # S is this member's own pool slot, the same number the Monitor running it is
 # labelled with (`--dormant <S>`; bin/fm-arm-pool-lib.sh owns the numbering), and
-# N is the ears still asleep after the handover (pool_lurking_count). The
-# successor is confirmed before the line claims one. Handover lines go to
+# N is the ears left asleep once one of the others takes the watch
+# (pool_others_count). That handover is COUNTED rather than waited for: the
+# captain's budget between the watcher firing and the model reading is a fraction
+# of a second, and confirming a successor costs seconds. Handover lines go to
 # state/.watch-arm.log instead of stdout (announce/arm_log below), and the drain
 # at exit still runs but prints nothing, because every record it holds is the
 # same payload already on that line (report_pool_wake).

@@ -593,6 +593,10 @@ signal_payload() {  # <seen-file> <status-file> <current sig>
 # path used to read and surfaces it as `stale:` with the pane as evidence. So
 # absorbing a bare turn-end costs the swallowed-finish guard nothing; it moves it
 # one layer down, to the layer that has something to say when it fires.
+# The one thing that layer cannot see is a window it can no longer capture at all
+# (fm_backend_capture failing skips the task), and TURN_END_QUIET_SECS is the
+# valve for exactly that: a marker nothing has spoken for by then surfaces on its
+# own rather than waiting for a pane that is never coming back.
 signal_is_bare_turn_end() {  # <file> ...
   local f
   [ "$#" -gt 0 ] || return 1
