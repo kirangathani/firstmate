@@ -32,6 +32,9 @@ UNAME_S=$(uname)
 
 # Common watcher knobs: tight poll/grace, no check or heartbeat cadence unless a
 # test overrides them, so a test only exercises the path it targets. FM_CREW_STATE_BIN
+# The extras go through env(1), not straight into the prefix: a quoted expansion
+# is a command word by the time bash looks for assignments, so "$@" alone made
+# the first extra the command and the watcher never ran.
 # points at the case's hermetic fake fm-crew-state.sh (installed by make_case) so the
 # absorb-only-when-provably-working triage reads a canned verdict; a test fixes that
 # verdict via FM_FAKE_CREW_STATE in its environment before calling watch_bg.
@@ -39,7 +42,7 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env "$@" "$WATCH" > "$out" &
 }
 
 # Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it
@@ -396,10 +399,64 @@ test_turn_ended_provably_working_absorbed() {
   pass "a bare turn-end whose crew is provably working (busy pane) is absorbed"
 }
 
+# --- a BARE turn-end is absorbed until it has gone quiet ----------------------
+# A turn-end marker with no status line beside it carries nothing to act on: the
+# wake it makes says only that a turn ended, which is what the captain measured on
+# 2026-09-17 and asked to stop paying a notification for. It is absorbed inside
+# TURN_END_QUIET_SECS however the crew reads, and the pane-stale layer owns the
+# crew it describes from there - including the swallowed finish, which reaches
+# firstmate as a `stale:` wake carrying the pane instead of as a bare turn-end
+# carrying nothing.
+
+test_bare_turn_ended_absorbed_inside_the_quiet_window() {
+  local dir state fakebin out pid
+  dir=$(make_case turn-ended-bare); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  : > "$state/task.turn-ended"
+  # The crew is NOT provably working - the reading that used to surface this on
+  # its own - so this case is exactly the one the new rule changes.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out" FM_TURN_END_QUIET_SECS=3600
+  pid=$!
+  if ! wait_cycle "$pid" "$state" 40; then
+    reap "$pid"; fail "watcher exited for a bare turn-end inside the quiet window (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a bare turn-end inside the quiet window printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a bare turn-end inside the quiet window enqueued a durable wake record"
+  [ -s "$state/.seen-task_turn-ended" ] || fail "the absorbed bare turn-end did not advance its .seen-* suppressor"
+  grep -F 'absorbed bare turn-end' "$state/.watch-triage.log" >/dev/null \
+    || fail "the absorbed bare turn-end was not logged as one: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  reap "$pid"
+  pass "a bare turn-end inside the quiet window is absorbed (no exit, no queue, suppressor advanced)"
+}
+
+test_turn_ended_beside_a_status_write_is_not_bare() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case turn-ended-with-status); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  # A no-verb status line beside the marker. The batch is not bare, so it falls
+  # through to the provably-working read exactly as it always did: the crew has
+  # stopped, so it surfaces. This is the "unless a status line accompanies it"
+  # half of the rule, and it is what keeps a crew's own words reaching firstmate.
+  printf 'working: compiling step 2\n' > "$state/task.status"
+  : > "$state/task.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out" FM_TURN_END_QUIET_SECS=3600
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher absorbed a turn-end that arrived beside a status write"
+  grep -F "signal: " "$out" >/dev/null || fail "watcher did not print the surfaced signal"
+  grep -F "$state/task.status" "$out" >/dev/null || fail "the surfaced reason did not name the status file"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced batch failed"
+  grep "$(printf '\tsignal\ttask.status\t')" "$drain_out" >/dev/null || fail "the accompanying status write was not queued"
+  pass "a turn-end that arrives beside a status write is not bare and still surfaces"
+}
+
 # --- a no-verb signal whose crew is NOT provably working SURFACES -------------
 # This is the swallowed-finish fix: a crew that finished (or stopped and waits)
 # reports its final turn-end with no captain-relevant status and no running
 # pipeline, so the wake must surface instead of being absorbed.
+# Since 2026-09-17 a BARE turn-end must also have gone quiet past
+# TURN_END_QUIET_SECS, which this case forces with a zero window; the case above
+# covers the same crew inside the window.
 
 test_turn_ended_not_working_surfaced() {
   local dir state fakebin out drain_out pid
@@ -409,7 +466,7 @@ test_turn_ended_not_working_surfaced() {
   # No running pipeline, no busy pane: the crew has stopped (e.g. it finished via
   # an interactive menu and wrote no done: status). Default unknown verdict.
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
-  watch_bg "$state" "$fakebin" "$out"
+  watch_bg "$state" "$fakebin" "$out" FM_TURN_END_QUIET_SECS=0
   pid=$!
   wait_for_exit "$pid" 40 || fail "watcher did not surface a turn-end whose crew is not provably working"
   grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the surfaced turn-end signal"
@@ -1462,6 +1519,8 @@ test_crew_absorb_class_classifier
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
+test_bare_turn_ended_absorbed_inside_the_quiet_window
+test_turn_ended_beside_a_status_write_is_not_bare
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced

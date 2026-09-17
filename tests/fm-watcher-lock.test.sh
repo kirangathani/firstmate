@@ -1721,12 +1721,25 @@ pool_count_is() {  # <state> <n>
 # rather than assumed from the lock: the lock names the watcher a beat before the
 # arm has confirmed it and said so, and reading the announcement early would
 # report zero for a pool that is working perfectly.
-arms_started_count() {  # <dir>
-  grep -lF 'watcher: started pid=' "$1"/arm-*.out 2>/dev/null | wc -l | tr -d '[:space:]'
+# Read from state/.watch-arm.log rather than from the arms' stdout: a POOL member
+# announces a handover only to that log, because every line it prints to stdout
+# is a notification the model has to read.
+arms_started_count() {  # <state>
+  grep -cF 'watcher: started pid=' "$1/.watch-arm.log" 2>/dev/null | tr -d '[:space:]'
 }
 
-arms_started_count_is() {  # <dir> <n>
+arms_started_count_is() {  # <state> <n>
   [ "$(arms_started_count "$1")" = "$2" ]
+}
+
+# The one arm output carrying a wake, and how many lines it has. A pool member's
+# whole contract is that these are "the wake line" and "1".
+wake_arm_out() {  # <dir>
+  grep -lF 'dormant watchers lurking' "$1"/arm-*.out 2>/dev/null | head -1
+}
+
+some_arm_woke() {  # <dir>
+  [ -n "$(wake_arm_out "$1")" ]
 }
 
 test_arm_pool_counts_only_live_members_of_this_session() {
@@ -1858,7 +1871,7 @@ test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm() {
   # Preconditions, established and verified here so the real assertion below
   # cannot quietly read a pool that never formed as a pool that failed to hand
   # over.
-  wait_for arms_started_count_is "$dir" 1 \
+  wait_for arms_started_count_is "$state" 1 \
     || fail "test setup: no dormant arm ever confirmed a watcher it started"
   wait_for pool_count_is "$state" 6 \
     || fail "test setup: the six dormant arms did not all register as pool members"
@@ -1866,7 +1879,7 @@ test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm() {
   [ -n "$first_lock" ] || fail "test setup: the watcher lock names nobody after an arm confirmed a start"
   # Re-read rather than trusting the wait above: the assertion is that the other
   # five are STILL waiting, which a settled second look is what proves.
-  started=$(arms_started_count "$dir")
+  started=$(arms_started_count "$state")
   [ "$started" = "1" ] \
     || fail "$started dormant arms started a watcher where exactly one should have; the rest must wait"
 
@@ -1882,9 +1895,9 @@ test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm() {
   # The successor came from the pool, not from a fresh arm: a second arm now
   # reports a started watcher, and the pool is one member lighter because the
   # member that fired exited to wake the model.
-  wait_for arms_started_count_is "$dir" 2 \
+  wait_for arms_started_count_is "$state" 2 \
     || fail "the arm that took over never confirmed the watcher it started"
-  started_after=$(arms_started_count "$dir")
+  started_after=$(arms_started_count "$state")
   [ "$started_after" = "2" ] \
     || fail "$started_after arms reported starting a watcher after one handover; the successor did not come from the pool"
   wait_for pool_count_is "$state" 5 \
@@ -1907,6 +1920,94 @@ test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm() {
     wait "$arm_pid" 2>/dev/null || true
   done
   pass "six dormant arms keep one watcher and hand the watch over with no new arm"
+}
+
+test_a_pool_wake_is_one_line_in_the_captains_words() {
+  # The captain measured five notifications for one crewmate status append on
+  # 2026-09-17 and asked for one. This is that one, byte for byte: the line he
+  # dictated, the arm's own pool number in front of it, the crewmate's words
+  # after it, and nothing else in the file at all. The count is checked as well
+  # as the wording, because a line that always said the same number would be
+  # decoration rather than a report.
+  local dir state fakebin i first_lock out lines
+  dir=$(make_case pool-wake-line)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mark_pr_check_migration_complete "$state"
+  # Three members, numbered as the protocol says the model numbers them: one
+  # watches, one takes over when it fires, and exactly one is left lurking.
+  for i in 1 2 3; do
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.5 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_GUARD_GRACE=300 \
+      FM_ARM_CONFIRM_TIMEOUT="$ARM_CONFIRM_START" FM_ARM_DORMANT_POLL=0.1 \
+      "$WATCH_ARM" --dormant "$i" > "$dir/arm-$i.out" 2>&1 &
+  done
+  wait_for arms_started_count_is "$state" 1 \
+    || fail "test setup: no dormant arm ever confirmed a watcher it started"
+  wait_for pool_count_is "$state" 3 \
+    || fail "test setup: the three dormant arms did not all register as pool members"
+  first_lock=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$first_lock" ] || fail "test setup: the watcher lock names nobody after an arm confirmed a start"
+
+  printf 'done: the work is finished\n' > "$state/fm-task.status"
+  wait_for some_arm_woke "$dir" || fail "no arm ever printed a wake line"
+  out=$(wake_arm_out "$dir")
+  lines=$(wc -l < "$out" | tr -d '[:space:]')
+  [ "$lines" = "1" ] \
+    || fail "a pool wake printed $lines lines where exactly one is the whole contract: $(cat "$out")"
+  case "$(cat "$out")" in
+    "dormant arm "[123]": watcher exited, firstmate woken, watcher replenished from the pool, 1 dormant watchers lurking - signal: fm-task | done: the work is finished") ;;
+    *) fail "the wake line is not the captain's line with this arm's number and the crewmate's words: $(cat "$out")" ;;
+  esac
+  # The drained record is not echoed separately: the queue really was emptied,
+  # and no raw queue row reached any arm's output.
+  [ ! -s "$state/.wake-queue" ] || fail "the arm printed its wake without draining the queue"
+  grep -qhE '^[0-9]+	[0-9]+	' "$dir"/arm-*.out 2>/dev/null \
+    && fail "the drained wake record was echoed a second time as a raw queue row"
+  reap_background_jobs
+  pass "a pool wake is exactly one line, in the captain's words, numbered and counted"
+}
+
+test_a_pool_member_announces_its_start_to_the_log_not_stdout() {
+  # Notification (3) of the five: the successor's own `watcher: started ...`.
+  # It still has to exist - a start nobody can find afterwards is worse than a
+  # noisy one - so it moves to the log rather than disappearing.
+  local dir state fakebin out
+  dir=$(make_case pool-silent-start)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/arm-1.out"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_GUARD_GRACE=300 \
+    FM_ARM_CONFIRM_TIMEOUT="$ARM_CONFIRM_START" FM_ARM_DORMANT_POLL=0.1 \
+    "$WATCH_ARM" --dormant 4 > "$out" 2>&1 &
+  wait_for arms_started_count_is "$state" 1 \
+    || fail "the dormant arm never confirmed the watcher it started"
+  [ ! -s "$out" ] \
+    || fail "a dormant arm printed something before its own wake: $(cat "$out")"
+  have_line "$state/.watch-arm.log" 'slot=4 watcher: started pid=' \
+    || fail "the silenced start was not recorded against its slot in the arm log: $(cat "$state/.watch-arm.log" 2>/dev/null)"
+  reap_background_jobs
+  pass "a dormant arm announces its start to the arm log and prints nothing"
+}
+
+test_pool_slots_are_numbered_and_reused() {
+  # The captain's chat showed `dormant arm 2` beside `dormant arm A`. Numbers
+  # come from the pool, and a freed number is the next one handed out, so a
+  # refill lands back on 1..target rather than counting upward forever.
+  local dir state free
+  dir=$(make_case pool-slots)
+  state="$dir/state"
+  [ "$(pool_eval "$state" 'fm_arm_pool_join dormant 3; printf "%s" "$FM_ARM_POOL_SLOT"')" = "3" ] \
+    || fail "a member that asked for a free slot did not get it"
+  # That member has exited, so its number is free again and is the lowest free
+  # one; the allocator must hand it back rather than move on.
+  free=$(pool_eval "$state" 'fm_arm_pool_free_slots | tr "\n" " "')
+  [ "$free" = "1 2 3 4 5 6 " ] || fail "an empty pool did not report every number free (got '$free')"
+  [ "$(pool_eval "$state" 'fm_arm_pool_resolve_slot 999999')" = "1" ] \
+    || fail "the allocator did not hand out the lowest free number"
+  pass "pool members are numbered from one, and a freed number is reused"
 }
 
 test_singleton_start
@@ -1952,3 +2053,6 @@ test_a_joined_arm_pool_member_counts_itself
 test_a_command_with_room_in_the_pool_becomes_an_arm
 test_a_command_exits_at_once_when_the_pool_is_full
 test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm
+test_a_pool_wake_is_one_line_in_the_captains_words
+test_a_pool_member_announces_its_start_to_the_log_not_stdout
+test_pool_slots_are_numbered_and_reused
