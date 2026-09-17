@@ -66,6 +66,37 @@
 # by running the canonical whole-set command against the fast path and diffing
 # the findings.
 #
+# ONE PASS AT A TIME, AND ONE SIZED FROM MEMORY
+# ---------------------------------------------
+# A full pass is 20+ concurrent ShellCheck processes, each up to about 1.9 GB
+# resident, so one pass can commit most of a workstation's memory and several at
+# once can take the box down. Measured 2026-09-17: four crewmates ran this
+# script within five minutes, 23 ShellCheck processes were resident at 0.6-1.9
+# GB each, free memory reached zero, load average reached 133, and fleet
+# supervision lapsed for three minutes. Two defences follow from that, both of
+# them in code here rather than in an instruction a caller could forget:
+#   - A box-wide lock (flock on FM_LINT_LOCK_FILE, default
+#     ${TMPDIR:-/tmp}/fm-lint-pass.lock, deliberately outside every worktree so
+#     all worktrees and clones on one machine share it) is taken before any
+#     ShellCheck runs and held for the life of the process. A second pass waits
+#     with a one-line notice on stderr instead of doubling the load. Every mode
+#     goes through it, including --verify-parity and the cached fast path. The
+#     re-entrant paths - --verify-parity's inner run, and the --whole-set
+#     fallback exec - inherit FM_LINT_LOCKED=1 and the open descriptor, so they
+#     hold the SAME lock rather than deadlocking against it. Where flock is not
+#     installed (it is Linux's util-linux; macOS has no flock(1)) the pass runs
+#     unserialised rather than failing. The default path is deliberately NOT
+#     /tmp/fm-lint.lock: while this script did no locking of its own, callers
+#     were told to wrap it as `flock /tmp/fm-lint.lock bin/fm-lint.sh`, and a
+#     wrapper holding the very file the wrapped script then waits for deadlocks
+#     forever. A surviving wrapper on the old path is harmless against this one.
+#   - The shard count is capped from memory, not just cores: at most half of
+#     /proc/meminfo's MemAvailable may be committed, at MEM_PER_JOB_KB per
+#     shard, i.e. jobs <= (MemAvailable / 2) / MEM_PER_JOB_KB, never below 1.
+#     The core-count cap below remains the upper bound, so this can only ever
+#     lower the job count. FM_LINT_MEM_AVAILABLE_KB substitutes a figure for
+#     MemAvailable, which is how the suite drives this from a healthy box.
+#
 # Usage:
 #   fm-lint.sh                    lint the canonical file set (what both gates run)
 #   fm-lint.sh <path>...          lint only the given paths with the same config
@@ -83,6 +114,10 @@
 #                       COMMON .git, shared by every worktree; see the CACHE_DIR
 #                       block for why the common dir and what that costs)
 #   FM_LINT_NO_CACHE=1 read and write no cache entries
+#   FM_LINT_LOCK_FILE  the box-wide lock path (default:
+#                       ${TMPDIR:-/tmp}/fm-lint-pass.lock)
+#   FM_LINT_MEM_AVAILABLE_KB
+#                      substitute for /proc/meminfo MemAvailable, in kB
 #
 # Exit status is ShellCheck's own on a lint run, so a caller (CI or the gate)
 # fails exactly when ShellCheck reports a finding; a version mismatch or a
@@ -112,6 +147,28 @@ cd "$ROOT" || exit 1
 if [ "${1:-}" = "--required-version" ]; then
   printf '%s\n' "$REQUIRED_SHELLCHECK"
   exit 0
+fi
+
+# --- one lint pass at a time on this box ------------------------------------
+# Taken before the version probe, so nothing in this script runs ShellCheck
+# outside the lock. The descriptor stays open for the life of the process and
+# the kernel releases it on exit, including a kill, so no stale lock can be left
+# behind. FM_LINT_LOCKED is exported rather than tested per call site because
+# the re-entrant paths are execs and child invocations of this same script:
+# they inherit both the variable and the descriptor, so they run under the lock
+# already held instead of blocking on themselves. See the header for why.
+FM_LINT_LOCK_FILE="${FM_LINT_LOCK_FILE:-${TMPDIR:-/tmp}/fm-lint-pass.lock}"
+# The `: >>` probe is deliberate: an `exec 9>>` that cannot open its target
+# would both abort under some shells and, written inline as a condition, leave
+# its own error redirection applied to the rest of the script.
+if [ "${FM_LINT_LOCKED:-0}" != 1 ] && command -v flock >/dev/null 2>&1 &&
+   : >>"$FM_LINT_LOCK_FILE" 2>/dev/null; then
+  exec 9>>"$FM_LINT_LOCK_FILE"
+  export FM_LINT_LOCKED=1
+  if ! flock -n 9; then
+    printf 'fm-lint.sh: another lint pass is running on this box; waiting.\n' >&2
+    flock 9
+  fi
 fi
 
 # Enforce the pin so local and CI resolve the identical rule set.
@@ -284,6 +341,32 @@ if [ -z "$JOBS" ]; then
   [ "$JOBS" -gt 8 ] && JOBS=8
 fi
 [ "$JOBS" -ge 1 ] || JOBS=1
+
+# --- memory-derived cap on that job count -----------------------------------
+# Cores say how many shards could run; memory says how many may. The largest
+# single shard measured on this repo held 1.9 GB resident (2026-09-17), so a
+# shard is budgeted at MEM_PER_JOB_KB and the pass may commit at most half of
+# MemAvailable, leaving the other half for everything else on the box. This
+# only ever lowers JOBS: the core cap above stays the upper bound, and an
+# explicit FM_LINT_JOBS is subject to the same ceiling, because memory the box
+# does not have is not something a caller can opt out of.
+MEM_PER_JOB_KB=2000000
+mem_kb="${FM_LINT_MEM_AVAILABLE_KB:-}"
+if [ -z "$mem_kb" ] && [ -r /proc/meminfo ]; then
+  mem_kb=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo)
+fi
+case "$mem_kb" in
+  '' | *[!0-9]*) mem_kb= ;;
+esac
+if [ -n "$mem_kb" ]; then
+  mem_jobs=$((mem_kb / 2 / MEM_PER_JOB_KB))
+  [ "$mem_jobs" -ge 1 ] || mem_jobs=1
+  if [ "$mem_jobs" -lt "$JOBS" ]; then
+    printf 'fm-lint.sh: %s MB available, so capping %s shard(s) to %s.\n' \
+      "$((mem_kb / 1024))" "$JOBS" "$mem_jobs" >&2
+    JOBS="$mem_jobs"
+  fi
+fi
 
 # --- source-edge discovery --------------------------------------------------
 # The planner does not parse source statements out of shell code; ShellCheck
