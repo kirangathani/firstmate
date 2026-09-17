@@ -106,6 +106,20 @@
 # in the session that is not responsible for it while everything reports fine.
 # This is the one place the gate lives, so every harness inherits it.
 #
+# --dormant: join the dormant-arm pool and wait for a turn instead of arming at
+# once. bin/fm-arm-pool-lib.sh owns the pool's size, floor, and membership; this
+# flag owns only the waiting. Six of these are issued as six background tasks in
+# one reply at session start: one wins the singleton and becomes the watcher, the
+# rest sleep on the lock. When the holder fires and exits - which is what wakes
+# the model - the next member has the lock within a fraction of a second, with no
+# model call in between. That is the whole point: supervision continues without
+# firstmate spending a turn on it.
+# A dormant arm never becomes a follower. The two endings that are not its own
+# wake, finding the lock already held and losing the singleton race, both send it
+# back to sleep, so the pool stays one watcher plus waiters. Every FAILED ending
+# still prints and exits, because a member that cannot arm when its turn comes is
+# exactly what has to be visible, and the turn-end guard's floor then refills it.
+#
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
 # wins the singleton while the duplicate child stands down. It
@@ -127,6 +141,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-arm-pool-lib.sh
+. "$SCRIPT_DIR/fm-arm-pool-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 # Detach primitive. Absent on macOS, where the arm keeps its pre-detach behaviour
@@ -141,6 +157,18 @@ GRACE=${FM_GUARD_GRACE:-300}
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
+# How often a DORMANT arm looks to see whether the watcher singleton has been
+# released. The captain's standing requirement is that everything between the
+# watcher firing and the model reading takes under one second, and this poll is
+# the whole of the handover gap, so it is set well inside that budget rather
+# than at the one-second mark it has to beat.
+DORMANT_POLL=${FM_ARM_DORMANT_POLL:-0.25}
+# Most of those looks are a single shell test on the lock path and fork nothing:
+# five idle members polling four times a second would otherwise cost about a
+# hundred process spawns a second to learn nothing. The full health check - which
+# is what also catches a lock left behind by a watcher that died without
+# releasing it - runs every DORMANT_DEEP_EVERY polls instead.
+DORMANT_DEEP_EVERY=${FM_ARM_DORMANT_DEEP_EVERY:-16}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
@@ -245,12 +273,18 @@ cycle_signal_name() {
 }
 
 cycle_log_append() {
-  local exit_code=$1 signal=$2 reason=$3 successor=$4 ended_at beacon_age lock_after outcome size tmp raw i
+  local exit_code=$1 signal=$2 reason=$3 successor=$4 ended_at beacon_age lock_after outcome pool size tmp raw i
   [ "$cycle_active" -eq 1 ] || return 0
   ended_at=$(date +%s)
   beacon_age=$(fm_path_age "$BEAT")
   lock_after=$(lock_snapshot)
   outcome=$(cycle_outcome)
+  # Pool depth AT THE HANDOVER, which is the one moment it answers the captain's
+  # "let us see what it looks like": how many ears were still asleep when this
+  # cycle closed, and therefore whether the next wake had a taker waiting or fell
+  # to the turn-end refill. Counted after the outcome above so a failure to count
+  # can never change how the cycle itself is classified.
+  pool=$(fm_arm_pool_count 2>/dev/null || printf 'unknown')
 
   i=0
   while ! fm_lock_try_acquire "$CYCLE_LOG_LOCK"; do
@@ -258,7 +292,10 @@ cycle_log_append() {
     sleep 0.02
     i=$((i + 1))
   done
-  printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\toutcome=%s\tsuccessor=%s\n' \
+  # successor= stays LAST: cycle_mark_predecessor_successor rewrites it with an
+  # end-anchored substitution, so a field appended after it would make that
+  # rewrite silently miss every record.
+  printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\toutcome=%s\tpool=%s\tsuccessor=%s\n' \
     "$ARM_PID" \
     "$(cycle_clean_field "$cycle_watcher_pid")" \
     "$(cycle_clean_field "$cycle_origin")" \
@@ -271,6 +308,7 @@ cycle_log_append() {
     "$(cycle_clean_field "$cycle_lock_before")" \
     "$(cycle_clean_field "$lock_after")" \
     "$outcome" \
+    "$(cycle_clean_field "$pool")" \
     "$(cycle_clean_field "$successor")" >> "$CYCLE_LOG" 2>/dev/null || true
 
   size=$(wc -c < "$CYCLE_LOG" 2>/dev/null | tr -d '[:space:]')
@@ -493,12 +531,64 @@ print_watch_output() {
   [ -s "$out" ] && cat "$out"
 }
 
+# A DORMANT arm is an ordinary arm that waits its turn. It joins the pool, sleeps
+# until the watcher singleton is genuinely free, and then runs the arm flow below
+# completely unchanged. Everything that makes an arm safe - the session-lock
+# gate, the singleton, the confirmation, the ledger - applies to it exactly as it
+# always did; dormancy only decides WHEN the flow starts.
+# It also decides what happens at the two endings that are not this arm's own
+# wake: already-held and lost-the-race both send it back to sleep instead of
+# attaching, so the pool keeps the shape the captain asked for - one member
+# watching, the others waiting - rather than collapsing into a queue of followers
+# that all die together when the holder fires.
+dormant=0
 mode=arm
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
+  --dormant) mode=arm; dormant=1 ;;
   --restart) mode=restart ;;
-  *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
+  *) echo "usage: $(basename "$0") [--dormant|--restart]" >&2; exit 2 ;;
 esac
+
+# Leaving the pool is tied to the process ending rather than to any one exit
+# path, because a member that dies without withdrawing its record is counted as
+# an ear this session does not have, and the guard would then pass a turn on a
+# pool that is smaller than it reads. `exec` deliberately does NOT run this: a
+# re-entering dormant arm keeps its pid, so its record stays true across the
+# re-entry and the pool never dips through it.
+trap 'fm_arm_pool_leave' EXIT
+
+# Wait until no healthy watcher holds the singleton. The cheap test is the whole
+# point: it is a shell builtin on the lock path, so an idle member costs
+# essentially nothing, and the expensive identity-and-beacon check runs only when
+# the lock looks gone or on the periodic sweep that catches a lock left behind by
+# a watcher that died holding it.
+dormant_wait_for_free_lock() {
+  local i=0
+  while :; do
+    if [ ! -e "$WATCH_LOCK" ] || [ "$((i % DORMANT_DEEP_EVERY))" -eq 0 ]; then
+      healthy_watcher || return 0
+    fi
+    sleep "$DORMANT_POLL"
+    i=$((i + 1))
+  done
+}
+
+# Go back to sleep by starting this script over. Re-entry is an exec rather than
+# a loop around the arm flow because the flow is a long straight line that sets
+# traps, forks a child, and holds a temp file: unwinding all of that correctly on
+# every path is exactly the kind of state a fresh process gets right for free.
+# The pid does not change, so the pool membership and the ledger identities
+# survive it.
+dormant_reenter() {
+  cycle_active=0
+  trap - HUP TERM INT
+  if [ -n "${child_out:-}" ]; then
+    command rm -f -- "$child_out" 2>/dev/null || true
+    child_out=
+  fi
+  exec "$0" --dormant
+}
 
 # Session-lock gate, before --restart can stop anything and before any attach:
 # a non-owning session must not arm, must not stop this home's watcher, and must
@@ -541,6 +631,14 @@ case "$(fm_session_lock_ownership "$STATE")" in
     ;;
 esac
 
+# Joining AFTER the gate, never before: an arm a non-owning session issued has
+# already declined above, and counting it would let that session's idle shells
+# stand in for ears the owning session does not have.
+if [ "$dormant" -eq 1 ]; then
+  fm_arm_pool_join dormant || true
+  dormant_wait_for_free_lock
+fi
+
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
@@ -566,6 +664,10 @@ fi
 # then, not as an immediate empty wake. (--restart skips this: it just stopped
 # this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
+  # A dormant arm only reaches this if another member took the lock in the
+  # moment between its last look and this one. It is not a follower, so it goes
+  # back to sleep rather than attaching.
+  [ "$dormant" -eq 0 ] || dormant_reenter
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
   cycle_begin "$HEALTHY_PID" attached
   report_attached
@@ -671,6 +773,11 @@ owned_child_finished() {
       child=
       child_out=
       cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+      # A dormant arm that lost the singleton race has done nothing wrong and is
+      # not out of the pool: another member is now the watcher, so this one
+      # returns to waiting. Attaching instead would spend a member as a follower
+      # of a cycle it does not own, and every follower ends when that cycle does.
+      [ "$dormant" -eq 0 ] || dormant_reenter
       cycle_begin "$HEALTHY_PID" attached
       report_attached
       attach_and_wait "$HEALTHY_PID"

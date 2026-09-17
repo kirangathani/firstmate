@@ -120,6 +120,7 @@ state/               volatile runtime signals; gitignored
   .handoff-unread    path of a handoff document no session has read yet; armed by bin/fm-handoff.sh, announced by its SessionStart pickup hook, cleared only by consume
   .lock              session lock: the pid and start ticks of the OWN harness process of the one session controlling this home's fleet, and the gate on arming supervision; a session that acquires or arms while its ancestor holds the lock inherits it, so a lock naming an ancestor migrates on its own and only a live holder outside that ancestry is a rival; never the .watch.lock singleton below (bin/fm-session-lock-lib.sh)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
+  .arm-pool/         one record per live dormant arm of this session, named by its pid; the waiting ears that take the watcher over when the current one fires, so a wake costs no re-arming call. bin/fm-arm-pool-lib.sh owns the record format, the count, the target, and the floor the turn-end guard blocks below; each member withdraws its own record when it exits
   .unactioned-*      short-lived unactioned-alarm confirm cache; never touch; removed by teardown
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
