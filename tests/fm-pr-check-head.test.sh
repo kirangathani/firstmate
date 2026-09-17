@@ -162,7 +162,32 @@ test_does_not_compare_an_unrelated_pr_head() {
   pass "fm-pr-check.sh: an unrelated PR head is never compared to this branch"
 }
 
+# A RE-RUN AGAINST A PR THIS TASK ALREADY RECORDED IS A SUPPORTED NO-OP, and the
+# moved-head case on that path is already refused one step later, at teardown
+# (tests/fm-teardown.test.sh: "merged PR does not allow teardown after a later
+# local commit", and its pr-check-stale case, which re-runs this command after a
+# later local commit and expects it to succeed without refreshing pr_head).
+# Refusing here too would break that re-run for a case already covered, so the
+# guard applies only to the FIRST recording - which is where the incident
+# happened and where nothing else looks.
+test_a_rerun_of_an_already_recorded_pr_is_left_alone() {
+  local dir tip base status
+  read -r dir tip < <(make_head_case rerun)
+  base=$(git -C "$dir/wt" rev-parse HEAD~1)
+  printf 'pr=%s\n' "https://github.com/o/r/pull/1" >> "$dir/home/state/task-a.meta"
+
+  set +e
+  FM_TEST_GH_HEAD="$base" \
+    run_check "$dir" task-a "https://github.com/o/r/pull/1" >/dev/null 2>&1
+  status=$?
+  set -e
+  expect_code 0 "$status" \
+    "a re-run against an already-recorded PR must stay the no-op the base defines"
+  pass "fm-pr-check.sh: a re-run of an already-recorded PR is left to teardown's gate"
+}
+
 test_refuses_a_pr_that_predates_the_tasks_commit
 test_records_a_pr_at_the_branch_tip
 test_records_a_pr_ahead_of_the_tasks_own_copy
 test_does_not_compare_an_unrelated_pr_head
+test_a_rerun_of_an_already_recorded_pr_is_left_alone

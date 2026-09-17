@@ -92,7 +92,20 @@ fi
 #     runs while firstmate is recording a report, and the case being caught -
 #     work committed locally and never pushed - always already has the PR head
 #     locally, because that head was pushed from this same copy.
-if [ -n "$PR_HEAD" ]; then
+# IT APPLIES ONLY TO THE FIRST RECORDING OF THIS PR, because a re-run against a
+# PR this task already recorded is a supported no-op whose moved-head case the
+# base already refuses one step later, at teardown
+# (tests/fm-teardown.test.sh's "merged PR does not allow teardown after a later
+# local commit" and "pr-check-stale"). Refusing here too would break that
+# re-run for a case already covered, so this adds the guard only where nothing
+# had one: the first recording, which is the moment the incident happened - the
+# worker reported `done: PR <url>` and firstmate recorded it for the first time.
+ALREADY_RECORDED=0
+if grep -qxF "pr=$URL" "$META" 2>/dev/null; then
+  ALREADY_RECORDED=1
+fi
+
+if [ -n "$PR_HEAD" ] && [ "$ALREADY_RECORDED" -eq 0 ]; then
   LOCAL_TIP=$(cd "$WT" && git rev-parse HEAD 2>/dev/null || true)
   if fm_pr_head_valid "$LOCAL_TIP" && [ "$LOCAL_TIP" != "$PR_HEAD" ] \
     && (cd "$WT" && git cat-file -e "$PR_HEAD^{commit}" 2>/dev/null) \
