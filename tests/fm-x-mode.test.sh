@@ -874,7 +874,7 @@ test_bootstrap_opt_out_cleanup() {
   out=$(PATH="$(fm_no_mistakes_stub_bin):$PATH" CLAUDECODE=1 FM_HOME="$home" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "FMX: X mode off" "opt-out must announce X mode off when it removed artifacts"
-  assert_contains "$out" "Claude Code background task" "opt-out remediation must use the harness-aware repair renderer"
+  assert_contains "$out" "Claude Code Monitor" "opt-out remediation must use the harness-aware repair renderer"
   assert_not_contains "$out" "bin/fm-watch-arm.sh --restart" "opt-out remediation must not hardcode a background-arm restart"
   assert_absent "$home/state/x-watch.check.sh" "opt-out must remove the shim"
   assert_absent "$home/config/x-mode.env" "opt-out must remove the cadence config"

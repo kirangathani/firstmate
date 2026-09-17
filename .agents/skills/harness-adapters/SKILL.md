@@ -151,7 +151,7 @@ The firstmate PRIMARY's own `.claude/settings.json` registers `bin/fm-turnend-gu
 Claude Code's stdin payload to a Stop hook carries a `stop_hook_active` boolean that is `true` exactly when the current stop attempt is itself a forced continuation from an earlier block this turn; a hook can and should use that as its own loop-guard (always allow the stop when it is already `true`) rather than tracking state itself.
 A project-level `.claude/settings.json` only takes effect when Claude Code's project root is that exact directory - it does not walk up from a subdirectory looking for one, so firstmate launches the primary from the repo root.
 After those settings are loaded, hook command resolution is still cwd-sensitive because Claude Code runs commands through `/bin/sh` against the session's current cwd; keep the tracked command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh` and see `docs/turnend-guard.md` for the verified Stop-hook details.
-Claude Code's primary watcher protocol is the lowest-friction path: run `bin/fm-watch-arm.sh` as its own Claude Code background task and treat background-task completion as the wake.
+Claude Code's primary watcher protocol is the lowest-friction path: the waiting arms of the dormant-arm pool, each launched as its own Monitor so every line an arm prints arrives as a notification. `docs/supervision-protocols/claude.md` owns the exact mechanism and the reasons for it.
 
 **Session-pid marker facts (verified 2026-09-15 on Claude Code 2.1.272/2.1.273; re-verified 2026-09-16 on 2.1.273).**
 `bin/fm-session-lock-lib.sh` reads `CLAUDE_PID` to find the harness process a session lock should record, through `FM_SESSION_HARNESS_PID_ENV`.
