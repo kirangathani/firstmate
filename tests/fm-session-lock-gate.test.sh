@@ -1067,18 +1067,6 @@ test_checkpoint_is_gated_on_the_session_lock() {
 STATUSLINE_EMPTY_CONFIG="$TMP_ROOT/statusline-empty-claude-config"
 mkdir -p "$STATUSLINE_EMPTY_CONFIG"
 
-# bin/fm-statusline.sh prints the fleet line only for a PRIMARY home, so every
-# fixture below that expects that line has to look like one. A .git DIRECTORY is
-# the plain-checkout form of primary; bin/fm-primary-scope-lib.sh owns the marker
-# form for a leased secondmate worktree. A home with state/ but no .git is a
-# recycled task worktree, which is the case that must stay silent, so it is a
-# fixture in its own right rather than something to give every case by default.
-make_statusline_home() {  # <home> [<extra dir>...]
-  local home=$1
-  shift
-  mkdir -p "$home/state" "$home/.git" "$@"
-}
-
 # FM_STATUSLINE_BASE is scrubbed for the invocation, not merely left unset here:
 # bin/fm-statusline.sh reads that env var BEFORE config/statusline-base, so an
 # operator who has their own base command configured - and every crewmate pane,
@@ -1096,7 +1084,7 @@ run_statusline() {  # <home>
 test_statusline_reports_fleet_control() {
   local home out other status
   home="$TMP_ROOT/statusline-home"
-  make_statusline_home "$home"
+  mkdir -p "$home/state"
 
   printf '%s\n' "$$" > "$home/state/.lock"
   out=$(run_statusline "$home"); status=$?
@@ -1131,9 +1119,9 @@ test_statusline_is_silent_and_writes_nothing_without_fleet_state() {
   pass "fm-statusline: silent, and creates nothing, where there is no fleet state"
 }
 
-# A REAL linked worktree, because its .git being a FILE rather than a directory
-# is the whole distinction under test, and a hand-written stand-in would test a
-# shape git may not emit.
+# A REAL linked worktree, because git writing .git as a FILE rather than a
+# directory is the whole distinction under test, and a hand-written stand-in
+# would test a shape git may not emit.
 make_linked_worktree() {  # <repo dir> <worktree dir>
   local repo=$1 worktree=$2
   mkdir -p "$repo"
@@ -1143,7 +1131,7 @@ make_linked_worktree() {  # <repo dir> <worktree dir>
   git -C "$repo" worktree add -q --detach "$worktree"
 }
 
-test_statusline_prints_the_fleet_line_only_for_a_primary_home() {
+test_statusline_says_nothing_in_an_unmarked_linked_worktree() {
   local repo worktree home out status
   # A task worktree is recycled between occupants and state/ is gitignored rather
   # than removed, so a fresh crew inherits an earlier one's empty state dir. That
@@ -1151,8 +1139,8 @@ test_statusline_prints_the_fleet_line_only_for_a_primary_home() {
   # exist, and every crew pane rendered a confident verdict about it. The verdict
   # could never have been right: bin/fm-spawn.sh exports FM_HOME only for a
   # secondmate, so the pane was never reading the real home's lock.
-  repo="$TMP_ROOT/statusline-primary-repo"
-  worktree="$TMP_ROOT/statusline-primary-worktree"
+  repo="$TMP_ROOT/statusline-linked-repo"
+  worktree="$TMP_ROOT/statusline-linked-worktree"
   make_linked_worktree "$repo" "$worktree"
   mkdir -p "$worktree/state"
   [ -f "$worktree/.git" ] || fail "the linked-worktree fixture must have a .git FILE; that is the case under test"
@@ -1161,14 +1149,6 @@ test_statusline_prints_the_fleet_line_only_for_a_primary_home() {
   expect_code 0 "$status" "a task worktree must not fail the status line"
   assert_not_contains "$out" "control of fleet" "a leftover state dir in a task worktree must not produce a verdict about a fleet"
 
-  # The control, so the case above cannot pass on a status line that has simply
-  # gone silent everywhere: the same state dir in a plain checkout IS a home.
-  home="$TMP_ROOT/statusline-primary-checkout"
-  make_statusline_home "$home"
-  printf '%s\n' "$$" > "$home/state/.lock"
-  out=$(run_statusline "$home")
-  assert_contains "$out" "in control of fleet" "a checkout with a .git directory is a home and must still be answered"
-
   # A leased secondmate home is a linked worktree too, so .git is a file there as
   # well; the marker is the only thing that tells the two apart, and
   # bin/fm-primary-scope-lib.sh owns reading it.
@@ -1176,7 +1156,16 @@ test_statusline_prints_the_fleet_line_only_for_a_primary_home() {
   printf '%s\n' "$$" > "$worktree/state/.lock"
   out=$(run_statusline "$worktree")
   assert_contains "$out" "in control of fleet" "a marked secondmate worktree is a home and must be answered despite its .git file"
-  pass "fm-statusline: the fleet line is printed for a primary home only"
+
+  # The control, so the silence above cannot be a status line that has simply
+  # gone quiet everywhere: only the unmarked LINKED worktree is silenced, and a
+  # home that is not one is still answered.
+  home="$TMP_ROOT/statusline-not-a-linked-worktree"
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  out=$(run_statusline "$home")
+  assert_contains "$out" "in control of fleet" "only an unmarked linked worktree may be silenced; every other home is still answered"
+  pass "fm-statusline: an unmarked linked worktree says nothing about a fleet it does not have"
 }
 
 install_statusline_base() {  # <home> <base path>
@@ -1199,7 +1188,7 @@ test_statusline_composes_with_the_operators_own_status_line() {
   # the fleet line beneath it.
   home="$TMP_ROOT/statusline-compose"
   base="$TMP_ROOT/statusline-base.sh"
-  make_statusline_home "$home"
+  mkdir -p "$home/state"
   install_statusline_base "$home" "$base"
   printf '%s\n' "$$" > "$home/state/.lock"
 
@@ -1229,7 +1218,7 @@ test_statusline_composes_with_the_operators_own_status_line() {
   # means no base line from it, quietly. The user-level fallback is pinned empty
   # here (see run_statusline), so what is left is the fleet line alone.
   home="$TMP_ROOT/statusline-base-unusable"
-  make_statusline_home "$home" "$home/config"
+  mkdir -p "$home/state" "$home/config"
   printf '%s\n' "$$" > "$home/state/.lock"
   printf '%s\n' "$TMP_ROOT/statusline-base-does-not-exist.sh" > "$home/config/statusline-base"
   out=$(run_statusline "$home")
@@ -1294,7 +1283,7 @@ test_statusline_fixtures_are_isolated_from_an_inherited_base() {
   home="$TMP_ROOT/statusline-inherited-base"
   fixture="$TMP_ROOT/statusline-fixture-base.sh"
   ambient="$TMP_ROOT/statusline-ambient-base.sh"
-  make_statusline_home "$home"
+  mkdir -p "$home/state"
   install_statusline_base "$home" "$fixture"
   printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "ambient line\\n"\n' > "$ambient"
   chmod +x "$ambient"
@@ -1310,7 +1299,7 @@ test_statusline_fixtures_are_isolated_from_an_inherited_base() {
 test_statusline_other_branch_names_a_remedy() {
   local home other out
   home="$TMP_ROOT/statusline-other-remedy"
-  make_statusline_home "$home"
+  mkdir -p "$home/state"
   other=$(start_other_session)
   printf '%s\n' "$other" > "$home/state/.lock"
   out=$(run_statusline "$home")
@@ -1413,7 +1402,7 @@ test_arm_arms_when_the_lock_holder_pid_was_reused
 test_checkpoint_is_gated_on_the_session_lock
 test_statusline_reports_fleet_control
 test_statusline_is_silent_and_writes_nothing_without_fleet_state
-test_statusline_prints_the_fleet_line_only_for_a_primary_home
+test_statusline_says_nothing_in_an_unmarked_linked_worktree
 test_statusline_composes_with_the_operators_own_status_line
 test_statusline_base_reaches_a_worktree_that_has_no_config_dir
 test_statusline_fixtures_are_isolated_from_an_inherited_base

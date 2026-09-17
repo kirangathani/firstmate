@@ -49,14 +49,14 @@
 #     user settings file, at most eight ps parent hops
 #     (bin/fm-session-lock-lib.sh), and whatever the operator's own base command
 #     costs. No process scans, no globbing over the fleet, no network, no git.
-#     The primary-home test below is part of that budget and is why it stats
+#     The linked-worktree test below is part of that budget, and is why it stats
 #     .git and reads the secondmate marker rather than asking git anything.
 #   - It never writes anything under state/, and never creates it.
 #   - It degrades QUIETLY: when ownership cannot be determined it prints no fleet
 #     line rather than a wrong or alarming answer. Two cases are exactly that: a
-#     missing state dir, and a home that is not a primary home, which is every
-#     crewmate or scout task worktree of this repo including one whose recycled
-#     slot left a state dir behind.
+#     missing state dir, and an unmarked linked worktree, which is every crewmate
+#     or scout task worktree of this repo including one whose recycled slot left
+#     a state dir behind.
 #   - Always exits 0.
 #
 # Wiring: Claude Code reads it through the statusLine setting in
@@ -152,13 +152,22 @@ fi
 # home that does not exist. That verdict could never have been right: a crew pane
 # reads its own worktree, because bin/fm-spawn.sh exports FM_HOME only for a
 # secondmate, and a crew's ancestry never contains the home's session anyway.
-# Decided without forking git, which the contract above forbids. A .git DIRECTORY
-# is a main checkout or a plain-clone secondmate; the marker is a leased linked
-# secondmate home. A linked task worktree has a .git FILE and no marker, so it
-# says nothing, which is the same quiet degrading as a missing state dir.
+# Decided without forking git, which the contract above forbids. A linked
+# worktree is the one shape that is someone ELSE's checkout, and git marks it by
+# writing .git as a FILE rather than a directory; a leased secondmate home is a
+# linked worktree too, and its marker (bin/fm-primary-scope-lib.sh) is the only
+# thing that tells the two apart. So the test silences exactly that case and
+# nothing else, which is the same quiet degrading as a missing state dir.
+# It is deliberately a test for the shape that must NOT speak rather than for the
+# shape that may. Requiring a .git directory would have been the same answer for
+# every real home - a checkout, a plain-clone secondmate, a leased secondmate
+# worktree, a task worktree - while also silencing any directory that is no git
+# checkout at all, which is not a home this ever had to decide about. Narrowing
+# to the one shape that was actually wrong keeps every case that speaks today
+# speaking.
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
-[ -d "$FM_HOME/.git" ] || fm_root_is_secondmate_home "$FM_HOME" || exit 0
+[ ! -f "$FM_HOME/.git" ] || fm_root_is_secondmate_home "$FM_HOME" || exit 0
 # Without ps the ancestry walk cannot run, and every answer would be wrong in
 # the alarming direction.
 command -v ps >/dev/null 2>&1 || exit 0
