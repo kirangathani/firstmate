@@ -1247,7 +1247,7 @@ test_subprocess_state_unreadable_inputs_are_unknown() {
   root=$(start_subprocess_root detached)
   gone_out=$(PATH="$fb:$PATH" FM_FAKE_TMUX_PANE_PID="$root" FM_FAKE_TMUX_PANE_ALIVE=0 \
     fm_backend_subprocess_state tmux sess:fm-a 0)
-  noroot_out=$(PATH="$fb:$PATH" FM_FAKE_TMUX_PANE_PID= \
+  noroot_out=$(PATH="$fb:$PATH" FM_FAKE_TMUX_PANE_PID='' \
     fm_backend_subprocess_state tmux sess:fm-a 0)
   badage_out=$(PATH="$fb:$PATH" FM_FAKE_TMUX_PANE_PID="$root" \
     fm_backend_subprocess_state tmux sess:fm-a 'soon')
