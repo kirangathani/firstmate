@@ -118,7 +118,7 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .handoff-unread    path of a handoff document no session has read yet; armed by bin/fm-handoff.sh, announced by its SessionStart pickup hook, cleared only by consume
-  .lock              session lock: the harness pid of the one session controlling this home's fleet, and the gate on arming supervision; never the .watch.lock singleton below (bin/fm-session-lock-lib.sh)
+  .lock              session lock: the pid and start ticks of the OWN harness process of the one session controlling this home's fleet, and the gate on arming supervision; a session that acquires or arms while its ancestor holds the lock inherits it, so a lock naming an ancestor migrates on its own and only a live holder outside that ancestry is a rival; never the .watch.lock singleton below (bin/fm-session-lock-lib.sh)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .arm-pool/         one record per live dormant arm of this session, named by its pid; the waiting ears that take the watcher over when the current one fires, so a wake costs no re-arming call. bin/fm-arm-pool-lib.sh owns the record format, the count, the target, and the floor the turn-end guard blocks below; each member withdraws its own record when it exits
   .unactioned-*      short-lived unactioned-alarm confirm cache; never touch; removed by teardown

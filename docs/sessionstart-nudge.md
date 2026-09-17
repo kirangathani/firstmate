@@ -13,6 +13,7 @@ The Shared Predicate section of `docs/turnend-guard.md` remains authoritative fo
 
 Before printing, the wrapper asks `bin/fm-session-lock-lib.sh` whether this session owns `state/.lock`; that library is the single implementation of the walk, so `bin/fm-lock.sh`, `bin/fm-watch-arm.sh`, `bin/fm-turnend-guard.sh`, `bin/fm-statusline.sh`, and Pi's and OpenCode's adapters all share its eight-parent ancestry depth instead of carrying their own copies.
 If the lock names a live pid in that ancestry, session-start already ran in this harness session and the wrapper stays silent.
+That stays true for a session forked from the lock holder, whose ancestry still reaches the recorded pid, so the nudge needs no rule of its own for the inherit case: the lock moves down to the child only when that child actually runs session start or arms supervision.
 Every path exits 0, including malformed state and adapter errors, because Claude SessionStart exit 2 blocks session initialization.
 
 ## Harness transports
