@@ -138,6 +138,31 @@ When the command carries such grammar and its raw bytes reference both a `fm-wat
 This backstop mirrors the protected-execution fail-closed rule and covers forms like `while true; do pkill -f fm-watch; done`, `for x in 1; do pkill -f fm-watch; done`, `case x in x) pkill -f fm-watch ;; esac`, and `until false; do kill $(pgrep -f fm-watch); done`.
 It is gated on the grammar being unsupported: in grammar the classifier does model, command-position analysis is authoritative, so data mentions such as `echo 'pkill -f fm-watch'` and a loop that only names the watcher without a kill verb such as `for f in 1; do echo fm-watch; done` remain allowed.
 
+## Steer scripts under Bash
+
+`bin/fm-send.sh` and `bin/fm-ack.sh` have exactly one form: the model issues each as its own Monitor, with `timeout_ms` 1800000 and the command alone with `2>&1`.
+A Monitor-issued one that succeeds stays alive as one of the dormant-arm pool's waiting arms, so ordinary steering keeps the pool full with no extra model call; a Bash-issued one cannot, because the Bash tool returns as soon as the command exits.
+The seatbelt is what makes that the only form: naming either script in an executed position is denied with `steer-under-bash`, whose prose carries the exact replacement.
+
+Command POSITION is what counts, and the rule reuses the same parser the watcher rules use rather than matching raw bytes, so reading, grepping, and editing these files stays allowed - a crewmate has to be able to work on firstmate itself.
+A nested execution counts: `bash -c 'bin/fm-send.sh a b'`, a substitution, and a group are all denied, and unsupported grammar containing the raw name fails closed the same way a protected watcher command does.
+
+The rule is off unless the transport passes `--steer`, and `bin/fm-arm-pretool-check.sh` turns that on only when BOTH hold: the adapter passed `--claude`, and the payload's tool name is empty or `Bash`.
+`--claude` is the harness signal, because Monitor is Claude-only: codex, grok, opencode, and pi have no replacement to point at, so denying there would wedge them with no escape.
+The tool-name half is a guard against a future wildcard hook registration denying the very Monitor the message recommends; it is not load-bearing today, for the reason the evidence below records.
+
+Scripts inside `bin/` that steer a worker must get their own exit code back rather than becoming an arm, so they set `FM_ARM_POOL_NO_REFILL=1`, which `bin/fm-arm-pool-lib.sh` owns.
+They are unaffected by this hook: it sees only the model's own tool calls.
+
+### Evidence: which hooks Claude Code fires for a Monitor call, 2026-09-17
+
+Claude Code 2.1.274, a scratch project with two PreToolUse hooks - one `"matcher": "Bash"`, one with no matcher - each appending its payload to a log, driven headless with `claude -p "...Monitor... then Bash..." --dangerously-skip-permissions --output-format text`.
+
+- A Monitor call DOES fire PreToolUse, with `"tool_name":"Monitor"` and `"tool_input":{"description":...,"timeout_ms":60000,"command":"..."}`, whose command field has the same name as Bash's.
+- The `Bash` matcher did NOT fire for it: only the no-matcher hook logged the Monitor event, while the Bash call logged twice.
+- So with the tracked `Bash`-matcher registration in `.claude/settings.json`, the deny-under-Bash rule is the whole mechanism, and Monitor is untouched because the matcher never selects it.
+- `ToolSearch` also fires PreToolUse, with tool name `ToolSearch`.
+
 ## Stable reason codes
 
 Every semantic deny includes one stable code in square brackets before its prose reason.
@@ -152,6 +177,7 @@ Every semantic deny includes one stable code in square brackets before its prose
 | `broad-watcher-kill` | An actual broad process kill targets the watcher. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |
 | `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh` or `bin/fm-watch-checkpoint.sh`. |
+| `steer-under-bash` | `bin/fm-send.sh` or `bin/fm-ack.sh` is executed from the Bash tool; it must be issued as its own Monitor instead. Raised only when the transport passes `--steer`. |
 
 Reason codes are the stable contract for tests and adapters.
 Prose may improve without changing adapter behavior.
@@ -171,7 +197,7 @@ Prose may improve without changing adapter behavior.
 | Harness | Exact command field | Adapter behavior on checker exit 2 |
 | --- | --- | --- |
 | Codex | `.tool_input.command` | The `.codex/hooks.json` command forwards the complete stdin payload and Codex blocks on exit 2. |
-| Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
+| Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. `--claude` also turns on the steer-under-bash rule. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
 | Pi | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |

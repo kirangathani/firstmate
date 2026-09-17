@@ -26,7 +26,7 @@ This skill is the on-demand render of that same predicate, for when the captain 
 
 2. **Act on what it found, before reporting.**
    A `NEEDS ACTION` line is not a status to relay, it is work firstmate already owed.
-   Do what each one owes now - trigger the validation, record and arm the PR, relay the decision or failure to the captain, steer the blocker - and only then record it with `bin/fm-ack.sh <id> "<what you did>"`.
+   Do what each one owes now - trigger the validation, record and arm the PR, relay the decision or failure to the captain, steer the blocker - and only then record it with `bin/fm-ack.sh <id> "<what you did>"`, issued as its own Monitor like every send.
    A stalled validation is answered the same way and recorded with `bin/fm-nm-stall.sh --ack <id>`: read the named step, decide or relay, and never restart or abort the run on the finding alone.
    Relaying a decision or a failure to the captain IS the action for that task; record it once relayed.
    Never record an action that was not taken: the record silences that state until the worker's next report, so a false one reintroduces exactly the blind spot this exists to close.

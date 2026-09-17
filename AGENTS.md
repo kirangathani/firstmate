@@ -272,7 +272,7 @@ The spawn must resolve a genuine isolated task worktree distinct from the primar
 After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship or scout work as under way.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
-Steer a worker with short single-line messages through fail-closed `fm-send`; put long instructions in a file.
+Steer a worker with short single-line messages through fail-closed `fm-send`, issued as its own Monitor rather than a shell command; put long instructions in a file.
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 Supervise all live work under section 8.
 
