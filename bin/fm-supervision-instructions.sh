@@ -134,7 +134,7 @@ repair_line() {
 
   case "$HARNESS" in
     claude)
-      printf '%s%s\n' "$prefix" 'repair missing watcher supervision by issuing six waiting arms in one reply, each its own Claude Code Monitor at the 1800000ms maximum running bin/fm-watch-arm.sh --dormant 2>&1, never shell &.'
+      printf '%s%s\n' "$prefix" 'repair missing watcher supervision by issuing six waiting arms in one reply, each its own Claude Code Monitor at the 1800000ms maximum described exactly as "dormant arm <N>" and running bin/fm-watch-arm.sh --dormant <N> 2>&1 with the same number, never shell &.'
       ;;
     codex)
       printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
