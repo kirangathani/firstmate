@@ -127,13 +127,29 @@
 # short TTL (FM_ACK_RECHECK) in state/.unactioned-<id>, so a genuinely
 # unactioned task does not re-pay the read on every fleet command.
 #
-# PER-TASK MONITORING EXEMPTION
-#   A task may be exempted from the alarm by state/<id>.monitor-exempt, whose
-#   format and captain-only minting are owned by bin/fm-monitor.sh. This library
-#   only VERIFIES one, because the verdict has to be identical everywhere the
-#   predicate runs. An exemption that cannot be verified is not an exemption:
-#   deleting this home's key does not silence the fleet, it only stops new
-#   exemptions from being minted.
+# CAPTAIN-DRIVEN TASKS
+#   fm_captain_driven is the ONE answer to "is the captain driving this worker
+#   himself right now", and every supervision surface asks it here rather than
+#   reading either of its two sources directly. It is true when EITHER holds:
+#
+#     1. state/<id>.monitor-exempt verifies. Its format and captain-only minting
+#        are owned by bin/fm-monitor.sh; this library only VERIFIES one, because
+#        the verdict has to be identical everywhere the predicate runs. A record
+#        that cannot be verified is not one: deleting this home's key does not
+#        silence the fleet, it only stops new records from being minted.
+#     2. A human tmux client is sitting in the task's window with a recent
+#        keystroke. bin/fm-captain-driven-lib.sh owns that reading and the
+#        evidence that it is trustworthy.
+#
+#   The signed record wins when both hold, because it carries the captain's own
+#   stated reason and the automatic reading carries only an observation.
+#
+#   WHAT IT IS WORTH. It suppresses every alarm and every watcher wake for that
+#   task - AGENTS.md section 8 and docs/captain-driven.md own the full list -
+#   and nothing else. The task stays in this library's render class, in the
+#   backlog, in the fleet view, and in the session-start digest, labelled with
+#   the reason, so a task firstmate is not watching is a blind spot the captain
+#   can see rather than one he has to remember.
 #
 # THE CLASSIFICATION IS THE PREDICATE
 #   fm_ack_classify is the single owner of "has this task been actioned". Both
@@ -159,6 +175,14 @@ _FM_ACK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _
 # shellcheck source=bin/fm-ci-waiver-lib.sh
 # shellcheck disable=SC1091
 . "$_FM_ACK_LIB_DIR/fm-ci-waiver-lib.sh"
+# fm-captain-driven-lib.sh owns the automatic half of the captain-driven
+# verdict (a human tmux client sitting in the task's window). It is sourced
+# unconditionally because fm_captain_driven below is not optional: a surface
+# that silently lost the automatic half would go back to waking firstmate for a
+# worker the captain is typing into.
+# shellcheck source=bin/fm-captain-driven-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_ACK_LIB_DIR/fm-captain-driven-lib.sh"
 # fm-bounded-lib.sh bounds the current-state confirm below. It is probed rather
 # than sourced unconditionally: several callers of this library run in trimmed
 # scenario trees, and an unconditional `.` of a missing sibling prints to stderr,
@@ -510,6 +534,35 @@ fm_ack_is_exempt() {  # <state-dir> <id>
   return 0
 }
 
+# 0 when the captain is driving <id> himself, by either of the two routes in
+# THE CAPTAIN-DRIVEN CONTRACT above. On success FM_CAPTAIN_DRIVEN_REASON holds
+# the reason to show him and FM_CAPTAIN_DRIVEN_SOURCE is `signed` or `attached`.
+#
+# The signed record is tested FIRST for two reasons: it outranks the observation
+# when both hold, and it is free when absent (fm_ack_is_exempt returns on a
+# missing file before it forks anything), so the ordering also keeps the common
+# case down to the one memoized tmux read the second test costs.
+FM_CAPTAIN_DRIVEN_REASON=
+# shellcheck disable=SC2034 # Read by bin/fm-bootstrap.sh and bin/fm-monitor.sh.
+FM_CAPTAIN_DRIVEN_SOURCE=
+fm_captain_driven() {  # <state-dir> <id>
+  FM_CAPTAIN_DRIVEN_REASON=
+  FM_CAPTAIN_DRIVEN_SOURCE=
+  if fm_ack_is_exempt "$1" "$2"; then
+    # shellcheck disable=SC2034 # Read by bin/fm-bootstrap.sh and bin/fm-monitor.sh.
+    FM_CAPTAIN_DRIVEN_SOURCE=signed
+    FM_CAPTAIN_DRIVEN_REASON=$FM_ACK_EXEMPT_REASON
+    return 0
+  fi
+  if fm_captain_attached "$1" "$2"; then
+    # shellcheck disable=SC2034 # Read by bin/fm-bootstrap.sh and bin/fm-monitor.sh.
+    FM_CAPTAIN_DRIVEN_SOURCE=attached
+    FM_CAPTAIN_DRIVEN_REASON=$FM_CAPTAIN_ATTACHED_REASON
+    return 0
+  fi
+  return 1
+}
+
 # --- the predicate ----------------------------------------------------------
 #
 # fm_ack_classify is the ONE owner of "has this task been actioned". It sets:
@@ -518,7 +571,7 @@ fm_ack_is_exempt() {  # <state-dir> <id>
 #   FM_ACK_AGE      seconds since that log was last appended (-1 when unknown)
 #   FM_ACK_VERDICT  the crew-state confirm's answer, or '' when none was made
 #   FM_ACK_LAST     the crew's own last status line, as evidence
-#   FM_ACK_REASON   the signed exemption reason, for class `exempt`
+#   FM_ACK_REASON   why the captain is driving it, for class `exempt`
 #   FM_ACK_OPEN_KEYS the still-open decision keys, space separated ('' when none)
 #   FM_ACK_PAUSE_AGE seconds the declared wait has stood (-1 when not paused or
 #                   when the wait cannot be dated)
@@ -594,13 +647,13 @@ fm_ack_classify() {  # <state-dir> <id> <grace> <now> [alarm|render]
     fi
   fi
 
-  # An exemption outranks every other class, so the render always names it and
-  # the alarm path can never fire on an exempt task. In alarm mode the node fork
-  # it costs is paid only by a task that would otherwise alarm; in render mode it
-  # is paid for every task, because the captain is owed the full accounting.
-  if [ "$mode" = render ] && fm_ack_is_exempt "$state" "$id"; then
+  # A captain-driven task outranks every other class, so the render always names
+  # it and the alarm path can never fire on one. In alarm mode the cost is paid
+  # only by a task that would otherwise alarm; in render mode it is paid for
+  # every task, because the captain is owed the full accounting.
+  if [ "$mode" = render ] && fm_captain_driven "$state" "$id"; then
     FM_ACK_CLASS=exempt
-    FM_ACK_REASON=$FM_ACK_EXEMPT_REASON
+    FM_ACK_REASON=$FM_CAPTAIN_DRIVEN_REASON
     if [ "$FM_ACK_CONFIRMS" -lt "$cap" ]; then
       FM_ACK_VERDICT=$(fm_ack_confirm_state "$id")
       FM_ACK_CONFIRMS=$((FM_ACK_CONFIRMS + 1))
@@ -616,9 +669,9 @@ fm_ack_classify() {  # <state-dir> <id> <grace> <now> [alarm|render]
     # never expire. Then confirm, for the same reason rules 1 and 2 confirm: the
     # status log is a wake-event history, and a worker whose run has resumed is
     # not waiting on anything regardless of what its last line still says.
-    if [ "$mode" != render ] && fm_ack_is_exempt "$state" "$id"; then
+    if [ "$mode" != render ] && fm_captain_driven "$state" "$id"; then
       FM_ACK_CLASS=exempt
-      FM_ACK_REASON=$FM_ACK_EXEMPT_REASON
+      FM_ACK_REASON=$FM_CAPTAIN_DRIVEN_REASON
       return 0
     fi
     raw=
@@ -665,9 +718,9 @@ fm_ack_classify() {  # <state-dir> <id> <grace> <now> [alarm|render]
     return 0
   fi
 
-  if [ "$mode" != render ] && fm_ack_is_exempt "$state" "$id"; then
+  if [ "$mode" != render ] && fm_captain_driven "$state" "$id"; then
     FM_ACK_CLASS=exempt
-    FM_ACK_REASON=$FM_ACK_EXEMPT_REASON
+    FM_ACK_REASON=$FM_CAPTAIN_DRIVEN_REASON
     return 0
   fi
 
