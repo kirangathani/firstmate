@@ -48,6 +48,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Run it ONCE per commit, on the whole tree, immediately before `git commit` - never after each edit and never in a loop, because a full pass is 20+ concurrent shellcheck processes and up to 15 GB of memory, and concurrent passes have taken the box down.
   While editing, check a single file with `shellcheck <file>` instead.
   The script enforces the concurrency half itself: it holds a box-wide lock for the whole pass, so a second pass waits with a notice on stderr rather than doubling the load, and it caps its shard count from `MemAvailable` as well as core count.
+  CI holds the verdict, so run it locally at most once before pushing rather than after each edit: it forks up to eight concurrent shellcheck processes over the whole tree, and it takes a machine-wide lock so several checkouts cannot run it at once.
   It pins one exact shellcheck version and refuses to run under any other; print it with `bin/fm-lint.sh --required-version` and install that build locally.
   It shards the file set and caches clean results under the shared git common dir, so every worktree of one clone reads and writes one cache: an unchanged tree costs well under a second, and a fresh linked worktree is served from what another worktree already linted instead of starting cold.
   Only a genuinely cold cache - a fresh clone, or CI, which never inherits one - pays about half of what the old single command did.

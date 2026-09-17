@@ -118,6 +118,8 @@
 #                       ${TMPDIR:-/tmp}/fm-lint-pass.lock)
 #   FM_LINT_MEM_AVAILABLE_KB
 #                      substitute for /proc/meminfo MemAvailable, in kB
+#   FM_LINT_LOCK       machine-wide serialisation lock (default: $TMPDIR/fm-lint.lock)
+#   FM_LINT_NO_LOCK=1  do not serialise against other runs on this machine
 #
 # Exit status is ShellCheck's own on a lint run, so a caller (CI or the gate)
 # fails exactly when ShellCheck reports a finding; a version mismatch or a
@@ -191,6 +193,41 @@ fi
 # same ShellCheck with the same config.
 if [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; then
   exec shellcheck --norc "$@"
+fi
+
+# SERIALISE ACROSS EVERY WORKER ON THIS MACHINE, before any shard is planned.
+#
+# The shard cap below is per INVOCATION: this script forks up to 8 concurrent
+# ShellCheck processes and has no idea another invocation exists. A firstmate
+# fleet runs several crewmates at once in separate worktrees of this repo, all
+# told by the same guideline to lint before calling a change done, so the real
+# concurrency is 8 times the number of workers who happen to finish together.
+# Measured 2026-09-17 on the captain's box: four simultaneous runs took all
+# 23 GB and every ShellCheck on the machine had to be killed, which showed up in
+# each worker as `ShellCheck exited 143` and an aborted run with no verdict.
+#
+# A machine-wide advisory lock is the fix, and it lives HERE rather than in the
+# instruction that tells people to run it: an instruction has to be remembered
+# by every caller every time, while a lock converges however the command is
+# typed. The wait is not wasted - a second concurrent run would only have been
+# contending for the same memory bandwidth.
+#
+# Held for the process's whole life and released by exit, so a crashed or killed
+# run leaves nothing stale behind. Skipped where flock is absent (stock macOS has
+# no flock(1)) and where the lock path is not writable by this user, because a
+# machine that cannot serialise must still be able to lint.
+FM_LINT_LOCK="${FM_LINT_LOCK:-${TMPDIR:-/tmp}/fm-lint.lock}"
+if [ "${FM_LINT_LOCKED:-0}" != 1 ] && [ "${FM_LINT_NO_LOCK:-0}" != 1 ] \
+  && command -v flock >/dev/null 2>&1 \
+  && { [ -w "$FM_LINT_LOCK" ] || : > "$FM_LINT_LOCK" 2>/dev/null; }; then
+  export FM_LINT_LOCKED=1
+  # Say so before blocking. A run that waits in silence is indistinguishable
+  # from a wedged one, and the next thing a waiting caller does is start a
+  # second copy of the very command that is already the problem.
+  if ! flock -n "$FM_LINT_LOCK" true 2>/dev/null; then
+    printf 'fm-lint.sh: another lint is running on this machine; waiting for it (FM_LINT_NO_LOCK=1 to skip)\n' >&2
+  fi
+  exec flock "$FM_LINT_LOCK" "$0" "$@"
 fi
 
 MODE=default
