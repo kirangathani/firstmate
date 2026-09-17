@@ -1280,8 +1280,21 @@ SH
   [ "$rc" -eq 0 ] || fail "arm returned non-zero for an immediate wake (status $rc): $(cat "$armout")"
   grep -F "check: $check_file: merged: https://example.test/pr/7" "$armout" >/dev/null || fail "arm did not propagate the immediate check wake"
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm printed FAILED after a valid immediate wake"
+  # The arm drains on its way out, so the queue record is handed over in ITS OWN
+  # output. That is the whole of what removing the drain from the model's hands
+  # means: the wake arrives with the record already in it.
+  grep "$(printf '\tcheck\t')" "$armout" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/7' >/dev/null \
+    || fail "the arm did not hand over the drained wake record in its own output"
+  # And the durable copy, which is what a session that never reads this output
+  # still gets. Written before the print, so it cannot be the thing that is lost.
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-pending.sh" --peek \
+    | grep -F 'merged: https://example.test/pr/7' >/dev/null \
+    || fail "the arm did not record the drained wake for a session that never read its output"
+  # Nothing left behind: a model that drained again would get nothing, which is
+  # why the protocol stops telling it to.
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after immediate arm wake failed"
-  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/7' >/dev/null || fail "immediate check wake was not queued"
+  ! grep -q "$(printf '\tcheck\t')" "$drain_out" \
+    || fail "a wake the arm had already drained was still sitting in the queue"
   pass "arm propagates an immediate watcher wake before confirmation"
 }
 
