@@ -358,7 +358,7 @@ It lives in `data/` and not `state/` for the reason section 2 of `AGENTS.md` giv
 Where the events come from:
 
 - A `wake` row per drained wake, written by `bin/fm-wake-drain.sh` from the rows it has already printed, so the enqueue epochs that drain otherwise destroys are retained without touching its print-before-delete boundary. Its `reported_epoch_ms` is the crew's own `[t=<epoch>] ` status stamp, whose grammar `bin/fm-classify-lib.sh` owns; a status line written before that stamp existed leaves the cell empty, which is the correct answer rather than a failure.
-- A `cmd` row per measured firstmate command, self-timed by the script itself. Today those are `bin/fm-wake-drain.sh`, `bin/fm-send.sh`, `bin/fm-ack.sh`, and `bin/fm-peek.sh`.
+- A `cmd` row per measured firstmate command, self-timed by the script itself. Today those are `bin/fm-wake-drain.sh`, `bin/fm-send.sh`, `bin/fm-ack.sh`, `bin/fm-peek.sh`, and `bin/fm-watch-arm.sh` under the two action names below.
 - A `tool` row per tool call, from the pre-tool hook (`bin/fm-arm-pretool-check.sh`, `docs/arm-pretool-check.md`), and a `turn` row per turn, from the turn-end guard (`bin/fm-turnend-guard.sh`, `docs/turnend-guard.md`). Both are additions to hooks that already fire for every verified primary harness; neither can change what those hooks block, and both record nothing outside a primary home.
 
 What each question the ledger was built to answer is read from:
@@ -372,9 +372,16 @@ What each question the ledger was built to answer is read from:
 | How long until it gets back to a crew? | a `wake` row's `reported_epoch_ms` against the next `cmd` row naming that task |
 | Did the answer actually land? | the `exit_code` on that `cmd` row, for `fm-send.sh` |
 | How long does triaging an input take? | a `wake` row's `epoch_ms` against the first `cmd` row naming that task |
+| How much of a handover is the watcher arm rather than firstmate? | the `cmd` rows for `fm-watch-arm.sh:up`, `fm-watch-arm.sh:up-dormant`, and `fm-watch-arm.sh:wake` |
 
-Re-arming the watcher is the one activity not on that list.
-`bin/fm-watch-arm.sh` times nothing yet, so its cost is still only derivable the old way, as the gap between one row of `state/.watch-cycle-exits.log` and the next.
+That last row is why the arm times itself twice.
+`state/.watch-cycle-exits.log` already gives the whole reaction time indirectly, as one record's `ended_at` against the next record's `started_at`, and that is how a 22-second median reaction and a continuity gate shut 39% of an active session were first measured.
+What it cannot say is whose seconds those were.
+`fm-watch-arm.sh:up` is the arm getting supervision live again, from being ready to arm through to a confirmed started watcher or an attached one, which its note names.
+A dormant pool member records the same span under `fm-watch-arm.sh:up-dormant`, timed from when its wait for the singleton ended because idling is not arming, and kept a separate action rather than a note because a pool handover and a cold arm are different costs that one median would average into a number describing neither.
+`fm-watch-arm.sh:wake` is the arm carrying the wake out, from the watcher exiting with a wake to the arm exiting, which is the moment the harness notifies the model; it contains the lifecycle record, the print, and the queue drain the arm does on the way out.
+The two bracket the arm's entire contribution to that gap, so whatever is left over is firstmate thinking.
+`bin/fm-watch-arm.sh`'s header owns what each one covers and what it deliberately does not.
 
 Those two hooks are why thinking time is observable at all: the gap between two harness events contains no command execution, so it is model time.
 The one thing the ledger cannot see is the duration of a command that is not one of the self-timed scripts above - no harness event fires when a command finishes, and only `claude` publishes a transcript to recover it from - so for an unmeasured command the interval to the next tool event holds execution and thinking together and is recorded as `think_ms` alone.
