@@ -2115,6 +2115,154 @@ test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm() {
   pass "six dormant arms keep one watcher and hand the watch over with no new arm"
 }
 
+# --- the arm's own two measurements -----------------------------------------
+#
+# state/.watch-cycle-exits.log already gives the whole reaction time indirectly,
+# as one record's ended_at against the next record's started_at. What it cannot
+# say is whose time that was. bin/fm-watch-arm.sh therefore times itself into the
+# latency ledger twice - arming up, and carrying the wake out - so a slow arm and
+# a slow firstmate can be told apart. bin/fm-latency-lib.sh owns that ledger and
+# tests/fm-latency.test.sh owns its format; these cases own only the claim that
+# the arm produces those two rows from a REAL run, and that failing to produce
+# them can never change what the arm does.
+#
+# tests/lib.sh exports FM_LATENCY_OFF=1 for the whole suite, so every invocation
+# below clears it and points FM_HOME at its own fixture.
+
+ledger_cmd_field() {  # <ledger> <action> <column-name> - the last matching row
+  [ -f "$1" ] || return 0
+  LC_ALL=C awk -F'\t' -v want="$2" -v name="$3" '
+    NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
+    $(col["kind"]) == "cmd" && $(col["action"]) == want { v = $(col[name]) }
+    END { printf "%s", v }' "$1"
+}
+
+ledger_has_cmd() {  # <ledger> <action>
+  [ -n "$(ledger_cmd_field "$1" "$2" epoch_ms)" ]
+}
+
+# A duration column must hold one bare number, per the ledger's own contract.
+assert_bare_number() {  # <value> <what>
+  case "$1" in
+    ''|*[!0-9]*) fail "$2 is not a bare number: '$1'" ;;
+  esac
+}
+
+test_arm_records_its_own_arm_up_and_its_wake_handover() {
+  local dir state fakebin armout ledger armpid status note dur lock_pid
+  dir=$(make_case arm-self-timing)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  ledger="$dir/data/latency.tsv"
+  mkdir -p "$dir/data"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_LATENCY_OFF='' FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_GUARD_GRACE=300 \
+    FM_ARM_CONFIRM_TIMEOUT="$ARM_CONFIRM_START" "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  wait_for have_line "$armout" 'watcher: started pid=' \
+    || fail "test setup: the arm never confirmed a watcher it started: $(cat "$armout")"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+
+  # Half one: arming up. Closed at the moment supervision is live under this arm,
+  # which is the same moment it prints the started line.
+  wait_for ledger_has_cmd "$ledger" fm-watch-arm.sh:up \
+    || fail "the arm recorded no arm-up row: $(cat "$ledger" 2>/dev/null || printf 'no ledger')"
+  note=$(ledger_cmd_field "$ledger" fm-watch-arm.sh:up note)
+  [ "$note" = started ] || fail "arm-up note was '$note', expected 'started'"
+  dur=$(ledger_cmd_field "$ledger" fm-watch-arm.sh:up duration_ms)
+  assert_bare_number "$dur" "the arm-up duration"
+  ledger_has_cmd "$ledger" fm-watch-arm.sh:wake \
+    && fail "a wake handover was recorded before any wake was produced"
+
+  # Half two: carrying the wake out. An ordinary crewmate status line with an
+  # actionable verb fires the watcher, which exits; the arm then records its
+  # lifecycle row, prints the reason, drains the queue, and exits - and all of
+  # that is the arm's own cost rather than firstmate thinking.
+  printf 'done: the work is finished\n' > "$state/fm-task.status"
+  status=0
+  wait_for_exit "$armpid" 300 || status=$?
+  [ "$status" -eq 0 ] || fail "arm exited $status carrying a wake: $(cat "$armout")"
+  grep -qF 'signal:' "$armout" || fail "the arm surfaced no signal wake: $(cat "$armout")"
+  ledger_has_cmd "$ledger" fm-watch-arm.sh:wake \
+    || fail "the arm recorded no wake handover: $(cat "$ledger")"
+  note=$(ledger_cmd_field "$ledger" fm-watch-arm.sh:wake note)
+  [ "$note" = actionable-signal ] || fail "wake handover note was '$note', expected 'actionable-signal'"
+  dur=$(ledger_cmd_field "$ledger" fm-watch-arm.sh:wake duration_ms)
+  assert_bare_number "$dur" "the wake handover duration"
+  kill -TERM "$lock_pid" 2>/dev/null || true
+  pass "the arm records how long it took to arm up and how long it took to carry a wake out"
+}
+
+test_a_dormant_arms_handover_is_recorded_apart_from_a_cold_arm() {
+  # A pool handover and a cold arm are different costs, so one median over both
+  # answers neither. Its own action name is what separates them in the report,
+  # and the arm-up clock must start only when the member stops waiting: a member
+  # that idles for hours and then takes the lock in milliseconds has to report
+  # the milliseconds.
+  local dir state fakebin armout ledger armpid note dur lock_pid
+  dir=$(make_case dormant-self-timing)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  ledger="$dir/data/latency.tsv"
+  mkdir -p "$dir/data"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_LATENCY_OFF='' FM_POLL=0.5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_GUARD_GRACE=300 \
+    FM_ARM_CONFIRM_TIMEOUT="$ARM_CONFIRM_START" FM_ARM_DORMANT_POLL=0.1 \
+    "$WATCH_ARM" --dormant > "$armout" 2>&1 &
+  armpid=$!
+  wait_for have_line "$armout" 'watcher: started pid=' \
+    || fail "test setup: the dormant arm never took the free lock: $(cat "$armout")"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  wait_for ledger_has_cmd "$ledger" fm-watch-arm.sh:up-dormant \
+    || fail "the dormant arm recorded no arm-up row: $(cat "$ledger" 2>/dev/null || printf 'no ledger')"
+  ledger_has_cmd "$ledger" fm-watch-arm.sh:up \
+    && fail "a pool handover was recorded under the cold-arm action, where one median would average the two"
+  note=$(ledger_cmd_field "$ledger" fm-watch-arm.sh:up-dormant note)
+  [ "$note" = started ] || fail "dormant arm-up note was '$note', expected 'started'"
+  dur=$(ledger_cmd_field "$ledger" fm-watch-arm.sh:up-dormant duration_ms)
+  assert_bare_number "$dur" "the dormant arm-up duration"
+  kill -TERM "$armpid" 2>/dev/null || true
+  kill -TERM "$lock_pid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "a dormant member's handover is recorded under its own action, timed from when it stopped waiting"
+}
+
+test_an_unwritable_ledger_changes_nothing_the_arm_does() {
+  # The instrumentation contract, proved on the arm rather than assumed from the
+  # library: a ledger that cannot be written is a silent no-op. Not "usually
+  # harmless" - the arm must still start its watcher, still surface the wake,
+  # still exit 0, and must not leak a write error into the output the harness
+  # hands the model as a wake reason.
+  local dir state fakebin armout armpid status
+  dir=$(make_case arm-unwritable-ledger)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$dir/data"
+  chmod 0555 "$dir/data"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_LATENCY_OFF='' FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_GUARD_GRACE=300 \
+    FM_ARM_CONFIRM_TIMEOUT="$ARM_CONFIRM_START" "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  wait_for have_line "$armout" 'watcher: started pid=' \
+    || { chmod 0755 "$dir/data"; fail "an unwritable ledger stopped the arm starting a watcher: $(cat "$armout")"; }
+  printf 'done: the work is finished\n' > "$state/fm-task.status"
+  status=0
+  wait_for_exit "$armpid" 300 || status=$?
+  chmod 0755 "$dir/data"
+  [ "$status" -eq 0 ] || fail "an unwritable ledger changed the arm's exit status to $status: $(cat "$armout")"
+  grep -qF 'signal:' "$armout" || fail "an unwritable ledger cost the arm its wake: $(cat "$armout")"
+  ! grep -qF 'Permission denied' "$armout" \
+    || fail "the arm leaked a ledger write error into the wake output: $(cat "$armout")"
+  [ ! -e "$dir/data/latency.tsv" ] || fail "a ledger appeared in a directory that refused writes"
+  pass "a ledger the arm cannot write leaves its watcher, its wake, its output and its exit status untouched"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_pid_identity_is_stable_across_repeated_reads
@@ -2163,3 +2311,6 @@ test_a_joined_arm_pool_member_counts_itself
 test_a_command_with_room_in_the_pool_becomes_an_arm
 test_a_command_exits_at_once_when_the_pool_is_full
 test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm
+test_arm_records_its_own_arm_up_and_its_wake_handover
+test_a_dormant_arms_handover_is_recorded_apart_from_a_cold_arm
+test_an_unwritable_ledger_changes_nothing_the_arm_does
