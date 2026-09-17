@@ -16,7 +16,7 @@
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
-# It blocks for FOUR independent reasons, reported together in one banner so a
+# It blocks for FIVE independent reasons, reported together in one banner so a
 # permanently broken watcher cannot hide the others:
 #   1. in-flight work with no live watcher (the original blind-turn reason),
 #   2. the branch NEXT to land in a project whose CI was measured against a base
@@ -26,7 +26,18 @@
 #   3. a direct report sitting in a state that owes firstmate an action, past the
 #      grace window, unacted on (bin/fm-ack-lib.sh, which owns that predicate), and
 #   4. a validation whose no-mistakes step has stopped advancing past the
-#      threshold (bin/fm-nm-stall.sh, which owns that predicate and its remedy).
+#      threshold (bin/fm-nm-stall.sh, which owns that predicate and its remedy), and
+#   5. a dormant-arm pool below its floor (bin/fm-arm-pool-lib.sh, which owns the
+#      count, the target, and the floor).
+#
+# Why reason 5 is a turn-end block and not a mid-turn one. The pool is what lets a
+# wake reach firstmate without firstmate spending a call on re-arming, so refilling
+# it is the one piece of watcher maintenance still owed - and the whole point is
+# that it is never owed on the captain's critical path. Turn end is the only moment
+# that is true of: the work of the turn is done, and issuing the refill costs the
+# captain nothing. Reason 1 still covers the case that actually matters for safety,
+# a fleet with no watcher at all; this one fires earlier, while supervision is
+# still healthy but down to its last ears.
 #
 # Why reason 3 is here and not only in bin/fm-guard.sh. That guard has raised
 # this exact finding since #35, and it exits 0 - it warns, then the turn ends
@@ -139,6 +150,8 @@ fi
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-arm-pool-lib.sh
+. "$SCRIPT_DIR/fm-arm-pool-lib.sh"
 
 fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
@@ -239,7 +252,28 @@ if [ -x "$SCRIPT_DIR/fm-nm-stall.sh" ]; then
   fi
 fi
 
-[ "$blind" = 1 ] || [ -n "$STALE_BASE" ] || [ -n "$UNACTIONED" ] || [ -n "$NM_STALL" ] || exit 0
+# Fifth, independent block reason: the dormant-arm pool has fallen to its floor.
+# bin/fm-arm-pool-lib.sh owns the count and both numbers; this only gives the
+# verdict a consequence. It is file reads over one small directory, so it costs a
+# turn end nothing.
+#
+# It is measured even when reason 1 is already blocking, because the two say
+# different things: reason 1 is "nothing is watching now", this is "the next few
+# wakes have nobody waiting to take over". The refill answers both.
+POOL_DEPTH=$(fm_arm_pool_count 2>/dev/null || printf '')
+POOL_SHORT=
+case "$POOL_DEPTH" in
+  ''|*[!0-9]*)
+    # The count could not be read at all. Reported rather than read as an
+    # all-clear, exactly as the two bounded sweeps above report an expiry.
+    POOL_SHORT=unknown
+    ;;
+  *)
+    [ "$POOL_DEPTH" -lt "$FM_ARM_POOL_FLOOR" ] && POOL_SHORT=short
+    ;;
+esac
+
+[ "$blind" = 1 ] || [ -n "$STALE_BASE" ] || [ -n "$UNACTIONED" ] || [ -n "$NM_STALL" ] || [ -n "$POOL_SHORT" ] || exit 0
 
 rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 {
@@ -298,6 +332,20 @@ EOF
     printf '%s\n' "$NM_STALL" | while IFS= read -r stall_line; do
       printf '●  %s\n' "$stall_line"
     done
+  fi
+  if [ -n "$POOL_SHORT" ]; then
+    { [ "$blind" = 1 ] || [ -n "$STALE_BASE" ] || [ -n "$UNACTIONED" ] || [ -n "$NM_STALL" ]; } && printf '●%s\n' "$rule"
+    printf '●  TURN WOULD END WITH TOO FEW EARS LEFT TO HEAR THE NEXT WAKES\n'
+    if [ "$POOL_SHORT" = unknown ]; then
+      printf '●  The number of waiting background arms could not be read, so it is NOT known to be safe.\n'
+    else
+      printf '●  %s waiting background arm(s) left, below the floor of %s. Each wake spends one.\n' \
+        "$POOL_DEPTH" "$FM_ARM_POOL_FLOOR"
+    fi
+    printf '●  Issue %s waiting arms in ONE reply, each as its own long-running watch running exactly this and nothing else:\n' "$FM_ARM_POOL_TARGET"
+    printf '●      bin/fm-watch-arm.sh --dormant 2>&1\n'
+    printf '●  They wait their turn; one takes over the moment the current watcher fires.\n'
+    printf '●  The session-start operating block for this harness names the exact mechanism to launch them with.\n'
   fi
   printf '●%s\n' "$rule"
 } >&2

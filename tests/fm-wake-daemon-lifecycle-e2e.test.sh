@@ -65,7 +65,9 @@ test_routine_then_terminal_after_restart() {
 
   # Drain it and route through the daemon: a routine status self-handles.
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after routine signal failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
+  # Keyed by the file's name; the payload carries the task id and its own words
+  # rather than the path (the watcher's reason line above still names the path).
+  grep "$(printf '\tsignal\t%s\t' "$(basename "$status_file")")" "$drain_out" >/dev/null \
     || fail "routine signal was not queued"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $status_file" "$state"
   [ ! -s "$state/.subsuper-escalations" ] || fail "routine status was escalated by the daemon"

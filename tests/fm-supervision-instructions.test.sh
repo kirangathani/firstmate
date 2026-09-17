@@ -51,7 +51,11 @@ test_repair_lines() {
 
   out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --repair-line)
   assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing"
-  assert_contains "$out" "Claude Code background task" "claude repair line missing background-task mechanism"
+  # The mechanism is Monitor, not a background task: a Monitor delivers the
+  # arm's own lines as notifications and survives the low-memory reaper that
+  # takes background shells.
+  assert_contains "$out" "Monitor" "claude repair line missing the Monitor mechanism"
+  assert_contains "$out" "bin/fm-watch-arm.sh --dormant" "claude repair line missing the waiting-arm command"
 
   : > "$home/config/x-mode.env"
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --x-mode 1 --repair-line)
@@ -80,8 +84,11 @@ test_ordinary_wake_lines_are_distinct_from_repair() {
 
   out=$("$RENDER" --harness claude)
   claude_ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
-  assert_contains "$claude_ordinary" "re-arm" "claude ordinary-wake line does not tell the model to re-arm"
-  assert_contains "$claude_ordinary" "bin/fm-watch-arm.sh" "claude ordinary-wake line lost the background arm command"
+  # The pool changed what an ordinary wake owes: a waiting arm has already taken
+  # the watch, so arming here is a model call spent on nothing, and the refill is
+  # the turn-end guard's to ask for.
+  assert_contains "$claude_ordinary" "do not arm" "claude ordinary-wake line still tells the model to arm on every wake"
+  assert_contains "$claude_ordinary" "turn-end guard" "claude ordinary-wake line does not say who asks for the refill"
 
   out=$("$RENDER" --harness opencode)
   opencode_ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')

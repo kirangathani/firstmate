@@ -120,6 +120,11 @@ HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 NM_STALL_INTERVAL=${FM_NM_STALL_INTERVAL:-600}  # seconds between stalled-validation sweeps
+# How many of a signal file's newly appended lines ride along in the wake. A
+# crewmate reports sparingly, so a handful is the whole of what it just said; the
+# cap exists only so a runaway writer cannot put an unbounded file into a queue
+# record that is read on every wake.
+SIGNAL_APPENDED_MAX_LINES=${FM_SIGNAL_APPENDED_MAX_LINES:-6}
 # Seconds between review-question sweeps, ZERO by default: the sweep runs on
 # every cycle, at the same cadence a crewmate's status line is picked up. A
 # separate cadence made a reviewer's question the slowest thing in the loop
@@ -499,6 +504,65 @@ scan_signals() {
     fi
   done
   return 0
+}
+
+# The task id a signal file belongs to, which is what the captain reads.
+signal_id_of_file() {
+  local base
+  base=$(basename "$1")
+  base=${base%.status}
+  printf '%s' "${base%.turn-ended}"
+}
+
+# What the crewmate actually WROTE since this watcher last looked, so the wake
+# can carry the words instead of a path to go and read them.
+#
+# The offset comes free: .seen-* already holds the previous "size:mtime"
+# signature, so the previous size is the number of bytes to skip. Nothing extra
+# is stat'ed and nothing new is persisted.
+#
+# A file SHORTER than its recorded size was rewritten rather than appended to, so
+# an offset into it would read from the wrong place or from nothing at all. Its
+# last lines are the closest honest answer to "what does this say now", so that
+# is what is taken.
+# Lines are joined with " | " before they reach the wake record, which is one
+# line by construction (bin/fm-wake-lib.sh's fm_wake_append flattens tabs and
+# newlines to spaces); joining first keeps the boundaries between a crewmate's
+# separate lines visible instead of running them together.
+signal_appended_text() {  # <seen-file> <status-file> <current sig>
+  local sf=$1 f=$2 sig=$3 prev prev_size now_size text
+  prev=$(cat "$sf" 2>/dev/null || true)
+  prev_size=${prev%%:*}
+  now_size=${sig%%:*}
+  case "$prev_size" in
+    ''|*[!0-9]*) prev_size=0 ;;
+  esac
+  case "$now_size" in
+    ''|*[!0-9]*) now_size=0 ;;
+  esac
+  if [ "$now_size" -lt "$prev_size" ]; then
+    text=$(tail -n "$SIGNAL_APPENDED_MAX_LINES" "$f" 2>/dev/null || true)
+  else
+    text=$(tail -c "+$((prev_size + 1))" "$f" 2>/dev/null | tail -n "$SIGNAL_APPENDED_MAX_LINES" || true)
+  fi
+  printf '%s' "$text" | awk 'NF { if (out != "") out = out " | "; out = out $0 } END { printf "%s", out }'
+}
+
+# One wake payload for one changed signal file: the id first, then the crewmate's
+# own words. A turn-end marker carries no words, and says so rather than looking
+# like a crewmate who wrote nothing.
+signal_payload() {  # <seen-file> <status-file> <current sig>
+  local id text
+  id=$(signal_id_of_file "$2")
+  text=$(signal_appended_text "$1" "$2" "$3")
+  case "$2" in
+    *.turn-ended) printf 'signal: %s ended its turn' "$id"; return 0 ;;
+  esac
+  if [ -n "$text" ]; then
+    printf 'signal: %s | %s' "$id" "$text"
+  else
+    printf 'signal: %s wrote to its status file' "$id"
+  fi
 }
 
 run_check_process() {
@@ -1008,9 +1072,33 @@ EOF
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+      # The words, not a path to them: read the bytes each file gained since the
+      # last look and put them in the record AND in this watcher's own reason, so
+      # the wake the model is handed already says what the crewmate said.
+      # Both are built here, in the same pass and BEFORE .seen-* is advanced
+      # below: once a marker moves to the current size there is no "since the
+      # last look" left to read, so a second pass would report every crewmate as
+      # having written nothing.
+      # $pending holds the pre-grace scan AND the post-grace rescan concatenated,
+      # so a file that changed once appears in it TWICE. The queue tolerates that
+      # (the drain dedupes on kind+key), but a repeated LINE does not: under a
+      # runner that turns each printed line into a notification, every crewmate's
+      # words would reach the supervisor twice on every wake. So the spoken lines
+      # are deduped by file here, the same way $files is deduped above.
+      spoken=
+      spoken_seen=
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
-        fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+        payload=$(signal_payload "$sf" "$f" "$sig")
+        case " $spoken_seen " in
+          *" $f "*) ;;
+          *)
+            spoken_seen="$spoken_seen $f"
+            spoken="$spoken
+  $payload"
+            ;;
+        esac
+        fm_wake_append signal "$(basename "$f")" "$payload" || exit 1
       done <<EOF
 $pending
 EOF
@@ -1021,7 +1109,10 @@ EOF
       done <<EOF
 $pending
 EOF
-      wake "$reason"
+      # The reason line keeps its exact existing shape as the FIRST line, because
+      # the arm layer classifies a cycle by matching ^signal: on it. The words
+      # follow it, indented, as further lines.
+      wake "$reason$spoken"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue

@@ -176,3 +176,25 @@ fm_arm_pool_has_room() {
 fm_arm_pool_below_floor() {
   [ "$(fm_arm_pool_count)" -lt "$FM_ARM_POOL_FLOOR" ]
 }
+
+# The refill that costs no model call: a command that has finished its real job,
+# and whose result the model does not need to act on, either exits now because the
+# pool is full or stays alive as a dormant arm because it is not. Either way the
+# model already paid for this call, so the ear is free.
+#
+# It REPLACES this process, so a caller must have finished everything it owes -
+# printed its result, written its records - before calling. It must also have run
+# as the harness's own background task, because the whole point is that this
+# process becomes the thing that waits, and a foreground caller would simply never
+# return. That is why it is opt-in per invocation rather than automatic: a command
+# line that does not ask for it behaves exactly as it always has, so running one
+# of these in the foreground by habit can never wedge a turn.
+#
+# A caller that has its own EXIT trap must settle it first (see bin/fm-send.sh):
+# exec does not run EXIT traps.
+fm_arm_pool_refill_or_exit() {
+  local arm=$1
+  fm_arm_pool_has_room || exit 0
+  [ -x "$arm" ] || exit 0
+  exec "$arm" --dormant
+}

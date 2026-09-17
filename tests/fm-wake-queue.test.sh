@@ -64,7 +64,12 @@ test_signal_catchup_without_running_watcher() {
   wait_for_exit "$!" 40 || fail "watcher did not exit for first signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print first signal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after first signal failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "first signal was not queued"
+  # The RECORD is keyed by the status file's name and carries the crewmate's own
+  # line, not the path to it: a wake exists to say what was said. The watcher's
+  # own reason line above still names the paths, which is what classifies a cycle.
+  grep "$(printf '\tsignal\ttask.status\t')" "$drain_out" >/dev/null || fail "first signal was not queued"
+  grep -F 'signal: task | blocked: first' "$drain_out" >/dev/null \
+    || fail "the queued signal did not carry the crewmate's own line"
 
   printf 'done: second\n' >> "$status_file"
   : > "$out"
@@ -72,6 +77,73 @@ test_signal_catchup_without_running_watcher() {
   wait_for_exit "$!" 40 || fail "watcher did not exit for second signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "signal written with no watcher was not caught"
   pass "signal written while no watcher runs is caught on next run"
+}
+
+test_wake_pending_hands_over_once_and_survives_an_unread_session() {
+  # The arm drains on its way out, so the queue file is gone before anyone has
+  # necessarily READ the rows. This log is the only place they still exist, and a
+  # fresh session is the one moment a model is certainly looking. It must hand
+  # them over exactly once and then be empty.
+  local dir state pending out1 out2
+  dir=$(make_case wake-pending)
+  state="$dir/state"
+  pending="$ROOT/bin/fm-wake-pending.sh"
+  out1="$dir/take1.out"
+  out2="$dir/take2.out"
+
+  printf '%s\n' 'row-one' 'row-two' | FM_STATE_OVERRIDE="$state" "$pending" --record \
+    || fail "recording drained rows failed"
+  FM_STATE_OVERRIDE="$state" "$pending" --peek | grep -qF 'row-one' \
+    || fail "a peek did not show a recorded row"
+  FM_STATE_OVERRIDE="$state" "$pending" --peek | grep -qF 'row-two' \
+    || fail "a peek lost the second recorded row"
+
+  FM_STATE_OVERRIDE="$state" "$pending" --take > "$out1" || fail "taking the pending rows failed"
+  grep -qF 'row-one' "$out1" || fail "the handover did not print the rows it was holding"
+  grep -qF 'row-two' "$out1" || fail "the handover dropped a row it was holding"
+
+  # Once handed over, gone: a second session must not be told about wakes the
+  # first one already read.
+  FM_STATE_OVERRIDE="$state" "$pending" --take > "$out2" || fail "a second take failed"
+  [ ! -s "$out2" ] || fail "the pending log handed the same rows over twice: $(cat "$out2")"
+  pass "drained-but-unread wakes are handed over exactly once and then cleared"
+}
+
+test_signal_wake_carries_the_crewmates_own_words() {
+  # The point of the whole path: the model should be woken WITH the message, not
+  # with a path to go and read it. The queue record and the watcher's own output
+  # both have to carry the line the crewmate just wrote, prefixed by who wrote it.
+  local dir state fakebin out drain_out status_file
+  dir=$(make_case signal-words)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  status_file="$state/task-alpha.status"
+
+  printf 'blocked: the credential is missing\n' > "$status_file"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not exit for the first signal"
+  grep -F 'signal: task-alpha | blocked: the credential is missing' "$out" >/dev/null \
+    || fail "the watcher's own output did not carry the crewmate's words: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the first signal failed"
+  grep -F 'signal: task-alpha | blocked: the credential is missing' "$drain_out" >/dev/null \
+    || fail "the queued wake record did not carry the crewmate's words: $(cat "$drain_out")"
+
+  # A second wake must carry only what is NEW. Re-reporting the whole file would
+  # put an already-answered blocker in front of the model every time the crewmate
+  # writes anything at all.
+  printf 'done: PR is green\n' >> "$status_file"
+  : > "$out"
+  : > "$drain_out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not exit for the second signal"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the second signal failed"
+  grep -F 'signal: task-alpha | done: PR is green' "$drain_out" >/dev/null \
+    || fail "the second wake did not carry the newly appended line: $(cat "$drain_out")"
+  grep -F 'the credential is missing' "$drain_out" >/dev/null \
+    && fail "the second wake repeated a line the first wake had already delivered"
+  pass "a signal wake carries the crewmate's own appended lines, prefixed by id, and only the new ones"
 }
 
 test_stale_enqueue_before_suppressor() {
@@ -441,3 +513,5 @@ test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_caps_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_interruption_before_and_after_raw_commit
+test_signal_wake_carries_the_crewmates_own_words
+test_wake_pending_hands_over_once_and_survives_an_unread_session

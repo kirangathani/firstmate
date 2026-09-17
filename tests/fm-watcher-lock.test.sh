@@ -1280,8 +1280,21 @@ SH
   [ "$rc" -eq 0 ] || fail "arm returned non-zero for an immediate wake (status $rc): $(cat "$armout")"
   grep -F "check: $check_file: merged: https://example.test/pr/7" "$armout" >/dev/null || fail "arm did not propagate the immediate check wake"
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm printed FAILED after a valid immediate wake"
+  # The arm drains on its way out, so the queue record is handed over in ITS OWN
+  # output. That is the whole of what removing the drain from the model's hands
+  # means: the wake arrives with the record already in it.
+  grep "$(printf '\tcheck\t')" "$armout" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/7' >/dev/null \
+    || fail "the arm did not hand over the drained wake record in its own output"
+  # And the durable copy, which is what a session that never reads this output
+  # still gets. Written before the print, so it cannot be the thing that is lost.
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-pending.sh" --peek \
+    | grep -F 'merged: https://example.test/pr/7' >/dev/null \
+    || fail "the arm did not record the drained wake for a session that never read its output"
+  # Nothing left behind: a model that drained again would get nothing, which is
+  # why the protocol stops telling it to.
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after immediate arm wake failed"
-  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/7' >/dev/null || fail "immediate check wake was not queued"
+  ! grep -q "$(printf '\tcheck\t')" "$drain_out" \
+    || fail "a wake the arm had already drained was still sitting in the queue"
   pass "arm propagates an immediate watcher wake before confirmation"
 }
 
@@ -1974,6 +1987,61 @@ test_a_joined_arm_pool_member_counts_itself() {
   pass "an arm that joins the pool is counted as a member while it is running"
 }
 
+test_a_command_with_room_in_the_pool_becomes_an_arm() {
+  # The refill that costs no model call. A stub stands in for the arm so the
+  # decision is asserted without standing up a real watcher: what matters here is
+  # that the process is REPLACED rather than allowed to exit.
+  local dir state stub out
+  dir=$(make_case pool-refill-room)
+  state="$dir/state"
+  stub="$dir/stub-arm"
+  # shellcheck disable=SC2016 # $1 is the STUB's own argument, written out literally.
+  printf '#!/usr/bin/env bash\nprintf "became-dormant %%s\\n" "$1"\n' > "$stub"
+  chmod +x "$stub"
+  out=$(pool_eval "$state" "fm_arm_pool_refill_or_exit '$stub'; echo NOT-REACHED")
+  case "$out" in
+    *"became-dormant --dormant"*) ;;
+    *) fail "a command with room in the pool did not become a dormant arm (got '$out')" ;;
+  esac
+  case "$out" in
+    *NOT-REACHED*) fail "the refill returned to its caller instead of replacing the process" ;;
+  esac
+  pass "a command with room in the pool becomes a dormant arm instead of exiting"
+}
+
+test_a_command_exits_at_once_when_the_pool_is_full() {
+  # The other direction: a full pool must not grow, or every send would leave
+  # another idle shell behind for as long as the session lives.
+  local dir state stub pool out now i pid pids=
+  dir=$(make_case pool-refill-full)
+  state="$dir/state"
+  pool="$state/.arm-pool"
+  stub="$dir/stub-arm"
+  printf '#!/usr/bin/env bash\nprintf "became-dormant\\n"\n' > "$stub"
+  chmod +x "$stub"
+  mkdir -p "$pool"
+  now=$(date +%s)
+  i=0
+  while [ "$i" -lt 6 ]; do
+    sleep 60 &
+    pid=$!
+    pids="$pids $pid"
+    printf '\t\t%s\tdormant\n' "$now" > "$pool/$pid"
+    i=$((i + 1))
+  done
+  out=$(pool_eval "$state" "fm_arm_pool_refill_or_exit '$stub'; echo NOT-REACHED")
+  for pid in $pids; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  case "$out" in
+    *became-dormant*) fail "a full pool still grew another dormant arm" ;;
+    *NOT-REACHED*) fail "the refill returned to its caller instead of exiting on a full pool" ;;
+  esac
+  [ -z "$out" ] || fail "a refill on a full pool printed something instead of exiting quietly"
+  pass "a command exits at once when the pool is already full"
+}
+
 test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm() {
   # The whole claim of the pool, end to end: six arms issued once, exactly one
   # watching and five asleep, and when the watching one fires and exits - which
@@ -2092,4 +2160,6 @@ test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
 test_arm_pool_counts_only_live_members_of_this_session
 test_a_joined_arm_pool_member_counts_itself
+test_a_command_with_room_in_the_pool_becomes_an_arm
+test_a_command_exits_at_once_when_the_pool_is_full
 test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm
