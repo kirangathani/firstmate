@@ -17,14 +17,18 @@ When this session owns supervision and away mode is not active:
    Refill only when the turn-end guard asks for it, by issuing six `bin/fm-watch-arm.sh --dormant` background tasks in one reply.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records or a real watcher reason line.
    A `watcher: cycle-complete ...` close is handled the same way and is not a failure: an attached cycle ended by delivering its wake to the arm that owns that watcher.
-9. Killed background task, not a wake: if this background task ends without a wake line - Claude Code stopped it for low memory, or the session restarted - the watcher is still running.
+9. Refill for free: run `bin/fm-send.sh --refill ...` and `bin/fm-ack.sh --refill ...` as their own Claude Code background tasks.
+   A successful one stays alive as a waiting arm while the pool has room, so ordinary steering keeps the pool topped up and the turn-end refill is only ever reached in a turn that sent nothing.
+   Their output is not something to act on, which is why they can be spent this way; a failed send or ack exits at once with its error instead.
+   Never pass `--refill` to a foreground run: that process becomes the thing that waits, so the call would never come back.
+10. Killed background task, not a wake: if this background task ends without a wake line - Claude Code stopped it for low memory, or the session restarted - the watcher is still running.
    The arm starts it detached from the task's process group and session, so a kill of the task does not reach it.
    Re-run `bin/fm-watch-arm.sh` as a fresh background task to re-attach; `watcher: attached ...` is the expected result and confirms supervision never lapsed.
    Do not use `--restart` here: that would stop a healthy watcher and leave a real gap where there was none.
-10. The continuity PreToolUse gate allows wake drain and watcher arm recovery, and refuses only other `bin/fm-*.sh` fleet commands while tasks are in flight and no identity-matched live watcher holds the home lock.
-11. The existing turn-end guard remains unchanged as the final backstop and is not replaced by this command gate.
-12. Recovery only: if a forced restart is genuinely needed, run `bin/fm-watch-arm.sh --restart` through the same Claude background task mechanism.
-13. Do not send idle progress while the watcher is parked.
+11. The continuity PreToolUse gate allows wake drain and watcher arm recovery, and refuses only other `bin/fm-*.sh` fleet commands while tasks are in flight and no identity-matched live watcher holds the home lock.
+12. The existing turn-end guard remains unchanged as the final backstop and is not replaced by this command gate.
+13. Recovery only: if a forced restart is genuinely needed, run `bin/fm-watch-arm.sh --restart` through the same Claude background task mechanism.
+14. Do not send idle progress while the watcher is parked.
 
 Claude Code's background task completion is the wake mechanism.
 The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` is only the verified background arm wrapper.
