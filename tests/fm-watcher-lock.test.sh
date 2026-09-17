@@ -1999,7 +1999,9 @@ test_pool_slots_are_numbered_and_reused() {
   local dir state free
   dir=$(make_case pool-slots)
   state="$dir/state"
-  [ "$(pool_eval "$state" 'fm_arm_pool_join dormant 3; printf "%s" "$FM_ARM_POOL_SLOT"')" = "3" ] \
+  # Read back through the pool's own record rather than the join's variable, so
+  # the assertion is what a LATER reader sees rather than what the joiner set.
+  [ "$(pool_eval "$state" 'fm_arm_pool_join dormant 3 && fm_arm_pool_taken_slots')" = "3" ] \
     || fail "a member that asked for a free slot did not get it"
   # That member has exited, so its number is free again and is the lowest free
   # one; the allocator must hand it back rather than move on.
