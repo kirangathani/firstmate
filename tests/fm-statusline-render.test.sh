@@ -78,6 +78,18 @@ make_workspace() {  # <dir>
     commit -q --allow-empty -m initial
 }
 
+# bin/fm-statusline.sh prints the fleet line only for a PRIMARY home, so every
+# fixture below that expects that line has to look like one. A .git DIRECTORY is
+# the plain-checkout form of primary; bin/fm-primary-scope-lib.sh owns the marker
+# form for a leased secondmate worktree. A home with state/ but no .git is a
+# recycled task worktree, which is the case that must stay silent, so it is a
+# fixture in its own right rather than something to give every case by default.
+make_statusline_home() {  # <home> [<extra dir>...]
+  local home=$1
+  shift
+  mkdir -p "$home/state" "$home/.git" "$@"
+}
+
 # The exact JSON payload Claude Code writes to a statusLine command's stdin:
 # model, workspace.current_dir, cwd, transcript_path, session_id.
 build_payload() {  # <workspace dir> [transcript path]
@@ -183,7 +195,7 @@ test_render_with_no_local_base_configured_at_all() {
   home="$case_dir/home"
   workspace="$case_dir/proj"
   config="$case_dir/claude-config"
-  mkdir -p "$home/state"
+  make_statusline_home "$home"
   make_workspace "$workspace"
   install_replay_base "$case_dir/base.sh"
   install_user_settings "$config" "$case_dir/base.sh"
@@ -235,7 +247,7 @@ test_render_inside_tmux_carries_the_whole_base_line() {
   home="$case_dir/home"
   workspace="$case_dir/proj"
   config="$case_dir/claude-config"
-  mkdir -p "$home/state"
+  make_statusline_home "$home"
   make_workspace "$workspace"
   install_replay_base "$case_dir/base.sh"
   install_user_settings "$config" "$case_dir/base.sh"
@@ -260,7 +272,7 @@ test_configured_sources_outrank_the_fallback() {
   home="$case_dir/home"
   workspace="$case_dir/proj"
   config="$case_dir/claude-config"
-  mkdir -p "$home/state" "$home/config"
+  make_statusline_home "$home" "$home/config"
   make_workspace "$workspace"
   install_replay_base "$case_dir/fallback.sh"
   install_user_settings "$config" "$case_dir/fallback.sh"
@@ -296,7 +308,7 @@ test_render_with_genuinely_no_base_command_anywhere() {
   home="$case_dir/home"
   workspace="$case_dir/proj"
   config="$case_dir/claude-config"
-  mkdir -p "$home/state" "$config"
+  make_statusline_home "$home" "$config"
   make_workspace "$workspace"
   printf '%s\n' '{"model":"claude-opus-5"}' > "$config/settings.json"
   printf '%s\n' "$$" > "$home/state/.lock"
@@ -327,7 +339,7 @@ test_a_self_referential_user_setting_does_not_recurse() {
   home="$case_dir/home"
   workspace="$case_dir/proj"
   config="$case_dir/claude-config"
-  mkdir -p "$home/state"
+  make_statusline_home "$home"
   make_workspace "$workspace"
   install_user_settings "$config" "$ROOT/bin/fm-statusline.sh"
   printf '%s\n' "$$" > "$home/state/.lock"
@@ -350,7 +362,7 @@ test_the_payload_reaches_the_base_command_unchanged() {
   home="$case_dir/home"
   workspace="$case_dir/proj"
   config="$case_dir/claude-config"
-  mkdir -p "$home/state"
+  make_statusline_home "$home"
   make_workspace "$workspace"
   cat > "$case_dir/base.sh" <<SH
 #!/usr/bin/env bash
@@ -388,7 +400,7 @@ test_real_operator_status_line_still_renders_every_segment() {
   # A sandboxed HOME, so the live script's own rune/state files land here and
   # never touch the operator's. Empty means it renders its first rune frame,
   # which is the frame the fixture was captured on.
-  mkdir -p "$home/state" "$home/.claude"
+  make_statusline_home "$home" "$home/.claude"
   make_workspace "$workspace"
   install_user_settings "$config" "$REAL_STATUSLINE"
   printf '%s\n' "$$" > "$home/state/.lock"

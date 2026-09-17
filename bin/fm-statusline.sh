@@ -45,14 +45,18 @@
 # that names this very script terminates instead of recursing.
 #
 # Contract, because this runs on every status-line render:
-#   - Bounded work only: at most three small file reads, one JSON read of the
+#   - Bounded work only: at most four small file reads, one JSON read of the
 #     user settings file, at most eight ps parent hops
 #     (bin/fm-session-lock-lib.sh), and whatever the operator's own base command
 #     costs. No process scans, no globbing over the fleet, no network, no git.
+#     The primary-home test below is part of that budget and is why it stats
+#     .git and reads the secondmate marker rather than asking git anything.
 #   - It never writes anything under state/, and never creates it.
 #   - It degrades QUIETLY: when ownership cannot be determined it prints no fleet
-#     line rather than a wrong or alarming answer. A missing state dir (every
-#     crewmate or scout task worktree of this repo) is exactly that case.
+#     line rather than a wrong or alarming answer. Two cases are exactly that: a
+#     missing state dir, and a home that is not a primary home, which is every
+#     crewmate or scout task worktree of this repo including one whose recycled
+#     slot left a state dir behind.
 #   - Always exits 0.
 #
 # Wiring: Claude Code reads it through the statusLine setting in
@@ -142,6 +146,19 @@ fi
 # No fleet state here (a task worktree, or a home that has never run): say
 # nothing about the fleet rather than guess. The base line above still stands.
 [ -d "$STATE" ] || exit 0
+# A state dir answers "was there ever a fleet here", not "is this a home". A
+# recycled task worktree carries a gitignored state/ left behind by an earlier
+# occupant of the same slot, so a crew pane rendered a confident verdict about a
+# home that does not exist. That verdict could never have been right: a crew pane
+# reads its own worktree, because bin/fm-spawn.sh exports FM_HOME only for a
+# secondmate, and a crew's ancestry never contains the home's session anyway.
+# Decided without forking git, which the contract above forbids. A .git DIRECTORY
+# is a main checkout or a plain-clone secondmate; the marker is a leased linked
+# secondmate home. A linked task worktree has a .git FILE and no marker, so it
+# says nothing, which is the same quiet degrading as a missing state dir.
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+[ -d "$FM_HOME/.git" ] || fm_root_is_secondmate_home "$FM_HOME" || exit 0
 # Without ps the ancestry walk cannot run, and every answer would be wrong in
 # the alarming direction.
 command -v ps >/dev/null 2>&1 || exit 0
