@@ -388,7 +388,11 @@ test_turn_ended_provably_working_absorbed() {
   # A busy pane is the second form of positive evidence (covers a queued
   # continuation right after the turn-end).
   export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
-  watch_bg "$state" "$fakebin" "$out"
+  # Pinned wide so this case exercises the absorb and not the quiet window: the
+  # window's default is derived from the poll and grace, which this harness sets
+  # to a second each, so a marker would age past it while the watcher was still
+  # lingering and surface for a reason this case is not about.
+  watch_bg "$state" "$fakebin" "$out" FM_TURN_END_QUIET_SECS=3600
   pid=$!
   if ! wait_cycle "$pid" "$state" 30; then
     reap "$pid"; fail "watcher exited for a turn-end whose crew is provably working (should absorb): $(cat "$out")"

@@ -172,6 +172,9 @@
 # state/.watch-arm.log instead of stdout (announce/arm_log below), and the drain
 # at exit still runs but prints nothing, because every record it holds is the
 # same payload already on that line (report_pool_wake).
+# The session-lock gate's two advisories take the same route, and for the same
+# reason: six members would otherwise announce one fact six times, and the
+# session-start digest already reports which session owns this home once.
 # FAILED endings are never silenced. Neither is the harness's stream-end notice,
 # which is emitted by the harness for every finished Monitor and cannot be
 # suppressed from here at all - one per wake is the floor this script can reach.
@@ -863,11 +866,16 @@ case "$(fm_session_lock_ownership "$STATE")" in
     FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || true
     ;;
   other)
-    echo "watcher: read-only - another firstmate session holds this home's session lock; not arming"
+    # Announced rather than echoed for the same reason a handover is: six members
+    # issued in one reply would otherwise put six copies of one fact in front of
+    # the model, and which session owns this home is something the session-start
+    # digest already reports once. A plain arm still prints it, and the adapters
+    # that classify an arm close still read it there.
+    announce "watcher: read-only - another firstmate session holds this home's session lock; not arming"
     exit 0
     ;;
   *)
-    echo "watcher: no live session holds this home's session lock - arming anyway; run bin/fm-session-start.sh to claim it"
+    announce "watcher: no live session holds this home's session lock - arming anyway; run bin/fm-session-start.sh to claim it"
     ;;
 esac
 

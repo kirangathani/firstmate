@@ -204,6 +204,7 @@ fm_arm_pool_live_records() {
     case "$slot" in ''|*[!0-9]*) slot= ;; esac
     printf '%s\t%s\n' "$pid" "$slot"
   done
+  return 0
 }
 
 fm_arm_pool_count() {
@@ -211,10 +212,14 @@ fm_arm_pool_count() {
 }
 
 # The slot numbers live members of this session hold, one per line.
+# Every reader below returns 0 even when it prints nothing. An empty pool is an
+# ordinary answer, not an error, and bin/fm-turnend-guard.sh and
+# bin/fm-supervision-instructions.sh both run under set -e.
 fm_arm_pool_taken_slots() {
   fm_arm_pool_live_records | while IFS="$fm_arm_pool_tab" read -r _pid slot; do
-    [ -n "$slot" ] && printf '%s\n' "$slot"
+    if [ -n "$slot" ]; then printf '%s\n' "$slot"; fi
   done
+  return 0
 }
 
 # The numbers in 1..FM_ARM_POOL_TARGET nobody holds, lowest first. This is what a
@@ -254,8 +259,9 @@ fm_arm_pool_taken_slots_excluding() {  # <pid>
   local pid=$1
   fm_arm_pool_live_records | while IFS="$fm_arm_pool_tab" read -r member slot; do
     [ "$member" = "$pid" ] && continue
-    [ -n "$slot" ] && printf '%s\n' "$slot"
+    if [ -n "$slot" ]; then printf '%s\n' "$slot"; fi
   done
+  return 0
 }
 
 # True when the pool has room, i.e. when a command that has finished its real
