@@ -115,7 +115,7 @@ first_settle() {  # <expected> <label> <harness|--explicit> <message> [selector-
   expect_code 0 "$rc" "$label: send should succeed"
   first=$(head -1 "$log")
   [ "$first" = "$expected" ] || fail "$label: expected popup-settle $expected, got '$first'"$'\n'"--- sleeps ---"$'\n'"$(cat "$log")"
-  pass "fm-send popup-settle: $label -> ${expected}s"
+  printf '# popup-settle %s -> %ss\n' "$label" "$expected"
 }
 
 # Codex `$<skill>` gets the long settle so its `$` popup clears (the fix).
@@ -145,3 +145,8 @@ first_settle 1.2 'codex /command -> long settle (slash unchanged)' codex '/help'
 
 # Plain text to codex takes the fast path - the codex scope is `$`-prefixed only.
 first_settle 0.3 'codex plain text -> fast path' codex 'just a normal steer'
+
+# One assertion for the whole table: every case above fails loudly on its own
+# mismatch, so the identity the merge gate compares stays a constant string
+# rather than a per-case name built from the case's own values.
+pass "fm-send popup-settle: every message and harness combination settles as specified"

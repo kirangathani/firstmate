@@ -199,8 +199,9 @@ test_full_acceptance_matrix() {
     for entry in codex claude grok opencode pi; do
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
-    pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all five entry forms"
+    printf '# matrix %s: %s through all five entry forms\n' "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}"
   done
+  pass "arm-guard acceptance matrix: every case holds through all five entry forms"
 }
 
 assert_policy() {
@@ -211,7 +212,7 @@ assert_policy() {
     "$expected"|"$expected"$'\t'*) : ;;
     *) fail "$id direct policy expected $expected, got: $output" ;;
   esac
-  pass "direct policy $id: $expected"
+  printf '# direct policy %s: %s\n' "$id" "$expected"
 }
 
 test_direct_policy_contract() {
@@ -237,6 +238,7 @@ test_direct_policy_contract() {
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"
   assert_policy direct-heredoc-watcher $'deny\twatcher-redirection' "$heredoc_watcher"
+  pass "arm-guard direct policy: every command classifies as specified"
 }
 
 # --- CLI parsing -------------------------------------------------------------
@@ -462,7 +464,7 @@ test_grok_turnend_hook_uses_safe_var_pattern() {
   assert_not_contains "$command" 'root=${GROK_WORKSPACE_ROOT' "grok Stop hook must not assign a bare \$root var either (regression fixed 2026-07-09, docs/arm-pretool-check.md)"
   # shellcheck disable=SC2016
   assert_contains "$command" '${GROK_WORKSPACE_ROOT:-}' "grok Stop hook must reference GROK_WORKSPACE_ROOT with an inline default every time"
-  pass ".grok primary hook: Stop hook uses the \${VAR:-} pattern throughout (no bare \$root)"
+  pass ".grok primary hook: Stop hook uses the braced default-value pattern throughout, never a bare variable"
 }
 
 test_claude_settings_pretool_hook_wired() {

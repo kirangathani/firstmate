@@ -218,10 +218,34 @@ BRIEF_REGION_RULE_BEGIN='<!-- fm:rule-1 -->'
 BRIEF_REGION_RULE_END='<!-- /fm:rule-1 -->'
 BRIEF_REGION_DOD_PREFIX='<!-- fm:definition-of-done'
 BRIEF_REGION_DOD_END='<!-- /fm:definition-of-done -->'
+BRIEF_REGION_MODE_PREFIX='<!-- fm:delivery-mode'
 
-# brief_skip_state <local on|off> <ci on|off>: the skip state recorded on the
-# definition-of-done marker, so a brief states which skip it was written for and
-# an apply can tell "already correct" from "needs rewriting" without guessing.
+# The three regions are a function of TWO axes, and each records its own on its own
+# marker, immediately above the definition of done:
+#   <!-- fm:delivery-mode <mode> -->
+#   <!-- fm:definition-of-done skip=<state> -->
+# Together they let an apply tell "already correct" from "needs rewriting" without
+# guessing. Only the skip was recorded until 2026-09-16, and the missing half was
+# not cosmetic: bin/fm-spawn.sh's --mode may now dispatch one task under a mode its
+# project is not registered for, and with only the skip recorded, an unflagged
+# dispatch of an unflagged brief compared equal on the one axis it could see and
+# exited without rewriting, handing the worker the definition of done for the OTHER
+# mode.
+#
+# The delivery mode gets its own line rather than a second field on the
+# definition-of-done marker, because that marker's exact text is an asserted
+# contract of the base's own tests; widening it in place would supersede those
+# assertions to record a fact that reads perfectly well on a line of its own.
+#
+# A brief with no delivery-mode marker was written before this contract. It can
+# prove nothing about which mode it was rendered for, so it is always rewritten
+# from the dispatch, which also restores the marker. That costs a hand adjustment
+# to these machine-owned regions on the first respawn of such a brief, and is the
+# safe direction: the alternative is assuming it agrees and shipping the
+# disagreement. It is deliberately NOT part of the structural marker count below,
+# so a legacy brief is rewritten rather than refused.
+
+# brief_skip_state <local on|off> <ci on|off>: the skip half of that pair.
 brief_skip_state() {
   if [ "${1}" = on ] && [ "${2}" = on ]; then printf 'all'
   elif [ "${1}" = on ]; then printf 'local'
@@ -351,7 +375,13 @@ Six firstmate-specific rules layer on top of that guidance:
   \`$NM_ATTACH_CMD $ID\` starts the run, or reattaches to it.
   \`$NM_ATTACH_CMD $ID --respond --action <approve|fix|skip> ...\` answers a gate, taking the same flags \`axi respond\` takes.
   Run it from inside this worktree; it refuses anywhere else. It composes the pinned intent for you from its one owner - the \`# Task\` section of this brief verbatim, never a paraphrase, which matters because the pipeline's final review scores the diff against it.
-  **It returns immediately, on purpose, while the run is still going.** That is not a failure and there is nothing to wait for: it holds the attach in the background for hours, so instead of the \`error: wait of 8m0s elapsed\` you would get in the foreground several times per run, the hold returns only when the run actually reaches a gate or an outcome, and then appends ONE line to your status file. That line is what wakes firstmate, whether or not you are still watching. So do not poll it, do not re-attach to "check", and do not treat its immediate return as something to retry.
+  **It returns immediately, on purpose, while the run is still going.** That is not a failure and there is nothing to wait for in that turn: it holds the attach in a detached background process for hours, so instead of the \`error: wait of 8m0s elapsed\` you would get in the foreground several times per run, the hold returns only when the run actually reaches a gate or an outcome, and then appends ONE line to your status file. That line is what wakes firstmate, whether or not you are still watching. Do not treat its immediate return as something to retry, and do not re-attach while that hold is still running just to "check" where the run is - \`no-mistakes axi status\` is the cheap look for that.
+  **ONE ATTACH COVERS EXACTLY ONE RETURN. Re-attaching after each returned hold IS the loop, and running that loop is your job.** The hold ENDS when it appends its line; after that nothing is attached to this run at all. The daemon never pushes and never resumes anything by itself, so a run parked with no live attach sits there indefinitely, NOTHING wakes you, and the pipeline's own stalled-run sweep stays deliberately silent because a parked run is not a frozen step. Measured 2026-09-16: three workers each stopped at exactly this point after starting a run, one of them for four hours.
+  So after every returned hold, read the line it appended and go straight on - never stop here and wait to be woken:
+  - \`needs-decision [key=nm-run]: run {id} parked at {step}\` - the run will not move until it is answered. Answer it with \`--respond\` (escalating first when the rules above make it firstmate's), and that \`--respond\` is itself the next attach.
+  - \`paused [key=nm-run]: run {id} still {status} at {step} after {wait}; reattach\` - the wait elapsed with the run still live and healthy. **That line is addressed to YOU, not to firstmate**, which reads a \`paused:\` pane as an external wait that clears on its own and will deliberately leave you alone. Re-attach plainly, at once, with \`$NM_ATTACH_CMD $ID\`.
+  - \`resolved\` or \`blocked [key=nm-run]\` - terminal. The loop is over; carry on with the steps below.
+  You never have to weigh up whether a re-attach is wanted, because the owner decides: it refuses a second attach while a hold is still live and prints that hold's pid and log instead. An unnecessary re-attach costs one refused command; a missing one costs the whole run.
   \`no-mistakes axi status\` is the cheap look if you want to see where the run is; \`axi logs\`, \`axi sync\` and \`axi abort\` are unaffected too.
 - **Every \`--action fix\` needs substantive \`--instructions\`.** Pass them through the attach owner like any other flag. The gate agent that applies a fix is not you: it sees the finding text and the diff and nothing else, and it cannot read this brief or the project's AGENTS.md. So \`--instructions\` must carry the design reasoning behind the code the finding touches, the principle the fix must preserve, and what the fix must not break or reintroduce. A bare or one-phrase \`--instructions\` is refused before it runs; that refusal is the rule working, not a tool fault, so answer it rather than routing around it.
 
@@ -377,7 +407,8 @@ Equally, a finding you are genuinely converging on is yours to keep working; the
 # Reporting done: let the run's own \`ci\` step watch the PR
 Do NOT abort a run to shortcut its \`ci\` step, and do not poll the PR yourself while the run is live. That step watches the PR it opened by PR number from the run record, so it sees your PR go green from this detached-HEAD worktree.
 
-You are detached from the run while it monitors: the attach owner holds it in the background and appends the one status line that wakes firstmate at the run's next gate or outcome. A run that stays active until the PR merges therefore costs you nothing.
+You are detached from the run while it monitors: the attach owner holds it in a background process and appends the one status line that wakes firstmate at the run's next gate or outcome. A run that stays active until the PR merges therefore costs you nothing.
+The \`ci\` step is held by an ordinary attach like every other step, so the re-attach loop above still applies to it: a long CI wait can elapse the hold and append the \`paused ... reattach\` line, and you re-attach then exactly as you would at any other step. Do not read that line as the run having finished, and do not stop and wait to be woken.
 
 1. When the run reaches its CI-green outcome, the attach owner appends \`resolved [key=nm-run]: run {id} checks-passed\`. Confirm it with ONE read of \`$PR_GREEN_CMD $ID {url}\`, passing the PR link the pipeline printed - one read, never a polling loop.
    **An \`infrastructure:\` line is not a red and is never re-run.** It means a check never delivered a verdict about your branch at all - it timed out, was cancelled, could not run, or died having written nothing. A timed-out review is an alarm, not a retry. Append \`blocked: infrastructure - {the infrastructure line verbatim}\` to the status file and stop. Do not re-run that check, do not push an empty commit to retrigger it, and do not keep waiting for it to pass on its own.
@@ -453,13 +484,17 @@ if [ "$APPLY_SKIP" -eq 1 ]; then
     exit 1
   fi
 
+  HAVE_MODE=$(sed -n "s|^$BRIEF_REGION_MODE_PREFIX \([^ ]*\) -->\$|\1|p" "$BRIEF")
   HAVE_STATE=$(sed -n "s|^$BRIEF_REGION_DOD_PREFIX skip=\([a-z]*\) -->\$|\1|p" "$BRIEF")
-  if [ "$HAVE_STATE" = "$WANT_STATE" ]; then
+  if [ -n "$HAVE_MODE" ] && [ "$HAVE_MODE" = "$APPLY_MODE" ] && [ "$HAVE_STATE" = "$WANT_STATE" ]; then
     # Byte-identical is not merely an optimization: an unchanged brief is never
     # rewritten, so a respawn cannot silently revert an adjustment firstmate made
-    # by hand to a region it happens to own.
+    # by hand to a region it happens to own. Both axes have to agree to earn that:
+    # see the marker contract above for why an absent delivery-mode marker never
+    # does.
     exit 0
   fi
+  [ -n "$HAVE_MODE" ] || HAVE_MODE='(unrecorded)'
 
   render_ship_regions "$APPLY_MODE" "$LOCAL_SKIP" "$CI_SKIP"
   TMPD="$BRIEF.apply.$$"
@@ -471,19 +506,25 @@ if [ "$APPLY_SKIP" -eq 1 ]; then
   awk -v sb="$BRIEF_REGION_SETUP_BEGIN" -v se="$BRIEF_REGION_SETUP_END" \
       -v rb="$BRIEF_REGION_RULE_BEGIN" -v re="$BRIEF_REGION_RULE_END" \
       -v dp="$BRIEF_REGION_DOD_PREFIX" -v de="$BRIEF_REGION_DOD_END" \
-      -v state="$WANT_STATE" \
+      -v mp="$BRIEF_REGION_MODE_PREFIX" \
+      -v state="$WANT_STATE" -v mode="$APPLY_MODE" \
       -v sf="$TMPD/setup" -v rf="$TMPD/rule" -v df="$TMPD/dod" '
     function emit(f,   line) { while ((getline line < f) > 0) print line; close(f) }
     skipping && $0 == endmark { print; skipping = 0; next }
     skipping { next }
     $0 == sb { print; emit(sf); endmark = se; skipping = 1; next }
     $0 == rb { print; emit(rf); endmark = re; skipping = 1; next }
-    index($0, dp " ") == 1 { print dp " skip=" state " -->"; emit(df); endmark = de; skipping = 1; next }
+    index($0, mp " ") == 1 { next }
+    index($0, dp " ") == 1 { print mp " " mode " -->"; print dp " skip=" state " -->"; emit(df); endmark = de; skipping = 1; next }
     { print }
   ' "$BRIEF" > "$TMPD/out"
   # A brief that lost its closing markers on the way out would leave the next
   # apply unable to find its regions, so the result is re-checked before it
   # replaces the original rather than after.
+  grep -qFx -- "$BRIEF_REGION_MODE_PREFIX $APPLY_MODE -->" "$TMPD/out" || {
+    echo "error: rewriting $BRIEF did not record the delivery mode it was rendered for; the original is unchanged" >&2
+    exit 1
+  }
   for m in "$BRIEF_REGION_SETUP_END" "$BRIEF_REGION_RULE_END" "$BRIEF_REGION_DOD_END"; do
     grep -qFx -- "$m" "$TMPD/out" || {
       echo "error: rewriting $BRIEF lost the '$m' marker; the original is unchanged" >&2
@@ -494,7 +535,7 @@ if [ "$APPLY_SKIP" -eq 1 ]; then
   # can never leave the worker a truncated brief; the temp dir is a sibling, so
   # the rename is atomic.
   mv "$TMPD/out" "$BRIEF"
-  echo "applied: $BRIEF (mode=$APPLY_MODE, testing skip $HAVE_STATE -> $WANT_STATE)"
+  echo "applied: $BRIEF (delivery mode $HAVE_MODE -> $APPLY_MODE, testing skip $HAVE_STATE -> $WANT_STATE)"
   exit 0
 fi
 
@@ -739,6 +780,7 @@ For anything the codebase already shows, prefer a pointer to the authoritative f
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
+$BRIEF_REGION_MODE_PREFIX $MODE -->
 $BRIEF_REGION_DOD_PREFIX skip=$SKIP_STATE -->
 $DOD_REGION
 $BRIEF_REGION_DOD_END

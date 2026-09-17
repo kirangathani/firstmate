@@ -145,21 +145,43 @@ So `bin/fm-flow-snapshot.sh` resolves the run id from the daemon's own database,
 ```
 
 That file is local to the host, holds one row per repository in `repos`, and is opened **read-only**.
-`repos.working_path` records the primary checkout, so worktrees do not fragment it, and it matches the `project=` value already present in `state/<id>.meta` without any transformation.
 
 The read is deliberately confined to a run index - the latest run for the branch, plus how many runs that branch has had:
 
 ```sql
 SELECT r.id, r.status, r.updated_at, r.created_at,
-       (SELECT COUNT(*) FROM runs c WHERE c.repo_id = r.repo_id AND c.branch = r.branch)
+       (SELECT COUNT(*) FROM runs c WHERE c.branch = r.branch)
   FROM runs r JOIN repos p ON p.id = r.repo_id
- WHERE p.working_path = ?1 AND r.branch = ?2
+ WHERE r.branch = ?1
  ORDER BY r.created_at DESC LIMIT 1;
 ```
 
-That count is the `run_number` the viewer draws beside the agent id, and it is scoped by `repo_id` rather than by the branch name alone, so two projects holding an identically named branch never share a count.
+That count is the `run_number` the viewer draws beside the agent id.
 
-Every fact that reaches the screen - step names, statuses, finding counts, durations - is then read through `no-mistakes axi status --run <id>`, the documented CLI, run from the task's own project directory for the reason below.
+### The branch is the whole key, and where a run lives is its own fact
+
+This statement used to require `repos.working_path` to equal the task's recorded `project=` as well, on the reasoning that `fm/<id>` is only unique within a project and two clones could hold an identically named branch.
+That reasoning does not hold: `fm/<task-id>` carries a task id that is unique across the fleet by construction, so the branch alone already distinguishes them, and the extra predicate could only ever remove true rows.
+
+It removed them on 2026-09-16.
+The captain watched `nm-upstream-port-review-conversation-g3` - live, on its eighth run, at the review step - drawn as `building 10h28m` with no pipeline run at all.
+That task raises its PR against `kunchenguid/no-mistakes` rather than the fork, so the pipeline runs in a scratch clone under the task's own temp root and `repos.working_path` records that clone, never the project:
+
+```
+sqlite3 "file:$HOME/.no-mistakes/state.sqlite?mode=ro" \
+  "select r.id, p.working_path from runs r join repos p on p.id = r.repo_id
+    where r.branch = 'fm/nm-upstream-port-review-conversation-g3';"
+-> 8 rows, every working_path under .../scratchpad/nmpr-g3/upstream-clone
+```
+
+Those eight runs sit across **two** `repos` rows, because the worker was respawned into a different scratch clone partway through.
+So the count and the previous run's end are scoped by branch alone as well: scoping either to the newest run's repository would have called the eighth run #5, and started its building phase at the wrong run's last write.
+
+The same fact drives where the CLI read happens.
+`no-mistakes axi status --run <id>` resolves the repository from its working directory, so it must be run inside a repository, and the task's project is the wrong one whenever the pipeline was pointed elsewhere.
+The directory comes from the run's own row, through `fm_nm_db_working_path` in `bin/fm-nm-db-lib.sh`, which is the single owner of that read; the task's project remains the fallback for a run whose recorded directory is gone.
+
+Every fact that reaches the screen - step names, statuses, finding counts, durations - is then read through `no-mistakes axi status --run <id>`, the documented CLI, run from that directory.
 `step_results` is never read.
 That table is a private undocumented schema and the installed binary is eight minor versions behind current, so the risk of it changing is real; the run index is the smallest surface that solves the problem.
 
@@ -772,6 +794,9 @@ The captain's ruling, recorded here as the contract:
 | passed, or running, on a head the live run will replace | yellow | the sentences below | never bright green, so nobody is tempted to merge a head that will not land |
 | not read, no PR, nothing ran | unchanged | | |
 
+The tally line's parenthetical follows the same rule as the counts above it.
+`no PR` is a claim, and it is made only when the row knows: a task's PR reaches it either from firstmate's own record or from the pipeline run's own `pr:` field, so when the run could not be read at all neither has answered and the line says `PR unknown: could not read this task's pipeline`.
+
 Waiting on the captain's word is a separate fact from the checks' verdict, and it moves to the box that actually waits for it: when the cell is green and the PR is still open, `pre-merge` draws amber with `your word` (see the section above).
 Yellow is unambiguous on the CI cell only because that phrase has left it.
 
@@ -812,11 +837,29 @@ A testing skip is a separate axis and is named beside it by the flag the captain
 
 The mode is read from `state/<id>.meta` and carried on the wire, never inferred from an absent run: a wedged worker and a pipeline that has not started yet also have no run.
 
+That record therefore has to be right, and until 2026-09-16 it could not be.
+It carried the project's mode from `data/projects.md`, which answers how that project's work NORMALLY reaches main, and a task whose instructions send it elsewhere had nowhere to say so.
+`nm-upstream-port-review-conversation-g3` was such a task: its project ships `direct-PR`, and its brief told it to raise the PR through the pipeline pointed at an upstream repository.
+It drove eight pipeline runs, and the view drew `intent`, `rebase`, `review`, `test`, `docs` and `lint` as `skipped` the whole time - a deliberate skip is what that word means, and this task had none.
+The renderer was reading a record that was wrong; the fix was to stop the record being wrong.
+`bin/fm-spawn.sh --mode <no-mistakes|direct-PR|local-only>` records that task's own delivery mode at dispatch, and from there it governs the brief's definition of done, the testing-skip matrix, the merge gates, and this view exactly as a registry mode does.
+
 `push+PR` is NOT drawn as skipped under this mode, for the same reason it is not under a local skip: the push and the PR did happen, by hand, and the CI cell one step to its right is showing that PR's real checks.
 It reads `by hand` instead.
 `pre-merge` is never skipped under any mode or flag, because `bin/fm-pr-merge.sh` runs the base's own assertions regardless.
 
 The header carries a blue `skipped` legend exactly when a skipped cell is on screen, and never otherwise.
+
+### A record reality refutes loses
+
+That fixes every dispatch from here on and nothing already written, so the renderer has one rule for the contradiction itself.
+`direct-PR` and `local_skip` both make the same claim about the world - no validation pipeline runs for this task - so a pipeline run the collector actually READ for this branch is not a detail beside that claim, it is the claim being false.
+The row then draws the stages the run reports, and the title stops naming `direct-PR` as what removed them, because none of them are missing.
+`push+PR` loses its `by hand` for the same reason: a run that pushed and opened the PR did not do it by hand.
+
+This is the opposite of inferring the mode from an ABSENT run, which the paragraph above rightly refuses.
+Absence is also what a wedged worker and a pipeline that has not started yet look like, so it says nothing; a run that was read, with steps on it, says something, and nothing else has to be guessed.
+A read that FAILED is excluded on the same test: it observed nothing, so it refutes nothing, and that row is drawn unknown as before.
 
 ## Cost
 

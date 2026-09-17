@@ -43,6 +43,11 @@ test_batch_dispatches_every_pair() {
 }
 
 # Boundary cases for batch detection. Each row:
+# The --mode row is here because an unconsumed flag does not merely go ignored: it
+# lands in the positional list, and POS[0] carrying no '=' is exactly how this
+# script decides a command is NOT a batch. So a --mode the parser did not know
+# about would silently turn a batch into a single-task dispatch of a task named
+# "--mode".
 #   <label>|<batch yes/no>|<expect substring>|<args>
 # batch=yes -> a 'batch:' line must appear; batch=no -> it must not.
 test_batch_mode_boundaries() {
@@ -65,6 +70,7 @@ single id=repo pair routes through batch|yes|batch: FAILED to spawn nope-batch-s
 non-pair arg in batch is rejected|yes|batch dispatch expects every argument as id=repo; got 'bogus-no-equals'|nope-batch-mix-z5=projects/none-mix bogus-no-equals
 plain '<id> <repo>' is single-task|no||nope-single-z4 projects/none-single
 id part containing '/' is not a pair|no||weird/id-z6=projects/none projects/none
+--mode and its value are flags, not a pair|yes|batch: FAILED to spawn nope-batch-mode-z7 (projects/none-mode)|--mode no-mistakes nope-batch-mode-z7=projects/none-mode
 ROWS
   pass "batch detection: single pair batches, non-pair rejected, single-task and slash-id stay single"
 }
