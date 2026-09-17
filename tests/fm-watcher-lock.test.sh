@@ -2111,7 +2111,10 @@ test_a_dormant_arms_handover_is_recorded_apart_from_a_cold_arm() {
     FM_ARM_CONFIRM_TIMEOUT="$ARM_CONFIRM_START" FM_ARM_DORMANT_POLL=0.1 \
     "$WATCH_ARM" --dormant > "$armout" 2>&1 &
   armpid=$!
-  wait_for have_line "$armout" 'watcher: started pid=' \
+  # A pool member announces its start to state/.watch-arm.log rather than to
+  # stdout, where the line would cost a notification for a handover nobody acts
+  # on; the start itself is unchanged and so is what this case is waiting for.
+  wait_for have_line "$state/.watch-arm.log" 'watcher: started pid=' \
     || fail "test setup: the dormant arm never took the free lock: $(cat "$armout")"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   wait_for ledger_has_cmd "$ledger" fm-watch-arm.sh:up-dormant \
