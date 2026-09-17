@@ -269,6 +269,107 @@ test_lock_rejects_unknown_arguments_without_touching_state() {
   pass "fm-lock.sh: an unknown argument prints the usage and exits 2, creating nothing"
 }
 
+test_take_over_refuses_a_pid_that_is_not_the_recorded_holder() {
+  local dir state holder out status recorded
+  # take-over is the captain displacing one NAMED session, so it refuses every
+  # pid but the one on record. That is what stops it being run blind: the holder
+  # has to have been read first, and a holder that changed since that read is a
+  # different situation than the one the captain decided about.
+  dir=$(make_case lock-take-over-refuses)
+  state="$dir/state"
+  holder=$(start_other_session)
+  printf '%s\n' "$holder" > "$state/.lock"
+
+  out=$(FM_STATE_OVERRIDE="$state" "$LOCK_CLI" take-over $((holder + 1)) 2>&1); status=$?
+  expect_code 1 "$status" "take-over of a pid that does not hold the lock must fail"
+  assert_contains "$out" "does not hold this lock" "the refusal must say the named pid is not the holder"
+  assert_contains "$out" "pid $holder" "the refusal must name the holder actually on record"
+  recorded=$(sed -n '1p' "$state/.lock")
+  [ "$recorded" = "$holder" ] || fail "a refused take-over rewrote the lock: $recorded"
+
+  # No pid at all, and a non-numeric one, are usage errors rather than attempts:
+  # exit 2 like every other malformed invocation, and nothing written.
+  for out in '' abc 12x; do
+    status=0
+    FM_STATE_OVERRIDE="$state" "$LOCK_CLI" take-over $out >/dev/null 2>&1 || status=$?
+    expect_code 2 "$status" "a malformed take-over argument must exit 2"
+  done
+  recorded=$(sed -n '1p' "$state/.lock")
+  [ "$recorded" = "$holder" ] || fail "a malformed take-over rewrote the lock: $recorded"
+
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "fm-lock.sh: take-over refuses any pid but the recorded holder, and writes nothing when it does"
+}
+
+test_take_over_records_this_session_and_names_what_it_displaced() {
+  local dir state holder hpid out recorded
+  # The sanctioned way out of a rival holder the captain knows is not managing
+  # this fleet. It records THIS session's own harness process, exactly as an
+  # ordinary acquire would, so the home is owned by something that outlives the
+  # tool call that ran the command.
+  dir=$(make_case lock-take-over-succeeds)
+  state="$dir/state"
+  holder=$(start_other_session)
+  printf '%s\n' "$holder" > "$state/.lock"
+
+  hpid=$(start_versioned_harness "$dir" "
+export FM_STATE_OVERRIDE='$state'
+'$LOCK_CLI' take-over $holder > '$dir/takeover.out' 2>&1
+'$LOCK_CLI' ownership > '$dir/ownership.out' 2>&1
+")
+  wait_for_chain "$dir" || { stop_harness "$hpid"; kill "$holder" 2>/dev/null; fail "the take-over chain never finished"; }
+  out=$(cat "$dir/takeover.out")
+  recorded=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+  stop_harness "$hpid"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  assert_contains "$out" "lock taken over: harness pid $hpid" \
+    "take-over must record this session's own harness process"
+  assert_contains "$out" "displaced" "take-over must say what it displaced"
+  assert_contains "$out" "pid $holder" "take-over must name the holder it displaced"
+  [ "$recorded" = "$hpid" ] || fail "the lock must name the taking-over harness $hpid, got: $recorded"
+  [ "$(cat "$dir/ownership.out")" = owned ] \
+    || fail "the session that took over must read owned, got: $(cat "$dir/ownership.out")"
+  pass "fm-lock.sh: take-over records this session and names the holder it displaced"
+}
+
+test_every_remedy_offers_the_take_over_as_its_second_half() {
+  local dir state other out
+  # One owner for that string (fm_session_lock_remedy), so the acquire refusal
+  # and status cannot drift apart or offer a command the reader cannot run: the
+  # remedy carries the holder's pid because take-over refuses every other pid.
+  #
+  # The fake ps is what makes this measure the code rather than the machine, and
+  # it is needed on BOTH surfaces. The remedy is printed only for a holder that
+  # is live and harness-shaped, and the acquire refusal is reached only once the
+  # acquiring side has found a harness of its own - on a box with no session
+  # above the suite, as in CI, acquire instead exits early with "cannot locate
+  # harness process in ancestry" and never gets as far as the refusal. This is
+  # the same seam test_lock_refusal_describes_the_holder_and_names_a_remedy uses,
+  # for the same reason.
+  dir=$(make_case lock-remedy-take-over)
+  state="$dir/state"
+  install_fake_ps_claude "$dir/fakebin"
+  other=$(start_other_session)
+  printf '%s\n' "$other" > "$state/.lock"
+
+  out=$(PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$LOCK_CLI" status 2>&1)
+  assert_contains "$out" "bin/fm-lock.sh take-over $other" \
+    "status must offer the take-over naming the holder it would displace"
+  assert_contains "$out" "captain only" "the remedy must mark the take-over as the captain's"
+  assert_contains "$out" "bin/fm-session-start.sh" "the remedy must keep naming the ordinary way out first"
+
+  out=$(PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$LOCK_CLI" 2>&1 || true)
+  assert_contains "$out" "bin/fm-lock.sh take-over $other" \
+    "the acquire refusal must offer the same take-over, naming the same holder"
+
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  pass "fm-lock.sh: the remedy offers the captain-only take-over, naming the holder it would displace"
+}
+
 # --- what fm-session-lock-lib.sh accepts as a harness -------------------------
 
 # Start one process from a fake VERSIONED Claude install, running <body> one
@@ -1384,6 +1485,9 @@ test_ownership_cli_classifies_and_writes_nothing
 test_lock_holder_identity_and_file_format
 test_lock_refusal_describes_the_holder_and_names_a_remedy
 test_lock_rejects_unknown_arguments_without_touching_state
+test_take_over_refuses_a_pid_that_is_not_the_recorded_holder
+test_take_over_records_this_session_and_names_what_it_displaced
+test_every_remedy_offers_the_take_over_as_its_second_half
 test_acquire_records_a_version_named_harness_process
 test_a_bash_tool_shell_is_not_a_live_harness
 test_the_harness_predicate_has_exactly_one_implementation

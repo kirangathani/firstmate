@@ -1009,7 +1009,7 @@ while :; do
         ;;
       other)
         fm_session_lock_read "$STATE" || true
-        reason="signal: fm-lock - another live session now holds this home ($(fm_session_lock_describe_holder "$FM_SESSION_LOCK_PID" "$FM_SESSION_LOCK_TICKS")), so this watcher stood down - run bin/fm-lock.sh status, then $(fm_session_lock_remedy)"
+        reason="signal: fm-lock - another live session now holds this home ($(fm_session_lock_describe_holder "$FM_SESSION_LOCK_PID" "$FM_SESSION_LOCK_TICKS")), so this watcher stood down - run bin/fm-lock.sh status, then $(fm_session_lock_remedy "$FM_SESSION_LOCK_PID")"
         fm_wake_append signal fm-lock "$reason" || exit 1
         wake "$reason"
         ;;

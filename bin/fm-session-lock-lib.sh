@@ -489,6 +489,16 @@ fm_session_lock_describe_holder() {
 # The remedy printed after the description wherever a live holder that is not
 # this session blocks the caller. One owner so that a new sanctioned recovery
 # path reaches every surface at once.
-fm_session_lock_remedy() {
-  printf 'end that session and rerun bin/fm-session-start.sh here\n'
+# It names the holder's pid because `take-over` refuses every other pid, so a
+# remedy that did not carry it would not be runnable as printed. A caller with no
+# pid to give still gets the first half rather than an uncompletable command.
+fm_session_lock_remedy() {  # <holder pid>
+  local pid=${1:-}
+  case "$pid" in
+    ''|*[!0-9]*)
+      printf 'end that session and rerun bin/fm-session-start.sh here\n'
+      return 0
+      ;;
+  esac
+  printf 'end that session and rerun bin/fm-session-start.sh here, or, if you are certain it is not managing this fleet, bin/fm-lock.sh take-over %s (captain only)\n' "$pid"
 }
