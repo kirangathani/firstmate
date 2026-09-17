@@ -257,7 +257,7 @@ test_refill_send_with_a_full_pool_delivers_then_exits() {
   # A full pool has no room for another waiting arm, so the send has to deliver
   # and then get out of the way promptly. --refill rides along here as the
   # accepted no-op it now is: it must select nothing and change nothing.
-  local dir fb home log rc got pool now i pid pids= target
+  local dir fb home log rc got pool now i pid target pids=''
   dir="$TMP_ROOT/refill-full"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home refill-full); log="$dir/tmux.log"; : > "$log"
   fm_write_meta "$home/state/lane-ok.meta" "window=sess:fm-lane-ok" "kind=ship" "harness=codex"
