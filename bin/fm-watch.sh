@@ -137,6 +137,27 @@ NM_QUESTIONS_TIMEOUT=${FM_NM_QUESTIONS_TIMEOUT:-20}  # seconds bounding one revi
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+# How long a turn-end marker must have sat unseen before a BARE one - a turn-end
+# with no status line beside it - is worth a wake of its own. Default: the grace
+# above (already spent before this is measured, so a fresh marker reads ~grace
+# old) plus two poll cycles, which is the shortest window in which the pane-stale
+# layer below can see the same crew twice and surface it. Past it, that layer has
+# had its chance and did not fire - the usual cause being that no watcher was
+# running when the turn ended - so the marker is surfaced instead of absorbed.
+# Both inputs may be FRACTIONAL in a test home (FM_POLL=0.2), and a fraction is a
+# hard arithmetic error rather than a rounding, so each is floored to an integer
+# with the production default as its fallback before it is added. Without that
+# floor the whole assignment failed and left the variable unset, which under
+# set -u took the watcher down on its next read.
+turn_end_quiet_int() {  # <value> <fallback>
+  local v=${1%%.*}
+  case "$v" in
+    ''|*[!0-9]*) printf '%s' "$2" ;;
+    *) printf '%s' "$v" ;;
+  esac
+}
+TURN_END_QUIET_SECS=${FM_TURN_END_QUIET_SECS:-$(( $(turn_end_quiet_int "$SIGNAL_GRACE" 30) + $(turn_end_quiet_int "$POLL" 15) * 2 ))}
+case "$TURN_END_QUIET_SECS" in ''|*[!0-9]*) TURN_END_QUIET_SECS=60 ;; esac
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
 # grok: "Ctrl+c:cancel" (the mid-turn cancel hint in grok's keybind bar, shown iff a
@@ -563,6 +584,42 @@ signal_payload() {  # <seen-file> <status-file> <current sig>
   else
     printf 'signal: %s wrote to its status file' "$id"
   fi
+}
+
+# A BARE turn-end: every file that changed in this batch is a turn-end marker, so
+# the crew ended a turn and wrote nothing anybody can act on. The wake it produced
+# carried no content at all - measured on a live crewmate on 2026-09-17, which is
+# what this absorb exists for.
+# Turn-end markers exist for STALE detection, not as an event in their own right:
+# a crew that really has stopped - including one that finished through an
+# interactive pane menu and wrote no done: status - is caught within two polls by
+# the pane-stale layer below, which reads the same crew_absorb_class verdict this
+# path used to read and surfaces it as `stale:` with the pane as evidence. So
+# absorbing a bare turn-end costs the swallowed-finish guard nothing; it moves it
+# one layer down, to the layer that has something to say when it fires.
+# The one thing that layer cannot see is a window it can no longer capture at all
+# (fm_backend_capture failing skips the task), and TURN_END_QUIET_SECS is the
+# valve for exactly that: a marker nothing has spoken for by then surfaces on its
+# own rather than waiting for a pane that is never coming back.
+signal_is_bare_turn_end() {  # <file> ...
+  local f
+  [ "$#" -gt 0 ] || return 1
+  for f in "$@"; do
+    case "$f" in *.turn-ended) ;; *) return 1 ;; esac
+  done
+  return 0
+}
+
+# 0 when any marker in a bare batch has gone quiet past TURN_END_QUIET_SECS, the
+# one case where a bare turn-end still surfaces: the pane-stale layer has already
+# had its window and produced nothing, so nothing else is going to speak for this
+# crew.
+signal_turn_end_is_overdue() {  # <file> ...
+  local f
+  for f in "$@"; do
+    [ "$(age_of "$f")" -ge "$TURN_END_QUIET_SECS" ] && return 0
+  done
+  return 1
 }
 
 # THE RECORDED PR FACT FOLLOWS THE TASK, not a hand-run command.
@@ -1103,18 +1160,37 @@ EOF
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file carries a captain-relevant verb;
-    #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
-    #     NOT provably working - the crew stopped its turn with no actively-running
-    #     pipeline and no busy pane, so it may be done (even via an interactive menu
-    #     that wrote no done: status), waiting on a decision, or wedged. Absorbing
-    #     such a turn-end is exactly the swallowed-finish this change guards against.
-    # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
-    # whose crew IS provably working) in always-on mode -> advance the markers so it
-    # will not re-fire, log, and keep blocking without enqueuing. The provably-working
-    # check is the only costly one (it may run a bounded no-mistakes call), so the ||
-    # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
-    # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+    #   - it is a BARE turn-end - every changed file is a turn-end marker, so the
+    #     crew ended a turn and wrote nothing - that has gone quiet past
+    #     TURN_END_QUIET_SECS. A bare turn-end inside that window is ABSORBED
+    #     however the crew reads, because the wake it makes carries no words to
+    #     act on and the pane-stale layer below owns the crew it describes; see
+    #     signal_is_bare_turn_end for why that costs the swallowed-finish guard
+    #     nothing;
+    #   - or it is any OTHER no-verb wake (a working: note, a turn-end beside a
+    #     status write) whose crew is NOT provably working - the crew stopped its
+    #     turn with no actively-running pipeline and no busy pane, so it may be
+    #     done, waiting on a decision, or wedged.
+    # Actionable -> enqueue, advance .seen-* markers, exit. Benign in always-on
+    # mode -> advance the markers so it will not re-fire, log, and keep blocking
+    # without enqueuing. The provably-working check is the only costly one (it may
+    # run a bounded no-mistakes call), so the branch ordering reaches it ONLY for a
+    # non-afk, no-captain-verb signal that is not a fresh bare turn-end.
+    actionable=1
+    absorb_class=benign
+    # $files is a space-separated status-path list (ids carry no spaces). Split it
+    # once into an array rather than relying on word splitting at each call: a
+    # lint directive only covers one complete compound command, so an unquoted
+    # expansion inside an elif branch cannot be annotated where it sits.
+    read -r -a signal_files <<< "$files"
+    if afk_present || signal_reason_is_actionable "${signal_files[@]}"; then
+      :
+    elif signal_is_bare_turn_end "${signal_files[@]}"; then
+      signal_turn_end_is_overdue "${signal_files[@]}" || { actionable=0; absorb_class="bare turn-end"; }
+    elif signal_crew_provably_working "${signal_files[@]}"; then
+      actionable=0
+    fi
+    if [ "$actionable" -eq 1 ]; then
       # The words, not a path to them: read the bytes each file gained since the
       # last look and put them in the record AND in this watcher's own reason, so
       # the wake the model is handed already says what the crewmate said.
@@ -1164,7 +1240,7 @@ EOF
       done <<EOF
 $pending
 EOF
-      triage_log "absorbed benign $reason"
+      triage_log "absorbed $absorb_class $reason"
     fi
   fi
 

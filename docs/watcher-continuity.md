@@ -82,6 +82,16 @@ Each record includes arm and watcher PIDs, start and end timestamps, exit code a
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 
+A DORMANT arm - a pool member - announces nothing on stdout except its own wake, and sends its `watcher: started ...` and `watcher: attached ...` lines to `state/.watch-arm.log` instead.
+That file is size-capped through `FM_WATCH_ARM_LOG_MAX_BYTES` and `FM_WATCH_ARM_LOG_KEEP_LINES`, records each line against the arm's pid and pool slot, and is diagnostic only; nothing reads it to make a supervision decision.
+The reason is that each line a member prints under Claude Code's Monitor becomes a notification the model must read, so what a member prints is what a wake costs.
+Measured in the captain's home on 2026-09-17, one crewmate status append produced five: the holder's wake line, the same records again from its drain at exit, the successor's `watcher: started ...`, an ordinary attach-follow arm's `watcher: attached ...` down the successor chain, and the harness's own stream-end notice for the finished Monitor.
+Four of those are now gone.
+The fifth cannot be: the stream-end notice is emitted by the harness for every finished Monitor and there is nothing on this side to suppress it, so one wake line plus that notice is the floor this design can reach.
+A plain arm keeps every line it ever printed, including the raw drained records, and must not be armed alongside a live pool - it follows the successor chain and announces every handover, which is the fourth notification above.
+Its wake line is `dormant arm <S>: watcher exited, firstmate woken, watcher replenished from the pool, <N> dormant watchers lurking - <the crewmate's words>`, where `<S>` is the member's own pool slot and `<N>` is how many members are still asleep once the handover is done.
+`bin/fm-arm-pool-lib.sh` owns the slot numbering: members are numbered 1 to the pool size, the number is passed in as `--dormant <S>` so the Monitor's description and the arm's own line agree, and a freed number is the next one handed out so a refill reuses it.
+
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
 
