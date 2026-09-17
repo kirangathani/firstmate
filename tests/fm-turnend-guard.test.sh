@@ -21,6 +21,18 @@ set -u
 # one change those cases exist to catch.
 # shellcheck source=bin/fm-ack-lib.sh
 . "$ROOT/bin/fm-ack-lib.sh"
+# Sourced for FM_WATCH_POLL_SECS_INT: the handover cases below must be sized
+# from the window reason 1 actually allows, read at run time. A hardcoded
+# offset would keep passing after that window changed, which is the one change
+# those cases exist to catch.
+# shellcheck source=bin/fm-classify-lib.sh
+. "$ROOT/bin/fm-classify-lib.sh"
+
+# One second inside the handover window, and comfortably outside it while still
+# inside the beacon GRACE reason 1 uses - so the "beacon too old" case fails for
+# the handover reason under test and not because the guard stopped looking.
+BEACON_INSIDE_POLL=$((FM_WATCH_POLL_SECS_INT > 1 ? FM_WATCH_POLL_SECS_INT - 1 : 0))
+BEACON_PAST_POLL=$((FM_WATCH_POLL_SECS_INT + 5))
 
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
@@ -253,6 +265,81 @@ test_hook_silent_when_no_work_in_flight() {
   expect_code 0 "$status" "hook must exit 0 with no in-flight work"
   [ -z "$out" ] || fail "hook produced output with no in-flight work: $out"
   pass "fm-turnend-guard: silent no-op with nothing in flight"
+}
+
+# --- reason 1: a watcher handover in progress is supervision, not a blackout --
+#
+# When the watcher that just fired exits, the lock names a dead pid until the
+# next dormant arm takes the singleton over, a gap of a few seconds. Reason 1
+# used to read that gap as a blind turn and demand a full refill while the arms
+# were already waiting (measured on this home 2026-09-17: six wasted model
+# calls, five arms waiting). The fixtures below pin the pool floor at 0 so only
+# reason 1 can speak; reason 5's own two directions are asserted separately.
+
+# Age the beacon by <seconds> without sleeping.
+age_beacon() {  # <dir> <seconds>
+  touch -d "@$(( $(date +%s) - $2 ))" "$1/state/.last-watcher-beat"
+}
+
+test_hook_silent_during_a_handover_with_arms_waiting() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-handover-waiting")
+  : > "$dir/state/task1.meta"
+  # No live watcher lock at all: exactly what the gap between one watcher
+  # exiting and the next taking over looks like on disk.
+  age_beacon "$dir" "$BEACON_INSIDE_POLL"
+  seed_arm_pool "$dir" 2
+  out=$(run_hook_with_pool_floor "$dir" false 1); status=$?
+  clear_arm_pool_seed
+  expect_code 0 "$status" "a fresh beacon plus a waiting arm is a handover, not a blind turn"
+  [ -z "$out" ] || fail "hook produced output during an ordinary watcher handover: $out"
+  pass "fm-turnend-guard: silent while a waiting arm is taking the watch over"
+}
+
+test_hook_blocks_during_a_handover_with_no_arms_waiting() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-handover-empty")
+  : > "$dir/state/task1.meta"
+  age_beacon "$dir" "$BEACON_INSIDE_POLL"
+  # Pool floor 0, so reason 5 cannot fire and the block below is reason 1's.
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "a fresh beacon with an EMPTY pool has nobody taking over and must still block"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: blocks when the beacon is fresh but no arm is waiting to take over"
+}
+
+test_hook_blocks_when_the_beacon_predates_a_handover_window() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-handover-stale-beacon")
+  : > "$dir/state/task1.meta"
+  age_beacon "$dir" "$BEACON_PAST_POLL"
+  seed_arm_pool "$dir" 2
+  out=$(run_hook_with_pool_floor "$dir" false 1); status=$?
+  clear_arm_pool_seed
+  expect_code 2 "$status" "a beacon older than one poll cycle is a real blackout, whatever the pool holds"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: waiting arms never excuse a beacon older than one poll cycle"
+}
+
+# The handover exemption is reason 1's alone. A pool at its floor still ends the
+# turn with a refill, which is the whole point of reason 5 - and a handover is
+# exactly when the pool has just spent a member, so the two must not cancel out.
+test_hook_still_blocks_for_the_pool_floor_during_a_handover() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-handover-pool-floor")
+  : > "$dir/state/task1.meta"
+  age_beacon "$dir" "$BEACON_INSIDE_POLL"
+  seed_arm_pool "$dir" 1
+  out=$(run_hook_with_pool_floor "$dir" false 2); status=$?
+  clear_arm_pool_seed
+  expect_code 2 "$status" "a handover must not suppress the pool-below-floor refill"
+  assert_contains "$out" "TOO FEW EARS LEFT TO HEAR THE NEXT WAKES" \
+    "the block during a handover must be the pool reason, not the blind-turn reason"
+  case "$out" in
+    *"TURN WOULD END BLIND"*)
+      fail "a handover must not also report a supervision blackout"$'\n'"$out" ;;
+  esac
+  pass "fm-turnend-guard: a handover still blocks for the pool floor, and only for it"
 }
 
 test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
@@ -1528,6 +1615,10 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
+test_hook_silent_during_a_handover_with_arms_waiting
+test_hook_blocks_during_a_handover_with_no_arms_waiting
+test_hook_blocks_when_the_beacon_predates_a_handover_window
+test_hook_still_blocks_for_the_pool_floor_during_a_handover
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_on_a_reported_state_left_unanswered
