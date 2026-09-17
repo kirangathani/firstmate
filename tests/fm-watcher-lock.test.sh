@@ -1991,9 +1991,10 @@ test_arm_records_its_own_arm_up_and_its_wake_handover() {
 
 test_a_dormant_arms_handover_is_recorded_apart_from_a_cold_arm() {
   # A pool handover and a cold arm are different costs, so one median over both
-  # answers neither. The note is what separates them, and the arm-up clock must
-  # start only when the member stops waiting: a member that idles for hours and
-  # then takes the lock in milliseconds has to report the milliseconds.
+  # answers neither. Its own action name is what separates them in the report,
+  # and the arm-up clock must start only when the member stops waiting: a member
+  # that idles for hours and then takes the lock in milliseconds has to report
+  # the milliseconds.
   local dir state fakebin armout ledger armpid note dur lock_pid
   dir=$(make_case dormant-self-timing)
   state="$dir/state"
@@ -2010,16 +2011,18 @@ test_a_dormant_arms_handover_is_recorded_apart_from_a_cold_arm() {
   wait_for have_line "$armout" 'watcher: started pid=' \
     || fail "test setup: the dormant arm never took the free lock: $(cat "$armout")"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-  wait_for ledger_has_cmd "$ledger" fm-watch-arm.sh:up \
+  wait_for ledger_has_cmd "$ledger" fm-watch-arm.sh:up-dormant \
     || fail "the dormant arm recorded no arm-up row: $(cat "$ledger" 2>/dev/null || printf 'no ledger')"
-  note=$(ledger_cmd_field "$ledger" fm-watch-arm.sh:up note)
-  [ "$note" = dormant-started ] || fail "dormant arm-up note was '$note', expected 'dormant-started'"
-  dur=$(ledger_cmd_field "$ledger" fm-watch-arm.sh:up duration_ms)
+  ledger_has_cmd "$ledger" fm-watch-arm.sh:up \
+    && fail "a pool handover was recorded under the cold-arm action, where one median would average the two"
+  note=$(ledger_cmd_field "$ledger" fm-watch-arm.sh:up-dormant note)
+  [ "$note" = started ] || fail "dormant arm-up note was '$note', expected 'started'"
+  dur=$(ledger_cmd_field "$ledger" fm-watch-arm.sh:up-dormant duration_ms)
   assert_bare_number "$dur" "the dormant arm-up duration"
   kill -TERM "$armpid" 2>/dev/null || true
   kill -TERM "$lock_pid" 2>/dev/null || true
   wait "$armpid" 2>/dev/null || true
-  pass "a dormant member's handover is recorded under its own name, timed from when it stopped waiting"
+  pass "a dormant member's handover is recorded under its own action, timed from when it stopped waiting"
 }
 
 test_an_unwritable_ledger_changes_nothing_the_arm_does() {

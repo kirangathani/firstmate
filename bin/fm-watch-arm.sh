@@ -87,7 +87,7 @@
 # exits on the next actionable wake (a heartbeat at the latest), and a beacon that
 # lapses without one is what fm-guard.sh alarms on.
 #
-# THE ARM TIMES ITSELF, in two measurements, into firstmate's own latency ledger
+# THE ARM TIMES ITSELF on both sides of a handover, into firstmate's own latency ledger
 # (bin/fm-latency-lib.sh, which owns the ledger and can never fail this script).
 # state/.watch-cycle-exits.log already gives the whole reaction time indirectly -
 # one record's ended_at against the next record's started_at - and that is how a
@@ -97,20 +97,23 @@
 # contribution to the gap, so whatever is left over is firstmate thinking:
 #
 #   fm-watch-arm.sh:up    getting supervision live again: from this arm being
-#                         ready to arm - after the session-lock gate, and after a
-#                         dormant member's wait for the singleton, because idling
-#                         is not arming - to the moment it has started a watcher
-#                         and confirmed it, or attached to a live one. The note
-#                         names which, and marks a dormant member's handover
-#                         separately from a cold arm.
+#                         ready to arm - after the session-lock gate - to the
+#                         moment it has started a watcher and confirmed it, or
+#                         attached to a live one, which the note names.
+#   ...:up-dormant        the same span for a member coming out of the dormant
+#                         pool, timed from when its wait for the singleton ended
+#                         because idling is not arming. It is a separate action
+#                         and not a note, because a pool handover and a cold arm
+#                         are different costs that one median would average into
+#                         a number describing neither.
 #   fm-watch-arm.sh:wake  carrying the wake out: from the watcher exiting with a
 #                         wake to this arm exiting, which is when the harness
 #                         notifies the model. It contains the lifecycle record,
 #                         the print, and the queue drain this arm does on the way
 #                         out. Its note is the wake's own reason type.
 #
-# Neither can fail this script: every write is a silent no-op, and the arm's exit
-# status is its own. What they do NOT cover, stated rather than implied: an
+# Neither measurement can fail this script: every write is a silent no-op, and
+# the arm's exit status is its own. What they do NOT cover, stated rather than implied: an
 # attached arm's close, because a followed cycle's wake went to the arm that owns
 # it and this one carries nothing to the model; and the watcher's own blocking
 # wait between the two, which is not latency but the supervision working.
@@ -178,18 +181,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # can never fail this script.
 # shellcheck source=bin/fm-latency-lib.sh
 . "$SCRIPT_DIR/fm-latency-lib.sh"
-
-# Close the arm-up measurement: supervision is live under this arm again, by
-# <origin>. Called from both endings that reach that state, so the note says
-# which one it was and whether the arm came out of the dormant pool - a pool
-# handover and a cold arm are different costs and a single median over both
-# answers neither. $dormant is read at CALL time, which is always after the
-# argument parse below sets it.
-arm_latency_in_position() {  # <origin>
-  local note=$1
-  [ "$dormant" -eq 0 ] || note="dormant-$note"
-  fm_latency_cmd_end 0 "$note"
-}
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 # Detach primitive. Absent on macOS, where the arm keeps its pre-detach behaviour
@@ -445,7 +436,7 @@ report_attached() {
   # later successor attach inside attach_and_wait reaches this again and closes
   # nothing, which is the library's one-measurement-per-invocation rule doing
   # exactly what it says.
-  arm_latency_in_position attached
+  fm_latency_cmd_end 0 attached
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
@@ -732,19 +723,25 @@ esac
 # Joining AFTER the gate, never before: an arm a non-owning session issued has
 # already declined above, and counting it would let that session's idle shells
 # stand in for ears the owning session does not have.
+# The arm-up clock starts HERE, which for a dormant member is deliberately AFTER
+# its wait for the singleton. That wait is an ear sleeping, not an arm working,
+# and a member woken after four idle hours would otherwise report a four-hour
+# arm-up and drag the median of the one number this measurement exists to give.
+# From this point both modes measure the same span: the work of getting
+# supervision live again. Both starts are also after the session-lock gate, so a
+# read-only session that declines to arm records nothing rather than a near-zero
+# arm-up.
+# The mode is carried in the ACTION rather than in the note, because a pool
+# handover and a cold arm are different costs and the report's per-command median
+# is where they are read: one action over both would average them into a number
+# that describes neither.
 if [ "$dormant" -eq 1 ]; then
   fm_arm_pool_join dormant || true
   dormant_wait_for_free_lock
+  fm_latency_cmd_start fm-watch-arm.sh:up-dormant
+else
+  fm_latency_cmd_start fm-watch-arm.sh:up
 fi
-
-# The arm-up clock starts HERE, which is deliberately AFTER a dormant arm's wait
-# for the singleton. That wait is an ear sleeping, not an arm working, and a
-# member woken after four idle hours would otherwise report a four-hour arm-up
-# and drag the median of the one number this measurement exists to give. From
-# this line on, both modes measure the same span: the work of getting
-# supervision live again. It is also after the session-lock gate, so a read-only
-# session that declines to arm records nothing rather than a near-zero arm-up.
-fm_latency_cmd_start fm-watch-arm.sh:up
 
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
@@ -942,7 +939,7 @@ while :; do
       cycle_refresh_lock_before
       cycle_mark_predecessor_successor "started:$child"
       follow_own_confirmed_watcher
-      arm_latency_in_position started
+      fm_latency_cmd_end 0 started
       echo "watcher: started pid=$child (beacon fresh)"
       wait "$child"
       rc=$?
