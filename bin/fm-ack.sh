@@ -2,6 +2,14 @@
 # Record that firstmate has acted on a direct report's terminal or
 # firstmate-owed state, and silence the unactioned alarm for that state.
 #
+# It is ALSO how a declared external wait's recurring recheck is recorded. A
+# `paused:` task owes firstmate no action, only a periodic re-verification of the
+# premise the worker stated, so acking one means "I read the pane and re-verified
+# what it is waiting on". That record silences the recheck alarm for exactly one
+# window (FM_ACK_PAUSE_RECHECK, default three hours) and then the alarm re-arms
+# by itself, because the next recheck is genuinely owed. This is deliberately
+# unlike an ack of a reported state, which holds for as long as that state does.
+#
 # Usage:
 #   fm-ack.sh [--refill] <task-id> [<what you did>]   record the action
 #   fm-ack.sh --list                                  show unactioned direct reports
@@ -44,7 +52,7 @@ fm_latency_cmd_start fm-ack.sh
 trap 'fm_latency_cmd_end $?' EXIT
 
 usage() {
-  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 REFILL=0

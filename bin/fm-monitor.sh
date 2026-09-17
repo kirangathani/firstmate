@@ -20,10 +20,14 @@
 # express, because a frozen validation reports nothing at all. Both are rendered
 # on every run, counts included.
 #
-# THE SIX CLASSES, all named on every render:
+# THE SEVEN CLASSES, all named on every render:
 #   unactioned  reported a state that owes firstmate an action, or left a keyed
 #               decision open behind later status lines, past the grace window
 #               and not acted on. This is what blocks a turn end.
+#   recheck     sitting in a declared external wait that has stood past the
+#               recheck window with no recheck recorded inside it. It blocks a
+#               turn end the same way, but what it owes is a look at the pane and
+#               a re-verification of the worker's stated premise, not an action.
 #   pending     owes an action but is still inside the grace window.
 #   acked       firstmate did its part; the ball is with the captain, a worker,
 #               or an external wait.
@@ -60,8 +64,8 @@
 #   fm-monitor.sh --exempt <id> --reason <why>   sign a standing exemption
 #   fm-monitor.sh --unexempt <id>          drop an exemption
 #   fm-monitor.sh --list-exempt            show standing exemptions
-# Exit: 0 nothing needs firstmate's attention, 1 at least one unactioned report
-#       or stalled validation, 2 bad usage or a refused exemption.
+# Exit: 0 nothing needs firstmate's attention, 1 at least one unactioned report,
+#       overdue recheck, or stalled validation, 2 bad usage or a refused exemption.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -101,7 +105,7 @@ REASON=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -h|--help) sed -n '2,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,68p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --quiet) ONLY_ATTENTION=1; shift ;;
     --list-exempt) MODE=list-exempt; shift ;;
     --exempt)
@@ -222,6 +226,7 @@ esac
 ROWS=$(fm_ack_sweep "$STATE")
 
 N_UNACTIONED=0
+N_RECHECK=0
 N_PENDING=0
 N_ACKED=0
 N_MOVED=0
@@ -244,6 +249,10 @@ say_worker() {  # <verdict>
 
 describe() {  # <class> <verb> <age> <verdict> <detail> <open-keys>
   case "$1" in
+    recheck)
+      printf 'NEEDS A RECHECK - paused %s without one; read the pane and re-verify what it is waiting on (worker: %s)' \
+        "$(fm_ack_duration "$3")" "$(say_worker "$4")"
+      ;;
     unactioned)
       if [ -n "$6" ]; then
         printf 'NEEDS ACTION - waiting on a decision (%s) firstmate has not answered; a later status line does not close it (worker: %s)' "$6" "$(say_worker "$4")"
@@ -272,6 +281,11 @@ while IFS=$TAB read -r id class verb age verdict open_keys detail; do
       ATTENTION="${ATTENTION}${line}"$'\n'
       [ -z "$detail" ] || ATTENTION="${ATTENTION}    ${detail}"$'\n'
       ;;
+    recheck)
+      N_RECHECK=$((N_RECHECK + 1))
+      ATTENTION="${ATTENTION}${line}"$'\n'
+      [ -z "$detail" ] || ATTENTION="${ATTENTION}    ${detail}"$'\n'
+      ;;
     pending) N_PENDING=$((N_PENDING + 1)); ATTENTION="${ATTENTION}${line}"$'\n' ;;
     acked)   N_ACKED=$((N_ACKED + 1)); ACCOUNTED="${ACCOUNTED}${line}"$'\n' ;;
     moved-on) N_MOVED=$((N_MOVED + 1)); ACCOUNTED="${ACCOUNTED}${line}"$'\n' ;;
@@ -288,13 +302,13 @@ done <<EOF
 $ROWS
 EOF
 
-TOTAL=$((N_UNACTIONED + N_PENDING + N_ACKED + N_MOVED + N_EXEMPT + N_QUIET))
+TOTAL=$((N_UNACTIONED + N_RECHECK + N_PENDING + N_ACKED + N_MOVED + N_EXEMPT + N_QUIET))
 
 printf 'MONITOR SWEEP: %s task(s) supervised in %s\n' "$TOTAL" "$STATE"
 # Every class on every render, zeros included: a class that is simply absent
 # reads as "there were none" and as "we did not check it" identically.
-printf 'MONITOR COUNTS: needs-action %s | just-reported %s | acted %s | moved-on %s | exempt %s | nothing-owed %s\n' \
-  "$N_UNACTIONED" "$N_PENDING" "$N_ACKED" "$N_MOVED" "$N_EXEMPT" "$N_QUIET"
+printf 'MONITOR COUNTS: needs-action %s | needs-recheck %s | just-reported %s | acted %s | moved-on %s | exempt %s | nothing-owed %s\n' \
+  "$N_UNACTIONED" "$N_RECHECK" "$N_PENDING" "$N_ACKED" "$N_MOVED" "$N_EXEMPT" "$N_QUIET"
 
 if [ -n "$ATTENTION" ]; then
   printf '%s' "$ATTENTION" | while IFS= read -r l; do printf 'MONITOR: %s\n' "$l"; done
@@ -327,10 +341,15 @@ if [ "$N_UNACTIONED" -gt 0 ]; then
   printf 'MONITOR REMEDY: do what each NEEDS ACTION state owes, then record it with bin/fm-ack.sh <id> "<what you did>".\n'
   printf 'MONITOR REMEDY: a state waiting on the CAPTAIN is recorded once you have relayed it to them.\n'
 fi
+if [ "$N_RECHECK" -gt 0 ]; then
+  printf 'MONITOR REMEDY: for each NEEDS A RECHECK task, read its pane and re-verify what it says it is waiting on -\n'
+  printf 'MONITOR REMEDY: the stated premise is what nobody has checked. Then record it with bin/fm-ack.sh <id> "<what you verified>",\n'
+  printf 'MONITOR REMEDY: which buys one more window before the next recheck is owed.\n'
+fi
 if [ "$TOTAL" -eq 0 ]; then
   printf 'MONITOR: no tasks under supervision in this home.\n'
 fi
-if [ "$N_UNACTIONED" -gt 0 ] || [ "$N_STALLED" -gt 0 ]; then
+if [ "$N_UNACTIONED" -gt 0 ] || [ "$N_RECHECK" -gt 0 ] || [ "$N_STALLED" -gt 0 ]; then
   exit 1
 fi
 exit 0
