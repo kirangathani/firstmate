@@ -1680,6 +1680,154 @@ test_pid_identity_matches_rejects_dead_and_other_processes() {
   pass "fm_pid_identity_matches still rejects dead, recycled, and start-marker-mismatched pids"
 }
 
+# --- dormant-arm pool -------------------------------------------------------
+
+POOL_LIB="$ROOT/bin/fm-arm-pool-lib.sh"
+
+# Run a snippet with the wake library and the pool library sourced against one
+# fixture's state, which is how the pool's own predicates are exercised without
+# standing up a watcher for them.
+#
+# The `bash -c` with a multi-line script is load-bearing, not incidental: it gives
+# the member a process whose COMMAND LINE contains newlines, which is what caught
+# an identity being stored that carried the command line into a one-line record
+# and truncated it. Do not flatten this into a one-liner.
+pool_eval() {  # <state> <snippet>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1"
+    . "$2"
+    eval "$3"
+  ' _ "$LIB" "$POOL_LIB" "$2" 2>/dev/null
+}
+
+pool_count_is() {  # <state> <n>
+  [ "$(pool_eval "$1" 'fm_arm_pool_count')" = "$2" ]
+}
+
+# How many of a fixture's arms have announced a watcher they started. Gated on
+# rather than assumed from the lock: the lock names the watcher a beat before the
+# arm has confirmed it and said so, and reading the announcement early would
+# report zero for a pool that is working perfectly.
+arms_started_count() {  # <dir>
+  grep -lF 'watcher: started pid=' "$1"/arm-*.out 2>/dev/null | wc -l | tr -d '[:space:]'
+}
+
+arms_started_count_is() {  # <dir> <n>
+  [ "$(arms_started_count "$1")" = "$2" ]
+}
+
+test_arm_pool_counts_only_live_members_of_this_session() {
+  # The count is what the turn-end floor and every refill decision read, so the
+  # three ways a record can lie about an ear - a member that died, a pid that was
+  # recycled onto something else, a member belonging to a session that has ended -
+  # all have to resolve to "not an ear this session has". A pool that reads full
+  # when it is empty is a fleet nobody is watching.
+  local dir state pool live dead now count
+  dir=$(make_case arm-pool-count)
+  state="$dir/state"
+  pool="$state/.arm-pool"
+  mkdir -p "$pool"
+  sleep 300 &
+  live=$!
+  sleep 0 &
+  dead=$!
+  wait "$dead" 2>/dev/null || true
+  now=$(date +%s)
+  # An empty identity field is the documented "this host offered none" case and
+  # must still count; an empty session field is what fm_arm_pool_session yields
+  # for a home whose session lock was never claimed, which these fixtures are.
+  printf '\t\t%s\tdormant\n' "$now" > "$pool/$live"
+  printf '\t\t%s\tdormant\n' "$now" > "$pool/$dead"
+  printf '\t\t%s\tdormant\n' "$now" > "$pool/notapid"
+  printf '\t999999:1\t%s\tdormant\n' "$now" > "$pool/$$"
+  count=$(pool_eval "$state" 'fm_arm_pool_count')
+  [ "$count" = "1" ] || fail "the pool counted $count members where only one live member of this session exists"
+  [ ! -e "$pool/$dead" ] || fail "the pool kept a record naming a dead pid"
+  [ ! -e "$pool/notapid" ] || fail "the pool kept a record whose name is not a pid"
+  # A foreign session's member is not ours to reap: it is uncounted but left for
+  # its own process to withdraw.
+  [ -e "$pool/$$" ] || fail "the pool deleted another session's member record"
+  [ -e "$pool/$live" ] || fail "the pool deleted a live member's record"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "the arm pool counts only live members of this session and prunes the rest"
+}
+
+test_a_joined_arm_pool_member_counts_itself() {
+  # The case the hand-written records above cannot reach, and the one that was
+  # actually broken: a member has to name the process that is really running it.
+  # Reading BASHPID through a command substitution names the substitution's own
+  # subshell instead, so the member recorded a pid that was dead before the
+  # assignment finished, pruned itself on the next count, and the pool read empty
+  # however many arms were genuinely waiting.
+  local dir state count
+  dir=$(make_case arm-pool-self-count)
+  state="$dir/state"
+  count=$(pool_eval "$state" 'fm_arm_pool_join dormant; fm_arm_pool_count')
+  [ "$count" = "1" ] || fail "an arm that joined the pool counted $count members instead of itself"
+  pass "an arm that joins the pool is counted as a member while it is running"
+}
+
+test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm() {
+  # The whole claim of the pool, end to end: six arms issued once, exactly one
+  # watching and five asleep, and when the watching one fires and exits - which
+  # is the event that wakes the model - the next member has the lock without
+  # anybody issuing another arm. No arm is started anywhere in this case after
+  # the initial six, so a lock that moves to a live pid can only have come from
+  # the pool itself.
+  local dir state fakebin i first_lock second_lock started started_after
+  dir=$(make_case dormant-pool)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mark_pr_check_migration_complete "$state"
+  for i in 1 2 3 4 5 6; do
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.5 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_GUARD_GRACE=300 \
+      FM_ARM_CONFIRM_TIMEOUT="$ARM_CONFIRM_START" FM_ARM_DORMANT_POLL=0.1 \
+      "$WATCH_ARM" --dormant > "$dir/arm-$i.out" 2>&1 &
+  done
+
+  # Preconditions, established and verified here so the real assertion below
+  # cannot quietly read a pool that never formed as a pool that failed to hand
+  # over.
+  wait_for arms_started_count_is "$dir" 1 \
+    || fail "test setup: no dormant arm ever confirmed a watcher it started"
+  wait_for pool_count_is "$state" 6 \
+    || fail "test setup: the six dormant arms did not all register as pool members"
+  first_lock=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$first_lock" ] || fail "test setup: the watcher lock names nobody after an arm confirmed a start"
+  # Re-read rather than trusting the wait above: the assertion is that the other
+  # five are STILL waiting, which a settled second look is what proves.
+  started=$(arms_started_count "$dir")
+  [ "$started" = "1" ] \
+    || fail "$started dormant arms started a watcher where exactly one should have; the rest must wait"
+
+  # Fire the holder with an ordinary crewmate status line carrying a verb the
+  # watcher treats as actionable.
+  printf 'done: the work is finished\n' > "$state/fm-task.status"
+  wait_for lock_pid_replaced "$state/.watch.lock" "$first_lock" \
+    || fail "the pool did not hand the watch over after its holder fired"
+  second_lock=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill -0 "$second_lock" 2>/dev/null \
+    || fail "the successor named in the watcher lock is not a live process"
+
+  # The successor came from the pool, not from a fresh arm: a second arm now
+  # reports a started watcher, and the pool is one member lighter because the
+  # member that fired exited to wake the model.
+  wait_for arms_started_count_is "$dir" 2 \
+    || fail "the arm that took over never confirmed the watcher it started"
+  started_after=$(arms_started_count "$dir")
+  [ "$started_after" = "2" ] \
+    || fail "$started_after arms reported starting a watcher after one handover; the successor did not come from the pool"
+  wait_for pool_count_is "$state" 5 \
+    || fail "the pool did not shed the member that fired and exited"
+  grep -qhF 'signal:' "$dir"/arm-*.out \
+    || fail "no arm surfaced the signal wake its watcher exited on"
+  grep -q 'pool=' "$state/.watch-cycle-exits.log" \
+    || fail "the cycle ledger recorded no pool depth at the handover"
+  pass "six dormant arms keep one watcher and hand the watch over with no new arm"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_pid_identity_is_stable_across_repeated_reads
@@ -1718,3 +1866,6 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_arm_pool_counts_only_live_members_of_this_session
+test_a_joined_arm_pool_member_counts_itself
+test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm
