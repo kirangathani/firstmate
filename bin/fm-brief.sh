@@ -809,6 +809,10 @@ $BRIEF_REGION_RULE_END
    commit it before moving on, and never sit on one large uncommitted diff. Uncommitted changes
    are invisible to firstmate's monitoring and are discarded when this worktree is recycled;
    commits survive any interruption, restart, or context compaction.
+9. Run the repository's lint ONCE per commit, on the whole tree, immediately before \`git commit\` -
+   never after each edit and never in a loop. A full pass can be 20+ concurrent linter processes and
+   many gigabytes of memory, and concurrent passes have taken the box down for the whole fleet.
+   While editing, run the linter on just the file you changed instead.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

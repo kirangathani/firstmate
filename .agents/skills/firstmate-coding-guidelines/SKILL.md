@@ -81,7 +81,9 @@ Keep instructions as the authority and discovery layer, but make repeated execut
 - Plain dash `-`, never an em dash.
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
-- Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
+- Run `bin/fm-lint.sh` ONCE per commit, on the whole tree, immediately before `git commit` - never after each edit, and never in a loop.
+- A full pass is 20+ concurrent shellcheck processes and up to 15 GB of memory, and concurrent passes have taken the box down, so while editing check one file with `shellcheck <file>` instead.
+- `bin/fm-lint.sh` is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Never hand jq a payload that grows with the fleet through `--argjson`/`--arg`; use `fm_jq_object` from `bin/fm-jq-lib.sh`, whose header owns the contract.
 - An argv payload dies at a size threshold rather than degrading, so it fails permanently and silently once crossed: `bin/fm-fleet-snapshot.sh --json` emitted zero bytes and exited 126 at 19 tasks and a 68737-byte backlog, taking the fleet view and bearings down with it (evidence 2026-08-08, `bin/fm-jq-lib.sh`).
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
