@@ -44,9 +44,12 @@ case "${FM_STUB_MODE:-ok}" in
       head -c 2000 /dev/zero | tr '\0' 'x' ;;
   stub) printf 'I will gather the state first.\n' ;;
   crash) echo "the writer broke" >&2; exit 3 ;;
-  hang) # A child of its own, whose pid is recorded too: `timeout` reaches only
-        # the command it started, so a writer's descendants are exactly what
-        # gets left behind (measured 2026-09-17).
+  hang) # A child of its own, whose pid is recorded too, so the death check
+        # below covers a writer's DESCENDANTS and not only the writer.
+        # `timeout` runs its command in a new process group and signals the
+        # group, so they do die (verified 2026-09-17); this keeps that property
+        # asserted rather than assumed, because a writer that leaves children
+        # behind is exactly the memory cost this whole shape exists to avoid.
         sleep 30 & printf '%s\n' "$!" >> "$FM_STUB_PIDS"; sleep 30 ;;
 esac
 STUB
