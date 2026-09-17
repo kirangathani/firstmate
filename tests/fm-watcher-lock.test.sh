@@ -1680,6 +1680,212 @@ test_pid_identity_matches_rejects_dead_and_other_processes() {
   pass "fm_pid_identity_matches still rejects dead, recycled, and start-marker-mismatched pids"
 }
 
+# --- per-poll session-lock ownership (bin/fm-watch.sh) ------------------------
+# The watcher re-checks every cycle that its own session still owns this home.
+# Before this, ownership was read once by the arm at launch and never again, so a
+# watcher kept supervising a home its session had lost - the 2026-09-15 lock-loss
+# incident's second half. Every case below drives the REAL watcher and asserts on
+# its durable queue record, not just on its exit, because the stand-down's whole
+# job is to leave the reason where the next session start will read it.
+
+# Seed a lock naming the test runner, which IS an ancestor of any watcher this
+# file starts, so the watcher reads `owned` at startup and arms the check.
+seed_owned_lock() {  # <state>
+  printf '%s\n' "$$" > "$1/.lock"
+}
+
+# A registered check that fires only once <state>/wake-now exists, the same seam
+# test_arm_reports_a_delivered_wake_as_a_completed_cycle uses to prove a watcher
+# is still doing its job rather than merely still running.
+arm_sentinel_check() {  # <state>
+  local state=$1
+  mark_pr_check_migration_complete "$state"
+  cat > "$state/task.check.sh" <<'SH'
+#!/usr/bin/env bash
+[ -e "${FM_STATE_OVERRIDE:-/nonexistent}/wake-now" ] || exit 0
+printf 'merged: https://example.test/pr/5\n'
+SH
+  chmod 0700 "$state/task.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register the sentinel check"
+}
+
+queue_has() {  # <state> <fixed substring>
+  grep -qF "$2" "$1/.wake-queue" 2>/dev/null
+}
+
+test_watcher_keeps_supervising_while_its_session_still_owns_the_home() {
+  local dir state fakebin out wpid
+  dir=$(make_case lock-owned-continues)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  seed_owned_lock "$state"
+  arm_sentinel_check "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  wait_for seed_watcher_ready "$state" "$wpid" || true
+  [ -e "$state/.last-watcher-beat" ] \
+    || fail "test setup: the owning watcher never reached the poll loop where the ownership check runs"
+  # Several polls under an unchanged, owned lock must change nothing.
+  sleep 1
+  kill -0 "$wpid" 2>/dev/null \
+    || fail "watcher stood down while its own session still held the lock: $(cat "$out")"
+  ! queue_has "$state" 'fm-lock' \
+    || fail "watcher queued a lock stand-down while it still owned the home"
+  # Still supervising, not merely still alive: release the check and require the
+  # ordinary wake out of it.
+  touch "$state/wake-now"
+  wait_for_exit "$wpid" "$WAIT_TICKS" || fail "owning watcher never delivered its wake: $(cat "$out")"
+  grep -qF 'check: ' "$out" \
+    || fail "owning watcher exited without the ordinary check wake: $(cat "$out")"
+  pass "a watcher whose session still owns the home keeps supervising it"
+}
+
+test_watcher_stands_down_when_another_live_session_takes_the_home() {
+  local dir state fakebin out wpid rival
+  dir=$(make_case lock-other-stands-down)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  seed_owned_lock "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  wait_for seed_watcher_ready "$state" "$wpid" || true
+  [ -e "$state/.last-watcher-beat" ] \
+    || fail "test setup: the owning watcher never reached the poll loop where the ownership check runs"
+  # A live process outside this watcher's ancestry is a rival owner. setsid puts
+  # it in its own session so it cannot be reached by walking up from the watcher.
+  setsid sleep 60 >/dev/null 2>&1 &
+  rival=$!
+  printf '%s\n' "$rival" > "$state/.lock"
+  wait_for_exit "$wpid" "$WAIT_TICKS" \
+    || fail "watcher kept supervising a home another live session had taken: $(cat "$out")"
+  grep -qF 'signal: fm-lock' "$out" \
+    || fail "standing-down watcher printed no lock reason: $(cat "$out")"
+  grep -qF 'bin/fm-lock.sh status' "$out" \
+    || fail "stand-down reason did not name the command that resolves it: $(cat "$out")"
+  queue_has "$state" 'signal: fm-lock' \
+    || fail "stand-down reason never reached the durable queue, so the next session start would never see it"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$wpid" ] \
+    || fail "standing-down watcher kept the singleton lock, so no successor could arm"
+  wait "$rival" 2>/dev/null || true
+  pass "a watcher stands down when another live session takes the home"
+}
+
+test_watcher_re_acquires_a_lock_that_went_missing_under_its_own_session() {
+  local dir state fakebin out runner wpid holder i
+  dir=$(make_case lock-missing-recovers)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  # A real process whose comm is `claude`, so the re-acquire's ancestry walk finds
+  # a harness above the watcher on ANY machine. Without it this case would pass on
+  # the captain's box, where a real session sits above the suite, and fail in CI,
+  # where nothing does.
+  mkdir -p "$dir/bin"
+  cp /bin/bash "$dir/bin/claude"
+  runner="$dir/run.sh"
+  cat > "$runner" <<'SH'
+#!/usr/bin/env bash
+set -u
+"$FM_TEST_WATCH" > "$FM_TEST_OUT" 2>&1 &
+printf '%s\n' "$!" > "$FM_TEST_PIDFILE"
+wait
+SH
+  chmod +x "$runner"
+  seed_owned_lock "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_TEST_WATCH="$WATCH" FM_TEST_OUT="$out" FM_TEST_PIDFILE="$dir/watch.pid" \
+    "$dir/bin/claude" "$runner" &
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ -s "$dir/watch.pid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  wpid=$(cat "$dir/watch.pid" 2>/dev/null || true)
+  [ -n "$wpid" ] || fail "test setup: the watcher under the fake harness never recorded its pid"
+  [ -e "$state/.last-watcher-beat" ] \
+    || fail "test setup: that watcher never reached the poll loop where the ownership check runs"
+  # The lock disappears under a session that is still very much alive. The
+  # watcher's job is to put it back, not to stand down.
+  rm -f "$state/.lock"
+  i=0
+  while [ "$i" -lt "$WAIT_TICKS" ]; do
+    [ -s "$state/.lock" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$state/.lock" ] \
+    || fail "watcher never re-acquired a lock that went missing under its own live session: $(cat "$out")"
+  holder=$(sed -n '1p' "$state/.lock")
+  kill -0 "$holder" 2>/dev/null \
+    || fail "watcher re-acquired the lock for a dead pid"
+  kill -0 "$wpid" 2>/dev/null \
+    || fail "watcher stood down instead of re-acquiring a recoverable lock: $(cat "$out")"
+  ! queue_has "$state" 'fm-lock' \
+    || fail "watcher queued a stand-down for a lock it successfully re-acquired"
+  pass "a watcher re-acquires a lock that went missing under its own live session"
+}
+
+test_watcher_stands_down_when_a_missing_lock_cannot_be_re_acquired() {
+  local dir state fakebin out wpid
+  dir=$(make_case lock-missing-unrecoverable)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  seed_owned_lock "$state"
+  # Sized from the limit the walk actually reads, not from a number that happened
+  # to work: at depth 1 the re-acquire sees only the watcher's own shell, which is
+  # no harness, so the recovery fails for the same reason a dead session makes it
+  # fail - and it fails that way on every machine, with or without a real session
+  # above the suite.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_SESSION_LOCK_ANCESTRY_DEPTH=1 "$WATCH" > "$out" &
+  wpid=$!
+  wait_for seed_watcher_ready "$state" "$wpid" || true
+  [ -e "$state/.last-watcher-beat" ] \
+    || fail "test setup: the owning watcher never reached the poll loop where the ownership check runs"
+  rm -f "$state/.lock"
+  wait_for_exit "$wpid" "$WAIT_TICKS" \
+    || fail "watcher kept supervising after losing a lock it could not re-acquire: $(cat "$out")"
+  grep -qF 'signal: fm-lock' "$out" \
+    || fail "standing-down watcher printed no lock reason: $(cat "$out")"
+  grep -qF 'bin/fm-session-start.sh' "$out" \
+    || fail "stand-down reason did not name the command that resolves it: $(cat "$out")"
+  queue_has "$state" 'signal: fm-lock' \
+    || fail "stand-down reason never reached the durable queue, so the next session start would never see it"
+  pass "a watcher stands down when a lost lock cannot be re-acquired"
+}
+
+test_watcher_armed_without_a_session_lock_never_stands_down() {
+  local dir state fakebin out wpid
+  dir=$(make_case lock-absent-at-start)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  # No lock at all, which is how bin/fm-watch-arm.sh arms a home whose session
+  # never took one: it says so itself and the blind-turn alarm covers it. Such a
+  # watcher never owned anything to lose, so the per-poll check must not fire -
+  # otherwise arming a home with an announced notice would stand supervision down
+  # on the very first poll.
+  arm_sentinel_check "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  wait_for seed_watcher_ready "$state" "$wpid" || true
+  sleep 1
+  kill -0 "$wpid" 2>/dev/null \
+    || fail "watcher armed without a session lock stood down instead of supervising: $(cat "$out")"
+  ! queue_has "$state" 'fm-lock' \
+    || fail "watcher armed without a session lock queued a stand-down"
+  touch "$state/wake-now"
+  wait_for_exit "$wpid" "$WAIT_TICKS" || fail "that watcher never delivered its wake: $(cat "$out")"
+  grep -qF 'check: ' "$out" \
+    || fail "that watcher exited without the ordinary check wake: $(cat "$out")"
+  pass "a watcher armed without a session lock keeps supervising"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_pid_identity_is_stable_across_repeated_reads
@@ -1702,6 +1908,11 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
+test_watcher_keeps_supervising_while_its_session_still_owns_the_home
+test_watcher_stands_down_when_another_live_session_takes_the_home
+test_watcher_re_acquires_a_lock_that_went_missing_under_its_own_session
+test_watcher_stands_down_when_a_missing_lock_cannot_be_re_acquired
+test_watcher_armed_without_a_session_lock_never_stands_down
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_arm_reports_a_delivered_wake_as_a_completed_cycle
