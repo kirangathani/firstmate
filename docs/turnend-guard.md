@@ -103,6 +103,11 @@ The third reason is that same treatment applied to the states workers report, wh
 The measured failure it closes, 2026-07-30: a finished ship task sat unanswered for twenty minutes.
 Its wake was durably queued, correctly drained, and read - and draining is what destroys the evidence, so nothing downstream could tell that the state had been dropped rather than handled.
 
+The same predicate gained a second half on 2026-09-17, for a failure of the opposite shape: a task sitting in a declared external wait (`paused:`) that nobody re-verified.
+A pause is the worker's own claim that something outside will clear on its own, and what it owes firstmate is not an action but a periodic re-verification of that claim.
+The incident is recorded in `bin/fm-ack-lib.sh`'s header and in `data/learnings.md`: a worker paused on a premise that was simply wrong, firstmate carried the record through a handoff and a session start unexamined, and the captain had to ask twice over six idle hours.
+Its threshold and its recurring-acknowledgement mechanics live with the rest of the predicate in `bin/fm-ack-lib.sh`; the consequence here is the same one every other reason gets.
+
 Quiet on a healthy fleet, by the mechanics `bin/fm-ack-lib.sh` owns rather than by a separate rule here: a ten-minute grace, an acknowledgement that silences a state firstmate has already handled for as long as the captain takes to answer, and a current-state confirm that clears a worker which has provably moved on.
 Every read it makes is a local file stat except the current-state confirm, which is already capped per invocation and cached, and is additionally wall-clock bounded (`FM_ACK_CONFIRM_TIMEOUT`, default 15 seconds) for the same reason the stale-base sweep is: this hook is the one place a hang wedges a whole session, and `bin/fm-crew-state.sh` reads panes and can shell out to `no-mistakes`, so it is not a call that can be assumed to return.
 Bounding the confirm is not the same as swallowing the finding.

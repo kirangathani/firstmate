@@ -399,6 +399,9 @@ test_hook_silent_with_live_lock_and_fresh_beacon() {
 # longer fires when they say it does.
 UNACTIONED_PAST_GRACE=$(( FM_ACK_GRACE_DEFAULT * 2 ))
 UNACTIONED_INSIDE_GRACE=$(( FM_ACK_GRACE_DEFAULT / 2 ))
+# Reason 3's other half ages against a different window, so it is sized from that
+# window's own constant read at runtime rather than from a second literal.
+PAUSE_PAST_WINDOW=$(( FM_ACK_PAUSE_RECHECK_DEFAULT + 60 ))
 
 # A primary whose supervision is entirely healthy: live identity-matched watcher
 # lock, fresh beacon. Anything these cases block on is therefore reason 3 alone.
@@ -498,6 +501,33 @@ test_hook_silent_once_the_state_has_been_acted_on() {
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   pass "fm-turnend-guard: a state firstmate has already acted on never blocks a turn again"
+}
+
+# Reason 3 also covers a declared external wait nobody has re-verified. It has to
+# reach this surface, because the whole failure it was written for (2026-09-17,
+# six idle hours on a wrong premise) is a turn ending with the wait unexamined.
+test_hook_blocks_on_a_declared_wait_that_was_never_rechecked() {
+  local dir pid out status
+  read -r dir pid < <(make_supervised_primary "$TMP_ROOT/hook-pause-recheck")
+  printf 'paused: only the maintainer can re-run the required check\n' > "$dir/state/task1.status"
+
+  out=$(FM_TEST_CREW_STATE='state: paused · source: status-log · waiting on upstream' \
+    run_hook_aged "$dir" "$PAUSE_PAST_WINDOW"); status=$?
+  expect_code 2 "$status" "a turn ended with a declared wait that had stood past the recheck window unexamined"
+  assert_contains "$out" "without a recheck" "the block did not say a recheck is what is owed"
+  assert_contains "$out" "re-verify what it is waiting on" "the block did not name the remedy"
+
+  # Recording the recheck buys one window, exactly as acting on a state does.
+  FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_ACK_NOW="$(( $(date +%s) + PAUSE_PAST_WINDOW ))" \
+    "$dir/bin/fm-ack.sh" task1 "read the pane; the workflow re-fires on any PR edit" >/dev/null 2>&1
+
+  out=$(FM_TEST_CREW_STATE='state: paused · source: status-log · waiting on upstream' \
+    run_hook_aged "$dir" "$(( PAUSE_PAST_WINDOW + 60 ))"); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a wait firstmate had just re-verified still blocked the turn"
+  [ -z "$out" ] || fail "the guard printed on a wait that had just been rechecked: $out"
+  pass "fm-turnend-guard: a declared wait nobody rechecked blocks a turn, and a recorded recheck releases it"
 }
 
 test_hook_silent_on_a_task_the_captain_exempted() {
@@ -1625,6 +1655,7 @@ test_hook_blocks_on_a_reported_state_left_unanswered
 test_hook_silent_on_a_report_inside_the_grace_window
 test_hook_silent_once_the_state_has_been_acted_on
 test_hook_silent_on_a_task_the_captain_exempted
+test_hook_blocks_on_a_declared_wait_that_was_never_rechecked
 test_hook_reports_blind_turn_and_unanswered_state_together
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
