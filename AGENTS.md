@@ -424,6 +424,7 @@ A forced repair must use the home-scoped owner path emitted by supervision instr
 Guard warnings do not replace the contract.
 Queued wakes must be drained before other action, stale liveness must be repaired through the emitted protocol, and the worktree-tangle warning must be resolved without touching unlanded work.
 An unactioned-direct-report warning is answered by doing what that state or still-open decision owes, then recording it with `bin/fm-ack.sh <id> "<what you did>"` when the action leaves no other trace, above all a relay to the captain; `bin/fm-ack-lib.sh` owns the predicate, owed states, still-open decisions, grace, and silencers.
+The same warning also covers a declared external wait that has stood for hours with no recheck, which owes not an action but a fresh look at what the worker says it is waiting on, recorded the same way and re-armed by that owner every window.
 That same predicate blocks a turn end, so a reported state cannot survive a turn unanswered; only a captain-signed per-task exemption stops it, and every standing exemption is announced at session start.
 When the captain invokes `/monitor`, or asks whether every task has been gone over, load the `monitor` skill for the forced per-task sweep and the exemption verbs.
 A stalled-validation warning reports a task whose no-mistakes step has stopped advancing while its worker is still busy, which no liveness path can see; `bin/fm-nm-stall.sh` owns the predicate, the threshold, and the durable record, and it blocks a turn end the same way.

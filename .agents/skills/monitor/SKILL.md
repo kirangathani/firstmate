@@ -24,9 +24,13 @@ This skill is the on-demand render of that same predicate, for when the captain 
 
    The sweep also renders a stalled-validation count on every run, zero included, because a validation whose step has stopped advancing reports nothing at all and so falls in no reported-state class; `bin/fm-nm-stall.sh` owns that predicate and its acknowledgement.
 
+   `NEEDS A RECHECK` is its own verdict, counted separately from `NEEDS ACTION` in `MONITOR COUNTS`, and it means something different: a task sitting in a declared external wait that has stood for hours with nobody re-verifying the premise the worker stated.
+
 2. **Act on what it found, before reporting.**
    A `NEEDS ACTION` line is not a status to relay, it is work firstmate already owed.
    Do what each one owes now - trigger the validation, record and arm the PR, relay the decision or failure to the captain, steer the blocker - and only then record it with `bin/fm-ack.sh <id> "<what you did>"`.
+   A `NEEDS A RECHECK` line owes no action at all - it owes a look: read that task's pane, re-verify what it says it is waiting on, and record what you verified with `bin/fm-ack.sh <id> "<what you verified>"`, which buys one more window before the next recheck is owed.
+   Treat the worker's stated reason as a claim rather than a fact, because it is exactly the thing nobody has checked; a wrong premise is the failure this verdict exists to catch.
    A stalled validation is answered the same way and recorded with `bin/fm-nm-stall.sh --ack <id>`: read the named step, decide or relay, and never restart or abort the run on the finding alone.
    Relaying a decision or a failure to the captain IS the action for that task; record it once relayed.
    Never record an action that was not taken: the record silences that state until the worker's next report, so a false one reintroduces exactly the blind spot this exists to close.
