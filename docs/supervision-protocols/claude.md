@@ -33,6 +33,10 @@ When this session owns supervision and away mode is not active:
 12. The existing turn-end guard remains unchanged as the final backstop and is not replaced by this command gate.
 13. Recovery only: if a forced restart is genuinely needed, run `bin/fm-watch-arm.sh --restart` through the same Monitor mechanism.
 14. Do not send idle progress while the watcher is parked.
+15. Bookkeeping runs as a Monitor, not in the foreground: a fleet command needs the foreground only when its result is your very next action.
+    Merges, teardown, spawn, acks, attestations, waivers, holds, backlog writes, fleet sync, and `bin/fm-write.sh` all qualify; reads whose output IS the next action - peek, crew-state, the session-start digest, backlog and fleet views - stay foreground.
+    Redirect with `2>&1` so failures arrive as events too, filter to the few lines that are the verdict, and never `sleep` waiting for something the watcher or a PR poll already wakes you for.
+    [`background-bookkeeping.md`](../background-bookkeeping.md) owns the per-command table, the exact shapes, the one merge that must not use a Monitor, and what each was measured to cost.
 
 A waiting arm's own stdout is the wake mechanism: each line it prints arrives as a notification, which is why the wake carries the watcher's reason rather than a pointer to it.
 The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` is only the verified background arm wrapper.

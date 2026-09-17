@@ -333,6 +333,14 @@ else
     printf 'UNREAD FROM AN EARLIER SESSION - drained before, never read; act on anything still open:\n'
     printf '%s\n' "$PENDING_OUT"
   fi
+  # Result lines from background commands that finished while nothing was armed
+  # to carry them out. The arm delivers these with an ordinary wake; this is the
+  # backstop for a home that was never woken between the command and this start.
+  RESULTS_OUT=$("$SCRIPT_DIR/fm-wake-pending.sh" --take-results 2>/dev/null || true)
+  if [ -n "$RESULTS_OUT" ]; then
+    printf 'RESULTS FROM BACKGROUND COMMANDS - finished since the last wake:\n'
+    printf '%s\n' "$RESULTS_OUT"
+  fi
 fi
 
 # --- 4. supervision operating instructions ----------------------------------

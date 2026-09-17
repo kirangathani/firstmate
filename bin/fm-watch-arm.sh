@@ -605,6 +605,23 @@ watch_output_reason_type() {
   esac
 }
 
+# The results channel, delivered on the same trip out. A firstmate command that
+# ran as a background task or a Monitor - a merge, a document write - records one
+# line for the model rather than costing it a call to go and read one.
+# bin/fm-wake-pending.sh owns that log and why it is separate from the unread
+# rows above. Taken rather than peeked, because a result line is spent once it
+# has been delivered.
+# Printed LAST, after the watcher's own reason and after the crewmate's words: a
+# result is a completion notice, and it must never lead a wake that a crew is
+# blocked behind. Labelled, so a finished command is never read as a new wake.
+print_pending_results_on_exit() {
+  local results
+  results=$("$SCRIPT_DIR/fm-wake-pending.sh" --take-results 2>/dev/null) || return 0
+  [ -n "$results" ] || return 0
+  printf 'results from background commands (no action owed unless one says so):\n'
+  printf '%s\n' "$results"
+}
+
 print_watch_output() {
   local out=$1
   [ -s "$out" ] && cat "$out"
@@ -874,6 +891,9 @@ owned_child_finished() {
     cycle_log_append "$rc" "$signal" "$reason_type" none
     print_watch_output "$child_out"
     drain_wake_queue_on_exit
+    print_pending_results_on_exit
+    # The ledger row closes AFTER the results are printed, because printing them
+    # is part of carrying the wake out and belongs inside what that row measures.
     fm_latency_cmd_end 0 "$reason_type"
     rm -f "$child_out" 2>/dev/null || true
     child=
