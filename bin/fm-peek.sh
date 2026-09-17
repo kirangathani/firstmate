@@ -20,10 +20,20 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# Self-timed: reading a pane is how firstmate triages a wake, so the interval
+# from a drained wake to this command is what "successfully triaging crewmate
+# inputs" costs. bin/fm-latency-lib.sh owns the ledger and can never fail this
+# command. The clock starts before the guard call below, which is part of what
+# a peek costs.
+# shellcheck source=bin/fm-latency-lib.sh
+. "$SCRIPT_DIR/fm-latency-lib.sh"
+fm_latency_cmd_start fm-peek.sh
+trap 'fm_latency_cmd_end $?' EXIT
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
 RAW_TARGET=$1
+fm_latency_cmd_task "${RAW_TARGET#fm-}"
 T=$(fm_backend_resolve_selector "$RAW_TARGET" "$STATE")
 N=${2:-40}
 

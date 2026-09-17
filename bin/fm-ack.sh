@@ -27,6 +27,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-ack-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ack-lib.sh"
+# Self-timed: acking is how "firstmate got back to the crew" is recorded when
+# the action left no other trace, so how long it took to get here is one of the
+# numbers the latency ledger exists to hold. bin/fm-latency-lib.sh owns the
+# ledger and can never fail this command.
+# shellcheck source=bin/fm-latency-lib.sh
+. "$SCRIPT_DIR/fm-latency-lib.sh"
+fm_latency_cmd_start fm-ack.sh
+trap 'fm_latency_cmd_end $?' EXIT
 
 usage() {
   sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -57,6 +65,7 @@ esac
 ID=$1
 shift
 NOTE=$*
+fm_latency_cmd_task "$ID"
 
 if [ ! -f "$STATE/$ID.meta" ]; then
   echo "error: no metadata for '$ID' in $STATE; fm-ack refuses to record an ack for an unknown task" >&2

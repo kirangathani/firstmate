@@ -34,6 +34,39 @@
 # OpenCode and Pi consume exit 2 plus stderr.
 set -u
 
+# --- latency telemetry, before anything else and after nothing -------------
+#
+# This hook is the one harness-portable place that sees EVERY command before it
+# runs, in every verified primary harness, which is what makes it the only
+# portable way to observe model thinking time: the gap between two hook events
+# holds no command execution. bin/fm-latency-lib.sh owns what is recorded and
+# docs/configuration.md's "Self-latency ledger" section the reading.
+#
+# IT CANNOT CHANGE WHAT THIS HOOK DENIES. It runs before argument parsing so it
+# also covers the fast-allow paths below, it reads no stdin - the payload this
+# hook consumes later must arrive untouched - it writes only an append to a
+# private ledger, every failure inside it is a silent no-op, and it never
+# exits. The block is a statement of fact about the call, not a decision about
+# it.
+#
+# Scoped, because this file is tracked and is therefore checked out into every
+# worktree of this repo, including crewmate and scout task worktrees whose tool
+# calls belong to no home's ledger. The scope test is one stat and no fork, for
+# a hook on the pre-command path of every single tool call.
+_fm_arm_lat_dir=${BASH_SOURCE[0]%/*}
+if [ -r "$_fm_arm_lat_dir/fm-latency-lib.sh" ]; then
+  # shellcheck source=bin/fm-latency-lib.sh
+  # shellcheck disable=SC1091 # tests/fm-arm-pretool-check.test.sh runs plain
+  # `shellcheck` on this file, without -x, so the sibling cannot be followed.
+  . "$_fm_arm_lat_dir/fm-latency-lib.sh" 2>/dev/null || true
+  if command -v fm_latency_scope_ok >/dev/null 2>&1 \
+    && fm_latency_scope_ok "${_fm_arm_lat_dir%/*}"; then
+    # The hook matcher is Bash in every tracked harness config, so the tool is
+    # known without reading the payload this hook must leave on stdin.
+    fm_latency_tool_event bash || true
+  fi
+fi
+
 CMD=""
 CMD_SET=0
 BACKGROUND=""

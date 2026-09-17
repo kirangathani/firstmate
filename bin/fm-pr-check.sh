@@ -56,6 +56,66 @@ if [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   fi
 fi
 
+# REFUSE A PR THAT DOES NOT CARRY THE WORK ITS TASK HAS ALREADY COMMITTED.
+# This is the other end of the defect bin/fm-brief.sh's definition of done
+# addresses: a worker that commits a fix, reports `done: PR <url>`, and stops
+# without pushing. Measured 2026-09-16 on fm-brief-attach-ownership-a3, whose
+# fix commit 0b16c1b3 never reached PR 97 while its head stayed at 8b2da7d5.
+# Firstmate read the resulting red as a verdict on the branch when it was a
+# verdict on the version before the fix, and only caught it by hand-comparing
+# the two shas - a step nothing required it to take. This is the moment both
+# facts are in hand, and it is before the merge poll is armed, which matters
+# most under the standing merge rule: arming a poll on a PR missing the fix is
+# arming an auto-merge of the wrong commit.
+#
+# THE WHOLE TEST IS ONE ANCESTRY QUESTION, asked in the direction that needs no
+# second fact: is the PR's head a STRICT ANCESTOR of this copy's tip? Only one
+# situation answers yes - the branch has moved on from what the PR carries - and
+# that is exactly the defect. It is deliberately not the mirror-image test
+# ("is the tip contained in the PR head"), which is false for unrelated
+# histories too and so would need the PR's head BRANCH read to tell a moved-on
+# branch from a worktree that was never this PR's at all. Asking it this way
+# makes that read, and its answer in every gh mock in the suite, unnecessary.
+#
+# IT REFUSES ONLY ON POSITIVE EVIDENCE, and every other reading is silent:
+#   - No gh, no worktree, or an unreadable PR leaves PR_HEAD empty: unknown, not
+#     wrong, and already the condition under which pr_head= is not recorded.
+#   - UNRELATED is silent: in the upstream-PR shape the worktree drives a branch
+#     that is not what this PR carries, so neither tip contains the other and
+#     nothing may be concluded from the pair.
+#   - BEHIND IS SILENT and must stay so. A no-mistakes PR is pushed by the
+#     pipeline from its own worktree under ~/.no-mistakes/worktrees/, so the
+#     task's own copy legitimately lags the PR head; refusing on that would
+#     break every pipeline task.
+#   - A PR head the local repository has never heard of is left alone rather
+#     than fetched. Nothing here may make an unbounded network call: this path
+#     runs while firstmate is recording a report, and the case being caught -
+#     work committed locally and never pushed - always already has the PR head
+#     locally, because that head was pushed from this same copy.
+# IT APPLIES ONLY TO THE FIRST RECORDING OF THIS PR, because a re-run against a
+# PR this task already recorded is a supported no-op whose moved-head case the
+# base already refuses one step later, at teardown
+# (tests/fm-teardown.test.sh's "merged PR does not allow teardown after a later
+# local commit" and "pr-check-stale"). Refusing here too would break that
+# re-run for a case already covered, so this adds the guard only where nothing
+# had one: the first recording, which is the moment the incident happened - the
+# worker reported `done: PR <url>` and firstmate recorded it for the first time.
+ALREADY_RECORDED=0
+if grep -qxF "pr=$URL" "$META" 2>/dev/null; then
+  ALREADY_RECORDED=1
+fi
+
+if [ -n "$PR_HEAD" ] && [ "$ALREADY_RECORDED" -eq 0 ]; then
+  LOCAL_TIP=$(cd "$WT" && git rev-parse HEAD 2>/dev/null || true)
+  if fm_pr_head_valid "$LOCAL_TIP" && [ "$LOCAL_TIP" != "$PR_HEAD" ] \
+    && (cd "$WT" && git cat-file -e "$PR_HEAD^{commit}" 2>/dev/null) \
+    && (cd "$WT" && git merge-base --is-ancestor "$PR_HEAD" "$LOCAL_TIP" 2>/dev/null); then
+    echo "error: $URL does not carry this task's committed work: its head is $PR_HEAD, and this task's copy has moved on to $LOCAL_TIP" >&2
+    echo "error: the PR's checks therefore describe the version before those commits, so nothing is recorded and no merge poll is armed; steer the worker to push its branch, let the checks re-run, then run this again" >&2
+    exit 1
+  fi
+fi
+
 META_TMP=
 pr_check_cleanup() {
   fm_pr_poll_cleanup

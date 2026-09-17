@@ -38,6 +38,15 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+# Self-timed: a steer is firstmate answering a crew, so both how long the send
+# itself took and whether it succeeded are ledger facts. bin/fm-latency-lib.sh
+# owns the ledger and can never fail this command; the trap preserves $? so the
+# swallowed-Enter non-zero exit this script is careful about still propagates.
+# shellcheck source=bin/fm-latency-lib.sh
+. "$SCRIPT_DIR/fm-latency-lib.sh"
+fm_latency_cmd_start fm-send.sh
+trap 'fm_latency_cmd_end $?' EXIT
+
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never steer
@@ -180,6 +189,10 @@ RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
+if [ -n "$TARGET_META" ]; then
+  _fm_send_task=${TARGET_META##*/}
+  fm_latency_cmd_task "${_fm_send_task%.meta}"
+fi
 
 fm_backend_validate "$TARGET_BACKEND" || exit 1
 

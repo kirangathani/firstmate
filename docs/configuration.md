@@ -240,7 +240,7 @@ Until a repository holds the secret, or while a PR carries no line, the review s
 
 ## The supersession attestation secret (FM_SUPERSESSION_SECRET)
 
-A captain-approved test-assertion supersession lives in `data/supersessions/<project>.md`, which is captain-private and gitignored, so `bin/fm-pr-merge.sh` can honour it and CI cannot see it at all.
+An approved test-assertion supersession lives in `data/supersessions/<project>.md`, which is private to this home and gitignored, so `bin/fm-pr-merge.sh` can honour it and CI cannot see it at all.
 That asymmetry makes the required `Base assertions re-verified` check unpassable for an approved override: it re-runs the same base assertions on a runner, reports the same findings, and stays red with nothing the branch can push to fix it, because the branch is not what is wrong.
 That no longer blocks the merge - `bin/fm-pr-merge.sh` excuses that check from the local run that read the approval, so nothing here is a prerequisite for landing one.
 What this secret buys is the PR's own check going green as well, for a public record of the approval or for branch protection enforced outside firstmate's merge path.
@@ -347,6 +347,41 @@ One tab-separated line per finished ship task, recording how long it took from d
 Each row also records the captain's testing skips as `local_skip`/`ci_skip` and, in `skipped_stages`, which pipeline stages did not run and by whose authority; `bin/fm-flow-tui.mjs`'s `LOCAL_SKIP_STAGES` owns which stages each authority removes, and `tests/fm-timeline.test.sh` fails if the ledger's mirror of that set ever drifts from it.
 Read it back with `bin/fm-timeline.sh report [--last N]`, which prints the ledger and, per project, the median launch-to-merge and per-stage times over two comparable windows.
 Those medians keep rows that skipped something in their own displayed bucket, so a journey that is faster because it skipped six stages is never folded in and read as an improvement.
+
+## Self-latency ledger (data/latency.tsv)
+
+Firstmate's own response latency, recorded from its own scripts and its already-wired harness hooks rather than from a harness transcript.
+It is gitignored, append-only, created lazily on the first recorded event, and holds one tab-separated row per event under a header written when the file is created.
+It lives in `data/` and not `state/` for the reason section 2 of `AGENTS.md` gives: this is a durable private fleet record, kept so this week can be compared with last month, not a volatile runtime signal that a teardown or a restart may discard.
+`bin/fm-latency-lib.sh`'s header is the single owner of the column list, of the four event kinds, of what each kind fills in, and of the rule that a failed write is a silent no-op and never a non-zero exit from the command being measured.
+
+Where the events come from:
+
+- A `wake` row per drained wake, written by `bin/fm-wake-drain.sh` from the rows it has already printed, so the enqueue epochs that drain otherwise destroys are retained without touching its print-before-delete boundary. Its `reported_epoch_ms` is the crew's own `[t=<epoch>] ` status stamp, whose grammar `bin/fm-classify-lib.sh` owns; a status line written before that stamp existed leaves the cell empty, which is the correct answer rather than a failure.
+- A `cmd` row per measured firstmate command, self-timed by the script itself. Today those are `bin/fm-wake-drain.sh`, `bin/fm-send.sh`, `bin/fm-ack.sh`, and `bin/fm-peek.sh`.
+- A `tool` row per tool call, from the pre-tool hook (`bin/fm-arm-pretool-check.sh`, `docs/arm-pretool-check.md`), and a `turn` row per turn, from the turn-end guard (`bin/fm-turnend-guard.sh`, `docs/turnend-guard.md`). Both are additions to hooks that already fire for every verified primary harness; neither can change what those hooks block, and both record nothing outside a primary home.
+
+What each question the ledger was built to answer is read from:
+
+| Question | Read from |
+| --- | --- |
+| How long do firstmate's own commands take? | `cmd.duration_ms`, per `action` |
+| How long does it think before running one? | `tool.think_ms` |
+| How long does draining the queue take? | the `cmd` row for `fm-wake-drain.sh` |
+| How long does it think before answering? | `turn.think_ms` and the `tool.think_ms` inside the turn |
+| How long until it gets back to a crew? | a `wake` row's `reported_epoch_ms` against the next `cmd` row naming that task |
+| Did the answer actually land? | the `exit_code` on that `cmd` row, for `fm-send.sh` |
+| How long does triaging an input take? | a `wake` row's `epoch_ms` against the first `cmd` row naming that task |
+
+Re-arming the watcher is the one activity not on that list.
+`bin/fm-watch-arm.sh` times nothing yet, so its cost is still only derivable the old way, as the gap between one row of `state/.watch-cycle-exits.log` and the next.
+
+Those two hooks are why thinking time is observable at all: the gap between two harness events contains no command execution, so it is model time.
+The one thing the ledger cannot see is the duration of a command that is not one of the self-timed scripts above - no harness event fires when a command finishes, and only `claude` publishes a transcript to recover it from - so for an unmeasured command the interval to the next tool event holds execution and thinking together and is recorded as `think_ms` alone.
+
+Read it back with `bin/fm-latency.sh report [--last N]`, which prints the tail of the ledger and then three summaries: the response chain from a crew's report through the queue to firstmate seeing it and acting, model time per tool call and per turn, and the median duration of each measured command with a count of its non-zero exits.
+The first two are printed over two comparable windows, recent against before, because a single median says how slow firstmate is and never whether that is improving.
+Set `FM_LATENCY_OFF` to any non-empty value to record nothing.
 
 ## Secondmate routes (data/secondmates.md)
 
