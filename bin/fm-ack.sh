@@ -3,15 +3,19 @@
 # firstmate-owed state, and silence the unactioned alarm for that state.
 #
 # Usage:
-#   fm-ack.sh [--refill] <task-id> [<what you did>]   record the action
-#   fm-ack.sh --list                                  show unactioned direct reports
+#   fm-ack.sh <task-id> [<what you did>]   record the action
+#   fm-ack.sh --list                       show unactioned direct reports
 #
-# --refill, only as the FIRST argument, keeps a SUCCESSFUL ack alive as one of the
-# dormant-arm pool's waiting arms instead of exiting, so the pool refills as a side
-# effect of ordinary work and costs no model call of its own. Pass it only when
-# running this as the harness's own background task: the process becomes the thing
-# that waits, so a foreground caller would never get its prompt back. A failed ack
-# never reaches it. bin/fm-arm-pool-lib.sh owns the pool and that decision.
+# ONE shape only: issue it as its own Monitor, timeout_ms 1800000, the command
+# alone with 2>&1, nothing bundled. A SUCCESSFUL ack does not exit - it stays
+# alive as one of the dormant-arm pool's waiting arms whenever the pool has room,
+# so ordinary acking keeps the pool full and costs no model call of its own. The
+# Bash tool cannot run this script at all: the PreToolUse seatbelt denies it with
+# that replacement (bin/fm-arm-command-policy.mjs, docs/arm-pretool-check.md).
+# bin/fm-arm-pool-lib.sh owns the pool and the FM_ARM_POOL_NO_REFILL opt-out that
+# a script needing its own prompt back must set. A failed ack, --list, and --help
+# all exit as they always have. --refill is accepted as a first-argument no-op
+# for one release so older protocol text and scripts keep working.
 #
 # The alarm itself lives in bin/fm-guard.sh; the record format, the owed-state
 # sets, the grace window, and the confirm mechanics are owned by
@@ -47,9 +51,9 @@ usage() {
   sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
-REFILL=0
+# --refill selected the refill when it was opt-in. It is now the default, so the
+# flag is accepted as a no-op for one release and simply consumed here.
 if [ "${1:-}" = "--refill" ]; then
-  REFILL=1
   shift
 fi
 
@@ -91,17 +95,14 @@ if ! fm_ack_record "$STATE" "$ID" "$NOTE"; then
 fi
 echo "acked: $ID${NOTE:+ ($NOTE)}"
 
-# The record is written, so if the caller asked, spend what is left of this
-# already paid-for process on being an ear rather than on exiting. The latency
-# row is closed by hand first because exec does not run EXIT traps, and the
-# libraries are sourced only here so an ordinary ack pays nothing for a path it
-# does not take.
-if [ "$REFILL" -eq 1 ]; then
-  fm_latency_cmd_end 0
-  trap - EXIT
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
-  # shellcheck source=bin/fm-arm-pool-lib.sh
-  . "$SCRIPT_DIR/fm-arm-pool-lib.sh"
-  fm_arm_pool_refill_or_exit "$SCRIPT_DIR/fm-watch-arm.sh"
-fi
+# The record is written, so spend what is left of this already paid-for process
+# on being an ear rather than on exiting. fm_arm_pool_refill_or_exit exits
+# instead when the pool is full or when the caller set FM_ARM_POOL_NO_REFILL.
+# The latency row is closed by hand first because exec does not run EXIT traps.
+fm_latency_cmd_end 0
+trap - EXIT
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-arm-pool-lib.sh
+. "$SCRIPT_DIR/fm-arm-pool-lib.sh"
+fm_arm_pool_refill_or_exit "$SCRIPT_DIR/fm-watch-arm.sh"

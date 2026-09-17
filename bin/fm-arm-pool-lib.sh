@@ -184,16 +184,25 @@ fm_arm_pool_below_floor() {
 #
 # It REPLACES this process, so a caller must have finished everything it owes -
 # printed its result, written its records - before calling. It must also have run
-# as the harness's own background task, because the whole point is that this
-# process becomes the thing that waits, and a foreground caller would simply never
-# return. That is why it is opt-in per invocation rather than automatic: a command
-# line that does not ask for it behaves exactly as it always has, so running one
-# of these in the foreground by habit can never wedge a turn.
+# as the harness's own background task - for claude, its own Monitor - because the
+# whole point is that this process becomes the thing that waits, and a foreground
+# caller would simply never return.
+#
+# FM_ARM_POOL_NO_REFILL=1 is the one opt-out, owned here and honoured for every
+# caller: set it and this returns the process to its caller (exit 0) instead of
+# becoming an arm. A SCRIPT that steers or acks on firstmate's behalf must set it
+# on the fm-send/fm-ack call it makes - bin/fm-merge-green.sh, bin/fm-ci-waiver.sh,
+# bin/fm-bootstrap.sh, tests/lib.sh - because a script that has more to do after
+# the steer must get its own prompt back and must never itself become an arm.
+# It is NOT a per-invocation choice for the model: the seatbelt
+# (bin/fm-arm-command-policy.mjs) denies fm-send and fm-ack from the Bash tool
+# outright, so the only shape a model has is the Monitor one, which refills.
 #
 # A caller that has its own EXIT trap must settle it first (see bin/fm-send.sh):
 # exec does not run EXIT traps.
 fm_arm_pool_refill_or_exit() {
   local arm=$1
+  [ "${FM_ARM_POOL_NO_REFILL:-0}" = 0 ] || exit 0
   fm_arm_pool_has_room || exit 0
   [ -x "$arm" ] || exit 0
   exec "$arm" --dormant
