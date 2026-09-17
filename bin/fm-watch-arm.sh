@@ -120,6 +120,28 @@
 # still prints and exits, because a member that cannot arm when its turn comes is
 # exactly what has to be visible, and the turn-end guard's floor then refills it.
 #
+# EXACTLY ONE NOTIFICATION PER WAKE. A dormant arm runs as a Monitor, and a
+# Monitor turns every line it prints into a notification the model has to read,
+# so what a member prints IS what a wake costs. Measured in the captain's home
+# on 2026-09-17, one crewmate status append cost five: the holder's wake line,
+# the same records again from its drain at exit, the successor's
+# `watcher: started ...`, an ordinary attach-follow arm still printing
+# `watcher: attached ...` down the successor chain, and the harness's own
+# stream-end notice for the finished Monitor.
+# So a member prints exactly one line, and only on its own wake:
+#   watcher exited, firstmate woken, watcher replenished from the pool, <N> dormant watchers lurking - <the crewmate's words>
+# N is the ears still asleep after the handover (pool_lurking_count), and the
+# successor is confirmed before the line claims one. Handover lines go to
+# state/.watch-arm.log instead of stdout (announce/arm_log below), and the drain
+# at exit still runs but prints nothing, because every record it holds is the
+# same payload already on that line (report_pool_wake).
+# FAILED endings are never silenced. Neither is the harness's stream-end notice,
+# which is emitted by the harness for every finished Monitor and cannot be
+# suppressed from here at all - one per wake is the floor this script can reach.
+# A PLAIN arm keeps every line it ever printed, and must not be armed alongside a
+# live pool: it follows the successor chain and announces every handover, which
+# is notification (4) above. See docs/supervision-protocols/claude.md.
+#
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
 # wins the singleton while the duplicate child stands down. It
@@ -169,11 +191,24 @@ DORMANT_POLL=${FM_ARM_DORMANT_POLL:-0.25}
 # is what also catches a lock left behind by a watcher that died without
 # releasing it - runs every DORMANT_DEEP_EVERY polls instead.
 DORMANT_DEEP_EVERY=${FM_ARM_DORMANT_DEEP_EVERY:-16}
+# Where an arm's own announcements go when they are not worth a notification.
+# bin/fm-watch-arm.sh is run as a Monitor, and a Monitor turns every printed line
+# into a notification the model must read, so for a POOL member the only line
+# worth that cost is the wake it was waiting for. A start and a handover are
+# facts to look up afterwards, not events to be told about, so they land here.
+ARM_LOG="$STATE/.watch-arm.log"
+ARM_LOG_MAX_BYTES=${FM_WATCH_ARM_LOG_MAX_BYTES:-131072}
+ARM_LOG_KEEP_LINES=${FM_WATCH_ARM_LOG_KEEP_LINES:-500}
+case "$ARM_LOG_MAX_BYTES" in ''|*[!0-9]*|0) ARM_LOG_MAX_BYTES=131072 ;; esac
+case "$ARM_LOG_KEEP_LINES" in ''|*[!0-9]*|0) ARM_LOG_KEEP_LINES=500 ;; esac
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
 CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
 ARM_PID=${BASHPID:-$$}
+# Set from the flags below. Declared here because the reporting helpers branch on
+# it and are defined long before the flag parse reaches them.
+dormant=0
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
 
@@ -391,10 +426,56 @@ healthy_watcher() {
   HEALTHY_PID=$FM_WATCHER_HEALTHY_PID
 }
 
+# Append one arm announcement to the bounded arm log. Best-effort in both
+# directions: a logging hiccup never affects the arm, and nothing reads this log
+# to make a supervision decision - it exists so a silenced line is still there to
+# look up.
+arm_log() {
+  local sz
+  printf '[%s] pid=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$ARM_PID" "$1" >> "$ARM_LOG" 2>/dev/null || return 0
+  sz=$(wc -c < "$ARM_LOG" 2>/dev/null | tr -d '[:space:]')
+  case "$sz" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$sz" -ge "$ARM_LOG_MAX_BYTES" ]; then
+    tail -n "$ARM_LOG_KEEP_LINES" "$ARM_LOG" > "$ARM_LOG.tmp" 2>/dev/null && mv -f "$ARM_LOG.tmp" "$ARM_LOG" 2>/dev/null
+    rm -f "$ARM_LOG.tmp" 2>/dev/null || true
+  fi
+}
+
+# A HANDOVER announcement - this arm took the singleton, or attached to a live
+# holder. A pool member says it to the log only: with six members, one crewmate
+# status append used to put the successor's `watcher: started ...` in front of
+# the captain's supervisor alongside the wake itself, and a member taking its
+# turn is the pool working exactly as designed rather than news. A plain arm
+# still prints it, because it has no pool behind it and that line is the only
+# proof an operator gets that a cycle exists.
+# FAILED lines are never routed here. A member that cannot arm when its turn
+# comes is precisely what has to be visible.
+announce() {
+  if [ "$dormant" -eq 1 ]; then
+    arm_log "$1"
+  else
+    echo "$1"
+  fi
+}
+
 report_attached() {
   local age
   age=$(fm_path_age "$BEAT")
-  echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
+  announce "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
+}
+
+# How many ears are still ASLEEP once this handover is done, which is the N the
+# wake line reports. fm_arm_pool_count counts every live member of this session,
+# and up to two of them are not lurking: this arm, whose record survives until
+# its EXIT trap fires a moment from now, and the member that has just taken the
+# singleton and is the watcher rather than a waiter.
+pool_lurking_count() {  # <successor-taken 0|1>
+  local n
+  n=$(fm_arm_pool_count 2>/dev/null) || n=0
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  n=$(( n - 1 - $1 ))
+  [ "$n" -ge 0 ] || n=0
+  printf '%s' "$n"
 }
 
 # Give a successor the same bounded confirmation window used for a fresh child.
@@ -550,6 +631,50 @@ EOF
   printf '%s\n' "$rows"
 }
 
+# What the crewmate actually SAID, out of the watcher's own reason output. The
+# reason's first line is the watcher's own classification - `signal: <paths>`, or
+# a whole stale/check/heartbeat reason - and the indented lines under it are the
+# crewmate's appended words. The words are what the captain reads, so they are
+# preferred; a wake that carries none (a stale, a check, a heartbeat) falls back
+# to the reason line, which is itself the thing to act on.
+# Flattened to ONE line, because every line an arm prints is its own
+# notification and the whole point of this report is that a wake costs exactly
+# one of them.
+wake_words() {
+  local out=$1 words
+  words=$(grep -E '^[[:space:]]+[^[:space:]]' "$out" 2>/dev/null || true)
+  [ -n "$words" ] || words=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null | head -1 || true)
+  printf '%s' "$words" | awk 'NF { sub(/^[[:space:]]+/, ""); if (out != "") out = out " | "; out = out $0 } END { printf "%s", out }'
+}
+
+# The ONE notification a pool member is worth: the wake it was waiting for, in
+# the captain's own words for it (2026-09-17). One crewmate status append used
+# to arrive as five notifications - this line, the same records again from the
+# drain below, the successor's start, a stray attach-follow arm's line, and the
+# harness's own stream-end notice - of which only this one said anything.
+# The successor is CONFIRMED before the line claims it, so "replenished from the
+# pool" is a fact this arm checked rather than a hope, and N is counted after
+# that handover so it names the ears actually left asleep.
+report_pool_wake() {
+  local out=$1 words
+  if wait_for_healthy_successor; then
+    printf 'watcher exited, firstmate woken, watcher replenished from the pool, %s dormant watchers lurking' "$(pool_lurking_count 1)"
+  else
+    # Not the captain's line, deliberately: an empty pool means the next wake
+    # has no taker waiting, and a line that says it was replenished would be the
+    # one thing worse than a line nobody needed.
+    printf 'watcher exited, firstmate woken, NO watcher left in the pool, %s dormant watchers lurking - re-arm' "$(pool_lurking_count 0)"
+  fi
+  words=$(wake_words "$out")
+  [ -z "$words" ] || printf ' - %s' "$words"
+  printf '\n'
+  # The queue still drains - the records reach the durable pending log and the
+  # queue file is emptied exactly as before - but its output is NOT printed. Every
+  # record it holds carries the same payload already on the line above, so
+  # printing it put the same event in front of the model a second time.
+  drain_wake_queue_on_exit >/dev/null 2>&1 || true
+}
+
 watch_output_reason_type() {
   local out=$1 line
   line=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null | head -1 || true)
@@ -577,7 +702,6 @@ print_watch_output() {
 # attaching, so the pool keeps the shape the captain asked for - one member
 # watching, the others waiting - rather than collapsing into a queue of followers
 # that all die together when the holder fires.
-dormant=0
 mode=arm
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
@@ -794,8 +918,16 @@ owned_child_finished() {
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
     reason_type=$(watch_output_reason_type "$child_out")
     cycle_log_append "$rc" "$signal" "$reason_type" none
-    print_watch_output "$child_out"
-    drain_wake_queue_on_exit
+    if [ "$dormant" -eq 1 ]; then
+      report_pool_wake "$child_out"
+    else
+      # A plain arm keeps both, unchanged: it has no pool behind it, so there is
+      # no successor to report and the raw drained records are the only copy its
+      # operator gets. Arming one alongside a live pool is what the protocol
+      # doc forbids, for exactly the duplication this branch preserves.
+      print_watch_output "$child_out"
+      drain_wake_queue_on_exit
+    fi
     rm -f "$child_out" 2>/dev/null || true
     child=
     child_out=
@@ -860,7 +992,7 @@ while :; do
       cycle_refresh_lock_before
       cycle_mark_predecessor_successor "started:$child"
       follow_own_confirmed_watcher
-      echo "watcher: started pid=$child (beacon fresh)"
+      announce "watcher: started pid=$child (beacon fresh)"
       wait "$child"
       rc=$?
       owned_child_finished "$rc"
