@@ -81,7 +81,11 @@ Keep instructions as the authority and discovery layer, but make repeated execut
 - Plain dash `-`, never an em dash.
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
-- Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
+- `bin/fm-lint.sh` is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
+- CI runs it on every push, so CI holds the verdict; run it locally at most ONCE, before pushing, and never after each edit.
+- It forks up to eight concurrent shellcheck processes over the whole tree, and a fleet runs several crewmates in separate worktrees of this repo at once, so "once per worker per push" is already up to eight times the workers.
+- Four simultaneous runs took all 23 GB of the captain's machine on 2026-09-17 and every shellcheck had to be killed, which each worker saw as `ShellCheck exited 143` and an aborted run with no verdict.
+- The script now takes a machine-wide lock itself so runs serialise however they are typed; a run that reports waiting is behaving correctly and must not be killed and retried.
 - Never hand jq a payload that grows with the fleet through `--argjson`/`--arg`; use `fm_jq_object` from `bin/fm-jq-lib.sh`, whose header owns the contract.
 - An argv payload dies at a size threshold rather than degrading, so it fails permanently and silently once crossed: `bin/fm-fleet-snapshot.sh --json` emitted zero bytes and exited 126 at 19 tasks and a 68737-byte backlog, taking the fleet view and bearings down with it (evidence 2026-08-08, `bin/fm-jq-lib.sh`).
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.

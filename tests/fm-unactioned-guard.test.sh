@@ -1017,6 +1017,191 @@ test_no_row_field_is_ever_emitted_empty() {
   pass "fm-ack-lib: no row field is emitted empty, so a tab-separated reader cannot shift the columns"
 }
 
+# --- the declared wait nobody re-verified (rule 3) ---------------------------
+#
+# 2026-09-17, upstream PR 1104. The worker appended
+# "paused [key=await-captain-recheck]: only the maintainer can re-run the
+# required check" at about 04:00. Firstmate carried that record through a handoff
+# and a session start without examining it, and at 09:45 the captain asked what
+# the worker was actually waiting on. The premise was wrong - that workflow
+# re-fires on any PR edit - and the real blocker was an unrelated conflict with
+# upstream main. Six idle hours, two captain interventions, and no alarm of any
+# kind, because `paused` is an expected-idle verb that alarmed on nothing.
+#
+# What a pause owes is not an ACTION but a periodic re-verification of the
+# worker's own claim, so these cases are written around that difference: it must
+# stay quiet for a real external wait, alarm once the wait has outlived the
+# window, go quiet again for exactly one more window when firstmate records a
+# recheck, and then come back on its own.
+#
+# Sized from FM_ACK_PAUSE_RECHECK_DEFAULT read at runtime from the library, never
+# from a number that happens to be three hours today, and the clock is moved with
+# FM_ACK_NOW rather than slept through.
+PAUSED_STATE='state: paused · source: status-log · waiting on upstream'
+
+# Run fm-ack.sh with the clock advanced, so a case can place the recheck record
+# at a chosen moment instead of always at now.
+run_ack_at() {  # <home> <age-seconds> <args...>
+  local home=$1 age=$2
+  shift 2
+  FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    FM_ACK_NOW="$(( $(date +%s) + age ))" \
+    FM_CREW_STATE_BIN="$home/crew-state-stub" \
+    "$ROOT/bin/fm-ack.sh" "$@" 2>&1
+}
+
+test_a_fresh_declared_wait_does_not_alarm() {
+  local home id out window
+  id=upstream-recheck-p1
+  home=$(make_home fresh-pause "$id")
+  window=$(fm_ack_resolve_pause_recheck)
+  crew_reports "$home" "$id" "paused: waiting on the upstream maintainer to cut a release"
+
+  out=$(FM_TEST_CREW_STATE="$PAUSED_STATE" run_guard "$home" "$(( window - 60 ))")
+  assert_not_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "a declared external wait inside the recheck window must stay silent - nagging a real CI or release wait is what makes a guard get learned past"
+  pass "fm-guard: a declared external wait inside the recheck window is left alone"
+}
+
+test_a_declared_wait_past_the_window_alarms_for_a_recheck() {
+  local home id out window
+  id=upstream-recheck-p2
+  home=$(make_home stale-pause "$id")
+  window=$(fm_ack_resolve_pause_recheck)
+  crew_reports "$home" "$id" "paused: only the maintainer can re-run the required check"
+
+  out=$(FM_TEST_CREW_STATE="$PAUSED_STATE" run_guard "$home" "$(( window + 60 ))")
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "a pause that has outlived the recheck window did not alarm - this is the 2026-09-17 six-hour blind spot"
+  assert_contains "$out" "$id" "the banner did not name the paused task"
+  assert_contains "$out" "without a recheck" \
+    "the banner did not say what is actually owed here, which is a recheck rather than an action"
+  assert_contains "$out" "re-verify what it is waiting on" \
+    "the banner did not tell firstmate to re-verify the worker's stated premise"
+  assert_contains "$out" "only the maintainer can re-run" \
+    "the banner did not quote the claim that is the thing to be re-verified"
+  assert_not_contains "$out" "firstmate has not acted" \
+    "the banner used the unactioned-state wording, which points at an action nobody owes"
+  assert_not_contains "$out" "the wake was delivered and then dropped" \
+    "the banner blamed a mishandled wake, but the pause was reported correctly and simply went unexamined"
+  pass "fm-guard: a declared external wait that outlived the recheck window alarms for a recheck, not for an action"
+}
+
+test_a_recorded_recheck_silences_the_wait_for_one_window() {
+  local home id out window at
+  id=upstream-recheck-p3
+  home=$(make_home acked-pause "$id")
+  window=$(fm_ack_resolve_pause_recheck)
+  crew_reports "$home" "$id" "paused: only the maintainer can re-run the required check"
+
+  at=$(( window + 60 ))
+  out=$(run_ack_at "$home" "$at" "$id" "read the pane; the workflow re-fires on any PR edit")
+  assert_contains "$out" "acked: $id" "fm-ack did not record the recheck"
+
+  out=$(FM_TEST_CREW_STATE="$PAUSED_STATE" run_guard "$home" "$(( at + 60 ))")
+  assert_not_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "a wait firstmate had just re-verified still alarmed - a recheck must buy one quiet window"
+  pass "fm-guard: a recorded recheck silences a declared wait for one window"
+}
+
+test_a_recheck_expires_and_the_wait_alarms_again() {
+  local home id out window at
+  id=upstream-recheck-p4
+  home=$(make_home expired-pause "$id")
+  window=$(fm_ack_resolve_pause_recheck)
+  crew_reports "$home" "$id" "paused: only the maintainer can re-run the required check"
+
+  at=$(( window + 60 ))
+  run_ack_at "$home" "$at" "$id" "read the pane; still waiting" >/dev/null
+
+  # The status log has gained no line, so the ack's fingerprint still matches
+  # exactly. Only its EPOCH ages, which is what makes the recheck recur instead
+  # of one ack taking the task permanently out of supervision.
+  out=$(FM_TEST_CREW_STATE="$PAUSED_STATE" run_guard "$home" "$(( at + window + 60 ))")
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "a recheck silenced the wait forever - a paused log gains no line, so only the record's age can re-arm it"
+  assert_contains "$out" "$id" "the re-armed banner did not name the paused task"
+  assert_contains "$out" "without a recheck" "the re-armed banner did not say a recheck is owed"
+  pass "fm-guard: a recheck buys one window and then the next one is owed again"
+}
+
+test_a_signed_exemption_silences_the_recheck_alarm() {
+  local home id out window
+  id=upstream-recheck-p5
+  home=$(make_home exempt-pause "$id")
+  give_key "$home"
+  window=$(fm_ack_resolve_pause_recheck)
+  crew_reports "$home" "$id" "paused: only the maintainer can re-run the required check"
+
+  out=$(FM_TEST_CREW_STATE="$PAUSED_STATE" run_guard "$home" "$(( window + 60 ))")
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" "precondition: the wait must be alarming before it is exempted"
+
+  run_monitor "$home" 0 --exempt "$id" --reason "captain is chasing the maintainer himself" >/dev/null
+  out=$(FM_TEST_CREW_STATE="$PAUSED_STATE" run_guard "$home" "$(( window + 60 ))")
+  assert_not_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "a captain-signed exemption must silence the recheck alarm exactly as it silences the others"
+  pass "fm-guard: a captain-signed exemption silences a declared wait's recheck alarm too"
+}
+
+test_a_captain_decision_still_never_alarms_on_elapsed_time() {
+  local home id out window age
+  id=upstream-recheck-p6
+  home=$(make_home pause-vs-decision "$id")
+  window=$(fm_ack_resolve_pause_recheck)
+  crew_reports "$home" "$id" "needs-decision: sync or async client - both compile"
+  run_ack "$home" "$id" "relayed to captain" >/dev/null
+
+  # Rule 3 is elapsed time, and adding it must not have leaked that into rule 1.
+  # A relayed decision waits on the captain for as long as the captain takes.
+  for age in "$window" "$(( window * 2 ))" "$(( window * 8 ))"; do
+    out=$(FM_TEST_CREW_STATE='state: parked · source: run-step · parked at review: 1 finding(s) (ask-user: captain decision)' \
+      run_guard "$home" "$age")
+    assert_not_contains "$out" "UNACTIONED DIRECT REPORT" \
+      "a decision already relayed to the captain alarmed on elapsed time - the pause recheck must not have widened into the other rules"
+  done
+  pass "fm-guard: adding a time-based recheck did not make a relayed captain decision alarm on elapsed time"
+}
+
+# The wait is aged from the line's own report-time stamp, not from the file's
+# mtime, and the two differ whenever anything else touched the log afterwards.
+test_the_wait_is_aged_from_the_lines_own_report_time() {
+  local home id out window stamp
+  id=upstream-recheck-p7
+  home=$(make_home stamped-pause "$id")
+  window=$(fm_ack_resolve_pause_recheck)
+  stamp=$(( $(date +%s) - window - 60 ))
+  printf '[t=%s] paused: only the maintainer can re-run the required check\n' "$stamp" \
+    >> "$home/state/$id.status"
+
+  # The file was written a moment ago, so an mtime-aged pause reads as brand new.
+  out=$(FM_TEST_CREW_STATE="$PAUSED_STATE" run_guard "$home" 0)
+  assert_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "a wait declared hours ago read as fresh because it was aged from the file's mtime instead of the line's own stamp"
+  assert_contains "$out" "$id" "the banner did not name the task whose stamped wait had outlived the window"
+  pass "fm-ack-lib: a declared wait is aged from the line's own report time, not from when the file was last touched"
+}
+
+# The alarm and the render answer from one predicate, so the sweep must name this
+# as its own verdict rather than folding it into either the unactioned class or
+# the quiet one - it owes something, and what it owes is not an action.
+test_the_sweep_renders_a_recheck_as_its_own_verdict() {
+  local home id out status window
+  id=upstream-recheck-p8
+  home=$(make_home sweep-pause "$id")
+  window=$(fm_ack_resolve_pause_recheck)
+  crew_reports "$home" "$id" "paused: only the maintainer can re-run the required check"
+
+  out=$(FM_TEST_CREW_STATE="$PAUSED_STATE" run_monitor "$home" "$(( window + 60 ))") && status=0 || status=$?
+  expect_code 1 "$status" "a sweep that found a wait owed a recheck must not exit 0"
+  assert_contains "$out" "needs-recheck 1" \
+    "the counts line did not count the overdue recheck as its own class"
+  assert_contains "$out" "NEEDS A RECHECK" \
+    "the sweep did not give the overdue recheck its own verdict word"
+  assert_not_contains "$out" "NEEDS ACTION" \
+    "the sweep called a recheck an action, which sends firstmate looking for work nobody owes"
+  pass "fm-monitor: an overdue recheck is rendered and counted as its own verdict, not as an unactioned report"
+}
+
 test_incident_reproduction
 test_captain_wait_never_alarms
 test_no_row_field_is_ever_emitted_empty
@@ -1051,3 +1236,11 @@ test_exemption_refused_without_a_key
 test_an_exemption_is_never_silent
 test_unexempt_restores_monitoring
 test_exemption_record_is_torn_down_with_the_task
+test_a_fresh_declared_wait_does_not_alarm
+test_a_declared_wait_past_the_window_alarms_for_a_recheck
+test_a_recorded_recheck_silences_the_wait_for_one_window
+test_a_recheck_expires_and_the_wait_alarms_again
+test_a_signed_exemption_silences_the_recheck_alarm
+test_a_captain_decision_still_never_alarms_on_elapsed_time
+test_the_wait_is_aged_from_the_lines_own_report_time
+test_the_sweep_renders_a_recheck_as_its_own_verdict
