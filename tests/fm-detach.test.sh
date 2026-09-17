@@ -188,6 +188,36 @@ test_logs_are_pruned_to_the_configured_limit() {
   pass "logs are pruned to the configured limit"
 }
 
+test_every_script_that_sources_the_library_also_calls_it() {
+  local script sourced=0
+  # Derived from the real tree, never a list: sourcing the library and forgetting
+  # to call it is silent - the script keeps working, in the foreground, exactly as
+  # if none of this existed. bin/fm-merge-green.sh shipped that way in this very
+  # branch before this assertion existed.
+  for script in "$ROOT"/bin/*.sh; do
+    # An actual source line, not a mention: bin/fm-detach-run.sh names the
+    # library in its header and must not be caught by that.
+    grep -qE '^[.] "\$SCRIPT_DIR/fm-detach-lib\.sh"' "$script" || continue
+    sourced=$((sourced + 1))
+    grep -q 'fm_detach "' "$script" \
+      || fail "$(basename "$script") sources the detach library but never calls fm_detach"
+  done
+  [ "$sourced" -gt 0 ] || fail "no script sources the detach library, so this guard is asserting nothing"
+  printf 'checked %s scripts\n' "$sourced"
+  pass "every script that sources the detach library also calls it"
+}
+
+test_a_dry_run_does_not_detach() {
+  local out
+  # A dry run merges nothing and steers nobody, so its report IS what firstmate
+  # reads. Detaching it would put the one useful thing into a log.
+  out=$(env -u FM_INLINE FM_HOME="$ROOT" "$ROOT/bin/fm-merge-green.sh" --dry-run 2>&1 || true)
+  [ -n "$out" ] || fail "a dry run printed nothing, so it detached the report it exists to produce"
+  pass "a dry run does not detach the report it exists to produce"
+}
+
+test_every_script_that_sources_the_library_also_calls_it
+test_a_dry_run_does_not_detach
 test_a_plain_call_returns_before_the_work_can_finish
 test_a_plain_call_prints_nothing
 test_the_detached_child_finishes_and_records_its_verdict

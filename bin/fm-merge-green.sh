@@ -107,6 +107,10 @@ EOF
 
 TAB=$'\t'
 DRY_RUN=0
+# The argument loop below consumes "$@", so the detach needs its own copy taken
+# before that. Expanded with the +-guard this file already uses for WANTED, so an
+# empty list is safe under `set -u` on stock macOS Bash 3.2.
+DETACH_ARGS=("$@")
 # Newline-delimited rather than an array so an EMPTY value stays safe to expand
 # under `set -u` on every Bash this repo supports, stock macOS 3.2 included -
 # the same reason bin/fm-pr-merge.sh keeps ATTESTATION_AUTHORITY a string.
@@ -127,6 +131,14 @@ done
 if [ ! -d "$STATE" ]; then
   echo "error: no fleet state at $STATE, so this home has no PRs to land" >&2
   exit 2
+fi
+
+# Detached from here on, once the arguments and the home are known good so a
+# malformed call still fails in the caller's own turn. A DRY RUN is exempt: it
+# merges nothing and steers nobody, so its report IS what firstmate reads, and
+# detaching it would put the one thing worth reading into a log.
+if [ "$DRY_RUN" -eq 0 ]; then
+  fm_detach "${DETACH_ARGS[@]+"${DETACH_ARGS[@]}"}"
 fi
 
 # --- candidate selection ------------------------------------------------------

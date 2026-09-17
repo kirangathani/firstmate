@@ -45,6 +45,12 @@ LOG=${FM_DETACH_LOG:-}
 TARGET=$1
 shift
 
+# This process owns the log, not the parent: the parent's descriptors are the
+# harness's own tool-result pipe, which it is about to close, and a child still
+# writing down it would take SIGPIPE - the exact death bin/fm-watch-arm.sh's
+# detach exists to avoid.
+[ -z "$LOG" ] || exec >"$LOG" 2>&1
+
 NAME=$(basename "$TARGET" .sh)
 MAX_LINES=${FM_DETACH_REPORT_MAX_LINES:-20}
 SELECT=${FM_DETACH_SELECT:-'^(merged:|  (number|status):|fm-pr-merge-refusal:|error:|REFUSED|summary:|note: captain-approved|TESTING WAIVER|ATTESTATION CHECK EXEMPTED|BASE RE-VERIFICATION EXEMPTED|NO CI EVIDENCE|[^:]+: (STUCK|recovered|pruned):|next to land:|parked behind |write-failed:|armed:|spawned |teardown )'}

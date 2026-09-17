@@ -122,9 +122,9 @@ fm_detach() {
   # would resolve a different home than the parent just did and record its
   # verdict where nothing is watching.
   if [ -n "$setsid_bin" ]; then
-    FM_HOME="${FM_HOME:-}" FM_DETACH_LOG="$log" "$setsid_bin" "$runner" "$self" "$@" >"$log" 2>&1 <"$stdin_src" &
+    FM_HOME="${FM_HOME:-}" FM_DETACH_LOG="$log" "$setsid_bin" "$runner" "$self" "$@" >/dev/null 2>&1 <"$stdin_src" &
   else
-    FM_HOME="${FM_HOME:-}" FM_DETACH_LOG="$log" "$runner" "$self" "$@" >"$log" 2>&1 <"$stdin_src" &
+    FM_HOME="${FM_HOME:-}" FM_DETACH_LOG="$log" "$runner" "$self" "$@" >/dev/null 2>&1 <"$stdin_src" &
   fi
   exit 0
 }
