@@ -46,21 +46,27 @@ usage() {
 }
 
 TSV=0
-IDS=()
+# A newline-delimited list rather than an array, and NAMED_ANY rather than a
+# count of it. `${#arr[@]}` on an empty array is an unbound-variable error under
+# `set -u` on stock macOS Bash 3.2, and a task id cannot contain whitespace
+# (bin/fm-spawn.sh validates the shape), so a list costs nothing here.
+IDS=
+NAMED_ANY=0
 for a in "$@"; do
   case "$a" in
     -h|--help) usage; exit 0 ;;
     --tsv) TSV=1 ;;
     -*) echo "error: unknown argument '$a'" >&2; exit 2 ;;
-    *) IDS+=("$a") ;;
+    *) IDS="$IDS$a
+"; NAMED_ANY=1 ;;
   esac
 done
 
-if [ "${#IDS[@]}" -eq 0 ]; then
+if [ "$NAMED_ANY" -eq 0 ]; then
   for m in "$STATE"/*.meta; do
     [ -f "$m" ] || continue
-    b=$(basename "$m" .meta)
-    IDS+=("$b")
+    IDS="$IDS$(basename "$m" .meta)
+"
   done
 fi
 
@@ -114,7 +120,10 @@ row_for() {
   printf '%s\t%s\tpresent\t%s\t%s\t%s\t%s\n' "$id" "$wt" "$branch" "$head" "$unpushed" "$dirty"
 }
 
-ROWS=$(for id in "${IDS[@]}"; do row_for "$id"; done)
+ROWS=$(printf '%s' "$IDS" | while IFS= read -r id; do
+  [ -n "$id" ] || continue
+  row_for "$id"
+done)
 
 if [ "$TSV" -eq 1 ]; then
   printf 'task\tworktree\tworktree_state\tbranch\thead\tunpushed\tdirty_paths\n'

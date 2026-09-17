@@ -106,6 +106,8 @@ WANT_LEARNINGS=1
 WANT_CAPTAIN=1
 CONTEXT_ONLY=0
 REFILL=0
+# Guarded with the `${arr[@]+...}` idiom wherever it is expanded: an empty array
+# is an unbound-variable error under `set -u` on stock macOS Bash 3.2.
 CONTEXT_FILES=()
 
 if [ "${1:-}" = "--refill" ]; then
@@ -200,7 +202,7 @@ bundle() {
     printf '\n</worktree-facts>\n\n'
   fi
   local f
-  for f in ${CONTEXT_FILES+"${CONTEXT_FILES[@]}"}; do
+  for f in ${CONTEXT_FILES[@]+"${CONTEXT_FILES[@]}"}; do
     section "context-$(basename -- "$f")" "$f"
   done
   printf '<instruction>\n%s\n</instruction>\n\n' "$INSTRUCTION"
