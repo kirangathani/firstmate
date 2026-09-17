@@ -276,7 +276,7 @@ The collector still calls `bin/fm-crew-state.sh` for a scout and carries its ans
 
 ### The captain-driving marker: one record, drawn the same way everywhere
 
-`state/<id>.monitor-exempt` is the captain's own signed record that he has taken a worker's window for himself (`bin/fm-monitor.sh --exempt`, cleared by `--unexempt`; `AGENTS.md` section 2).
+`state/<id>.monitor-exempt` is the captain's own signed record that he has taken a worker's window for himself (`bin/fm-monitor.sh --exempt`, cleared by `--unexempt`; `AGENTS.md` section 2), and a tmux client of his sitting in that window says the same thing with no record at all (`docs/captain-driven.md`).
 The collector states it as `captain_driving`, a plain boolean with no signature or reason attached - verifying the signature is `bin/fm-monitor.sh`'s job, and this read-only collector only reports whether the record exists or a tmux client of the captain's is currently sitting in the task's window.
 
 It means the same thing whatever kind of row carries it, so it is drawn the same way on every kind rather than being given a row-specific spelling: the fixed sentence `captain driving directly in the window`, appended to whatever detail the row already carries (or standing alone when that detail is otherwise empty, as on an idle secondmate's row).
