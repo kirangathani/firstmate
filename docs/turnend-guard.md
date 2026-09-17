@@ -48,7 +48,7 @@ The poll window comes from `FM_WATCH_POLL_SECS_INT`, whose owner is `bin/fm-clas
 
 Reason 5 is untouched by this: a pool at or below its floor still ends the turn with a refill whether or not a handover is under way, which matters because a handover is exactly when the pool has just spent a member.
 `bin/fm-guard.sh` needs no equivalent change.
-It reads beacon freshness through `fm_supervision_lib.sh`'s grace window rather than the watcher lock, and a handover's beacon is fresh, so it never raised this finding in the first place.
+It reads beacon freshness through `bin/fm-supervision-lib.sh`'s grace window rather than the watcher lock, and a handover's beacon is fresh, so it never raised this finding in the first place.
 
 It then requires this session to hold the home's SESSION lock, `state/.lock`, resolved by `bin/fm-session-lock-lib.sh` and distinct from the `state/.watch.lock` watcher singleton above.
 When another live session holds it, the guard exits 0 silently, mirroring the read-only advisory mode `bin/fm-guard.sh` already has: that session cannot arm a watcher at all, because `bin/fm-watch-arm.sh` declines from there, so a blind-turn alarm would be a hard stop-hook error on nearly every turn demanding supervision work it must not do.

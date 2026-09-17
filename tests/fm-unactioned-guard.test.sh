@@ -253,13 +253,15 @@ test_confirm_clears_a_resumed_crew() {
 # busy-but-quiet pane alone, and it re-surfaces such a pane on its own wedge
 # timer. This guard has no such backstop: clearing on that evidence would
 # silence an unanswered report for as long as the process happened to live.
+# Each case gets its OWN home, because the confirm verdict is cached per task
+# and fingerprint: reusing one home would serve the first case's verdict to the
+# rest and the control would pass or fail for the cache rather than the rule.
 test_executing_sources_do_not_clear_an_unanswered_report() {
-  local home id out src
-  id=leftover-proc-t9
-  home=$(make_home leftover "$id")
-  crew_reports "$home" "$id" "done: PR raised and green"
-
+  local home out src n=0
   for src in subprocess attach; do
+    n=$((n + 1))
+    home=$(make_home "leftover-$n" "leftover-proc-t$n")
+    crew_reports "$home" "leftover-proc-t$n" "done: PR raised and green"
     out=$(FM_TEST_CREW_STATE="state: working · source: $src · still executing" \
       run_guard "$home" "$INCIDENT_SECS")
     printf 'source under test: %s\n' "$src"
@@ -267,8 +269,11 @@ test_executing_sources_do_not_clear_an_unanswered_report() {
       "a report left unanswered was cleared by evidence that something is merely still executing"
   done
 
-  # The control: the same state from a source that DOES prove the agent moved
-  # on still clears, so this is a rule about the evidence, not about `working`.
+  # The control: the same `working` state from a source that DOES prove the
+  # agent moved on still clears, so this is a rule about the evidence rather
+  # than a blanket refusal to clear.
+  home=$(make_home leftover-control leftover-proc-ctl)
+  crew_reports "$home" leftover-proc-ctl "done: PR raised and green"
   out=$(FM_TEST_CREW_STATE='state: working · source: run-step · validating (running)' \
     run_guard "$home" "$INCIDENT_SECS")
   assert_not_contains "$out" "UNACTIONED DIRECT REPORT" \
