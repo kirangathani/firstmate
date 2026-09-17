@@ -2103,3 +2103,211 @@ test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm
 test_arm_records_its_own_arm_up_and_its_wake_handover
 test_a_dormant_arms_handover_is_recorded_apart_from_a_cold_arm
 test_an_unwritable_ledger_changes_nothing_the_arm_does
+
+# --- bin/fm-detach-lib.sh ----------------------------------------------------
+#
+# These live here rather than in a tests/fm-detach.test.sh of their own because
+# bin/fm-test.sh partitions the suite round-robin over the byte-ordered file
+# list, so ADDING a file moves most of the others to a different shard. Measured
+# 2026-09-17: one new file changed the shard of about 40 files per shard and put
+# this suite into shard 2, which then hit its 10-minute cap and was cancelled
+# (run 35243514223). The subject is the same either way - a process deliberately
+# outside the caller's process group, which is what the arm/watcher tests above
+# already assert from the other end.
+#
+# The suite baseline in tests/lib.sh exports FM_INLINE=1 so every other suite
+# runs these scripts in place; the fixture calls below drop it per invocation
+# with `env -u`, because the detaching itself is what they are about.
+
+detach_home() {
+  local tmproot home entry
+  tmproot=$(fm_test_tmproot fm-detach)
+  home="$tmproot/home"
+  mkdir -p "$home/state" "$home/bin"
+  # Every entry of the real bin/, symlinked at run time rather than named: a
+  # hand-maintained dependency list is a second copy that rots the moment a
+  # script gains a sibling, and it fails as an abort before the first command.
+  for entry in "$ROOT"/bin/*; do
+    ln -sf "$entry" "$home/bin/$(basename "$entry")"
+  done
+  cat > "$home/bin/fixture.sh" <<'FIXTURE'
+#!/usr/bin/env bash
+set -eu
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_HOME="${FM_HOME:?}"
+STATE="$FM_HOME/state"
+[ -z "${FIXTURE_READS_STDIN:-}" ] || FM_DETACH_STDIN=1
+. "$SCRIPT_DIR/fm-detach-lib.sh"
+fm_detach "$@"
+case "${1:-}" in
+  slow)   sleep 3; echo "merged: slow finished" ;;
+  crash)  echo "error: deliberate failure"; exit 7 ;;
+  signal) kill -TERM $$; sleep 5 ;;
+  stdin)  printf 'merged: read [%s]\n' "$(cat)" ;;
+  *)      echo "merged: https://example/pr/1" ;;
+esac
+FIXTURE
+  chmod +x "$home/bin/fixture.sh"
+  printf '%s\n' "$home"
+}
+
+detach_results() { cat "$1/state/.wake-results" 2>/dev/null || true; }
+
+await_detach_result() {
+  local home=$1 waited=0
+  while [ ! -s "$home/state/.wake-results" ]; do
+    [ "$waited" -lt 150 ] || return 1
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  return 0
+}
+
+test_every_script_sourcing_the_detach_library_also_calls_it() {
+  local script sourced=0
+  # Derived from the real tree, never a list. Sourcing the library and forgetting
+  # to call it is silent: the script keeps working, in the foreground, exactly as
+  # if none of this existed. bin/fm-merge-green.sh shipped that way in the branch
+  # that introduced the library, before this assertion existed.
+  for script in "$ROOT"/bin/*.sh; do
+    grep -qE '^[.] "[$]SCRIPT_DIR/fm-detach-lib[.]sh"' "$script" || continue
+    sourced=$((sourced + 1))
+    grep -q 'fm_detach "' "$script" \
+      || fail "$(basename "$script") sources the detach library but never calls fm_detach"
+  done
+  [ "$sourced" -gt 0 ] || fail "no script sources the detach library, so this guard asserts nothing"
+  pass "every script that sources the detach library also calls it"
+}
+
+test_a_detaching_dry_run_still_prints_its_report() {
+  local out
+  # A dry run merges nothing and steers nobody, so its report IS what firstmate
+  # reads; detaching it would put the one useful thing into a log.
+  out=$(env -u FM_INLINE FM_HOME="$ROOT" "$ROOT/bin/fm-merge-green.sh" --dry-run 2>&1 || true)
+  [ -n "$out" ] || fail "a dry run printed nothing, so it detached the report it exists to produce"
+  pass "a detaching command exempts its dry run and still prints the report"
+}
+
+test_a_plain_call_returns_before_detached_work_finishes() {
+  local home started ended elapsed
+  home=$(detach_home)
+  # The fixture's work sleeps three seconds. A caller back inside one did not wait.
+  started=$(date +%s%N)
+  env -u FM_INLINE FM_HOME="$home" "$home/bin/fixture.sh" slow
+  ended=$(date +%s%N)
+  elapsed=$(( (ended - started) / 1000000 ))
+  printf 'detach parent returned in %sms\n' "$elapsed"
+  [ "$elapsed" -lt 1000 ] || fail "the parent waited ${elapsed}ms for work it was supposed to hand off"
+  pass "a plain call returns before the detached work can finish"
+}
+
+test_a_detaching_parent_prints_nothing() {
+  local home out
+  home=$(detach_home)
+  out=$(env -u FM_INLINE FM_HOME="$home" "$home/bin/fixture.sh" ok 2>&1)
+  [ -z "$out" ] || fail "the detaching parent printed '$out' when it should print nothing"
+  pass "a detaching parent prints nothing for firstmate to read"
+}
+
+test_the_detached_child_finishes_and_records_its_verdict() {
+  local home
+  home=$(detach_home)
+  env -u FM_INLINE FM_HOME="$home" "$home/bin/fixture.sh" ok
+  await_detach_result "$home" || fail "no verdict ever reached the results channel"
+  assert_contains "$(detach_results "$home")" "merged: https://example/pr/1" \
+    "the child's own verdict line did not reach the results channel"
+  assert_not_contains "$(detach_results "$home")" "log:" \
+    "a successful verdict carried a log path, which is noise on the common outcome"
+  pass "the detached child finishes and records a verdict with no log path"
+}
+
+test_a_failing_detached_child_records_code_log_and_reason() {
+  local home out
+  home=$(detach_home)
+  env -u FM_INLINE FM_HOME="$home" "$home/bin/fixture.sh" crash
+  await_detach_result "$home" || fail "a failing child recorded nothing, which reads as success"
+  out=$(detach_results "$home")
+  assert_contains "$out" "exit 7" "the failure line did not carry the exit code"
+  assert_contains "$out" "log:" "the failure line did not carry its log path"
+  assert_contains "$out" "error: deliberate failure" \
+    "the failure line did not inline the reason, so firstmate would need a read call"
+  pass "a failing detached child records its code, its log and its reason"
+}
+
+test_a_signalled_detached_child_still_records_a_line() {
+  local home
+  home=$(detach_home)
+  env -u FM_INLINE FM_HOME="$home" "$home/bin/fixture.sh" signal
+  await_detach_result "$home" || fail "a signalled child recorded nothing, which reads as success"
+  assert_contains "$(detach_results "$home")" "exit " \
+    "a child that died on a signal left no exit code behind"
+  pass "a detached child killed by a signal still records a line"
+}
+
+test_the_detached_child_survives_a_kill_of_its_parents_group() {
+  local home leader
+  home=$(detach_home)
+  # The parent leads its own process group so the group can be signalled without
+  # touching the runner. If the child were still in that group - the pre-setsid
+  # shape that cost the watcher 107 kills - this would take it too.
+  setsid env -u FM_INLINE FM_HOME="$home" "$home/bin/fixture.sh" slow &
+  leader=$!
+  sleep 0.5
+  kill -TERM -"$leader" 2>/dev/null || true
+  await_detach_result "$home" || fail "killing the parent's process group killed the detached work"
+  assert_contains "$(detach_results "$home")" "merged: slow finished" \
+    "the detached work did not run to completion after its parent's group was killed"
+  pass "the detached child survives a kill of its parent's process group"
+}
+
+test_the_inline_marker_runs_the_detachable_body_in_place() {
+  local home out
+  home=$(detach_home)
+  out=$(FM_INLINE=1 FM_HOME="$home" "$home/bin/fixture.sh" ok 2>&1)
+  assert_contains "$out" "merged: https://example/pr/1" \
+    "the inline marker did not run the body in the caller's own process"
+  [ ! -s "$home/state/.wake-results" ] \
+    || fail "an inline run recorded a results line, which belongs to the detached child alone"
+  pass "the inline marker runs the body in place and records nothing"
+}
+
+test_stdin_reaches_the_detached_child_when_the_script_asks() {
+  local home
+  home=$(detach_home)
+  printf 'piped instruction\n' \
+    | env -u FM_INLINE FIXTURE_READS_STDIN=1 FM_HOME="$home" "$home/bin/fixture.sh" stdin
+  await_detach_result "$home" || fail "the stdin-reading child recorded nothing"
+  assert_contains "$(detach_results "$home")" "merged: read [piped instruction]" \
+    "the piped input did not survive the handover to the detached child"
+  pass "stdin reaches the detached child when the script asks for it"
+}
+
+test_detach_logs_are_pruned_to_the_configured_limit() {
+  local home keep count i
+  home=$(detach_home)
+  keep=3
+  mkdir -p "$home/state/.detach"
+  for i in $(seq 1 $((keep * 3))); do
+    : > "$home/state/.detach/stale-$i.log"
+  done
+  env -u FM_INLINE FM_DETACH_LOG_KEEP="$keep" FM_HOME="$home" "$home/bin/fixture.sh" ok
+  await_detach_result "$home" || fail "the pruning run recorded no verdict"
+  count=$(find "$home/state/.detach" -maxdepth 1 -type f -name '*.log' | wc -l | tr -d '[:space:]')
+  # The ceiling is whatever was configured for this run plus the run's own log,
+  # which is written after pruning - never a number that happened to work.
+  [ "$count" -le "$((keep + 1))" ] \
+    || fail "pruning left $count logs with the limit set to $keep"
+  pass "detach logs are pruned to the configured limit"
+}
+
+test_every_script_sourcing_the_detach_library_also_calls_it
+test_a_detaching_dry_run_still_prints_its_report
+test_a_plain_call_returns_before_detached_work_finishes
+test_a_detaching_parent_prints_nothing
+test_the_detached_child_finishes_and_records_its_verdict
+test_a_failing_detached_child_records_code_log_and_reason
+test_a_signalled_detached_child_still_records_a_line
+test_the_detached_child_survives_a_kill_of_its_parents_group
+test_the_inline_marker_runs_the_detachable_body_in_place
+test_stdin_reaches_the_detached_child_when_the_script_asks
+test_detach_logs_are_pruned_to_the_configured_limit
