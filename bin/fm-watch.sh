@@ -34,6 +34,10 @@
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
+#   signal: fm-lock ...    this home's session lock was lost mid-cycle and could
+#                          not be re-acquired, or another live session now holds
+#                          it; supervision stood down and the line names the
+#                          exact command that resolves it
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -899,6 +903,15 @@ fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 # inherits the schedule already on disk.
 [ -e "$STATE/.last-nm-stall" ] || touch "$STATE/.last-nm-stall"
 
+# Whether the per-poll session-lock check below applies to this watcher, decided
+# once here. A watcher that does not own the home at startup never had ownership
+# to lose: bin/fm-watch-arm.sh armed it with its own announced notice, and the
+# blind-turn alarm already covers that home. Arming the check for it would turn
+# that announced state into a stand-down on the first poll. Ownership can only be
+# LOST, so the check exists to notice a loss, and only an owner can suffer one.
+LOCK_ENFORCED=
+[ "$(fm_session_lock_ownership "$STATE")" = owned ] && LOCK_ENFORCED=1
+
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -908,6 +921,42 @@ while :; do
   # and doubling every wake.
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ]; then
     exit 0
+  fi
+
+  # Session-lock ownership, re-checked every cycle beside the self-eviction check
+  # above. It costs one file read while ownership holds, and at most a short
+  # ancestry walk, because ownership can only be lost by the session process
+  # dying, a rival session acquiring or taking over, or a hand edit.
+  # `missing` is recoverable: this watcher is the owner's descendant, so
+  # bin/fm-lock.sh re-records the owner's own pid. That re-acquire can only fail
+  # when no live session sits above this watcher at all, which means the session
+  # that armed it is gone and there is nothing left to supervise for.
+  # `other` is never recoverable here: a watcher whose session no longer owns
+  # this home must stop supervising it. The arm's gate would have refused to
+  # start it, so refusing to continue mid-life is that same rule, one poll later.
+  # Both stand-downs leave the reason in the durable queue, which is what carries
+  # it to the next session start.
+  if [ -n "$LOCK_ENFORCED" ]; then
+    case "$(fm_session_lock_ownership "$STATE")" in
+      owned) ;;
+      missing)
+        # FM_STATE_OVERRIDE is passed explicitly because bin/fm-lock.sh resolves
+        # its state dir from that variable and FM_HOME only, and never from an
+        # ambient STATE, so a bare call could acquire against a different home
+        # than the one this watcher just judged.
+        if ! FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1; then
+          reason="signal: fm-lock - this home's session lock is gone and no live session sits above this watcher, so supervision has stopped - run bin/fm-session-start.sh from the session that should own this home"
+          fm_wake_append signal fm-lock "$reason" || exit 1
+          wake "$reason"
+        fi
+        ;;
+      other)
+        fm_session_lock_read "$STATE" || true
+        reason="signal: fm-lock - another live session now holds this home ($(fm_session_lock_describe_holder "$FM_SESSION_LOCK_PID" "$FM_SESSION_LOCK_TICKS")), so this watcher stood down - run bin/fm-lock.sh status, then $(fm_session_lock_remedy)"
+        fm_wake_append signal fm-lock "$reason" || exit 1
+        wake "$reason"
+        ;;
+    esac
   fi
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
