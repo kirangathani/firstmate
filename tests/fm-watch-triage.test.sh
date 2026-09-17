@@ -459,6 +459,46 @@ test_actionable_signal_surfaced() {
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
 }
 
+# THE RECORDED PR FACT FOLLOWS THE TASK. A task shipping several PRs under one
+# id reports each one on the same status log, and until the watcher recorded it
+# the `pr=` in state/<id>.meta only moved when somebody ran bin/fm-pr-check.sh by
+# hand. Measured 2026-09-16 on fm-lock-lineage-fix-l8 (seven PRs): the record
+# still named the merged PR 95 hours after the worker reported PR 96, so the
+# fleet view drew a merged PR beside a task that had moved on, and the merge poll
+# armed for PR 95 kept reporting it merged at every sweep.
+#
+# The wake itself is unchanged and still surfaces; this asserts the fact and the
+# poll moved WITH it, and that the automatic record did not ack the report - the
+# captain-facing relay is what the unactioned alarm exists to force.
+test_reported_pr_moves_the_recorded_fact_and_the_poll() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case reported-pr); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  status_file="$state/task.status"
+  # No worktree= recorded, so nothing here reaches gh at all: the PR head is
+  # simply unknown, which is already the state bin/fm-pr-check.sh records under.
+  fm_write_meta "$state/task.meta" "window=sess:fm-task" "kind=ship" "mode=direct-PR"
+  printf 'pr=https://github.com/o/r/pull/95\n' >> "$state/task.meta"
+  printf 'working: shipping step 3\n' > "$status_file"
+  printf '%s' "$(seen_sig "$status_file")" > "$state/.seen-task_status"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  printf 'done: PR https://github.com/o/r/pull/96 (step 4 of 7)\n' >> "$status_file"
+  wait_for_exit "$pid" 150 || fail "watcher did not surface the reported PR signal"
+  grep -F "pr=https://github.com/o/r/pull/96" "$state/task.meta" >/dev/null \
+    || fail "the recorded PR did not follow the worker's done: PR line"
+  grep -F "pr=https://github.com/o/r/pull/95" "$state/task.meta" >/dev/null \
+    && fail "the previous PR stayed on the record beside the one the task moved on to"
+  [ -e "$state/task.check.sh" ] || fail "the merge poll was not armed for the reported PR"
+  grep -F "pull/96" "$state/task.pr-poll" >/dev/null \
+    || fail "the merge poll does not watch the PR the task moved on to"
+  grep -F "pull/95" "$state/task.pr-poll" >/dev/null \
+    && fail "the previous PR's merge poll was left firing beside the new one"
+  [ ! -e "$state/task.acted" ] \
+    || fail "the automatic record acked the report and silenced the captain-facing relay"
+  pass "a reported PR moves the recorded fact and the merge poll with it"
+}
+
 test_terminal_stale_surfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
   dir=$(make_case terminal-stale); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1555,6 +1595,7 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
+test_reported_pr_moves_the_recorded_fact_and_the_poll
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_stale_limit_dialog_surfaced_despite_provably_working

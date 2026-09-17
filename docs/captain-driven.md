@@ -45,9 +45,10 @@ A worker firstmate is not watching has to be a blind spot the captain can see, n
 
 ## What keeps running
 
-The task's PR merge poll keeps running.
-That poll is about the PR, not the pane: a PR the captain merges himself still leaves the clone to refresh and still leaves sibling branches measuring their checks against a base that has moved.
-Silencing it would trade a wake firstmate cannot act on for a landing nobody notices.
+The task's PR merge poll keeps running, and so does the recording of which PR the task is on.
+Both are about the PR, not the pane: a PR the captain merges himself still leaves the clone to refresh and still leaves sibling branches measuring their checks against a base that has moved.
+Silencing the poll would trade a wake firstmate cannot act on for a landing nobody notices.
+So `bin/fm-watch.sh`'s skip still calls `record_reported_pr` on the way past, because that recorder is otherwise reached only from the surfaced branch: a worker the captain drove to a PR would keep the previous PR on record with its poll armed for a PR nobody is watching, which is the fault that recorder exists to close.
 
 The review-question sweep (`bin/fm-nm-questions.sh`) also keeps running, for the same shape of reason: those questions come from the validation pipeline's own reviewer rather than from the pane, they are answered through `axi answer` rather than by steering the worker, and they route to the captain either way.
 
