@@ -176,6 +176,7 @@ fm_arm_pool_has_room() {
 fm_arm_pool_below_floor() {
   [ "$(fm_arm_pool_count)" -lt "$FM_ARM_POOL_FLOOR" ]
 }
+<<<<<<< HEAD
 
 # The refill that costs no model call: a command that has finished its real job,
 # and whose result the model does not need to act on, either exits now because the
@@ -198,3 +199,5 @@ fm_arm_pool_refill_or_exit() {
   [ -x "$arm" ] || exit 0
   exec "$arm" --dormant
 }
+=======
+>>>>>>> origin/main
