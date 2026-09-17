@@ -466,16 +466,14 @@ report_attached() {
   announce "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
-# How many ears are still ASLEEP once this handover is done, which is the N the
-# wake line reports. fm_arm_pool_count counts every live member of this session,
-# and up to two of them are not lurking: this arm, whose record survives until
-# its EXIT trap fires a moment from now, and the member that has just taken the
-# singleton and is the watcher rather than a waiter.
-pool_lurking_count() {  # <successor-taken 0|1>
+# The members of this session's pool OTHER than this arm. fm_arm_pool_count
+# counts every live one, and this arm is still among them: its record survives
+# until its EXIT trap fires a moment from now.
+pool_others_count() {
   local n
   n=$(fm_arm_pool_count 2>/dev/null) || n=0
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
-  n=$(( n - 1 - $1 ))
+  n=$(( n - 1 ))
   [ "$n" -ge 0 ] || n=0
   printf '%s' "$n"
 }
@@ -658,18 +656,25 @@ wake_words() {
 # pool" is a fact this arm checked rather than a hope, and N is counted after
 # that handover so it names the ears actually left asleep.
 report_pool_wake() {
-  local out=$1 words
+  local out=$1 words others
+  # COUNTED, never waited for. A member takes the free lock within DORMANT_POLL
+  # but then forks and confirms a watcher, which is seconds; the captain's budget
+  # between the watcher firing and the model reading it is a fraction of one, so
+  # an arm that stopped to watch that confirmation would spend the whole budget
+  # proving what the pool's own membership already says.
+  others=$(pool_others_count)
   # Named by its own slot, the same number the Monitor running it is labelled
   # with, so a wake in the captain's chat is traceable to the arm that produced
   # it instead of to one of six identical lines.
   printf 'dormant arm %s: ' "${FM_ARM_POOL_SLOT:-?}"
-  if wait_for_healthy_successor; then
-    printf 'watcher exited, firstmate woken, watcher replenished from the pool, %s dormant watchers lurking' "$(pool_lurking_count 1)"
+  if [ "$others" -ge 1 ]; then
+    # One of those others becomes the watcher; the rest keep lurking.
+    printf 'watcher exited, firstmate woken, watcher replenished from the pool, %s dormant watchers lurking' "$((others - 1))"
   else
     # Not the captain's line, deliberately: an empty pool means the next wake
     # has no taker waiting, and a line that says it was replenished would be the
     # one thing worse than a line nobody needed.
-    printf 'watcher exited, firstmate woken, NO watcher left in the pool, %s dormant watchers lurking - re-arm' "$(pool_lurking_count 0)"
+    printf 'watcher exited, firstmate woken, NO watcher left in the pool, 0 dormant watchers lurking - re-arm'
   fi
   words=$(wake_words "$out")
   [ -z "$words" ] || printf ' - %s' "$words"

@@ -140,7 +140,19 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # layer below can see the same crew twice and surface it. Past it, that layer has
 # had its chance and did not fire - the usual cause being that no watcher was
 # running when the turn ended - so the marker is surfaced instead of absorbed.
-TURN_END_QUIET_SECS=${FM_TURN_END_QUIET_SECS:-$((SIGNAL_GRACE + POLL * 2))}
+# Both inputs may be FRACTIONAL in a test home (FM_POLL=0.2), and a fraction is a
+# hard arithmetic error rather than a rounding, so each is floored to an integer
+# with the production default as its fallback before it is added. Without that
+# floor the whole assignment failed and left the variable unset, which under
+# set -u took the watcher down on its next read.
+turn_end_quiet_int() {  # <value> <fallback>
+  local v=${1%%.*}
+  case "$v" in
+    ''|*[!0-9]*) printf '%s' "$2" ;;
+    *) printf '%s' "$v" ;;
+  esac
+}
+TURN_END_QUIET_SECS=${FM_TURN_END_QUIET_SECS:-$(( $(turn_end_quiet_int "$SIGNAL_GRACE" 30) + $(turn_end_quiet_int "$POLL" 15) * 2 ))}
 case "$TURN_END_QUIET_SECS" in ''|*[!0-9]*) TURN_END_QUIET_SECS=60 ;; esac
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
