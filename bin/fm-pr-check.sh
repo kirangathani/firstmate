@@ -6,7 +6,15 @@
 # That poll's header owns when an armed poll wakes firstmate, including the
 # standing merge rule's extra requirement that a task still reporting work in
 # progress does not wake anything on green.
-# Usage: fm-pr-check.sh <task-id> <pr-url>
+#
+# --no-ack records and arms WITHOUT the ack below. It exists for the one caller
+# that is not firstmate: bin/fm-watch.sh records a PR the moment a worker's own
+# `done: PR <url>` line reaches the status log, so the recorded fact follows the
+# task rather than waiting for a hand-run. That automatic record discharges the
+# MACHINE half of what the report owes - the fact and the merge poll - but not
+# the captain-facing half, so it must not silence the unactioned alarm that is
+# what makes firstmate relay the PR at all.
+# Usage: fm-pr-check.sh [--no-ack] <task-id> <pr-url>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,6 +27,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
+NO_ACK=0
+if [ "${1-}" = --no-ack ]; then
+  NO_ACK=1
+  shift
+fi
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
   exit 2
@@ -49,11 +62,25 @@ fi
 
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
+PR_STATE=
 if [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
+  PR_STATE=$(cd "$WT" && gh pr view "$URL" --json state -q .state 2>/dev/null) || PR_STATE=
+fi
+
+# WARN, NEVER REFUSE, ON A PR THAT IS ALREADY MERGED. Recording a merged PR is
+# legitimate on the ordinary path - bin/fm-pr-merge.sh records before it merges,
+# and a re-run after landing is a supported no-op - so this cannot be a refusal
+# without breaking both. It is still worth saying, because it is the other end of
+# the defect this task fixed: a multi-PR task whose recorded fact lags behind its
+# worker leaves the viewer drawing a merged PR beside a task that has moved on,
+# and leaves a merge poll firing `merged` forever at a PR nobody is waiting for.
+if [ "$PR_STATE" = MERGED ]; then
+  echo "warning: $URL is already merged; recording it arms a merge poll that will report it merged on every sweep" >&2
+  echo "warning: if this task has moved on to a later PR, record THAT one instead - the recorded PR is what the fleet view draws and what the merge poll watches" >&2
 fi
 
 # REFUSE A PR THAT DOES NOT CARRY THE WORK ITS TASK HAS ALREADY COMMITTED.
@@ -159,5 +186,6 @@ printf 'armed: state/%s.check.sh\n' "$ID"
 
 # Recording the PR and arming the merge poll IS the action a PR-ready `done:`
 # owes, so ack it here (bin/fm-ack-lib.sh) instead of leaving the task alarming
-# while it legitimately waits on review or merge.
-fm_ack_record "$STATE" "$ID" "fm-pr-check $URL" || true
+# while it legitimately waits on review or merge. --no-ack is the one exception,
+# and this file's header owns why.
+[ "$NO_ACK" -eq 1 ] || fm_ack_record "$STATE" "$ID" "fm-pr-check $URL" || true

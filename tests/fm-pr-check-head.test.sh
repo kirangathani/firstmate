@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Behavior tests for bin/fm-pr-check.sh's unpushed-work refusal.
+# Behavior tests for bin/fm-pr-check.sh's unpushed-work refusal, for the
+# already-merged warning beside it, and for the multi-PR case that made the
+# recorded fact follow the task: re-recording must MOVE the `pr=` and re-arm the
+# merge poll against the new PR, retiring the previous PR's poll rather than
+# leaving it firing `merged` at a PR nobody is waiting for.
 #
 # Recording a PR-ready task must REFUSE when the PR does not carry work the task
 # has already committed. Measured 2026-09-16 on fm-brief-attach-ownership-a3: the
@@ -55,6 +59,7 @@ make_head_case() {
 #!/usr/bin/env bash
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:?}" ;;
+  *" state "*) [ -z "${FM_TEST_GH_STATE:-}" ] || printf '%s\n' "$FM_TEST_GH_STATE" ;;
 esac
 SH
   chmod +x "$fakebin/gh"
@@ -186,8 +191,87 @@ test_a_rerun_of_an_already_recorded_pr_is_left_alone() {
   pass "fm-pr-check.sh: a re-run of an already-recorded PR is left to teardown's gate"
 }
 
+# THE MULTI-PR CASE. One task ships several PRs under one id
+# (fm-lock-lineage-fix-l8 ships seven), and every landing-and-next-PR cycle
+# re-opens the same window: the recorded fact is what the fleet view draws and
+# what the merge poll watches, so a fact left on the previous PR draws a merged
+# PR beside a task that has moved on AND leaves a poll reporting that PR merged
+# on every sweep. Re-recording must move BOTH, and the previous PR's poll must be
+# gone rather than firing beside the new one.
+test_recording_a_second_pr_moves_the_fact_and_the_poll() {
+  local dir tip status
+  read -r dir tip < <(make_head_case second-pr)
+
+  set +e
+  FM_TEST_GH_HEAD="$tip" run_check "$dir" task-a "https://github.com/o/r/pull/1" >/dev/null 2>&1
+  status=$?
+  set -e
+  expect_code 0 "$status" "the first PR must be recorded"
+  assert_grep "pull/1" "$dir/home/state/task-a.pr-poll" \
+    "the first recording must arm a poll watching the first PR"
+
+  set +e
+  FM_TEST_GH_HEAD="$tip" run_check "$dir" task-a "https://github.com/o/r/pull/2" >/dev/null 2>&1
+  status=$?
+  set -e
+  expect_code 0 "$status" "a later PR reported by the same task must be recorded"
+  assert_grep "pr=https://github.com/o/r/pull/2" "$dir/home/state/task-a.meta" \
+    "the recorded PR must move to the PR the task has moved on to"
+  assert_no_grep "pr=https://github.com/o/r/pull/1" "$dir/home/state/task-a.meta" \
+    "the previous PR must not stay on the record beside the new one"
+  assert_present "$dir/home/state/task-a.check.sh" "the merge poll must stay armed"
+  assert_grep "pull/2" "$dir/home/state/task-a.pr-poll" \
+    "the merge poll must watch the new PR"
+  assert_no_grep "pull/1" "$dir/home/state/task-a.pr-poll" \
+    "the previous PR's poll must be retired, not left firing beside the new one"
+  pass "fm-pr-check.sh: a second PR moves the recorded fact and the merge poll"
+}
+
+# WARN, NEVER REFUSE. bin/fm-pr-merge.sh records before it merges and a re-run
+# after landing is a supported no-op, so a refusal would break both paths.
+test_warns_when_recording_an_already_merged_pr() {
+  local dir tip out status
+  read -r dir tip < <(make_head_case merged)
+  set +e
+  out=$(FM_TEST_GH_HEAD="$tip" FM_TEST_GH_STATE=MERGED \
+    run_check "$dir" task-a "https://github.com/o/r/pull/1" 2>&1)
+  status=$?
+  set -e
+  expect_code 0 "$status" "an already-merged PR must be recorded, not refused"
+  case "$out" in
+    *"is already merged"*) ;;
+    *) fail "recording a merged PR must warn; got: $out" ;;
+  esac
+  assert_grep "pr=https://github.com/o/r/pull/1" "$dir/home/state/task-a.meta" \
+    "the warning must not stop the PR being recorded"
+  pass "fm-pr-check.sh: warns, without refusing, when the PR is already merged"
+}
+
+# The automatic recorder (bin/fm-watch.sh) discharges the MACHINE half of what a
+# PR report owes. Acking there would take the captain-facing relay into silence
+# with nothing left to re-arm it, so --no-ack must leave the alarm standing.
+test_no_ack_records_without_silencing_the_alarm() {
+  local dir tip status
+  read -r dir tip < <(make_head_case no-ack)
+  printf 'done: PR https://github.com/o/r/pull/1\n' > "$dir/home/state/task-a.status"
+  set +e
+  FM_TEST_GH_HEAD="$tip" \
+    run_check "$dir" --no-ack task-a "https://github.com/o/r/pull/1" >/dev/null 2>&1
+  status=$?
+  set -e
+  expect_code 0 "$status" "--no-ack must still record the PR"
+  assert_grep "pr=https://github.com/o/r/pull/1" "$dir/home/state/task-a.meta" \
+    "--no-ack must record the PR exactly as the acking path does"
+  assert_absent "$dir/home/state/task-a.acted" \
+    "--no-ack must leave the unactioned alarm standing for the captain-facing relay"
+  pass "fm-pr-check.sh: --no-ack records the PR without acking the report"
+}
+
 test_refuses_a_pr_that_predates_the_tasks_commit
 test_records_a_pr_at_the_branch_tip
 test_records_a_pr_ahead_of_the_tasks_own_copy
 test_does_not_compare_an_unrelated_pr_head
 test_a_rerun_of_an_already_recorded_pr_is_left_alone
+test_recording_a_second_pr_moves_the_fact_and_the_poll
+test_warns_when_recording_an_already_merged_pr
+test_no_ack_records_without_silencing_the_alarm

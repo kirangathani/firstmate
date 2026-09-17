@@ -561,6 +561,47 @@ signal_payload() {  # <seen-file> <status-file> <current sig>
   fi
 }
 
+# THE RECORDED PR FACT FOLLOWS THE TASK, not a hand-run command.
+#
+# A worker's `done: PR <url>` line is the signal that this task's PR has changed.
+# Until this existed, only a hand-run bin/fm-pr-check.sh moved the `pr=` in
+# state/<id>.meta, so a task shipping several PRs under one id kept the PREVIOUS
+# PR's fact for as long as nobody noticed. Measured 2026-09-16 on
+# fm-lock-lineage-fix-l8, which ships seven PRs: it had reported PR 96 hours
+# earlier while the record still named PR 95, so the fleet view drew a merged
+# PR 95 beside a task that had moved on, and the merge poll armed for PR 95 kept
+# reporting it merged on every sweep - armed, and watching nothing.
+#
+# bin/fm-pr-check.sh stays the ONE writer of that fact and the one owner of
+# arming the poll; this only calls it at the moment the evidence arrives. Because
+# that script rewrites state/<id>.check.sh and its sidecar in place, re-recording
+# also retires the previous PR's poll rather than leaving a second one firing.
+#
+# It reads the STATUS FILE rather than only the bytes just appended, so a report
+# whose own wake was missed still converges the next time that task writes
+# anything, and it compares against the recorded fact first, so the ordinary case
+# - a worker re-reporting the PR already on record - costs one grep and no call.
+#
+# --no-ack is deliberate: this discharges the machine half of what a PR report
+# owes, never the captain-facing relay (bin/fm-pr-check.sh's header).
+record_reported_pr() {  # <status-file>
+  local f=$1 id url meta out
+  case "$f" in *.status) ;; *) return 0 ;; esac
+  url=$(grep -oE 'done: PR https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*' "$f" 2>/dev/null | tail -1)
+  [ -n "$url" ] || return 0
+  url=${url#done: PR }
+  id=$(signal_id_of_file "$f")
+  meta="$STATE/$id.meta"
+  [ -f "$meta" ] || return 0
+  ! grep -qxF "pr=$url" "$meta" 2>/dev/null || return 0
+  if fm_bounded_available 2>/dev/null; then
+    out=$(fm_bounded_run "$CHECK_TIMEOUT" "$SCRIPT_DIR/fm-pr-check.sh" --no-ack "$id" "$url" 2>&1)
+  else
+    out=$("$SCRIPT_DIR/fm-pr-check.sh" --no-ack "$id" "$url" 2>&1)
+  fi
+  triage_log "recorded reported PR for $id: $url${out:+ | $(printf '%s' "$out" | tr '\n' ' ')}"
+}
+
 run_check_process() {
   local c=$1
   shift
@@ -1057,6 +1098,7 @@ EOF
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
         mark_surfaced "$f"
+        record_reported_pr "$f"
       done <<EOF
 $pending
 EOF
