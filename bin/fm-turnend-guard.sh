@@ -114,6 +114,26 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# --- latency telemetry (never affects the block decision below) --------------
+#
+# The turn boundary. Paired with the pre-tool hook's tool events, it is what
+# makes model thinking time observable without parsing a harness transcript:
+# the gap between two hook events contains no command execution.
+# bin/fm-latency-lib.sh owns the ledger and docs/configuration.md's
+# "Self-latency ledger" section the reading.
+#
+# Placed here deliberately. After the loop guard, so a forced continuation's
+# second Stop is not counted as a second turn; after the primary scope test, so
+# a crewmate worktree - this file is tracked into every one of them - records
+# nothing; and before the predicate, so an idle primary's turns are still timed.
+# It writes one line to a private ledger, swallows every failure, and never
+# exits, so it cannot change whether this guard blocks.
+if [ -r "$SCRIPT_DIR/fm-latency-lib.sh" ]; then
+  # shellcheck source=bin/fm-latency-lib.sh
+  . "$SCRIPT_DIR/fm-latency-lib.sh" 2>/dev/null || true
+  command -v fm_latency_turn_event >/dev/null 2>&1 && { fm_latency_turn_event || true; }
+fi
+
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"

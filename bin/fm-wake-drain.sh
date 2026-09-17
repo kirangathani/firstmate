@@ -6,6 +6,14 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# Self-timed, and the source of the ledger's wake rows. This script runs at the
+# top of every wake-handling turn, so its own wall time IS "how long draining
+# the queue takes" and the rows it consumes are the only place the enqueue
+# epochs are ever seen. bin/fm-latency-lib.sh owns the ledger and can never
+# fail this command.
+# shellcheck source=bin/fm-latency-lib.sh
+. "$SCRIPT_DIR/fm-latency-lib.sh"
+fm_latency_cmd_start fm-wake-drain.sh
 
 DRAIN_TMP=
 DRAIN_LOCK_HELD=false
@@ -35,6 +43,12 @@ cleanup() {
   if [ "$DRAIN_LOCK_HELD" = true ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   fi
+  # Measured from inside this handler rather than from a second EXIT trap,
+  # because replacing this one is what would lose the queue restore above, and
+  # measured LAST so nothing in the ledger can ever delay that restore or the
+  # lock release. A drain that fails or is interrupted is still recorded, with
+  # its real exit status.
+  fm_latency_cmd_end "$status"
   exit "$status"
 }
 
@@ -75,5 +89,10 @@ DRAIN_LOCK_HELD=false
 # Raw output and queue deletion are authoritative. Everything below is
 # best-effort and cannot restore, duplicate, hide, or fail the consumed rows.
 (fm_wake_print_annotations "$RAW_ROWS") || true
+# The ledger's wake rows. Written HERE, outside the print-before-delete gap,
+# and not inside it: $RAW_ROWS already holds every enqueue epoch - it was
+# assigned before the delete - so the facts are retained without adding a
+# failure point to the at-least-once no-loss boundary above.
+(printf '%s\n' "$RAW_ROWS" | fm_latency_wake_rows) || true
 assert_watcher_liveness
 exit 0
