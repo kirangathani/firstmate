@@ -336,30 +336,37 @@ export FM_STATE_OVERRIDE='$state'
 }
 
 test_every_remedy_offers_the_take_over_as_its_second_half() {
-  local dir state rival out
+  local dir state other out
   # One owner for that string (fm_session_lock_remedy), so the acquire refusal
   # and status cannot drift apart or offer a command the reader cannot run: the
   # remedy carries the holder's pid because take-over refuses every other pid.
-  # The rival is a real version-named harness rather than a bare sleep, because
-  # the remedy is printed only for a holder that is LIVE and harness-shaped; a
-  # sleep reads as stale and never reaches it.
+  #
+  # The fake ps is what makes this measure the code rather than the machine, and
+  # it is needed on BOTH surfaces. The remedy is printed only for a holder that
+  # is live and harness-shaped, and the acquire refusal is reached only once the
+  # acquiring side has found a harness of its own - on a box with no session
+  # above the suite, as in CI, acquire instead exits early with "cannot locate
+  # harness process in ancestry" and never gets as far as the refusal. This is
+  # the same seam test_lock_refusal_describes_the_holder_and_names_a_remedy uses,
+  # for the same reason.
   dir=$(make_case lock-remedy-take-over)
   state="$dir/state"
-  rival=$(start_versioned_harness "$dir/rival" "true")
-  wait_for_chain "$dir/rival" || { stop_harness "$rival"; fail "the rival harness never started"; }
-  write_lock_for "$state" "$rival"
+  install_fake_ps_claude "$dir/fakebin"
+  other=$(start_other_session)
+  printf '%s\n' "$other" > "$state/.lock"
 
-  out=$(FM_STATE_OVERRIDE="$state" "$LOCK_CLI" status 2>&1)
-  assert_contains "$out" "bin/fm-lock.sh take-over $rival" \
+  out=$(PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$LOCK_CLI" status 2>&1)
+  assert_contains "$out" "bin/fm-lock.sh take-over $other" \
     "status must offer the take-over naming the holder it would displace"
   assert_contains "$out" "captain only" "the remedy must mark the take-over as the captain's"
   assert_contains "$out" "bin/fm-session-start.sh" "the remedy must keep naming the ordinary way out first"
 
-  out=$(FM_STATE_OVERRIDE="$state" "$LOCK_CLI" 2>&1 || true)
-  assert_contains "$out" "bin/fm-lock.sh take-over $rival" \
+  out=$(PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$LOCK_CLI" 2>&1 || true)
+  assert_contains "$out" "bin/fm-lock.sh take-over $other" \
     "the acquire refusal must offer the same take-over, naming the same holder"
 
-  stop_harness "$rival"
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
   pass "fm-lock.sh: the remedy offers the captain-only take-over, naming the holder it would displace"
 }
 
