@@ -54,6 +54,38 @@ pinned_ready() {
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
 }
 
+# bin/fm-lint.sh takes a box-wide lock for the whole pass, on a path outside
+# every worktree by design. Left to default here, this suite would serialise
+# against a developer's real lint pass on the same machine and against every
+# other fixture run below, so the cases would be measuring the machine rather
+# than the code. Every case therefore runs against a lock path of its own.
+FM_LINT_LOCK_FILE="$(fm_test_tmproot fm-lint-lock)/lock"
+export FM_LINT_LOCK_FILE
+
+# fm_lint_fake_shellcheck <dir>: drop a fake `shellcheck` into <dir> and echo
+# that directory, for cases about how the pass is SCHEDULED rather than what it
+# finds. It reports the pinned version so fm-lint.sh's pin check passes, emits
+# no findings, and records an in/out marker per invocation when FAKE_SC_LOG is
+# set, which is what makes two passes' overlap observable. FAKE_SC_SLEEP widens
+# each invocation's window.
+fm_lint_fake_shellcheck() {
+  local fake=$1
+  mkdir -p "$fake"
+  cat > "$fake/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: %s\nlicense: none\n' "$FAKE_SC_VERSION"
+  exit 0
+fi
+[ -z "${FAKE_SC_LOG:-}" ] || printf '%s in\n' "$FAKE_SC_TAG" >> "$FAKE_SC_LOG"
+[ "${FAKE_SC_SLEEP:-0}" = 0 ] || sleep "$FAKE_SC_SLEEP"
+[ -z "${FAKE_SC_LOG:-}" ] || printf '%s out\n' "$FAKE_SC_TAG" >> "$FAKE_SC_LOG"
+exit 0
+SH
+  chmod +x "$fake/shellcheck"
+  printf '%s\n' "$fake"
+}
+
 # fm_lint_fixture <dir>: build a miniature repo with the canonical layout
 # (bin/*.sh, bin/backends/*.sh, tests/*.sh) and a REAL source graph, so the
 # sharding and closure logic is exercised rather than mocked. fm-lint.sh
@@ -656,7 +688,11 @@ test_concurrent_runs_publish_a_whole_cache_not_a_spliced_one() {
   while [ "$i" -lt "$n" ]; do
     i=$((i + 1))
     (
-      FM_LINT_CACHE_DIR="$tmp/shared" "$tmp/r$i/bin/fm-lint.sh" >"$tmp/out.$i" 2>&1
+      # A lock path per run, because THIS case is about genuinely simultaneous
+      # writers to one cache directory: the shared box lock would serialise them
+      # and the splice it guards against could never arise.
+      FM_LINT_LOCK_FILE="$tmp/lock.$i" \
+        FM_LINT_CACHE_DIR="$tmp/shared" "$tmp/r$i/bin/fm-lint.sh" >"$tmp/out.$i" 2>&1
       printf '%s\n' "$?" > "$tmp/rc.$i"
     ) &
     pids="$pids $!"
@@ -842,6 +878,92 @@ SH
   pass "fm-lint.sh passes a clean fixture"
 }
 
+test_a_second_pass_waits_for_the_first() {
+  if ! command -v flock >/dev/null 2>&1; then
+    pass "SKIP (no flock on this host): box-wide serialisation check"
+    return
+  fi
+  # A full pass is 20+ concurrent ShellCheck processes at up to 1.9 GB each, so
+  # two passes at once have taken the box down and cost the fleet its
+  # supervision (2026-09-17). The lock must hold for the whole pass, which shows
+  # up as the two runs' analyser invocations forming two contiguous blocks in
+  # the shared log rather than interleaving.
+  local tmp fx fake log a b changes
+  tmp=$(fm_test_tmproot fm-lint-serial)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  fake=$(fm_lint_fake_shellcheck "$tmp/fakebin")
+  log="$tmp/log"
+  : >"$log"
+  (
+    PATH="$fake:$PATH" FAKE_SC_VERSION="$REQUIRED" FAKE_SC_LOG="$log" FAKE_SC_TAG=A \
+      FAKE_SC_SLEEP=0.2 FM_LINT_LOCK_FILE="$tmp/lock" FM_LINT_NO_CACHE=1 \
+      "$fx/bin/fm-lint.sh" >/dev/null 2>&1
+  ) &
+  a=$!
+  (
+    PATH="$fake:$PATH" FAKE_SC_VERSION="$REQUIRED" FAKE_SC_LOG="$log" FAKE_SC_TAG=B \
+      FAKE_SC_SLEEP=0.2 FM_LINT_LOCK_FILE="$tmp/lock" FM_LINT_NO_CACHE=1 \
+      "$fx/bin/fm-lint.sh" >/dev/null 2>&1
+  ) &
+  b=$!
+  wait "$a" || true
+  wait "$b" || true
+  grep -q '^A in$' "$log" || fail "the first pass never ran the analyser at all"
+  grep -q '^B in$' "$log" || fail "the second pass never ran the analyser at all"
+  # Two blocks means exactly one change of owner across the whole log.
+  changes=$(awk '{ if ($1 != prev) n++; prev = $1 } END { print n - 1 }' "$log")
+  [ "$changes" -eq 1 ] || \
+    fail "two passes ran the analyser at the same time instead of waiting for the lock:"$'\n'"$(cat "$log")"
+  pass "a second lint pass waits for the first instead of doubling the load"
+}
+
+test_available_memory_caps_the_shard_count() {
+  # Cores say how many shards could run, memory says how many may: the cap is
+  # (MemAvailable / 2) / MEM_PER_JOB_KB, and it may only ever lower the count.
+  # Both figures are injected, so the verdict does not depend on the machine
+  # running the suite.
+  local tmp fx fake out
+  tmp=$(fm_test_tmproot fm-lint-mem)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  fake=$(fm_lint_fake_shellcheck "$tmp/fakebin")
+  out=$(PATH="$fake:$PATH" FAKE_SC_VERSION="$REQUIRED" FM_LINT_NO_CACHE=1 \
+    FM_LINT_LOCK_FILE="$tmp/lock" FM_LINT_JOBS=4 FM_LINT_MEM_AVAILABLE_KB=1000000 \
+    "$fx/bin/fm-lint.sh" 2>&1) || fail "the memory-capped run did not reach a verdict"$'\n'"$out"
+  assert_contains "$out" "in 1 shards" \
+    "a nearly full box did not cap the pass to a single shard"
+  out=$(PATH="$fake:$PATH" FAKE_SC_VERSION="$REQUIRED" FM_LINT_NO_CACHE=1 \
+    FM_LINT_LOCK_FILE="$tmp/lock" FM_LINT_JOBS=4 FM_LINT_MEM_AVAILABLE_KB=64000000 \
+    "$fx/bin/fm-lint.sh" 2>&1) || fail "the uncapped run did not reach a verdict"$'\n'"$out"
+  assert_contains "$out" "in 4 shards" \
+    "an idle box was capped below the shard count it was given"
+  pass "the shard count is capped from available memory, not just cores"
+}
+
+test_verify_parity_runs_under_the_box_lock() {
+  if ! command -v flock >/dev/null 2>&1; then
+    pass "SKIP (no flock on this host): re-entrant lock check"
+    return
+  fi
+  # --verify-parity and the --whole-set fallback re-enter this script. If a
+  # re-entrant run took the lock again it would wait on the lock its own parent
+  # holds, and the gate would hang for ever rather than fail. `timeout` is what
+  # turns that hang into a verdict.
+  local tmp fx fake out rc
+  tmp=$(fm_test_tmproot fm-lint-reentrant)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  fake=$(fm_lint_fake_shellcheck "$tmp/fakebin")
+  rc=0
+  out=$(PATH="$fake:$PATH" FAKE_SC_VERSION="$REQUIRED" FM_LINT_LOCK_FILE="$tmp/lock" \
+    timeout 120 "$fx/bin/fm-lint.sh" --verify-parity 2>&1) || rc=$?
+  [ "$rc" -ne 124 ] || fail "--verify-parity deadlocked against the lock its own parent holds"
+  [ "$rc" -eq 0 ] || fail "--verify-parity did not confirm parity under the lock (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "PARITY OK" "--verify-parity did not confirm parity under the lock"
+  pass "a re-entrant run holds the lock already taken instead of waiting on itself"
+}
+
 test_owner_exists_and_executable
 test_owner_defines_canonical_set
 test_ci_invokes_the_owner
@@ -869,3 +991,6 @@ test_one_worktree_warms_the_next
 test_cache_dir_override_and_disable_survive_the_shared_default
 test_publication_never_uses_a_fixed_staging_name
 test_concurrent_runs_publish_a_whole_cache_not_a_spliced_one
+test_a_second_pass_waits_for_the_first
+test_available_memory_caps_the_shard_count
+test_verify_parity_runs_under_the_box_lock
