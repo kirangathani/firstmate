@@ -119,6 +119,39 @@ fm_fakebin() {
   printf '%s\n' "$fakebin"
 }
 
+# fm_fake_tmux_clients: install a `tmux` into <fakebin> that answers only
+# `list-clients`, from the file named by FM_FAKE_TMUX_CLIENTS. This is the
+# attached-client reading behind fm_captain_attached
+# (bin/fm-captain-driven-lib.sh), and a suite that exercises anything reading
+# that predicate MUST install it: without it the predicate forks the real tmux
+# and its verdict is whatever window the operator happens to be looking at.
+# A file rather than a variable so a case can change who is attached while a
+# long-running subject (a watcher) is already going.
+#
+# Its rows are the real bytes tmux 3.4 printed for exactly the -F the library
+# asks for, captured from the live fleet on 2026-09-17:
+#   1789646192<TAB>firstmate:fm-nm-upstream-port-test-gate-g2<TAB>firstmate:2<TAB>@2
+fm_fake_tmux_clients() {  # <fakebin>
+  cat > "$1/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "list-clients" ]; then
+  if [ -n "${FM_FAKE_TMUX_CLIENTS:-}" ] && [ -f "$FM_FAKE_TMUX_CLIENTS" ]; then
+    cat "$FM_FAKE_TMUX_CLIENTS"
+  fi
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$1/tmux"
+}
+
+# fm_fake_tmux_client_row: write one attached-client row viewing <target>, whose
+# last keystroke was at <epoch>, into <file>.
+fm_fake_tmux_client_row() {  # <file> <target> <epoch>
+  printf '%s\t%s\t%s\t%s\n' "$3" "$2" "sess:9" "@9" > "$1"
+}
+
 fm_fake_exit0() {
   local fakebin=$1 tool
   shift

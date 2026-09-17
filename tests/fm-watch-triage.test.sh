@@ -1452,6 +1452,96 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+# --- a task the captain is driving is not watched at all ---------------------
+# 2026-09-17: the captain sat in a worker's window, the watcher fired a stale
+# wake on the quiet pane anyway, and firstmate put that worker's own question
+# back to the captain who was already answering it. docs/captain-driven.md owns
+# the contract; these cases hold the watcher to it from both wake paths, and
+# hold it to giving the task back when he leaves.
+
+# One attached-client row in the exact shape tmux 3.4 printed on the live fleet
+# for the -F bin/fm-captain-driven-lib.sh asks for (captured 2026-09-17):
+#   1789646192<TAB>firstmate:fm-nm-upstream-port-test-gate-g2<TAB>firstmate:2<TAB>@2
+write_client_row() {  # <file> <window-name-target> <last-keystroke-epoch>
+  printf '%s\t%s\t%s\t%s\n' "$3" "$2" "sess:9" "@9" > "$1"
+}
+
+test_captain_driven_signal_absorbed() {
+  local dir state fakebin out clients pid
+  dir=$(make_case captain-driven-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; clients="$dir/clients.txt"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task" "kind=ship"
+  # A verb that would ordinarily surface at once, so the absorb can only be the
+  # captain-driven skip and never the no-verb path.
+  printf 'needs-decision: which shape?\n' > "$state/task.status"
+  write_client_row "$clients" "sess:fm-task" "$(date +%s)"
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_CLIENTS="$clients"
+  pid=$!
+  if ! wait_cycle "$pid" "$state" 30; then
+    reap "$pid"; fail "watcher exited for a captain-driven task's status append: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a captain-driven task's status append printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a captain-driven task's status append enqueued a durable wake record"
+  [ -s "$state/.seen-task_status" ] || fail "the skipped signal did not advance its suppressor, so it would replay as a flood on resumption"
+  reap "$pid"
+  pass "a captain-driven task's status append wakes nobody and leaves nothing to replay"
+}
+
+test_captain_driven_stale_pane_absorbed() {
+  local dir state fakebin out clients capture_file window key pane_hash sig pid
+  dir=$(make_case captain-driven-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; clients="$dir/clients.txt"; capture_file="$dir/pane.txt"
+  window="sess:fm-done"
+  printf 'finished, awaiting review' > "$capture_file"
+  fm_write_meta "$state/done.meta" "window=$window" "kind=ship"
+  printf 'done: PR https://example.test/pr/3\n' > "$state/done.status"
+  sig=$(seen_sig "$state/done.status"); printf '%s' "$sig" > "$state/.seen-done_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, awaiting review")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A wedge timer left over from before he sat down: it must not fire while the
+  # window is his, and must not be sitting there ready to fire the moment it is
+  # not. test_terminal_stale_surfaced is the same fixture with nobody attached.
+  printf '1\n' > "$state/.stale-since-$key"
+  write_client_row "$clients" "$window" "$(date +%s)"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CLIENTS="$clients" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_cycle "$pid" "$state" 40; then
+    reap "$pid"; fail "watcher exited for a captain-driven task's quiet pane: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a captain-driven task's quiet pane printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a captain-driven task's quiet pane enqueued a durable wake record"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the skipped window kept a wedge timer that would fire the moment the captain left"
+  reap "$pid"
+  pass "a captain-driven task's quiet pane wakes nobody and its wedge timer is stood down"
+}
+
+test_supervision_resumes_when_the_captain_leaves() {
+  local dir state fakebin out drain_out clients pid
+  dir=$(make_case captain-leaves); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; clients="$dir/clients.txt"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task" "kind=ship"
+  printf 'working: driving this by hand\n' > "$state/task.status"
+  write_client_row "$clients" "sess:fm-task" "$(date +%s)"
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_CLIENTS="$clients"
+  pid=$!
+  if ! wait_cycle "$pid" "$state" 30; then
+    reap "$pid"; fail "watcher exited while the captain was driving: $(cat "$out")"
+  fi
+  # He leaves the window, and the worker then says something worth a wake.
+  : > "$clients"
+  printf 'done: PR https://example.test/pr/9\n' >> "$state/task.status"
+  wait_for_exit "$pid" 60 || { reap "$pid"; fail "supervision did not resume after the captain left the window"; }
+  grep -F "signal: $state/task.status" "$out" >/dev/null \
+    || fail "the first append after the captain left did not surface: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the resumed signal failed"
+  grep "$(printf '\tsignal\ttask.status\t')" "$drain_out" >/dev/null || fail "the resumed signal was not queued"
+  pass "supervision resumes by itself once the captain leaves the window, with no command"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1484,6 +1574,9 @@ test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
+test_captain_driven_signal_absorbed
+test_captain_driven_stale_pane_absorbed
+test_supervision_resumes_when_the_captain_leaves
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
