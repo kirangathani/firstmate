@@ -94,6 +94,8 @@ fm_refuse_if_gate_agent
 . "$SCRIPT_DIR/fm-spawned-at-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-detach-lib.sh
+. "$SCRIPT_DIR/fm-detach-lib.sh"
 
 usage() {
   cat <<'EOF'

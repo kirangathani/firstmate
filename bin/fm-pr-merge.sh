@@ -491,6 +491,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-attribution-lib.sh"
 # shellcheck source=bin/fm-merge-additive-lib.sh
 . "$SCRIPT_DIR/fm-merge-additive-lib.sh"
+# shellcheck source=bin/fm-detach-lib.sh
+. "$SCRIPT_DIR/fm-detach-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -506,6 +508,11 @@ URL=$FM_PR_URL
 PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
+# Detached from here on. The arguments are validated above so a malformed call
+# still fails in the caller's own turn; everything below is gate work, which is
+# the entire measured cost of this command (16.7 s median, 391 s max, and 20 to
+# 35 minutes when bin/fm-assert-tests-kept.sh does a full run).
+fm_detach "$@"
 shift 2
 [ "${1:-}" = "--" ] && shift
 
@@ -1387,4 +1394,21 @@ attestation_banner "MERGING NOW"
 base_reverify_banner "MERGING NOW"
 ci_skip_zero_check_banner "MERGING NOW"
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+merge_rc=0
+gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@" || merge_rc=$?
+
+# THE CLONE REFRESH BELONGS TO THE MERGE, not to a second firstmate turn.
+# A landed PR leaves this home's clone behind the remote, and every in-flight
+# branch in that project measured against a base that no longer exists. That
+# refresh used to be a separate call firstmate made after reading the merge
+# result; detached, there is no such turn to make it in, so it happens here.
+# FM_INLINE keeps it part of THIS command rather than forking a second detached
+# copy, so its output lands in this log and its verdict in this results line.
+# Teardown is deliberately NOT chained here: its refusal test is about unlanded
+# work rather than unfinished intent, so a worker whose first PR has just merged
+# has a clean tree and would be torn down mid-series (bin/fm-teardown.sh's
+# header owns that test).
+if [ "$merge_rc" -eq 0 ] && [ -n "${PROJ_NAME:-}" ]; then
+  FM_INLINE=1 "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ_NAME" || true
+fi
+exit "$merge_rc"
