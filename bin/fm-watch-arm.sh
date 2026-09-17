@@ -600,7 +600,28 @@ dormant_reenter() {
 # announced rather than silently allowed, and names the command that claims the
 # lock.
 case "$(fm_session_lock_ownership "$STATE")" in
-  owned) ;;
+  owned)
+    # Converge the lock onto this session's OWN harness process. The gate has
+    # just established that this session owns the home, so the only thing this
+    # can change is WHICH process in this session's lineage the lock names, and
+    # the only pid it can ever write is one found by walking up from here. It
+    # cannot take a home from a rival: a live holder outside this ancestry still
+    # refuses.
+    #
+    # For a lock that already names this session's harness it is a no-op refresh.
+    # For a lock written before the finder learned to record the session's own
+    # process - one that names an ANCESTOR, typically the interactive session a
+    # background one was forked from, or the Claude Code daemon between them - it
+    # is the migration, so every running home converges at its first arm after
+    # this lands, with no operator step, and stops depending on a process Claude
+    # Code restarts on every auto-update - the 2026-09-15 lock-loss incident.
+    #
+    # A failure is deliberately silent. Ownership is already intact by the
+    # verdict above, so an unconvergeable home loses only the improvement; a
+    # session whose harness process this library cannot recognise and that sets
+    # no marker would otherwise print the finder's error on every single arm.
+    FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || true
+    ;;
   other)
     echo "watcher: read-only - another firstmate session holds this home's session lock; not arming"
     exit 0
