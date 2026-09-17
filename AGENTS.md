@@ -126,6 +126,7 @@ state/               volatile runtime signals; gitignored
   .unactioned-*      short-lived unactioned-alarm confirm cache; never touch; removed by teardown
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
+  .watch-arm.log     the handover lines a dormant arm does not print, so a pool wake costs exactly one notification (size-capped, diagnostic only, safe to delete); docs/watcher-continuity.md owns the contract
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .latency-last .latency-turn  last harness hook event and last turn end, in epoch ms, so the latency ledger can measure the gap between them; bin/fm-latency-lib.sh owns both
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
