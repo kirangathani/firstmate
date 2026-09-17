@@ -654,9 +654,9 @@ wake_words() {
 # to arrive as five notifications - this line, the same records again from the
 # drain below, the successor's start, a stray attach-follow arm's line, and the
 # harness's own stream-end notice - of which only this one said anything.
-# The successor is CONFIRMED before the line claims it, so "replenished from the
-# pool" is a fact this arm checked rather than a hope, and N is counted after
-# that handover so it names the ears actually left asleep.
+# "Replenished from the pool" is read off the pool's own membership: this arm is
+# still a member until its EXIT trap fires, so every OTHER live member is one
+# that can take the watch, and N is the rest of them once one does.
 report_pool_wake() {
   local out=$1 words others
   # COUNTED, never waited for. A member takes the free lock within DORMANT_POLL
