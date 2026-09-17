@@ -277,7 +277,7 @@ The collector still calls `bin/fm-crew-state.sh` for a scout and carries its ans
 ### The captain-driving marker: one record, drawn the same way everywhere
 
 `state/<id>.monitor-exempt` is the captain's own signed record that he has taken a worker's window for himself (`bin/fm-monitor.sh --exempt`, cleared by `--unexempt`; `AGENTS.md` section 2).
-The collector states its presence as `captain_driving`, a plain boolean with no signature or reason attached - verifying the signature is `bin/fm-monitor.sh`'s job, and this read-only collector only reports whether the record exists.
+The collector states it as `captain_driving`, a plain boolean with no signature or reason attached - verifying the signature is `bin/fm-monitor.sh`'s job, and this read-only collector only reports whether the record exists or a tmux client of the captain's is currently sitting in the task's window.
 
 It means the same thing whatever kind of row carries it, so it is drawn the same way on every kind rather than being given a row-specific spelling: the fixed sentence `captain driving directly in the window`, appended to whatever detail the row already carries (or standing alone when that detail is otherwise empty, as on an idle secondmate's row).
 A scout's row therefore reads `no pipeline view as this is a scout agent · captain driving directly in the window`, and a ship row carries the same sentence among its head's other agent-wide notes - authority, `worker gone`, `unreadable: ...` - because a pipeline row has no single "detail" field the way a compact row does.
@@ -545,7 +545,7 @@ Guarantees the renderer is entitled to rely on:
   One `no-mistakes axi run` is one run, so a run that fails or is cancelled and is restarted from building is the next number; the auto-fix rounds INSIDE a single run are not, and the view already states those as `auto-fix n/3`.
   It is `null` - never `0` - for a worker that runs no pipeline, for a branch with no run yet, and when the database could not be read, and the renderer then draws nothing rather than a placeholder.
   It is an additive field: a `v2` consumer that does not know it is unaffected, so it carries no version bump.
-- `captain_driving` is on every agent, of either kind, and is true exactly when `state/<id>.monitor-exempt` exists for that task - the captain's own signed record that he has taken that worker's window for himself (`bin/fm-monitor.sh --exempt`, removed by `--unexempt`; AGENTS.md section 2).
+- `captain_driving` is on every agent, of either kind, and is true when the captain has taken that worker's window for himself by either route: `state/<id>.monitor-exempt` exists for that task (`bin/fm-monitor.sh --exempt`, removed by `--unexempt`; AGENTS.md section 2), or a tmux client is viewing its window with a recent keystroke (`docs/captain-driven.md`).
   The collector reads PRESENCE alone; verifying the signature inside it is `bin/fm-monitor.sh`'s own job, not a read-only collector's.
   It is an additive field for the same reason `run_number` is: a `v2` consumer that does not know it is unaffected, so it carries no version bump.
 - Every entry of `agents` has a recorded endpoint that resolved at collection time, unless `--include-dead` was passed.
