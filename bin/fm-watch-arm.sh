@@ -170,8 +170,8 @@
 # captain's budget between the watcher firing and the model reading is a fraction
 # of a second, and confirming a successor costs seconds. Handover lines go to
 # state/.watch-arm.log instead of stdout (announce/arm_log below), and the drain
-# at exit still runs but prints nothing, because every record it holds is the
-# same payload already on that line (report_pool_wake).
+# at exit still runs, ahead of that line and printing nothing, because every
+# record it holds is the same payload the line already carries (report_pool_wake).
 # The session-lock gate's two advisories take the same route, and for the same
 # reason: six members would otherwise announce one fact six times, and the
 # session-start digest already reports which session owns this home once.
@@ -705,6 +705,14 @@ wake_words() {
 # that can take the watch, and N is the rest of them once one does.
 report_pool_wake() {
   local out=$1 words others
+  # BEFORE the line, not after. The queue still drains exactly as it did - the
+  # records reach the durable pending log and the queue file is emptied - but its
+  # output is NOT printed, because every record it holds carries the payload the
+  # line below already carries, and printing it put the same event in front of
+  # the model a second time. Doing it first is what makes that line true: it says
+  # the wake has been carried out, and a model that acts on it the instant it
+  # arrives finds nothing left to drain. It costs a lock and a rename.
+  drain_wake_queue_on_exit >/dev/null 2>&1 || true
   # COUNTED, never waited for. A member takes the free lock within DORMANT_POLL
   # but then forks and confirms a watcher, which is seconds; the captain's budget
   # between the watcher firing and the model reading it is a fraction of one, so
@@ -727,11 +735,6 @@ report_pool_wake() {
   words=$(wake_words "$out")
   [ -z "$words" ] || printf ' - %s' "$words"
   printf '\n'
-  # The queue still drains - the records reach the durable pending log and the
-  # queue file is emptied exactly as before - but its output is NOT printed. Every
-  # record it holds carries the same payload already on the line above, so
-  # printing it put the same event in front of the model a second time.
-  drain_wake_queue_on_exit >/dev/null 2>&1 || true
 }
 
 watch_output_reason_type() {
