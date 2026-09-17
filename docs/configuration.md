@@ -240,7 +240,7 @@ Until a repository holds the secret, or while a PR carries no line, the review s
 
 ## The supersession attestation secret (FM_SUPERSESSION_SECRET)
 
-A captain-approved test-assertion supersession lives in `data/supersessions/<project>.md`, which is captain-private and gitignored, so `bin/fm-pr-merge.sh` can honour it and CI cannot see it at all.
+An approved test-assertion supersession lives in `data/supersessions/<project>.md`, which is private to this home and gitignored, so `bin/fm-pr-merge.sh` can honour it and CI cannot see it at all.
 That asymmetry makes the required `Base assertions re-verified` check unpassable for an approved override: it re-runs the same base assertions on a runner, reports the same findings, and stays red with nothing the branch can push to fix it, because the branch is not what is wrong.
 That no longer blocks the merge - `bin/fm-pr-merge.sh` excuses that check from the local run that read the approval, so nothing here is a prerequisite for landing one.
 What this secret buys is the PR's own check going green as well, for a public record of the approval or for branch protection enforced outside firstmate's merge path.

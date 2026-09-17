@@ -258,7 +258,7 @@ brief_skip_state() {
 # Sets SETUP_REGION, RULE_REGION, DOD_REGION.
 render_ship_regions() {
   local mode=$1 local_skip=$2 ci_skip=$3
-  local pr_order ci_section setup2 rule1 dod
+  local pr_order done_head done_loop round_order ci_section setup2 rule1 dod
 
   # The definition-of-done sentence and the waiver handshake must not each give
   # their own PR order. The handshake is the only authority when it applies: the
@@ -270,9 +270,43 @@ render_ship_regions() {
   if [ "$ci_skip" = on ]; then
     pr_order='push your branch, then follow the CI waiver handshake below for when and how to open the PR.'
   else
-    # shellcheck disable=SC2016 # {url} and the backticks are literal brief text, not expansions.
-    pr_order='push your branch and open a PR with `gh-axi`, then append `done: PR {url}` to the status file and stop.'
+    # shellcheck disable=SC2016 # the backticks are literal brief text, not expansions.
+    pr_order='push your branch and open a PR with `gh-axi`.'
   fi
+
+  # DONE_HEAD and DONE_LOOP state the definition of done as a LOOP over every
+  # change to the branch, not as a first-pass sequence. Measured 2026-09-16 on
+  # fm-brief-attach-ownership-a3: the worker made its fix commit 0b16c1b3,
+  # reported `done: PR .../97`, and stopped with the PR's head still at the
+  # pre-fix 8b2da7d5, so firstmate read a red that was CI's verdict on the
+  # version BEFORE the fix. That worker did exactly what the brief said. The two
+  # defects being fixed here are that completion was defined as COMMITTED, and
+  # that the push instruction was welded to opening the PR - an event that
+  # happens once, so a later fix round was addressed by nothing but "append
+  # done: and stop". The remedy is to define done as PUSHED AND VERIFIED and to
+  # make bin/fm-pr-green.sh's verdict the required evidence, rather than leaving
+  # the worker to judge for itself whether it is finished. That command reads the
+  # PR's OWN head commit, so it is exactly the read that catches an unpushed fix;
+  # a stale red is worse than no result, because it looks like a genuine failure
+  # and invites debugging code that is already fixed.
+  done_head='The task is complete only when your work is PUSHED and the PR carrying it is green. A commit is not done.'
+
+  # The loop's own push order defers to the waiver handshake for the same reason
+  # the DOD sentence does: on a waived task a later push needs its fresh line in
+  # the PR body BEFORE it starts CI, so a bare "commit, push" here would state a
+  # second, wrong order for exactly the rounds this loop exists to address.
+  if [ "$ci_skip" = on ]; then
+    round_order='commit, take the handshake step 5 below (it puts a fresh waiver line in the PR body, then pushes)'
+  else
+    round_order='commit, push'
+  fi
+  done_loop=$(cat <<EOF
+Every time you change this branch after the PR exists - a fix round, a review finding, anything - the same loop applies, not just the first time: $round_order, then confirm with ONE read of \`$PR_GREEN_CMD $ID {url}\`, never a polling loop.
+That read is the evidence behind your report: when it exits 0 it prints \`green: {url} {sha} {n} checks\`, and only then do you append \`done: PR {url} checks green at {sha}\` quoting the exact sha it printed, and stop.
+Reporting done on an unpushed commit publishes a verdict about the version BEFORE your change, which reads as a real failure of code that is already fixed and sends somebody to debug it.
+**An \`infrastructure:\` line is not a red and is never re-run.** It means a check never delivered a verdict about your branch at all - it timed out, was cancelled, could not run, or died having written nothing. Append \`blocked: infrastructure - {the infrastructure line verbatim}\` to the status file and stop. Do not re-run that check and do not push an empty commit to retrigger it.
+EOF
+)
 
   # The waiver handshake, appended to whichever definition of done applies. Its
   # order is load-bearing: the signature covers the head commit, so it cannot
@@ -290,7 +324,8 @@ It is computed from a secret only the captain's machine holds, and it covers you
 3. Append \`blocked: ci-waiver needed for {full-40-char-sha} on {owner}/{repo}\` to the status file and stop. Firstmate replies with a single line.
    Write that sentence exactly, with the full 40-character commit and the owner/repo: firstmate issues the waiver straight from this line, and a reworded or abbreviated one cannot be read.
 4. When that line arrives, append \`resolved: ci waiver received\`, then open the PR with \`gh-axi\` and put the line VERBATIM on its own line in the PR body.
-5. If you push again afterwards, the head commit changes and the old line no longer covers it. Repeat steps 2-4 for a fresh one before that push can be waived.
+5. Every later change needs its own line, and in a DIFFERENT order from the first round, because the PR already exists: commit, read the new head with \`git rev-parse HEAD\`, ask for a fresh line the same way, replace the old line in the PR body with it, and only THEN push.
+   The body has to carry the new line before the push starts CI; editing it afterwards does not re-run anything, so a line added after the push waives nothing.
 Never invent, guess, edit, reformat, or reuse a line for another commit.
 A wrong or stale line is not a failure - CI simply runs in full - so there is nothing to be gained by improvising one.
 EOF
@@ -306,8 +341,9 @@ EOF
       dod=$(cat <<EOF
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, $pr_order
+$done_head
+When it is first implemented and committed, $pr_order
+$done_loop
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 $ci_section
 EOF
@@ -337,8 +373,9 @@ EOF
 This task was dispatched with **local testing skipped**: the captain switched the local validation pipeline off for it.
 That skip is enforced, not requested - the \`no-mistakes\` on your PATH is a shim that explains the skip and exits without running anything.
 Nothing is broken. Do not look for another copy of it, do not install one, do not change your PATH, and do not touch the shared daemon.
-The task is complete only when committed on your branch.
-When it is implemented and committed, $pr_order
+$done_head
+When it is first implemented and committed, $pr_order
+$done_loop
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 $ci_section
 EOF
