@@ -18,6 +18,17 @@
 #                               nothing. This is the one entry point the
 #                               OpenCode and Pi adapters use instead of
 #                               reimplementing the walk in JavaScript.
+#        fm-lock.sh take-over <pid>
+#                               displace the recorded holder <pid> and record
+#                               THIS session instead, printing what it
+#                               displaced. CAPTAIN ONLY - by rule, not by
+#                               anything this script can check, because nothing
+#                               here can tell a captain from an agent
+#                               (AGENTS.md section 3). It refuses any pid but
+#                               the one currently recorded, so it cannot be run
+#                               blind: the holder has to have been read first,
+#                               and a holder that changed since that read is a
+#                               different situation than the one decided about.
 # Any other argument prints that usage and exits 2, creating nothing: the verb
 # list used to be a two-way test, so `fm-lock.sh --help` ATTEMPTED AN ACQUISITION
 # and made state/ on the way (run for real during the 2026-09-15 lock-loss
@@ -58,11 +69,37 @@ case "${1:-}" in
       # A live holder this session is not descended from is the case an operator
       # runs `status` to resolve, so name the way out of it here too.
       if ! fm_pid_ancestry_contains "$FM_SESSION_LOCK_PID"; then
-        echo "lock: $(fm_session_lock_remedy)"
+        echo "lock: $(fm_session_lock_remedy "$FM_SESSION_LOCK_PID")"
       fi
     else
       echo "lock: stale - $(fm_session_lock_describe_holder "$FM_SESSION_LOCK_PID" "$FM_SESSION_LOCK_TICKS")"
     fi
+    exit 0
+    ;;
+  take-over)
+    # Writes nothing and creates nothing unless every check below passes, so a
+    # take-over aimed at the wrong holder leaves the lock exactly as it was.
+    want=${2:-}
+    case "$want" in
+      ''|*[!0-9]*)
+        echo "error: take-over needs the pid of the recorded holder, as bin/fm-lock.sh status prints it" >&2
+        exit 2
+        ;;
+    esac
+    if [ ! -f "$LOCK" ] || ! fm_session_lock_read "$STATE"; then
+      echo "error: no readable lock to take over; run bin/fm-lock.sh to acquire it" >&2
+      exit 1
+    fi
+    if [ "$FM_SESSION_LOCK_PID" != "$want" ]; then
+      echo "error: pid $want does not hold this lock; the recorded holder is $(fm_session_lock_describe_holder "$FM_SESSION_LOCK_PID" "$FM_SESSION_LOCK_TICKS")" >&2
+      exit 1
+    fi
+    # Described BEFORE the write, because afterwards the holder it names is no
+    # longer what the file says and the line would describe nothing.
+    displaced=$(fm_session_lock_describe_holder "$FM_SESSION_LOCK_PID" "$FM_SESSION_LOCK_TICKS")
+    me=$(fm_session_harness_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+    fm_session_lock_write "$STATE" "$me" || { echo "error: could not write the lock" >&2; exit 1; }
+    echo "lock taken over: harness pid $me (displaced $displaced)"
     exit 0
     ;;
   '') ;;
@@ -98,7 +135,7 @@ if fm_session_lock_read "$STATE"; then
       inherited=$FM_SESSION_LOCK_PID
     else
       echo "error: another live firstmate session holds the lock: $(fm_session_lock_describe_holder "$FM_SESSION_LOCK_PID" "$FM_SESSION_LOCK_TICKS")" >&2
-      echo "error: operate read-only until resolved - $(fm_session_lock_remedy)" >&2
+      echo "error: operate read-only until resolved - $(fm_session_lock_remedy "$FM_SESSION_LOCK_PID")" >&2
       exit 1
     fi
   fi

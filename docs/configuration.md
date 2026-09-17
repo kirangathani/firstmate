@@ -105,6 +105,7 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 ## Status-line composition (config/statusline-base / FM_STATUSLINE_BASE)
 
 `bin/fm-statusline.sh` prints one line saying whether this session is in control of the current home's fleet, and Claude Code runs it through the `statusLine` setting in the tracked `.claude/settings.json`.
+It stays silent about the fleet in a linked worktree that carries no secondmate marker, which is every crewmate and scout task worktree, so a recycled slot's leftover gitignored `state/` directory can no longer make a worker pane report on a home that does not exist.
 Because that file is tracked and shared, it would otherwise replace whatever status line the operator already runs globally, in every worktree of this repo.
 So the script composes instead of replacing: it runs an optional base status-line command first and prints the fleet line beneath that command's output.
 

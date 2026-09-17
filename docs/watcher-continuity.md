@@ -82,8 +82,42 @@ Each record includes arm and watcher PIDs, start and end timestamps, exit code a
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 
+A DORMANT arm - a pool member - announces nothing on stdout except its own wake, and sends its `watcher: started ...` and `watcher: attached ...` lines to `state/.watch-arm.log` instead.
+That file is size-capped through `FM_WATCH_ARM_LOG_MAX_BYTES` and `FM_WATCH_ARM_LOG_KEEP_LINES`, records each line against the arm's pid and pool slot, and is diagnostic only; nothing reads it to make a supervision decision.
+The reason is that each line a member prints under Claude Code's Monitor becomes a notification the model must read, so what a member prints is what a wake costs.
+Measured in the captain's home on 2026-09-17, one crewmate status append produced five: the holder's wake line, the same records again from its drain at exit, the successor's `watcher: started ...`, an ordinary attach-follow arm's `watcher: attached ...` down the successor chain, and the harness's own stream-end notice for the finished Monitor.
+Four of those are now gone.
+The fifth cannot be: the stream-end notice is emitted by the harness for every finished Monitor and there is nothing on this side to suppress it, so one wake line plus that notice is the floor this design can reach.
+A plain arm keeps every line it ever printed, including the raw drained records, and must not be armed alongside a live pool - it follows the successor chain and announces every handover, which is the fourth notification above.
+Its wake line is `dormant arm <S>: watcher exited, firstmate woken, watcher replenished from the pool, <N> dormant watchers lurking - <the crewmate's words>`, where `<S>` is the member's own pool slot and `<N>` is how many members are still asleep once the handover is done.
+`bin/fm-arm-pool-lib.sh` owns the slot numbering: members are numbered 1 to the pool size, the number is passed in as `--dormant <S>` so the Monitor's description and the arm's own line agree, and a freed number is the next one handed out so a refill reuses it.
+
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
+
+## Watcher-layer ownership: re-checked every poll
+
+The arm's gate above reads ownership once, at launch.
+That was the whole of it until 2026-09-15, when a home's session lock moved under a running watcher and the watcher kept supervising a fleet its session no longer controlled, because nothing looked again after the arm.
+`bin/fm-watch.sh` now re-reads ownership at the top of every cycle, beside the self-eviction check, and acts on the three verdicts `bin/fm-session-lock-lib.sh` already defines.
+
+- `owned`: continue, which is the whole cost on the healthy path - one file read, and a short ancestry walk only when the holder is not this process.
+- `missing`: attempt the sanctioned re-acquire, `bin/fm-lock.sh` itself, which is idempotent for the owner.
+  The watcher is the owner's descendant, so a successful re-acquire re-records the owner's own pid and supervision continues with nothing surfaced.
+  That re-acquire can only fail when no live session sits above this watcher at all, which means the session that armed it is gone; the watcher then queues one reason naming `bin/fm-session-start.sh` and stands down.
+- `other`: never recoverable here, because a watcher whose session no longer owns this home must stop supervising it.
+  It queues one reason carrying the shared holder description and the remedy, naming `bin/fm-lock.sh status`, and stands down.
+
+Both stand-downs go through `fm_wake_append` before exiting, so the reason waits in `state/.wake-queue` for the next session start rather than depending on anyone reading a pane.
+Detection latency is one poll, `FM_POLL`, default 15 seconds.
+
+The check arms only for a watcher that read `owned` at startup, recorded once before the loop.
+A watcher that did not own the home when it started never had ownership to lose: the arm armed it deliberately, with its own announced notice, and the blind-turn alarm already covers that home.
+Arming the check for it would turn that announced state into a stand-down on the first poll, which is why the condition is ownership LOST rather than ownership absent.
+
+Because a `missing` verdict now leads to a re-acquire and possibly a stand-down, a reader that lands inside a lock write matters in a way it did not before.
+`fm_session_lock_write` therefore writes a temporary file in the same directory and renames it over `state/.lock`, so every reader sees the old holder or the new one and never a half-written file.
+It is the only writer of that format, so one change covers every reader.
 
 ## Regression coverage
 
@@ -95,6 +129,9 @@ That file reaps its own background processes from the shell's job table on EXIT,
 It now also reaps each fixture's recorded watcher pid, because a watcher that deliberately survives its arm is no longer covered by the job table alone.
 `tests/fm-pi-watch-extension.test.sh` covers the adapter half of the same contract for Pi and OpenCode, using the exact captured `watcher: cycle-complete` bytes and a guard that fails if `bin/fm-watch-arm.sh` stops emitting that line.
 `tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state and preserves the existing Stop registration.
+`tests/fm-watcher-lock.test.sh` also owns the per-poll ownership check, driving the real watcher for each verdict: an owning watcher keeps supervising and still delivers an ordinary wake, a home taken by a live session outside its ancestry stands it down with the remedy in its durable queue and the singleton released, a lock that vanishes under a live session is re-acquired rather than surfaced, the same vanished lock stands it down when no harness sits above it, and a watcher armed with no lock at all never stands down.
+The unrecoverable case sizes itself from `FM_SESSION_LOCK_ANCESTRY_DEPTH`, read at runtime, so the re-acquire fails for the same reason on a machine with a real session above the suite and on one without.
+The recoverable case builds a real process whose command name is `claude` above the watcher for the same reason, rather than relying on whatever happens to be running the suite.
 `tests/fm-session-lock-gate.test.sh` owns the session-lock gate itself: the `bin/fm-lock.sh ownership` verdicts and their read-only contract, the arm and checkpoint refusing for a live rival owner while still arming for an absent, dead, or pid-reused holder, ownership recognized several process levels down, the status line, and an assertion that only `bin/fm-session-lock-lib.sh` implements the walk.
 
 ## OpenCode arm coalescing: measured behavior, 2026-08-03 and 2026-08-04

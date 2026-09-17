@@ -24,7 +24,9 @@
 #      landing queue, and the remedy; a branch it reports as parked behind
 #      another owes nothing yet and never blocks),
 #   3. a direct report sitting in a state that owes firstmate an action, past the
-#      grace window, unacted on (bin/fm-ack-lib.sh, which owns that predicate), and
+#      grace window, unacted on, or sitting in a declared external wait that has
+#      stood past the recheck window with no recheck recorded (bin/fm-ack-lib.sh,
+#      which owns both predicates), and
 #   4. a validation whose no-mistakes step has stopped advancing past the
 #      threshold (bin/fm-nm-stall.sh, which owns that predicate and its remedy), and
 #   5. a dormant-arm pool below its floor (bin/fm-arm-pool-lib.sh, which owns the
@@ -51,7 +53,9 @@
 # Reason 3 stays quiet on a healthy fleet for the reasons bin/fm-ack-lib.sh owns:
 # a ten-minute grace, an ack that silences a state firstmate has already handled
 # for as long as the captain takes to answer, and a current-state confirm that
-# clears a worker which has provably moved on. A task the captain has signed an
+# clears a worker which has provably moved on. Its declared-wait half is quiet for
+# three hours at a time, and a recorded recheck buys another three, so it asks for
+# a look rather than nagging. A task the captain has signed an
 # exemption for never reaches this check at all. A guard that fired constantly
 # would be turned off, which is worse than no guard.
 #
@@ -262,6 +266,11 @@ fi
 # wakes have nobody waiting to take over". The refill answers both.
 POOL_DEPTH=$(fm_arm_pool_count 2>/dev/null || printf '')
 POOL_SHORT=
+# The numbers a refill should reuse, so the model does not have to invent labels
+# and end up with `dormant arm 2` beside `dormant arm A` in the captain's chat.
+# bin/fm-arm-pool-lib.sh owns which numbers are free and why they get reused.
+POOL_FREE_SLOTS=$(fm_arm_pool_free_slots 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+[ -n "$POOL_FREE_SLOTS" ] || POOL_FREE_SLOTS='(could not be read - use 1 upward and skip any number a waiting arm already reports)'
 case "$POOL_DEPTH" in
   ''|*[!0-9]*)
     # The count could not be read at all. Reported rather than read as an
@@ -298,14 +307,24 @@ rule='━━━━━━━━━━━━━━━━━━━━━━━━�
   fi
   if [ -n "$UNACTIONED" ]; then
     { [ "$blind" = 1 ] || [ -n "$STALE_BASE" ]; } && printf '●%s\n' "$rule"
-    printf '●  TURN WOULD END WITH A REPORTED STATE UNANSWERED\n'
+    printf '●  TURN WOULD END WITH A REPORTED STATE UNANSWERED OR A DECLARED WAIT UNCHECKED\n'
     while IFS=$'\t' read -r u_id u_verb u_age u_verdict u_open u_last; do
       [ -n "$u_id" ] || continue
       # "-" is this row format's empty; see bin/fm-ack-lib.sh's fm_ack_unactioned.
       [ "$u_open" != - ] || u_open=
       [ "$u_verb" != - ] || u_verb=
       [ "$u_verdict" != - ] || u_verdict=
-      if [ -n "$u_open" ] && ! fm_ack_verb_is_owed "$u_verb"; then
+      if fm_ack_row_is_recheck "$u_verb" "$u_open"; then
+        # Rule 3's row: nothing is owed an ACTION here, so the wording must not
+        # say firstmate failed to act. What it owes is a look at the pane and a
+        # re-verification of the premise the worker stated, because that premise
+        # is the thing nobody has checked (bin/fm-ack-lib.sh).
+        printf '●  %s has been paused %s without a recheck.\n' \
+          "$u_id" "$(fm_ack_duration "$u_age")"
+        printf '●      %s\n' "$u_last"
+        printf '●      read the pane and re-verify what it is waiting on, then bin/fm-ack.sh %s "<what you verified>"\n' \
+          "$u_id"
+      elif [ -n "$u_open" ] && ! fm_ack_verb_is_owed "$u_verb"; then
         # Owed only under the open-decision rule, so the LAST verb is not what is
         # unanswered - naming it here would point at the wrong line entirely.
         printf '●  %s is waiting on a decision (%s) that firstmate has not answered (state: %s).\n' \
@@ -342,8 +361,10 @@ EOF
       printf '●  %s waiting background arm(s) left, below the floor of %s. Each wake spends one.\n' \
         "$POOL_DEPTH" "$FM_ARM_POOL_FLOOR"
     fi
-    printf '●  Issue %s waiting arms in ONE reply, each as its own long-running watch running exactly this and nothing else:\n' "$FM_ARM_POOL_TARGET"
-    printf '●      bin/fm-watch-arm.sh --dormant 2>&1\n'
+    printf '●  Issue one waiting arm per free number below, in ONE reply, each as its own long-running watch running exactly this and nothing else:\n'
+    printf '●      bin/fm-watch-arm.sh --dormant <N> 2>&1\n'
+    printf '●  Free numbers to reuse: %s\n' "$POOL_FREE_SLOTS"
+    printf '●  Label each watch exactly "dormant arm <N>" with the same number. The arms still waiting keep theirs.\n'
     printf '●  They wait their turn; one takes over the moment the current watcher fires.\n'
     printf '●  The session-start operating block for this harness names the exact mechanism to launch them with.\n'
   fi
