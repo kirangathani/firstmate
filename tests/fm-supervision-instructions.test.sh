@@ -80,8 +80,11 @@ test_ordinary_wake_lines_are_distinct_from_repair() {
 
   out=$("$RENDER" --harness claude)
   claude_ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
-  assert_contains "$claude_ordinary" "re-arm" "claude ordinary-wake line does not tell the model to re-arm"
-  assert_contains "$claude_ordinary" "bin/fm-watch-arm.sh" "claude ordinary-wake line lost the background arm command"
+  # The pool changed what an ordinary wake owes: a waiting arm has already taken
+  # the watch, so arming here is a model call spent on nothing, and the refill is
+  # the turn-end guard's to ask for.
+  assert_contains "$claude_ordinary" "do not arm" "claude ordinary-wake line still tells the model to arm on every wake"
+  assert_contains "$claude_ordinary" "turn-end guard" "claude ordinary-wake line does not say who asks for the refill"
 
   out=$("$RENDER" --harness opencode)
   opencode_ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')

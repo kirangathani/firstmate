@@ -25,7 +25,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
-REQUIRED_REASON='repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task'
+REQUIRED_REASON='repair missing watcher supervision by issuing six bin/fm-watch-arm.sh --dormant Claude Code background tasks in one reply'
 
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
@@ -173,10 +173,53 @@ make_secondmate_linked_home_dir() {
   printf '%s\n' "$dir"
 }
 
+# The pool-below-floor reason is pinned OFF here, and only here. Every case that
+# uses this helper was written to assert one specific reason, and a fixture has
+# no dormant arms at all, so leaving the floor at its production value would make
+# each of them block for the pool instead - passing for the wrong reason, or
+# failing a silent-healthy-turn assertion that is still perfectly correct. The
+# reason's own two directions are asserted in the dedicated cases below, which
+# call the hook with the real floor.
 run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" \
+    | CLAUDECODE=1 FM_HOME="$home" FM_ARM_POOL_FLOOR=0 bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+# Same, with the pool reason live and the floor stated by the caller.
+run_hook_with_pool_floor() {
+  local dir=$1 stop_active=$2 floor=$3 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s}' "$stop_active" \
+    | CLAUDECODE=1 FM_HOME="$home" FM_ARM_POOL_FLOOR="$floor" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+# Register <n> live processes as this home's waiting arms. Real pids, because the
+# count deliberately believes nothing it cannot see running.
+ARM_POOL_SEEDED_PIDS=
+seed_arm_pool() {
+  local dir=$1 count=$2 i pid
+  mkdir -p "$dir/state/.arm-pool"
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    sleep 60 >/dev/null 2>&1 &
+    pid=$!
+    ARM_POOL_SEEDED_PIDS="$ARM_POOL_SEEDED_PIDS $pid"
+    # Empty identity and empty session are what a fixture home yields: no /proc
+    # identity is recorded for it and no session lock was ever claimed.
+    printf '\t\t%s\tdormant\n' "$(date +%s)" > "$dir/state/.arm-pool/$pid"
+    i=$((i + 1))
+  done
+}
+
+clear_arm_pool_seed() {
+  local pid
+  for pid in $ARM_POOL_SEEDED_PIDS; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  ARM_POOL_SEEDED_PIDS=
 }
 
 nonexistent_pid() {
@@ -303,6 +346,7 @@ run_hook_aged() {  # <dir> <age-seconds>
   printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" \
     FM_ACK_NOW="$(( $(date +%s) + age ))" \
     FM_CREW_STATE_BIN="$dir/crew-state-stub" \
+    FM_ARM_POOL_FLOOR=0 \
     bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
@@ -1049,6 +1093,63 @@ test_hook_stays_silent_when_its_optional_siblings_are_absent() {
   pass "fm-turnend-guard: stays silent on a healthy turn when its optional siblings are absent"
 }
 
+test_hook_blocks_when_the_arm_pool_is_below_its_floor() {
+  # Supervision is healthy and nothing else is wrong: the ONLY thing missing is
+  # anybody waiting to take the watch when this one fires. That is the moment to
+  # ask for a refill, because the turn's work is done and it costs the captain
+  # nothing.
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pool-short")
+  : > "$dir/state/task1.meta"
+  start_live_watcher "$dir"
+  out=$(run_hook_with_pool_floor "$dir" false 2); status=$?
+  stop_live_watcher
+
+  expect_code 2 "$status" "hook must block when no arms are waiting to take the next watch"
+  assert_contains "$out" "TOO FEW EARS LEFT TO HEAR THE NEXT WAKES" \
+    "the pool-below-floor reason was not reported"
+  assert_contains "$out" "bin/fm-watch-arm.sh --dormant" \
+    "the pool remedy did not name the exact command to issue"
+  assert_not_contains "$out" "SUPERVISION IS OFF" \
+    "a healthy watcher was reported as missing supervision by the pool reason"
+  pass "fm-turnend-guard: blocks when too few arms are waiting to take the next watch"
+}
+
+test_hook_silent_when_the_arm_pool_meets_its_floor() {
+  # The other direction, without which the case above would pass on a reason that
+  # simply never goes quiet.
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pool-ok")
+  : > "$dir/state/task1.meta"
+  start_live_watcher "$dir"
+  seed_arm_pool "$dir" 2
+  out=$(run_hook_with_pool_floor "$dir" false 2); status=$?
+  clear_arm_pool_seed
+  stop_live_watcher
+
+  expect_code 0 "$status" "a pool at its floor must not block a healthy turn"
+  [ -z "$out" ] || fail "hook spoke on a healthy turn with the pool at its floor: $out"
+  pass "fm-turnend-guard: stays silent when enough arms are waiting"
+}
+
+test_hook_reports_the_pool_alongside_the_other_reasons() {
+  # The banner's whole design is that one permanently broken thing cannot hide
+  # the others, so a new reason has to be shown to compose rather than replace.
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pool-and-blind")
+  : > "$dir/state/task1.meta"
+  out=$(run_hook_with_pool_floor "$dir" false 2); status=$?
+
+  expect_code 2 "$status" "hook must block when supervision is off and no arms are waiting"
+  assert_contains "$out" "SUPERVISION IS OFF" \
+    "the supervision reason was dropped once the pool reason was present"
+  assert_contains "$out" "$REQUIRED_REASON" \
+    "the supervision repair instruction was dropped from a combined banner"
+  assert_contains "$out" "TOO FEW EARS LEFT TO HEAR THE NEXT WAKES" \
+    "the pool reason was dropped from a combined banner"
+  pass "fm-turnend-guard: the pool reason is reported alongside the others, neither hiding the other"
+}
+
 test_hook_blocks_cleanly_when_its_optional_siblings_are_absent() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-no-siblings-unhealthy")
@@ -1466,6 +1567,9 @@ test_hook_blocks_on_a_validation_that_stopped_advancing
 test_hook_nm_stall_pairs_silence_with_the_block
 test_hook_stays_silent_when_its_optional_siblings_are_absent
 test_hook_blocks_cleanly_when_its_optional_siblings_are_absent
+test_hook_blocks_when_the_arm_pool_is_below_its_floor
+test_hook_silent_when_the_arm_pool_meets_its_floor
+test_hook_reports_the_pool_alongside_the_other_reasons
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir

@@ -3,16 +3,20 @@ Mode: Claude background-notify supervision.
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
 2. Source `__FM_X_MODE_ENV__` first when X mode is active.
-3. First cycle: run `bin/fm-watch-arm.sh` as its own Claude Code background task.
+3. First cycle: issue six dormant arms as six Claude Code background tasks in ONE reply, each running exactly `bin/fm-watch-arm.sh --dormant` and nothing else.
+   One of them takes the watcher and the other five wait their turn, so the wake after this one needs no arming call at all.
+   `bin/fm-arm-pool-lib.sh` owns how many and how few; the turn-end guard asks for a refill when too few are left.
 4. Never bundle the arm command with other commands.
 5. Never use shell `&` for watcher supervision.
    A shell `&`, a truncating pipe, or bundling is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.claude/settings.json`.
 6. Treat `watcher: started ...` and `watcher: attached ...` as proof that one live cycle exists.
    On attach, the background task follows verified identity-matched successors instead of exiting when the first cycle ends.
 7. Failure or missing cycle only: treat any `watcher: FAILED ...` result as an alarm and repair it before ending the turn.
-8. Ordinary wake: when the background task completes with `signal:`, `stale:`, `check:`, or `heartbeat`, drain queued wakes, then start exactly one fresh background task before running other fleet commands to handle the wake.
+8. Ordinary wake: when a background task completes with `signal:`, `stale:`, `check:`, or `heartbeat`, drain queued wakes and handle the wake.
+   Do NOT arm anything first. A waiting arm has already taken the watcher, so supervision never lapsed and a call spent on re-arming is a call not spent on the work.
+   Refill only when the turn-end guard asks for it, by issuing six `bin/fm-watch-arm.sh --dormant` background tasks in one reply.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records or a real watcher reason line.
-   A `watcher: cycle-complete ...` close is handled the same way and is not a failure: an attached cycle ended by delivering its wake to the arm that owns that watcher, so drain and start exactly one fresh background task.
+   A `watcher: cycle-complete ...` close is handled the same way and is not a failure: an attached cycle ended by delivering its wake to the arm that owns that watcher.
 9. Killed background task, not a wake: if this background task ends without a wake line - Claude Code stopped it for low memory, or the session restarted - the watcher is still running.
    The arm starts it detached from the task's process group and session, so a kill of the task does not reach it.
    Re-run `bin/fm-watch-arm.sh` as a fresh background task to re-attach; `watcher: attached ...` is the expected result and confirms supervision never lapsed.

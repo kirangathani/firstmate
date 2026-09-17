@@ -134,7 +134,7 @@ repair_line() {
 
   case "$HARNESS" in
     claude)
-      printf '%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task, never shell &.'
+      printf '%s%s\n' "$prefix" 'repair missing watcher supervision by issuing six bin/fm-watch-arm.sh --dormant Claude Code background tasks in one reply, each its own task, never shell &.'
       ;;
     codex)
       printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
@@ -157,7 +157,7 @@ repair_line() {
 ordinary_wake_line() {
   case "$HARNESS" in
     claude)
-      printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Claude Code background task as directed below.'
+      printf '%s\n' '- Ordinary wake: a waiting arm has already taken the watcher; do not arm, just handle the wake. Refill only when the turn-end guard asks.'
       ;;
     codex)
       printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
