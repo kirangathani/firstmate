@@ -232,14 +232,24 @@ if [ -n "$unactioned" ]; then
   urule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$urule"
-    printf '●  UNACTIONED DIRECT REPORT - A REPORTED STATE IS SITTING UNANSWERED\n'
+    printf '●  UNACTIONED DIRECT REPORT - A STATE IS UNANSWERED OR A DECLARED WAIT UNCHECKED\n'
     while IFS=$'\t' read -r u_id u_verb u_age u_verdict u_open u_last; do
       [ -n "$u_id" ] || continue
       # "-" is this row format's empty; see bin/fm-ack-lib.sh's fm_ack_unactioned.
       [ "$u_open" != - ] || u_open=
       [ "$u_verb" != - ] || u_verb=
       [ "$u_verdict" != - ] || u_verdict=
-      if [ -n "$u_open" ] && ! fm_ack_verb_is_owed "$u_verb"; then
+      if fm_ack_row_is_recheck "$u_verb" "$u_open"; then
+        # Rule 3's row: nothing is owed an ACTION here, so the wording must not
+        # say firstmate failed to act. What it owes is a look at the pane and a
+        # re-verification of the premise the worker stated, because that premise
+        # is the thing nobody has checked (bin/fm-ack-lib.sh).
+        printf '●  %s has been paused %s without a recheck (state: %s).\n' \
+          "$u_id" "$(fm_ack_duration "$u_age")" "$u_verdict"
+        printf '●      %s\n' "$u_last"
+        printf '●      read the pane and re-verify what it is waiting on, then bin/fm-ack.sh %s "<what you verified>"\n' \
+          "$u_id"
+      elif [ -n "$u_open" ] && ! fm_ack_verb_is_owed "$u_verb"; then
         # Owed only under the open-decision rule, so the LAST verb is not what is
         # unanswered - naming it here would point at the wrong line entirely.
         printf '●  %s is waiting on a decision (%s) that firstmate has not answered (state: %s).\n' \
