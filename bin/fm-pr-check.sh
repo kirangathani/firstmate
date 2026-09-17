@@ -7,14 +7,27 @@
 # standing merge rule's extra requirement that a task still reporting work in
 # progress does not wake anything on green.
 #
-# --no-ack records and arms WITHOUT the ack below. It exists for the one caller
-# that is not firstmate: bin/fm-watch.sh records a PR the moment a worker's own
-# `done: PR <url>` line reaches the status log, so the recorded fact follows the
-# task rather than waiting for a hand-run. That automatic record discharges the
-# MACHINE half of what the report owes - the fact and the merge poll - but not
-# the captain-facing half, so it must not silence the unactioned alarm that is
-# what makes firstmate relay the PR at all.
-# Usage: fm-pr-check.sh [--no-ack] <task-id> <pr-url>
+# --from-watcher is for the one caller that is not firstmate: bin/fm-watch.sh
+# records a PR the moment a worker's own `done: PR <url>` line reaches the status
+# log, so the recorded fact follows the task rather than waiting for a hand-run.
+# It changes exactly two things, both because the CALLER is the watcher itself:
+#
+#   IT DOES NOT ACK. The automatic record discharges the MACHINE half of what the
+#   report owes - the fact and the merge poll - and none of the captain-facing
+#   half. Acking here would silence the unactioned alarm (bin/fm-ack-lib.sh) that
+#   is what forces firstmate to relay the PR at all.
+#
+#   IT DOES NOT RUN THE MIGRATION. bin/fm-pr-check-migrate.sh takes watcher
+#   exclusion by TERMing the pid in state/.watch.lock, which on this path is the
+#   very process calling this script: the watcher would kill itself on every
+#   reported PR. It is bin/fm-bootstrap.sh's to run at session start, and a live
+#   watcher has already passed that.
+#
+#   IT DOES NOT RUN THE GUARD EITHER. bin/fm-guard.sh prints diagnostics for
+#   firstmate to read; on this path nobody reads them, and its unactioned
+#   predicate may fork a crew-state confirm per task, which is not a cost a
+#   watcher poll should pay.
+# Usage: fm-pr-check.sh [--from-watcher] <task-id> <pr-url>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,9 +40,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
-NO_ACK=0
-if [ "${1-}" = --no-ack ]; then
-  NO_ACK=1
+FROM_WATCHER=0
+if [ "${1-}" = --from-watcher ]; then
+  FROM_WATCHER=1
   shift
 fi
 if [ "$#" -ne 2 ]; then
@@ -56,9 +69,10 @@ fi
 
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while
-# it quarantines or rebuilds them.
-"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
-"$FM_ROOT/bin/fm-guard.sh" || true
+# it quarantines or rebuilds them - which is exactly why --from-watcher skips it
+# (this file's header).
+[ "$FROM_WATCHER" -eq 1 ] || "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
+[ "$FROM_WATCHER" -eq 1 ] || "$FM_ROOT/bin/fm-guard.sh" || true
 
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
@@ -186,6 +200,6 @@ printf 'armed: state/%s.check.sh\n' "$ID"
 
 # Recording the PR and arming the merge poll IS the action a PR-ready `done:`
 # owes, so ack it here (bin/fm-ack-lib.sh) instead of leaving the task alarming
-# while it legitimately waits on review or merge. --no-ack is the one exception,
-# and this file's header owns why.
-[ "$NO_ACK" -eq 1 ] || fm_ack_record "$STATE" "$ID" "fm-pr-check $URL" || true
+# while it legitimately waits on review or merge. --from-watcher is the one
+# exception, and this file's header owns why.
+[ "$FROM_WATCHER" -eq 1 ] || fm_ack_record "$STATE" "$ID" "fm-pr-check $URL" || true

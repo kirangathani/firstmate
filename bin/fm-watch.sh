@@ -582,8 +582,10 @@ signal_payload() {  # <seen-file> <status-file> <current sig>
 # anything, and it compares against the recorded fact first, so the ordinary case
 # - a worker re-reporting the PR already on record - costs one grep and no call.
 #
-# --no-ack is deliberate: this discharges the machine half of what a PR report
-# owes, never the captain-facing relay (bin/fm-pr-check.sh's header).
+# --from-watcher is mandatory here, not a preference: it keeps the report's
+# captain-facing relay owed, and it keeps the migration - which takes watcher
+# exclusion by TERMing this very process - out of the watcher's own call.
+# bin/fm-pr-check.sh's header owns both.
 record_reported_pr() {  # <status-file>
   local f=$1 id url meta out
   case "$f" in *.status) ;; *) return 0 ;; esac
@@ -595,9 +597,9 @@ record_reported_pr() {  # <status-file>
   [ -f "$meta" ] || return 0
   ! grep -qxF "pr=$url" "$meta" 2>/dev/null || return 0
   if fm_bounded_available 2>/dev/null; then
-    out=$(fm_bounded_run "$CHECK_TIMEOUT" "$SCRIPT_DIR/fm-pr-check.sh" --no-ack "$id" "$url" 2>&1)
+    out=$(fm_bounded_run "$CHECK_TIMEOUT" "$SCRIPT_DIR/fm-pr-check.sh" --from-watcher "$id" "$url" 2>&1)
   else
-    out=$("$SCRIPT_DIR/fm-pr-check.sh" --no-ack "$id" "$url" 2>&1)
+    out=$("$SCRIPT_DIR/fm-pr-check.sh" --from-watcher "$id" "$url" 2>&1)
   fi
   triage_log "recorded reported PR for $id: $url${out:+ | $(printf '%s' "$out" | tr '\n' ' ')}"
 }

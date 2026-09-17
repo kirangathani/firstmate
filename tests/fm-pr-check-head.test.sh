@@ -249,22 +249,22 @@ test_warns_when_recording_an_already_merged_pr() {
 
 # The automatic recorder (bin/fm-watch.sh) discharges the MACHINE half of what a
 # PR report owes. Acking there would take the captain-facing relay into silence
-# with nothing left to re-arm it, so --no-ack must leave the alarm standing.
-test_no_ack_records_without_silencing_the_alarm() {
+# with nothing left to re-arm it, so --from-watcher must leave the alarm standing.
+test_from_watcher_records_without_silencing_the_alarm() {
   local dir tip status
   read -r dir tip < <(make_head_case no-ack)
   printf 'done: PR https://github.com/o/r/pull/1\n' > "$dir/home/state/task-a.status"
   set +e
   FM_TEST_GH_HEAD="$tip" \
-    run_check "$dir" --no-ack task-a "https://github.com/o/r/pull/1" >/dev/null 2>&1
+    run_check "$dir" --from-watcher task-a "https://github.com/o/r/pull/1" >/dev/null 2>&1
   status=$?
   set -e
-  expect_code 0 "$status" "--no-ack must still record the PR"
+  expect_code 0 "$status" "--from-watcher must still record the PR"
   assert_grep "pr=https://github.com/o/r/pull/1" "$dir/home/state/task-a.meta" \
-    "--no-ack must record the PR exactly as the acking path does"
+    "--from-watcher must record the PR exactly as the acking path does"
   assert_absent "$dir/home/state/task-a.acted" \
-    "--no-ack must leave the unactioned alarm standing for the captain-facing relay"
-  pass "fm-pr-check.sh: --no-ack records the PR without acking the report"
+    "--from-watcher must leave the unactioned alarm standing for the captain-facing relay"
+  pass "fm-pr-check.sh: --from-watcher records the PR without acking the report"
 }
 
 test_refuses_a_pr_that_predates_the_tasks_commit
@@ -274,4 +274,4 @@ test_does_not_compare_an_unrelated_pr_head
 test_a_rerun_of_an_already_recorded_pr_is_left_alone
 test_recording_a_second_pr_moves_the_fact_and_the_poll
 test_warns_when_recording_an_already_merged_pr
-test_no_ack_records_without_silencing_the_alarm
+test_from_watcher_records_without_silencing_the_alarm
