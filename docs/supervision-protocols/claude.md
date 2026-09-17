@@ -1,7 +1,7 @@
 Mode: Claude background-notify supervision.
 
 When this session owns supervision and away mode is not active:
-1. Drain first with `bin/fm-wake-drain.sh`.
+1. Drain first with `bin/fm-wake-drain.sh`, at SESSION START only; an ordinary wake arrives already drained (item 8).
 2. Source `__FM_X_MODE_ENV__` first when X mode is active.
 3. First cycle: issue six waiting arms in ONE reply, each as its own Monitor with `timeout_ms` at the 1800000 maximum, running exactly `bin/fm-watch-arm.sh --dormant 2>&1` and nothing else.
    One of them takes the watcher and the other five wait their turn, so the wake after this one needs no arming call at all.
@@ -15,7 +15,8 @@ When this session owns supervision and away mode is not active:
 6. Treat `watcher: started ...` and `watcher: attached ...` as proof that one live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
 7. Failure or missing cycle only: treat any `watcher: FAILED ...` result as an alarm and repair it before ending the turn.
-8. Ordinary wake: when a waiting arm reports `signal:`, `stale:`, `check:`, or `heartbeat`, drain queued wakes and handle the wake.
+8. Ordinary wake: a waiting arm's `signal:`, `stale:`, `check:`, or `heartbeat` lines arrive as a notification. Act on what they say.
+   They already carry the drained wake records and the crewmate's own appended lines, prefixed by id: the arm drains on its way out, so there is nothing left to drain and no call to spend on draining it.
    Do NOT arm anything first. Another waiting arm has already taken the watcher, so supervision never lapsed and a call spent on re-arming is a call not spent on the work.
    Refill only when the turn-end guard asks for it, or when a Monitor reports its own expiry, by issuing six waiting arms in one reply exactly as item 3 says.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records or a real watcher reason line.

@@ -323,6 +323,16 @@ else
   else
     printf '(no queued wakes)\n'
   fi
+  # Anything a previous session had drained but never read. Those rows are no
+  # longer in the queue - the drain that took them deleted it, correctly - so
+  # this is the only place they can still surface, and a fresh session is the one
+  # moment a model is certainly looking. bin/fm-wake-pending.sh owns the log and
+  # its print-before-clear boundary; a row already acted on merely costs a glance.
+  PENDING_OUT=$("$SCRIPT_DIR/fm-wake-pending.sh" --take 2>/dev/null || true)
+  if [ -n "$PENDING_OUT" ]; then
+    printf 'UNREAD FROM AN EARLIER SESSION - drained before, never read; act on anything still open:\n'
+    printf '%s\n' "$PENDING_OUT"
+  fi
 fi
 
 # --- 4. supervision operating instructions ----------------------------------
