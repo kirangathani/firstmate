@@ -80,6 +80,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   captain-shared.md  main-authoritative shared captain preferences propagated read-only to secondmate homes; LOCAL, gitignored, owned by secondmate-provisioning
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
   timeline.tsv       append-only task timeline ledger, one line per finished ship task from dispatch to merged PR, including which stages were skipped and by whose authority; LOCAL, gitignored, written by bin/fm-timeline.sh (which owns its columns) as bin/fm-teardown.sh's first step, read back with `bin/fm-timeline.sh report`
+  latency.tsv        append-only ledger of firstmate's OWN latency: one row per drained wake, measured command, tool call, and turn; LOCAL, gitignored, written by bin/fm-latency-lib.sh (which owns its columns and the rule that a failed write never fails the command being measured), read back with `bin/fm-latency.sh report` (docs/configuration.md "Self-latency ledger")
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   supersessions/<project>.md  approved test-assertion supersessions consumed by bin/fm-pr-merge.sh's test-keep gate (entry format in its header), which also excuses the PR's own re-verification check from that same local run, so an approval lands the merge on its own; LOCAL, gitignored; created lazily by captain approval, or by firstmate itself under section 7's standing rule, never auto-generated, absent means no approvals
@@ -90,7 +91,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   HANDOFF-<date>[-sessionN].md  volatile working state written by /handoff for the next session in this home; LOCAL, gitignored; path allocated by bin/fm-handoff.sh, read once and then consumed (section 6)
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
-  <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
+  <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth; an optional leading "[t=<epoch>] " records when the crew reported, and bin/fm-classify-lib.sh owns that grammar and the permanent both-forms parse
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.acted           written by bin/fm-ack.sh, bin/fm-send.sh, and bin/fm-pr-check.sh: firstmate acted on this task's reported state; silences the unactioned alarm until the crew's next status append (bin/fm-ack-lib.sh); removed by teardown
@@ -123,6 +124,7 @@ state/               volatile runtime signals; gitignored
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
+  .latency-last .latency-turn  last harness hook event and last turn end, in epoch ms, so the latency ledger can measure the gap between them; bin/fm-latency-lib.sh owns both
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```

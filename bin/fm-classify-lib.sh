@@ -144,29 +144,89 @@ status_is_paused_or_captain_held() {  # <status-line>
 # and two captain requests sat unanswered for 50 minutes with no alarm. Only the
 # token at the very start of the note is read, so a key-shaped string deeper in a
 # summary cannot re-key the line.
+#
+# THE OPTIONAL REPORT-TIME PREFIX. A status line MAY begin with the epoch
+# SECONDS at which it was written, as a leading "[t=<digits>] " token:
+#
+#   [t=1789580411] needs-decision [key=api-shape]: which shape?
+#
+# This is the ONE statement of that token's grammar, and bin/fm-brief.sh's
+# status protocol is the template crews copy. The time is there so firstmate's
+# own records can say how long it took to answer a crew, which nothing before
+# this could derive; docs/configuration.md's "Self-latency ledger" section is
+# what reads it. It sits BEFORE the verb rather than after the note because the
+# note is the only free-text cell on the line, and a trailing field would have
+# to be delimited out of arbitrary prose; epoch seconds carry no colon, so a
+# leading token also cannot disturb the "<verb>: <note>" split below.
+#
+# BOTH FORMS ARE PERMANENTLY VALID, not a migration. Every status file on disk
+# when the token was introduced is untimestamped, live tasks keep appending to
+# those same files, and a crew that copies the template imperfectly still has to
+# be understood. So an absent token is normal and simply means the report time
+# is unknown - never an error, never a reason to drop the line. A token that is
+# not exactly "[t=" digits "]" is not a time prefix at all and is left in the
+# body untouched, so a note that happens to start with a bracket is unharmed.
+#
+# Every parser below reads the BODY, so the token is invisible to the verb, the
+# note, the decision key, and the folds. Consumers outside this library that
+# match a status line themselves must accept both forms; bin/fm-pr-poll.sh is
+# the only one, because it is a standalone static poll that cannot source this.
+_FM_STATUS_T=
+_FM_STATUS_BODY=
+_fm_status_split_time() {  # <status-line> -> sets _FM_STATUS_T, _FM_STATUS_BODY
+  local line=$1 tok rest
+  line=${line#"${line%%[![:space:]]*}"}
+  _FM_STATUS_T=
+  _FM_STATUS_BODY=$line
+  case "$line" in \[t=*\]*) ;; *) return 0 ;; esac
+  tok=${line#\[t=}
+  rest=${tok#*\]}
+  tok=${tok%%\]*}
+  case "$tok" in ''|*[!0-9]*) return 0 ;; esac
+  _FM_STATUS_T=$tok
+  _FM_STATUS_BODY=${rest#"${rest%%[![:space:]]*}"}
+}
+# The epoch seconds a status line reports it was written at, or empty when the
+# line carries no time prefix. Pure read; no fork.
+status_line_epoch() {  # <status-line> -> epoch seconds, or empty
+  _fm_status_split_time "$1"
+  printf '%s' "$_FM_STATUS_T"
+}
+# The status line with any time prefix and leading whitespace removed.
+status_line_body() {  # <status-line> -> "<verb>[ [key=..]]: <note>"
+  _fm_status_split_time "$1"
+  printf '%s' "$_FM_STATUS_BODY"
+}
 status_line_verb() {  # <status-line> -> leading verb word
-  local v=${1%%:*}
+  local v
+  _fm_status_split_time "$1"
+  v=${_FM_STATUS_BODY%%:*}
   v=${v%%\[key=*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
 }
 status_line_note() {  # <status-line> -> text after the first colon, trimmed
-  case "$1" in
-    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
-    *) printf '%s' "$1" ;;
+  local n
+  _fm_status_split_time "$1"
+  case "$_FM_STATUS_BODY" in
+    *:*) n=${_FM_STATUS_BODY#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
+    *) printf '%s' "$_FM_STATUS_BODY" ;;
   esac
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} note k
+  local body prefix note k
+  _fm_status_split_time "$1"
+  body=$_FM_STATUS_BODY
+  prefix=${body%%:*}
   case "$prefix" in
     *\[key=*\]*)
       k=${prefix#*\[key=}
       k=${k%%\]*}
       ;;
     *)
-      case "$1" in
-        *:*) note=${1#*:}; note=${note#"${note%%[![:space:]]*}"} ;;
+      case "$body" in
+        *:*) note=${body#*:}; note=${note#"${note%%[![:space:]]*}"} ;;
         *) note= ;;
       esac
       case "$note" in
@@ -223,7 +283,11 @@ _fm_status_open_decisions_stream() {
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    trimmed=${line#"${line%%[![:space:]]*}"}
+    # The prefilter below matches the verb at the START of the line, so an
+    # optional time prefix has to come off first or every timestamped decision
+    # would be filtered out as unactionable. Pure parameter expansion, no fork.
+    _fm_status_split_time "$line"
+    trimmed=$_FM_STATUS_BODY
     [ -n "$trimmed" ] || continue
     # Skip every line the fold below cannot act on, WITHOUT forking. The two
     # parsers are command substitutions, so an unfiltered fold pays two
