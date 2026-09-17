@@ -51,7 +51,11 @@ test_repair_lines() {
 
   out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --repair-line)
   assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing"
-  assert_contains "$out" "Claude Code background task" "claude repair line missing background-task mechanism"
+  # The mechanism is Monitor, not a background task: a Monitor delivers the
+  # arm's own lines as notifications and survives the low-memory reaper that
+  # takes background shells.
+  assert_contains "$out" "Monitor" "claude repair line missing the Monitor mechanism"
+  assert_contains "$out" "bin/fm-watch-arm.sh --dormant" "claude repair line missing the waiting-arm command"
 
   : > "$home/config/x-mode.env"
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --x-mode 1 --repair-line)

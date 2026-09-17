@@ -342,9 +342,10 @@ EOF
       printf '●  %s waiting background arm(s) left, below the floor of %s. Each wake spends one.\n' \
         "$POOL_DEPTH" "$FM_ARM_POOL_FLOOR"
     fi
-    printf '●  Issue %s background tasks in ONE reply, each running exactly this and nothing else:\n' "$FM_ARM_POOL_TARGET"
-    printf '●      bin/fm-watch-arm.sh --dormant\n'
+    printf '●  Issue %s waiting arms in ONE reply, each as its own long-running watch running exactly this and nothing else:\n' "$FM_ARM_POOL_TARGET"
+    printf '●      bin/fm-watch-arm.sh --dormant 2>&1\n'
     printf '●  They wait their turn; one takes over the moment the current watcher fires.\n'
+    printf '●  The session-start operating block for this harness names the exact mechanism to launch them with.\n'
   fi
   printf '●%s\n' "$rule"
 } >&2

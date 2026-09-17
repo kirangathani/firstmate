@@ -25,7 +25,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
-REQUIRED_REASON='repair missing watcher supervision by issuing six bin/fm-watch-arm.sh --dormant Claude Code background tasks in one reply'
+REQUIRED_REASON='repair missing watcher supervision by issuing six waiting arms in one reply'
 
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 

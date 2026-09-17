@@ -64,7 +64,13 @@ esac
 # a failure, while an absent or dead-holder lock still runs the checkpoint,
 # announced, so a home whose session start never ran is not left unsupervised.
 case "$(fm_session_lock_ownership "$STATE")" in
-  owned) ;;
+  owned)
+    # Converge the lock onto this session's own harness process, for the reasons
+    # bin/fm-watch-arm.sh's owned branch gives in full. Codex reaches supervision
+    # through this entry point instead of the arm, so without this a Codex-primary
+    # home would never migrate its lock.
+    FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || true
+    ;;
   other)
     echo "watcher: read-only - another firstmate session holds this home's session lock; not arming"
     exit 0

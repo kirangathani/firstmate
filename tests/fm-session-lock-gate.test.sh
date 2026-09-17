@@ -457,6 +457,342 @@ env CLAUDE_PID=$rival '$LOCK_CLI' > '$dir/acquire.out' 2>&1
   pass "fm-session-lock-lib: a marker naming a live harness outside this ancestry is ignored, and the walk answers instead"
 }
 
+# The start ticks the kernel recorded for a pid, or empty where /proc is not
+# available. The library that owns the parse is asked for it in a subshell, the
+# same way tests/fm-continuity-pretool-check.test.sh asks for a pid identity, so
+# the suite does not carry a second copy of a format the lock file depends on.
+holder_ticks() {  # <pid>
+  bash -c '. "$1"; fm_pid_start_ticks "$2"' _ "$ROOT/bin/fm-session-lock-lib.sh" "$1" 2>/dev/null || true
+}
+
+# Write the session lock the way a real acquire would: pid on line 1, and the
+# holder's start ticks on line 2 wherever the kernel offers them.
+write_lock_for() {  # <state> <pid>
+  local state=$1 pid=$2 ticks
+  ticks=$(holder_ticks "$pid")
+  if [ -n "$ticks" ]; then
+    printf '%s\n%s\n' "$pid" "$ticks" > "$state/.lock"
+  else
+    printf '%s\n' "$pid" > "$state/.lock"
+  fi
+}
+
+wait_for_marker() {  # <path>
+  local path=$1 i=0
+  while [ "$i" -lt 300 ]; do
+    [ -e "$path" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+wait_for_death() {  # <pid>
+  local pid=$1 i=0
+  while [ "$i" -lt 150 ]; do
+    is_live_non_zombie "$pid" || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Start the incident's FULL process chain, the one the 2026-09-15 lock loss
+# turned on:
+#   claude  ->  2.1.273  ->  bash  ->  <the caller's commands>
+# The outer `claude` is a copy of bash named `claude`, which is the shape of the
+# Claude Code daemon that sat between the interactive session and the background
+# one; beneath it is the version-named session process of start_versioned_harness
+# above. Both shapes were captured by the scout from the real processes. Each
+# level runs the next WITHOUT exec, so every one is a genuine process and the
+# finder's walk has two candidates to choose between rather than one.
+#
+# The chain is driven in two phases by marker files, because both things this
+# fixture exists to test need the caller to act BETWEEN them: <phase1> runs once
+# the caller touches <dir>/go1, so the caller can pre-write the lock knowing both
+# pids, and <phase2> runs once it touches <dir>/go2, so the caller can kill the
+# outer `claude` in between - which is exactly the daemon self-restart that broke
+# the ancestry link at 21:26. Each wait is bounded so a failing assertion leaves
+# a dead fixture rather than a hung suite.
+#
+# Echoes "<outer claude pid> <versioned session pid>". The caller stops BOTH:
+# the outer holds its child open with `wait`, so killing the outer orphans the
+# versioned process rather than ending it.
+start_claude_over_versioned_harness() {  # <dir> <phase1 body> <phase2 body>
+  local dir=$1 phase1=$2 phase2=$3 outer versioned='' i=0
+  mkdir -p "$dir/bin" "$dir/claude/versions"
+  cp /bin/bash "$dir/bin/claude"
+  cp /bin/bash "$dir/claude/versions/2.1.273"
+  # The phase gate is its own script rather than a loop written into the chain,
+  # so the generated chain needs no shell expansions of its own: a `printf`
+  # format carrying them has to be single-quoted to survive generation, which is
+  # exactly what shellcheck reads as a mistake (SC2016). A quoted heredoc is
+  # literal by construction, the same way install_fake_ps_claude above writes its
+  # stub, so the bound stays real and the suite stays clean without a disable.
+  cat > "$dir/await.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+i=0
+while [ ! -e "$1" ] && [ "$i" -lt 300 ]; do
+  sleep 0.1
+  i=$((i + 1))
+done
+SH
+  chmod +x "$dir/await.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '"%s/await.sh" "%s/go1"\n' "$dir" "$dir"
+    printf '%s\n' "$phase1"
+    printf 'touch "%s/phase1.done"\n' "$dir"
+    printf '"%s/await.sh" "%s/go2"\n' "$dir" "$dir"
+    printf '%s\n' "$phase2"
+    printf 'touch "%s/chain.done"\n' "$dir"
+  } > "$dir/chain.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'bash "%s/chain.sh"\n' "$dir"
+    printf 'sleep 300\n'
+  } > "$dir/harness-body.sh"
+  # The versioned process is backgrounded and publishes its own pid to a file:
+  # the caller needs BOTH pids, and a command substitution can only carry the
+  # one it started. `wait` is what keeps the outer alive until it is killed.
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '"%s/claude/versions/2.1.273" "%s/harness-body.sh" \\\n' "$dir" "$dir"
+    printf '  --session-id 00000000-0000-4000-8000-000000000000 --fork-session >/dev/null 2>&1 &\n'
+    printf 'printf "%%s\\n" "$!" > "%s/versioned.pid"\n' "$dir"
+    printf 'wait\n'
+  } > "$dir/outer-body.sh"
+  env -u CLAUDE_PID "$dir/bin/claude" "$dir/outer-body.sh" >/dev/null 2>&1 &
+  outer=$!
+  while [ "$i" -lt 150 ]; do
+    versioned=$(cat "$dir/versioned.pid" 2>/dev/null || true)
+    [ -n "$versioned" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  printf '%s %s\n' "$outer" "$versioned"
+}
+
+test_acquire_records_the_nearest_harness_not_the_one_above_it() {
+  local dir state pids outer versioned recorded
+  # With two harness-shaped processes in one ancestry, WHICH one is recorded is
+  # the whole difference between a lock that survives a Claude Code auto-update
+  # and the one that did not. The outer `claude` here stands in for the daemon:
+  # the daemon self-restarts on every binary change, so a lock naming anything
+  # at or above it is only as durable as the next upgrade.
+  dir=$(make_case lock-nearest-harness)
+  state="$dir/state"
+  pids=$(start_claude_over_versioned_harness "$dir" "
+export FM_STATE_OVERRIDE='$state'
+'$LOCK_CLI' > '$dir/acquire1.out' 2>&1
+" "
+export FM_STATE_OVERRIDE='$state'
+bash -c \"'$LOCK_CLI' ownership\" > '$dir/ownership2.out' 2>&1
+'$LOCK_CLI' > '$dir/acquire2.out' 2>&1
+")
+  read -r outer versioned <<< "$pids"
+  [ -n "$versioned" ] || { stop_harness "$outer"; fail "the versioned session process never started under the outer claude"; }
+
+  touch "$dir/go1"
+  wait_for_marker "$dir/phase1.done" || {
+    stop_harness "$versioned"; stop_harness "$outer"
+    fail "the chain's first phase never finished"
+  }
+  recorded=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+  assert_contains "$(cat "$dir/acquire1.out")" "lock acquired: harness pid $versioned" \
+    "acquire must record the NEAREST harness, the session's own process: $(cat "$dir/acquire1.out")"
+  assert_not_contains "$(cat "$dir/acquire1.out")" "moved from ancestor" \
+    "a first acquisition over no lock at all has nothing to inherit"
+  [ "$recorded" = "$versioned" ] \
+    || fail "the lock must name the version-named session process $versioned, got: $recorded"
+  [ "$recorded" != "$outer" ] \
+    || fail "the lock names the outer claude $outer, the disposable process the incident depended on"
+
+  # The daemon restart: kill the process ABOVE the recorded holder. Ownership
+  # must not notice, because nothing above the session is consulted any more.
+  stop_harness "$outer"
+  wait_for_death "$outer" || { stop_harness "$versioned"; fail "the outer claude never died"; }
+  touch "$dir/go2"
+  wait_for_marker "$dir/chain.done" || {
+    stop_harness "$versioned"
+    fail "the chain's second phase never finished"
+  }
+  recorded=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+  stop_harness "$versioned"
+
+  [ "$(cat "$dir/ownership2.out")" = owned ] \
+    || fail "losing the process above the session must not lose the fleet, got: $(cat "$dir/ownership2.out")"
+  assert_contains "$(cat "$dir/acquire2.out")" "lock acquired: harness pid $versioned" \
+    "re-acquiring after the process above died must still succeed: $(cat "$dir/acquire2.out")"
+  [ "$recorded" = "$versioned" ] || fail "the re-acquire moved the lock off the session, to: $recorded"
+  pass "fm-lock.sh: the nearest harness is recorded, so the fleet survives the death of the process above it"
+}
+
+test_acquire_inherits_a_lock_that_names_a_live_ancestor() {
+  local dir state pids outer versioned recorded
+  # The migration case, and the one that would have prevented the incident
+  # outright. At 08:59 on 2026-09-15 the INTERACTIVE session acquired the lock;
+  # the background session beneath it never held the lock at all, and its own
+  # acquire was refused at 18:29 while every gate still read `owned` through
+  # ancestry - a split brain that predated the failure by three hours. A live
+  # holder that is an ancestor is now inherited instead of defended, so the first
+  # descendant to act becomes the sole owner and a legacy lock migrates with no
+  # operator step.
+  dir=$(make_case lock-inherit-ancestor)
+  state="$dir/state"
+  pids=$(start_claude_over_versioned_harness "$dir" "
+export FM_STATE_OVERRIDE='$state'
+'$LOCK_CLI' > '$dir/acquire.out' 2>&1
+" "
+export FM_STATE_OVERRIDE='$state'
+bash -c \"'$LOCK_CLI' ownership\" > '$dir/ownership.out' 2>&1
+")
+  read -r outer versioned <<< "$pids"
+  [ -n "$versioned" ] || { stop_harness "$outer"; fail "the versioned session process never started under the outer claude"; }
+
+  # The 08:59 state: the lock names the live process ABOVE this session, with its
+  # kernel start ticks, exactly as a real acquire from that session wrote it.
+  write_lock_for "$state" "$outer"
+  touch "$dir/go1"
+  wait_for_marker "$dir/phase1.done" || {
+    stop_harness "$versioned"; stop_harness "$outer"
+    fail "the chain's first phase never finished"
+  }
+  recorded=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+  assert_contains "$(cat "$dir/acquire.out")" "lock acquired: harness pid $versioned (moved from ancestor $outer)" \
+    "a live ANCESTOR holder must be inherited, and the move named: $(cat "$dir/acquire.out")"
+  assert_not_contains "$(cat "$dir/acquire.out")" "another live firstmate session holds the lock" \
+    "a session forked from the holder is not a rival and must not be refused"
+  [ "$recorded" = "$versioned" ] \
+    || fail "the inherited lock must name this session's own process $versioned, got: $recorded"
+
+  # Having inherited it, the fleet survives the ancestor's death - which is the
+  # whole point of moving the lock down before the daemon restarts.
+  stop_harness "$outer"
+  wait_for_death "$outer" || { stop_harness "$versioned"; fail "the outer claude never died"; }
+  touch "$dir/go2"
+  wait_for_marker "$dir/chain.done" || {
+    stop_harness "$versioned"
+    fail "the chain's second phase never finished"
+  }
+  stop_harness "$versioned"
+  [ "$(cat "$dir/ownership.out")" = owned ] \
+    || fail "after inheriting, the ancestor's death must not lose the fleet, got: $(cat "$dir/ownership.out")"
+  pass "fm-lock.sh: a live ancestor holder is inherited, so a legacy lock migrates and survives that ancestor"
+}
+
+test_a_live_harness_outside_this_ancestry_is_still_refused() {
+  local dir state rival pids outer versioned recorded
+  # Requirement (b), and the one this change could plausibly have broken: making
+  # a descendant inherit must not make a STRANGER inheritable. The rival here is
+  # a second version-named harness, alive and harness-shaped, so the only thing
+  # that can reject it is the ancestry test - which is what makes this a test of
+  # the inherit condition rather than of the harness predicate.
+  dir=$(make_case lock-rival-not-inherited)
+  state="$dir/state"
+  rival=$(start_versioned_harness "$dir/rival" "true")
+  wait_for_chain "$dir/rival" || { stop_harness "$rival"; fail "the rival harness never started"; }
+  write_lock_for "$state" "$rival"
+
+  pids=$(start_claude_over_versioned_harness "$dir" "
+export FM_STATE_OVERRIDE='$state'
+'$LOCK_CLI' > '$dir/acquire.out' 2>&1
+printf '%s\n' \"\$?\" > '$dir/acquire.status'
+" "true")
+  read -r outer versioned <<< "$pids"
+  [ -n "$versioned" ] || { stop_harness "$outer"; stop_harness "$rival"; fail "the versioned session process never started"; }
+  touch "$dir/go1"
+  wait_for_marker "$dir/phase1.done" || {
+    stop_harness "$versioned"; stop_harness "$outer"; stop_harness "$rival"
+    fail "the chain's first phase never finished"
+  }
+  recorded=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+  touch "$dir/go2"
+  stop_harness "$versioned"
+  stop_harness "$outer"
+  stop_harness "$rival"
+
+  [ "$(cat "$dir/acquire.status")" = 1 ] \
+    || fail "acquiring over a live harness outside this ancestry must still exit 1, got: $(cat "$dir/acquire.status")"
+  assert_contains "$(cat "$dir/acquire.out")" "another live firstmate session holds the lock" \
+    "a live non-ancestor holder must still be refused: $(cat "$dir/acquire.out")"
+  assert_contains "$(cat "$dir/acquire.out")" "is not an ancestor of this process" \
+    "the refusal must say why the holder was not inherited"
+  assert_not_contains "$(cat "$dir/acquire.out")" "moved from ancestor" \
+    "a rival session must never be reported as an inherited ancestor"
+  [ "$recorded" = "$rival" ] || fail "a refused acquire rewrote the lock, to: $recorded"
+  pass "fm-lock.sh: a live harness outside this session's ancestry is a rival, not an ancestor to inherit from"
+}
+
+test_arming_converges_a_lock_that_names_an_ancestor() {
+  local dir state pids outer versioned recorded watcher
+  # Inheriting at acquire alone would leave every already-running home on its
+  # legacy ancestor-recorded lock until someone next ran session start, and a
+  # daemon restart before that repeats the incident. So both entry points that
+  # take the watcher singleton re-acquire once on their OWNED path, which for a
+  # lock already naming this session is a no-op refresh and for a legacy lock is
+  # the migration. Codex reaches supervision through the checkpoint rather than
+  # the arm, so both are exercised here, each from inside the chain so the
+  # ancestry the gate walks is the real one.
+  dir=$(make_case gate-arm-converge)
+  state="$dir/state"
+  mark_pr_check_migration_complete "$state"
+  pids=$(start_claude_over_versioned_harness "$dir" "
+export FM_STATE_OVERRIDE='$state'
+export PATH='$dir/fakebin':\$PATH
+export FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999
+timeout 30 '$WATCH_CHECKPOINT' --seconds 1 > '$dir/checkpoint.out' 2>&1 || true
+" "
+export FM_STATE_OVERRIDE='$state'
+export PATH='$dir/fakebin':\$PATH
+export FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999
+export FM_ARM_CONFIRM_TIMEOUT=5
+timeout 20 '$WATCH_ARM' > '$dir/arm.out' 2>&1 || true
+")
+  read -r outer versioned <<< "$pids"
+  [ -n "$versioned" ] || { stop_harness "$outer"; fail "the versioned session process never started under the outer claude"; }
+
+  # Codex's entry point first, on the 08:59 lock shape.
+  write_lock_for "$state" "$outer"
+  touch "$dir/go1"
+  wait_for_marker "$dir/phase1.done" || {
+    stop_harness "$versioned"; stop_harness "$outer"
+    fail "the checkpoint phase never finished"
+  }
+  recorded=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+  assert_not_contains "$(cat "$dir/checkpoint.out")" "read-only" \
+    "a session descended from the holder owns the home and must not be refused: $(cat "$dir/checkpoint.out")"
+  [ "$recorded" = "$versioned" ] \
+    || fail "the checkpoint must move the lock onto this session's own process $versioned, got: $recorded"
+
+  # Then the arm, put back on the legacy lock so it has the same work to do. The
+  # beacon the checkpoint's own watcher touched has to go with it, or the arm
+  # attaches to that finished cycle instead of starting one.
+  write_lock_for "$state" "$outer"
+  find "$state" -maxdepth 1 -name .last-watcher-beat -delete
+  touch "$dir/go2"
+  wait_for_marker "$dir/chain.done" || {
+    watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ -n "$watcher" ] && kill -TERM "$watcher" 2>/dev/null
+    stop_harness "$versioned"; stop_harness "$outer"
+    fail "the arm phase never finished: $(cat "$dir/arm.out" 2>/dev/null || true)"
+  }
+  recorded=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+  watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$watcher" ] && kill -TERM "$watcher" 2>/dev/null
+  stop_harness "$versioned"
+  stop_harness "$outer"
+
+  assert_not_contains "$(cat "$dir/arm.out")" "read-only" \
+    "the arm must not refuse a session descended from the lock holder: $(cat "$dir/arm.out")"
+  assert_contains "$(cat "$dir/arm.out")" "watcher: started pid=" \
+    "the arm must still arm after converging the lock: $(cat "$dir/arm.out")"
+  [ "$recorded" = "$versioned" ] \
+    || fail "the arm must move the lock onto this session's own process $versioned, got: $recorded"
+  pass "fm-watch-arm, fm-watch-checkpoint: arming converges an ancestor-recorded lock onto this session"
+}
+
 test_the_harness_predicate_has_exactly_one_implementation() {
   local definitions leftovers names count alternatives name
   # The finder and the holder check each used to carry their own idea of what a
@@ -975,9 +1311,13 @@ test_a_bash_tool_shell_is_not_a_live_harness
 test_the_harness_predicate_has_exactly_one_implementation
 test_the_marker_finds_the_session_the_ancestry_walk_cannot_reach
 test_an_inherited_marker_for_another_session_is_ignored
+test_acquire_records_the_nearest_harness_not_the_one_above_it
+test_acquire_inherits_a_lock_that_names_a_live_ancestor
+test_a_live_harness_outside_this_ancestry_is_still_refused
 test_arm_refuses_when_another_session_owns_the_fleet
 test_arm_refuses_restart_when_another_session_owns_the_fleet
 test_arm_starts_for_the_owning_session
+test_arming_converges_a_lock_that_names_an_ancestor
 test_arm_recognises_ownership_several_process_levels_down
 test_arm_still_arms_without_a_lock_holder_and_says_so
 test_arm_arms_when_the_lock_holder_pid_was_reused

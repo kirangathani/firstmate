@@ -1830,7 +1830,7 @@ test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm() {
   # anybody issuing another arm. No arm is started anywhere in this case after
   # the initial six, so a lock that moves to a live pid can only have come from
   # the pool itself.
-  local dir state fakebin i first_lock second_lock started started_after
+  local dir state fakebin i first_lock second_lock started started_after arm_pid
   dir=$(make_case dormant-pool)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1880,6 +1880,19 @@ test_dormant_arm_pool_hands_the_watch_over_without_a_new_arm() {
     || fail "no arm surfaced the signal wake its watcher exited on"
   grep -q 'pool=' "$state/.watch-cycle-exits.log" \
     || fail "the cycle ledger recorded no pool depth at the handover"
+
+  # Reap what this case started, here rather than leaving it to the file's EXIT
+  # sweep. Five waiting arms poll, and their watcher runs, for as long as they are
+  # alive; every later case in this shard would otherwise share a box with them,
+  # and the ones that assert a real process reacts within a few seconds are
+  # exactly the ones that lose that race first.
+  for arm_pid in $(jobs -p 2>/dev/null); do
+    kill -TERM "$arm_pid" 2>/dev/null || true
+  done
+  kill -TERM "$second_lock" 2>/dev/null || true
+  for arm_pid in $(jobs -p 2>/dev/null); do
+    wait "$arm_pid" 2>/dev/null || true
+  done
   pass "six dormant arms keep one watcher and hand the watch over with no new arm"
 }
 
