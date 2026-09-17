@@ -670,6 +670,99 @@ test_stale_limit_dialog_respects_declared_pause() {
   pass "a declared limit pause is never re-escalated through the dialog path"
 }
 
+# --- a captain-exempt task's stale is absorbed on the bounded cadence --------
+#
+# A task the captain has signed out of monitoring was still surfacing a stale
+# wake every poll, spending an arm on a pane nobody was going to act on - which
+# is what the exemption already said. It absorbs on the same bounded cadence a
+# declared pause uses, so a forgotten exemption still re-surfaces once a window.
+# The signature is the authority: an unsigned record is not an exemption, which
+# tests/fm-unactioned-guard.test.sh owns and is not re-asserted here.
+
+# Sign a real exemption for <id> in <home>, through the owner that mints them.
+# A hand-written record would be rejected by design, so this must go through
+# bin/fm-monitor.sh exactly as the captain's own command does.
+grant_exemption() {  # <home-dir> <id> <reason>
+  local home=$1 id=$2 reason=$3
+  mkdir -p "$home/config"
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$home/config/ci-waiver-secret"
+  chmod 600 "$home/config/ci-waiver-secret"
+  FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-monitor.sh" --exempt "$id" --reason "$reason" >/dev/null 2>&1 \
+    || fail "could not mint a signed exemption for $id"
+  [ -f "$home/state/$id.monitor-exempt" ] || fail "no exemption record was written for $id"
+}
+
+# The fixture both cases share: an exempt task on a stale pane whose crew reads
+# as stopped, which is precisely the shape that used to surface every cycle.
+setup_exempt_stale_case() {  # <case-name> -> sets EX_DIR EX_STATE EX_FAKEBIN EX_WINDOW EX_KEY EX_HASH EX_CAPTURE
+  local name=$1 sig
+  EX_DIR=$(make_case "$name"); EX_STATE="$EX_DIR/state"; EX_FAKEBIN="$EX_DIR/fakebin"
+  EX_CAPTURE="$EX_DIR/pane.txt"
+  EX_WINDOW="test:fm-exempted"
+  printf 'idle composer, captain is driving this one' > "$EX_CAPTURE"
+  printf 'window=%s\nkind=ship\n' "$EX_WINDOW" > "$EX_STATE/exempted.meta"
+  printf 'working: captain took this over by hand\n' > "$EX_STATE/exempted.status"
+  sig=$(seen_sig "$EX_STATE/exempted.status")
+  printf '%s' "$sig" > "$EX_STATE/.seen-exempted_status"
+  EX_KEY=$(printf '%s' "$EX_WINDOW" | tr ':/.' '___')
+  EX_HASH=$(hash_text "$(cat "$EX_CAPTURE")")
+  printf '%s' "$EX_HASH" > "$EX_STATE/.hash-$EX_KEY"
+  printf '1\n' > "$EX_STATE/.count-$EX_KEY"
+  grant_exemption "$EX_DIR" exempted "the captain is driving this window himself"
+}
+
+test_exempt_stale_absorbed() {
+  local out drain_out pid
+  setup_exempt_stale_case exempt-stale-absorbed
+  out="$EX_DIR/watch.out"; drain_out="$EX_DIR/drain.out"
+  # Stopped crew: without the exemption this surfaces immediately, which is what
+  # test_nonterminal_stale_not_working_surfaced above pins.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  # A re-surface window far longer than this test runs, so the only thing that
+  # can end the watcher here is a surface the exemption should have absorbed.
+  PATH="$EX_FAKEBIN:$PATH" FM_FAKE_TMUX_WINDOW="$EX_WINDOW" FM_FAKE_TMUX_CAPTURE="$EX_CAPTURE" \
+    FM_STATE_OVERRIDE="$EX_STATE" FM_CONFIG_OVERRIDE="$EX_DIR/config" \
+    FM_CREW_STATE_BIN="$EX_FAKEBIN/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_cycle "$pid" "$EX_STATE" 40 2 \
+    || fail "watcher exited on an exempt task's stale instead of absorbing it"
+  reap "$pid"
+  [ ! -s "$EX_STATE/.wake-queue" ] || {
+    FM_STATE_OVERRIDE="$EX_STATE" "$DRAIN" > "$drain_out" 2>/dev/null || true
+    fail "an exempt task's stale was queued: $(cat "$drain_out")"
+  }
+  unset FM_FAKE_CREW_STATE
+  pass "a captain-exempt task's stale pane is absorbed instead of surfaced"
+}
+
+test_exempt_stale_resurfaces_after_the_cadence() {
+  local out drain_out pid
+  setup_exempt_stale_case exempt-stale-resurface
+  out="$EX_DIR/watch.out"; drain_out="$EX_DIR/drain.out"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  # The cadence is anchored on the status file's own age, so a zero-length
+  # window is what makes an already-quiet task due for its recheck now. That is
+  # the same knob the declared-pause cases drive the cadence with.
+  PATH="$EX_FAKEBIN:$PATH" FM_FAKE_TMUX_WINDOW="$EX_WINDOW" FM_FAKE_TMUX_CAPTURE="$EX_CAPTURE" \
+    FM_STATE_OVERRIDE="$EX_STATE" FM_CONFIG_OVERRIDE="$EX_DIR/config" \
+    FM_CREW_STATE_BIN="$EX_FAKEBIN/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=0 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "an exempt task past its recheck window never re-surfaced - a forgotten exemption would rot invisibly"
+  FM_STATE_OVERRIDE="$EX_STATE" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the exempt re-surface failed"
+  grep -F "captain-exempt from monitoring" "$drain_out" >/dev/null \
+    || fail "the re-surfaced wake did not say the exemption is what held it: $(cat "$drain_out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a captain-exempt task re-surfaces once its recheck window has passed"
+}
+
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
 # The key requirement: a crew with no running pipeline that has gone quiet (and is
 # not busy) has stopped - it may be done via interactive menus, waiting, or wedged.
@@ -1469,6 +1562,8 @@ test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_stale_limit_dialog_surfaced_despite_provably_working
 test_stale_limit_dialog_respects_declared_pause
+test_exempt_stale_absorbed
+test_exempt_stale_resurfaces_after_the_cadence
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
