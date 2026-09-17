@@ -365,8 +365,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 
 # Absorb a stale pane under a declared external-wait pause (paused:), a
 # dead-agent captain-held transfer, or a captain-signed monitoring exemption,
-# and re-surface it once every
-# PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
+# and re-surface it once every PAUSE_RESURFACE_SECS for a recheck so it cannot
+# rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
 # status file mtime, not a per-hash marker, so a churny idle pane (a ticking

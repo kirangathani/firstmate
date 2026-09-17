@@ -27,11 +27,22 @@ set -u
 # those cases exist to catch.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$ROOT/bin/fm-classify-lib.sh"
+# Sourced for fm_watcher_takeover_pending, whose window edge is asserted
+# directly below rather than through the hook.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$ROOT/bin/fm-wake-lib.sh"
 
-# One second inside the handover window, and comfortably outside it while still
-# inside the beacon GRACE reason 1 uses - so the "beacon too old" case fails for
-# the handover reason under test and not because the guard stopped looking.
-BEACON_INSIDE_POLL=$((FM_WATCH_POLL_SECS_INT > 1 ? FM_WATCH_POLL_SECS_INT - 1 : 0))
+# Comfortably outside the handover window while still inside the beacon GRACE
+# reason 1 uses, so the "beacon too old" case fails for the handover reason under
+# test and not because the guard stopped looking. There is deliberately no
+# matching "one second inside" constant: the hook forks a subshell, jq, and a
+# pool scan before it reads the beacon, so a fixture aged to the last second
+# inside the window crosses it under load and the case fails for the clock
+# rather than the code (observed at load average 73 on this box, 2026-09-17).
+# The hook cases therefore use a beacon aged zero, which is also exactly what a
+# watcher that has just exited leaves behind, and the window's own edge is
+# pinned directly against the predicate in test_takeover_predicate_window_edges
+# below, where no fork sits between the fixture and the comparison.
 BEACON_PAST_POLL=$((FM_WATCH_POLL_SECS_INT + 5))
 
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
@@ -281,13 +292,42 @@ age_beacon() {  # <dir> <seconds>
   touch -d "@$(( $(date +%s) - $2 ))" "$1/state/.last-watcher-beat"
 }
 
+# The window's own edge, asserted against the predicate rather than the hook so
+# no fork sits between aging the beacon and reading it. Both bounds are stated
+# as the poll argument rather than as a beacon age, so neither can be crossed by
+# the clock: a beacon aged AGE is never younger than a window of AGE (it only
+# grows), and a window of AGE plus a minute would need a minute of drift to fail.
+test_takeover_predicate_window_edges() {
+  local dir age
+  dir="$TMP_ROOT/pred-takeover/state"
+  mkdir -p "$dir"
+  age=30
+  touch -d "@$(( $(date +%s) - age ))" "$dir/.last-watcher-beat"
+  fm_watcher_takeover_pending "$dir" 1 $((age + 60)) \
+    || fail "a beacon inside the window with an arm waiting must read as a handover"
+  if fm_watcher_takeover_pending "$dir" 1 "$age"; then
+    fail "a beacon exactly at the window edge must not read as a handover"
+  fi
+  if fm_watcher_takeover_pending "$dir" 0 $((age + 60)); then
+    fail "an empty pool must never read as a handover, however fresh the beacon"
+  fi
+  if fm_watcher_takeover_pending "$dir" "" $((age + 60)); then
+    fail "an unreadable pool depth is not a member count and must not read as a handover"
+  fi
+  find "$dir" -name .last-watcher-beat -delete
+  if fm_watcher_takeover_pending "$dir" 1 $((age + 60)); then
+    fail "a home that has never had a beacon must not read as a handover"
+  fi
+  pass "fm_watcher_takeover_pending: needs both a beacon inside the window and a waiting arm"
+}
+
 test_hook_silent_during_a_handover_with_arms_waiting() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-handover-waiting")
   : > "$dir/state/task1.meta"
   # No live watcher lock at all: exactly what the gap between one watcher
   # exiting and the next taking over looks like on disk.
-  age_beacon "$dir" "$BEACON_INSIDE_POLL"
+  age_beacon "$dir" 0
   seed_arm_pool "$dir" 2
   out=$(run_hook_with_pool_floor "$dir" false 1); status=$?
   clear_arm_pool_seed
@@ -300,7 +340,7 @@ test_hook_blocks_during_a_handover_with_no_arms_waiting() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-handover-empty")
   : > "$dir/state/task1.meta"
-  age_beacon "$dir" "$BEACON_INSIDE_POLL"
+  age_beacon "$dir" 0
   # Pool floor 0, so reason 5 cannot fire and the block below is reason 1's.
   out=$(run_hook "$dir" false); status=$?
   expect_code 2 "$status" "a fresh beacon with an EMPTY pool has nobody taking over and must still block"
@@ -328,7 +368,7 @@ test_hook_still_blocks_for_the_pool_floor_during_a_handover() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-handover-pool-floor")
   : > "$dir/state/task1.meta"
-  age_beacon "$dir" "$BEACON_INSIDE_POLL"
+  age_beacon "$dir" 0
   seed_arm_pool "$dir" 1
   out=$(run_hook_with_pool_floor "$dir" false 2); status=$?
   clear_arm_pool_seed
@@ -1645,6 +1685,7 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
+test_takeover_predicate_window_edges
 test_hook_silent_during_a_handover_with_arms_waiting
 test_hook_blocks_during_a_handover_with_no_arms_waiting
 test_hook_blocks_when_the_beacon_predates_a_handover_window
