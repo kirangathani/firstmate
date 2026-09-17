@@ -288,10 +288,10 @@ test_refill_send_with_a_full_pool_delivers_then_exits() {
   got=$(cat "$log")
   assert_contains "$got" "target=sess:fm-lane-ok literal=1 arg=hello captain" "a full-pool send must still type its literal text"
   assert_contains "$got" "target=sess:fm-lane-ok literal=0 arg=Enter" "a full-pool send must still submit with Enter"
-  pass "fm-send strict: a full pool leaves the send nothing to refill and it exits"
+  pass "fm-send strict: --refill still delivers the send and exits when the pool is full"
 }
 
-test_send_that_fails_exits_instead_of_waiting() {
+test_refill_send_that_fails_exits_instead_of_waiting() {
   # The rule that keeps a failure visible: a send that did not land must come back
   # with its error at once, never disappear into the pool where the model would
   # hear nothing until the next wake.
@@ -300,11 +300,11 @@ test_send_that_fails_exits_instead_of_waiting() {
   fb=$(make_stubs "$dir"); home=$(setup_home refill-fail); err="$dir/send.err"
 
   env -u FM_ARM_POOL_NO_REFILL PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_SEND_SETTLE=0 \
-    timeout 30 "$SEND" fm-nosuchlane "hello captain" >/dev/null 2>"$err"; rc=$?
+    timeout 30 "$SEND" --refill fm-nosuchlane "hello captain" >/dev/null 2>"$err"; rc=$?
   [ "$rc" -ne 0 ] || fail "a send to an unresolvable target exited 0"
   [ "$rc" -ne 124 ] || fail "a failed send waited as a dormant arm instead of reporting its error"
   assert_contains "$(cat "$err")" "no metadata for fm-nosuchlane" "a failed send must still report why it failed"
-  pass "fm-send strict: a send that fails exits with its error instead of waiting"
+  pass "fm-send strict: a --refill send that fails exits with its error instead of waiting"
 }
 
 test_exact_lane_id_send_still_works
@@ -317,4 +317,4 @@ test_a_successful_send_becomes_a_waiting_arm_when_the_pool_has_room
 test_a_key_send_becomes_a_waiting_arm_too
 test_the_opt_out_returns_the_send_to_its_caller
 test_refill_send_with_a_full_pool_delivers_then_exits
-test_send_that_fails_exits_instead_of_waiting
+test_refill_send_that_fails_exits_instead_of_waiting

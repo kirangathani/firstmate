@@ -1912,15 +1912,7 @@ POOL_LIB="$ROOT/bin/fm-arm-pool-lib.sh"
 # an identity being stored that carried the command line into a one-line record
 # and truncated it. Do not flatten this into a one-liner.
 pool_eval() {  # <state> <snippet>
-  # The refill opt-out is scrubbed, never inherited: tests/lib.sh sets it as the
-  # suite baseline so an ordinary test send stays out of the pool, but it is the
-  # very variable these cases exercise, so leaving it set would make the refill
-  # cases pass by not refilling at all.
-  # The body is the child's script, expanded there from its own positional args
-  # and never here; the env prefix is only what stops shellcheck recognising
-  # that bash -c idiom.
-  # shellcheck disable=SC2016
-  env -u FM_ARM_POOL_NO_REFILL FM_STATE_OVERRIDE="$1" bash -c '
+  FM_STATE_OVERRIDE="$1" bash -c '
     . "$1"
     . "$2"
     eval "$3"

@@ -318,4 +318,4 @@ trap - EXIT
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-arm-pool-lib.sh
 . "$SCRIPT_DIR/fm-arm-pool-lib.sh"
-fm_arm_pool_refill_or_exit "$SCRIPT_DIR/fm-watch-arm.sh"
+fm_arm_pool_refill_opted_out || fm_arm_pool_refill_or_exit "$SCRIPT_DIR/fm-watch-arm.sh"
