@@ -175,6 +175,10 @@
 # The session-lock gate's two advisories take the same route, and for the same
 # reason: six members would otherwise announce one fact six times, and the
 # session-start digest already reports which session owns this home once.
+# The results channel (print_pending_results_on_exit) is the one addition to that
+# line, and deliberately not an exception to it: a backgrounded command's result
+# is its own content arriving on the same trip out, never a second copy of the
+# wake, and it is labelled and printed last so it cannot be read as one.
 # FAILED endings are never silenced. Neither is the harness's stream-end notice,
 # which is emitted by the harness for every finished Monitor and cannot be
 # suppressed from here at all - one per wake is the floor this script can reach.
@@ -749,6 +753,23 @@ watch_output_reason_type() {
   esac
 }
 
+# The results channel, delivered on the same trip out. A firstmate command that
+# ran as a background task or a Monitor - a merge, a document write - records one
+# line for the model rather than costing it a call to go and read one.
+# bin/fm-wake-pending.sh owns that log and why it is separate from the unread
+# rows above. Taken rather than peeked, because a result line is spent once it
+# has been delivered.
+# Printed LAST, after the watcher's own reason and after the crewmate's words: a
+# result is a completion notice, and it must never lead a wake that a crew is
+# blocked behind. Labelled, so a finished command is never read as a new wake.
+print_pending_results_on_exit() {
+  local results
+  results=$("$SCRIPT_DIR/fm-wake-pending.sh" --take-results 2>/dev/null) || return 0
+  [ -n "$results" ] || return 0
+  printf 'results from background commands (no action owed unless one says so):\n'
+  printf '%s\n' "$results"
+}
+
 print_watch_output() {
   local out=$1
   [ -s "$out" ] && cat "$out"
@@ -1044,6 +1065,14 @@ owned_child_finished() {
       print_watch_output "$child_out"
       drain_wake_queue_on_exit
     fi
+    # Both kinds of arm deliver the results channel, and a pool member does too:
+    # these are a finished command's own words, not a second copy of the wake, so
+    # the one-line rule above has nothing to say about them. They stay LAST for
+    # the reason that function's header gives - a completion notice must never
+    # lead a wake a crew is blocked behind.
+    print_pending_results_on_exit
+    # The ledger row closes AFTER the results are printed, because printing them
+    # is part of carrying the wake out and belongs inside what that row measures.
     fm_latency_cmd_end 0 "$reason_type"
     rm -f "$child_out" 2>/dev/null || true
     child=

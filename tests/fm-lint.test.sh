@@ -656,7 +656,10 @@ test_concurrent_runs_publish_a_whole_cache_not_a_spliced_one() {
   while [ "$i" -lt "$n" ]; do
     i=$((i + 1))
     (
-      FM_LINT_CACHE_DIR="$tmp/shared" "$tmp/r$i/bin/fm-lint.sh" >"$tmp/out.$i" 2>&1
+      # FM_LINT_NO_LOCK is what this case is FOR: the machine-wide lock added
+      # below would serialise these runs, and concurrent publication is exactly
+      # the contract under test here.
+      FM_LINT_NO_LOCK=1 FM_LINT_CACHE_DIR="$tmp/shared" "$tmp/r$i/bin/fm-lint.sh" >"$tmp/out.$i" 2>&1
       printf '%s\n' "$?" > "$tmp/rc.$i"
     ) &
     pids="$pids $!"
@@ -693,6 +696,75 @@ test_concurrent_runs_publish_a_whole_cache_not_a_spliced_one() {
   ' "$tmp/shared/discovery" \
     || fail "concurrent runs left a spliced discovery cache:"$'\n'"$(cat "$tmp/shared/discovery")"
   pass "concurrent runs on one shared cache publish whole files, never a splice"
+}
+
+test_runs_serialise_across_the_whole_machine() {
+  if ! pinned_ready; then
+    pass "SKIP (pinned ShellCheck not resolved): machine-wide serialisation check"
+    return
+  fi
+  if ! command -v flock >/dev/null 2>&1; then
+    pass "SKIP (no flock on this host): machine-wide serialisation check"
+    return
+  fi
+  # The shard cap is per invocation, so N workers linting at once is N times 8
+  # concurrent ShellCheck processes. Four at once took all 23 GB of the captain's
+  # box on 2026-09-17 and every ShellCheck had to be killed, which each worker saw
+  # as `ShellCheck exited 143` and an aborted run with no verdict. The lock has to
+  # live in the script, because an instruction to serialise has to be remembered
+  # by every caller every time.
+  local tmp lock rc out holder
+  tmp=$(fm_test_tmproot fm-lint-serialise)
+  fm_lint_fixture "$tmp/tree"
+  lock="$tmp/lint.lock"
+  : > "$lock"
+
+  # Hold the lock the way another worker's run would, then confirm a second run
+  # waits instead of starting its own eight ShellCheck processes.
+  flock "$lock" sleep 30 &
+  holder=$!
+  # Give the holder time to actually acquire before measuring the contention.
+  while ! flock -n "$lock" true 2>/dev/null; do break; done
+  rc=0
+  out=$(FM_LINT_LOCK="$lock" timeout 8 "$tmp/tree/bin/fm-lint.sh" 2>&1) || rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  if [ "$rc" -ne 124 ]; then
+    printf 'exit was %s and the run said:\n%s\n' "$rc" "$out" >&2
+    fail "a lint run waits while another holds the machine-wide lock"
+  fi
+  pass "a lint run waits while another holds the machine-wide lock"
+
+  # Waiting in silence is indistinguishable from wedged, and the next thing a
+  # waiting caller does is start a second copy of the problem.
+  case "$out" in
+    *"another lint is running"*) : ;;
+    *) printf 'the waiting run said:\n%s\n' "$out" >&2
+       fail "a waiting lint run says why it is waiting" ;;
+  esac
+  pass "a waiting lint run says why it is waiting"
+
+  # With the lock free it must reach its verdict exactly as before, and the
+  # escape hatch must skip the wait entirely.
+  rc=0
+  out=$(FM_LINT_LOCK="$lock" "$tmp/tree/bin/fm-lint.sh" 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'exit was %s and the run said:\n%s\n' "$rc" "$out" >&2
+    fail "an uncontended run reaches its verdict through the lock"
+  fi
+  pass "an uncontended run reaches its verdict through the lock"
+
+  flock "$lock" sleep 30 &
+  holder=$!
+  rc=0
+  out=$(FM_LINT_NO_LOCK=1 FM_LINT_LOCK="$lock" timeout 60 "$tmp/tree/bin/fm-lint.sh" 2>&1) || rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  if [ "$rc" -ne 0 ]; then
+    printf 'exit was %s and the run said:\n%s\n' "$rc" "$out" >&2
+    fail "the documented escape hatch skips the wait"
+  fi
+  pass "the documented escape hatch skips the wait"
 }
 
 test_owner_exists_and_executable() {
@@ -869,3 +941,4 @@ test_one_worktree_warms_the_next
 test_cache_dir_override_and_disable_survive_the_shared_default
 test_publication_never_uses_a_fixed_staging_name
 test_concurrent_runs_publish_a_whole_cache_not_a_spliced_one
+test_runs_serialise_across_the_whole_machine
