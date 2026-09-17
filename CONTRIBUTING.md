@@ -45,10 +45,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, and pinned shellcheck version), and both CI and the no-mistakes pre-push gate run it, so local and CI can never diverge.
-  Run it ONCE per commit, on the whole tree, immediately before `git commit` - never after each edit and never in a loop, because a full pass is 20+ concurrent shellcheck processes and up to 15 GB of memory, and concurrent passes have taken the box down.
-  While editing, check a single file with `shellcheck <file>` instead.
-  The script enforces the concurrency half itself: it holds a box-wide lock for the whole pass, so a second pass waits with a notice on stderr rather than doubling the load, and it caps its shard count from `MemAvailable` as well as core count.
   CI holds the verdict, so run it locally at most once before pushing rather than after each edit: it forks up to eight concurrent shellcheck processes over the whole tree, and it takes a machine-wide lock so several checkouts cannot run it at once.
+  It also caps that shard count from `MemAvailable`, so the one run that does go ahead cannot commit more than half of what the machine has free.
   It pins one exact shellcheck version and refuses to run under any other; print it with `bin/fm-lint.sh --required-version` and install that build locally.
   It shards the file set and caches clean results under the shared git common dir, so every worktree of one clone reads and writes one cache: an unchanged tree costs well under a second, and a fresh linked worktree is served from what another worktree already linted instead of starting cold.
   Only a genuinely cold cache - a fresh clone, or CI, which never inherits one - pays about half of what the old single command did.
@@ -77,7 +75,7 @@ Check and test the toolbelt before pushing:
 
 ```sh
 for script in bin/*.sh bin/backends/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt
-bin/fm-lint.sh   # ONCE per commit, immediately before `git commit`: the single owner CI and the no-mistakes gate both run
+bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
 bin/fm-test.sh --local   # behavior tests the working change can affect, in parallel; what no-mistakes commands.test runs
 bin/fm-test.sh   # the canonical whole set, serial: the definition of the suite, and what --local is measured against
 
