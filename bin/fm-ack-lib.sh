@@ -149,6 +149,16 @@ FM_ACK_OWED_STATES_DEFAULT='done failed parked blocked'
 # reporting done: reads unknown, and that is the case this guard exists for.
 # Clearing on unknown would silence exactly the incident it was built to catch.
 FM_ACK_CLEAR_STATES_DEFAULT='working paused'
+# The fm-crew-state.sh SOURCES that may not clear a candidate even when the
+# state they carry is one of the above. Both are evidence that something of this
+# task's is still executing, which is what the watcher needs to know before it
+# absorbs a quiet pane - but neither is evidence that the AGENT has moved past
+# the state it reported. A worker that appends `done:` and leaves a background
+# process behind reads `working - source: subprocess`, and clearing on that
+# would silence exactly the unanswered report this guard exists to catch. The
+# watcher's own absorb path deliberately does trust them; that path re-surfaces
+# on its wedge timer, and this one has no such backstop.
+FM_ACK_NONCLEARING_SOURCES_DEFAULT='subprocess attach'
 
 # How long an owed, unacked state may sit before it alarms. Ten minutes is
 # deliberately conservative: firstmate routinely takes a turn or two to trigger
@@ -203,6 +213,17 @@ fm_ack_state_is_clear() {  # <fm-crew-state state token>
   local s=$1 w
   [ -n "$s" ] || return 1
   for w in ${FM_ACK_CLEAR_STATES:-$FM_ACK_CLEAR_STATES_DEFAULT}; do
+    if [ "$s" = "$w" ]; then return 0; fi
+  done
+  return 1
+}
+
+# 0 when <source> is one this guard refuses to clear on, whatever state it
+# carries. See FM_ACK_NONCLEARING_SOURCES_DEFAULT for why these two are listed.
+fm_ack_source_is_nonclearing() {  # <fm-crew-state source token>
+  local s=$1 w
+  [ -n "$s" ] || return 1
+  for w in ${FM_ACK_NONCLEARING_SOURCES:-$FM_ACK_NONCLEARING_SOURCES_DEFAULT}; do
     if [ "$s" = "$w" ]; then return 0; fi
   done
   return 1
@@ -277,7 +298,7 @@ fm_ack_is_current() {  # <state-dir> <id>
 # it is not a call that can be assumed to return.
 FM_ACK_CONFIRM_TIMEOUT_DEFAULT=15
 fm_ack_confirm_state() {  # <id>
-  local line state rc=0 bound
+  local line state src rc=0 bound
   bound=${FM_ACK_CONFIRM_TIMEOUT:-$FM_ACK_CONFIRM_TIMEOUT_DEFAULT}
   case "$bound" in ''|*[!0-9]*) bound=$FM_ACK_CONFIRM_TIMEOUT_DEFAULT ;; esac
   if command -v fm_bounded_available >/dev/null 2>&1 && fm_bounded_available; then
@@ -292,7 +313,9 @@ fm_ack_confirm_state() {  # <id>
   esac
   state=${line#state: }
   state=${state%% *}
-  if fm_ack_state_is_clear "$state"; then
+  src=${line#*source: }
+  src=${src%% *}
+  if fm_ack_state_is_clear "$state" && ! fm_ack_source_is_nonclearing "$src"; then
     printf 'clear'
   elif fm_ack_state_is_owed "$state"; then
     printf 'owed'

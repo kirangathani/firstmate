@@ -60,6 +60,30 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
+# Seconds between watcher poll cycles. The watcher's own loop cadence
+# (bin/fm-watch.sh's sleep), and the unit every "is this younger/older than one
+# cycle" judgement elsewhere is measured in: a detached subprocess that has
+# outlived a poll cycle is doing real work rather than rendering a status line
+# (bin/fm-crew-state.sh), and a liveness beacon younger than one cycle belongs to
+# a watcher that was beating normally right up to the moment it exited
+# (fm_watcher_takeover_pending, bin/fm-wake-lib.sh). Those three readings must
+# agree, so the number is defined here once and read from here by all of them.
+# FM_POLL overrides it, and may be fractional for tests that want a fast loop -
+# every integer-arithmetic consumer coerces it for itself.
+FM_WATCH_POLL_SECS_DEFAULT=15
+# shellcheck disable=SC2034 # Read by the watcher, the state reader, and the turn-end guard, not this lib.
+FM_WATCH_POLL_SECS=${FM_POLL:-$FM_WATCH_POLL_SECS_DEFAULT}
+# The same cadence as a whole number of seconds, for the consumers that compare
+# it with `[ ... -lt ... ]`. Test loops legitimately set a sub-second FM_POLL
+# (FM_POLL=0.2 in tests/fm-watcher-lock.test.sh), and shell arithmetic aborts on
+# that, so the fractional part is dropped and the result floored at one second -
+# the smallest window that can mean anything, and the safe direction for both
+# consumers, since a shorter window absorbs less.
+FM_WATCH_POLL_SECS_INT=${FM_WATCH_POLL_SECS%%.*}
+case "$FM_WATCH_POLL_SECS_INT" in
+  ''|*[!0-9]*|0) FM_WATCH_POLL_SECS_INT=1 ;;
+esac
+
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
 # status decision opened by needs-decision or blocked. See status_open_decisions
 # below for the status-fold contract. The transfer verb is written only after
@@ -403,9 +427,14 @@ signal_reason_is_actionable() {  # <file> ...
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
-#   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
-#             pane; the crew is legitimately mid-work on a static-looking pane
-#             (e.g. waiting on CI);
+#   working - POSITIVE evidence the crew is mid-work on a static-looking pane:
+#             an actively-running no-mistakes step (running/fixing/ci), a busy
+#             pane, a detached subprocess that has outlived a poll cycle (a tool
+#             shell the worker is waiting on while its own composer sits idle),
+#             or a live pipeline attach. The last two are what a worker whose
+#             own shell command is running looks like - the harness is not
+#             generating, so nothing renders a busy footer - and neither can be
+#             produced by a worker that has genuinely stopped;
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
 #   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
@@ -425,7 +454,7 @@ crew_absorb_class() {  # <id>
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
+    case "$src" in run-step|pane|subprocess|attach) printf 'working'; return ;; esac
   fi
   printf 'none'
 }

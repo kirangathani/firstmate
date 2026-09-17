@@ -110,7 +110,10 @@ else
   stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }
 fi
 
-POLL=${FM_POLL:-15}                   # seconds between cycles
+# Seconds between cycles, from its one owner in bin/fm-classify-lib.sh (sourced
+# above): the same number bin/fm-crew-state.sh ages a detached subprocess
+# against and bin/fm-wake-lib.sh measures a watcher handover with.
+POLL=$FM_WATCH_POLL_SECS
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
