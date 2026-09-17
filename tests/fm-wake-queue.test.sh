@@ -109,6 +109,53 @@ test_wake_pending_hands_over_once_and_survives_an_unread_session() {
   pass "drained-but-unread wakes are handed over exactly once and then cleared"
 }
 
+test_a_background_commands_result_goes_out_with_the_next_wake() {
+  # The results channel. A firstmate command that ran in the background records
+  # one line for the model; the arm delivers it on its way out and clears it.
+  # Measured 2026-09-17 (data/fm-foreground-audit-f9/report.md, blocker 3): this
+  # route was documented and wired nowhere, so a result surfaced only at the next
+  # session start, which could be hours away.
+  local dir state pending out1 out2
+  dir=$(make_case wake-results)
+  state="$dir/state"
+  pending="$ROOT/bin/fm-wake-pending.sh"
+  out1="$dir/results1.out"
+  out2="$dir/results2.out"
+
+  printf 'wrote: a document\n' | FM_STATE_OVERRIDE="$state" "$pending" --result \
+    || fail "recording a background command's result failed"
+  FM_STATE_OVERRIDE="$state" "$pending" --peek-results | grep -qF 'wrote: a document' \
+    || fail "a peek did not show a recorded result"
+
+  FM_STATE_OVERRIDE="$state" "$pending" --take-results > "$out1" || fail "taking the results failed"
+  grep -qF 'wrote: a document' "$out1" || fail "the results handover did not print the line it was holding"
+
+  FM_STATE_OVERRIDE="$state" "$pending" --take-results > "$out2" || fail "a second results take failed"
+  [ ! -s "$out2" ] || fail "a result line was delivered twice"
+  pass "a background command's result is delivered once and then spent"
+}
+
+test_results_and_unread_wakes_do_not_share_a_log() {
+  # They have opposite lifetimes: an unread wake row must survive every wake
+  # until a fresh session reads it, a result line is spent on first delivery.
+  # One log would force one rule on both, and would have the arm taking back the
+  # rows it had just recorded.
+  local dir state pending
+  dir=$(make_case wake-results-separate)
+  state="$dir/state"
+  pending="$ROOT/bin/fm-wake-pending.sh"
+
+  printf 'row-one\n' | FM_STATE_OVERRIDE="$state" "$pending" --record || fail "recording a row failed"
+  printf 'merged: a pull request\n' | FM_STATE_OVERRIDE="$state" "$pending" --result || fail "recording a result failed"
+
+  FM_STATE_OVERRIDE="$state" "$pending" --take-results >/dev/null || fail "taking the results failed"
+  FM_STATE_OVERRIDE="$state" "$pending" --peek | grep -qF 'row-one' \
+    || fail "taking the results consumed an unread wake row"
+  FM_STATE_OVERRIDE="$state" "$pending" --peek | grep -qF 'merged:' \
+    && fail "a result line was written into the unread-wake log"
+  pass "taking the results leaves the unread wake rows untouched"
+}
+
 test_signal_wake_carries_the_crewmates_own_words() {
   # The point of the whole path: the model should be woken WITH the message, not
   # with a path to go and read it. The queue record and the watcher's own output
@@ -515,3 +562,5 @@ test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_interruption_before_and_after_raw_commit
 test_signal_wake_carries_the_crewmates_own_words
 test_wake_pending_hands_over_once_and_survives_an_unread_session
+test_a_background_commands_result_goes_out_with_the_next_wake
+test_results_and_unread_wakes_do_not_share_a_log

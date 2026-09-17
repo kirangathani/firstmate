@@ -117,7 +117,7 @@ pass "a successful write lands the document and reports one line"
 # --- the result line is handed to the next wake -------------------------------
 # Under a Monitor the printed line is the notification, but a Monitor that
 # expires before delivering it would take the only copy with it.
-grep -q 'wrote:' "$STATE/.wake-pending" 2>/dev/null \
+grep -q 'wrote:' "$STATE/.wake-results" 2>/dev/null \
   || fail "the result line is recorded for the next wake as well as printed"
 pass "the result line is recorded for the next wake as well as printed"
 
