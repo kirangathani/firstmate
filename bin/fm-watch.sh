@@ -3,12 +3,23 @@
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
 # and keeps blocking; it queues and exits only for actionable wakes.
 # The no-verb signal and stale path is absorb-only-when-provably-working: a wake
-# is absorbed only when the crew shows POSITIVE evidence it is still working (an
-# actively-running no-mistakes step, or a backend busy signal), and surfaced
-# otherwise, so a crew that finishes (or stops and waits) without a current
-# working signal is never silently swallowed. A declared external-wait pause is
-# the separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# is absorbed only when the crew shows POSITIVE evidence it is still working, and
+# surfaced otherwise, so a crew that finishes (or stops and waits) without a
+# current working signal is never silently swallowed. Four things count as that
+# evidence, and bin/fm-classify-lib.sh's crew_absorb_class is their one owner:
+# an actively-running no-mistakes step, a backend busy signal, a subprocess the
+# harness detached and has not reaped, and a live pipeline attach. The last two
+# are the shape of a worker idle at its composer while its OWN shell command
+# runs - it is not generating, so nothing renders a busy footer, and a plain
+# shell command has no run to attribute - which used to read as stopped and cost
+# five surfaced wakes in fifteen minutes across three workers (2026-09-17).
+# A declared external-wait pause is the separate idle absorb case and re-surfaces
+# only on its long bounded cadence, although its initial no-verb status signal
+# still surfaces in normal mode. A task the captain has signed out of monitoring
+# (state/<id>.monitor-exempt, verified through fm_ack_is_exempt) is absorbed on
+# that same bounded cadence: the exemption already said nobody is going to act
+# on that pane, so surfacing it every cycle spends a wake for nothing, while the
+# bounded recheck keeps a forgotten exemption from rotting invisibly.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -167,9 +178,10 @@ LIMIT_DIALOG_REGEX=${FM_LIMIT_DIALOG_REGEX:-'Stop and wait for limit|Adjust mont
 # debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb signal
 # / stale path is absorb-only-when-provably-working: such a wake is absorbed ONLY
 # while the crew shows positive evidence it is still working (an actively-running
-# no-mistakes step, or a busy pane, via crew_is_provably_working over
-# fm-crew-state.sh); a crew that stopped its turn with no running pipeline and no
-# busy pane is SURFACED, so a finish reported only through interactive pane menus
+# no-mistakes step, a busy pane, a detached subprocess older than a poll cycle,
+# or a live pipeline attach - via crew_is_provably_working over fm-crew-state.sh,
+# whose header owns each reading); a crew that stopped its turn with none of
+# those is SURFACED, so a finish reported only through interactive pane menus
 # (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
 # signal, a no-verb signal whose crew is not provably working, any check, a stale
 # pane whose crew is not provably working, a provably-working stale past the

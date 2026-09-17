@@ -31,7 +31,24 @@ If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
 The process-identity primitive behind that match must not drift for a live process; see the 2026-07-30 WSL2 entry below for why, and `bin/fm-wake-lib.sh` for the format itself.
 A stale beacon blocks even if a watcher pid is still live.
-A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
+A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched, unless a watcher handover is in progress.
+
+### The handover exception
+
+The dormant-arm pool hands the watch over without a model call: the watcher that fires exits, and the next waiting arm takes the singleton over a few seconds later.
+During those seconds the lock names a process that has exited, which `fm_watcher_healthy` correctly reports as no live watcher, and reason 1 used to read as a supervision blackout.
+Measured on the main home 2026-09-17: one wake fired, the successor arm announced itself four seconds later, a turn-end guard ran in the gap with the beacon 13 seconds old, and it demanded a six-arm refill while five arms were already waiting; the extras exited immediately as pool-full, so the cost was six wasted model calls rather than six processes.
+
+`fm_watcher_takeover_pending <state-dir> <pool-depth> [poll-seconds]` in `bin/fm-wake-lib.sh` owns the distinction, and reason 1 consults it only after `fm_watcher_healthy` has already said no.
+It requires both halves, because each rules out a different real failure.
+A beacon younger than one poll cycle means the watcher that just released the lock was beating normally right up to the moment it went; a beacon older than that means supervision stopped some time ago, which is the blackout reason 1 exists to catch, and no pool depth excuses it.
+At least one pool member means somebody is actually waiting to take over; an empty pool during a gap means nothing will.
+An unreadable pool depth is not a member count, so it is not a handover either.
+The poll window comes from `FM_WATCH_POLL_SECS_INT`, whose owner is `bin/fm-classify-lib.sh` and which the watcher's own loop cadence is read from, so the guard cannot drift from the loop it is judging.
+
+Reason 5 is untouched by this: a pool at or below its floor still ends the turn with a refill whether or not a handover is under way, which matters because a handover is exactly when the pool has just spent a member.
+`bin/fm-guard.sh` needs no equivalent change.
+It reads beacon freshness through `fm_supervision_lib.sh`'s grace window rather than the watcher lock, and a handover's beacon is fresh, so it never raised this finding in the first place.
 
 It then requires this session to hold the home's SESSION lock, `state/.lock`, resolved by `bin/fm-session-lock-lib.sh` and distinct from the `state/.watch.lock` watcher singleton above.
 When another live session holds it, the guard exits 0 silently, mirroring the read-only advisory mode `bin/fm-guard.sh` already has: that session cannot arm a watcher at all, because `bin/fm-watch-arm.sh` declines from there, so a blind-turn alarm would be a hard stop-hook error on nearly every turn demanding supervision work it must not do.
