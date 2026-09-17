@@ -65,6 +65,14 @@ unset CLAUDE_PID
 # wins over this baseline.
 export FM_LATENCY_OFF=1
 
+# Every fm_detach-carrying script runs its body in the test's own process rather
+# than handing it to a detached child (bin/fm-detach-lib.sh). A suite that let
+# them detach would assert against a command that had already returned, so the
+# work would still be running when the assertion ran and the exit code would
+# always be 0. The suite whose subject IS the detach clears this for its own
+# fixture invocations, which wins over this baseline.
+export FM_INLINE=1
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

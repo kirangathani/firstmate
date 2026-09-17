@@ -398,6 +398,11 @@ Session start is the only exception because its one-shot digest already drained 
 A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
 A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed.
 
+Firstmate's own bookkeeping commands run off its critical path by construction rather than by instruction.
+`bin/fm-pr-merge.sh`, `bin/fm-merge-green.sh`, and `bin/fm-fleet-sync.sh` hand their work to a detached child and return in milliseconds, so call them plainly and never through a Monitor or a background task, which would only add a completion notice for work that has already been handed off.
+Each records one verdict line that arrives with the next wake, carrying its log path and the reason whenever the outcome is worth chasing, so nothing is read back and nothing is waited for.
+`docs/background-bookkeeping.md` owns which commands these are, what each was measured to cost, and the delivery route.
+
 Handle actionable wakes as follows:
 
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.

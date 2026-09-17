@@ -11,6 +11,11 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# The baseline in tests/lib.sh makes every other suite run these scripts inline.
+# This one is about the detaching itself, so it drops the baseline and sets it
+# back explicitly in the single case that asserts inline behaviour.
+unset FM_INLINE
+
 # One shim bin/ per run, holding a symlink to EVERY entry of the real bin/ plus
 # the fixture. Symlinking the whole directory rather than naming dependencies is
 # deliberate: a hand-maintained list is a second copy of the dependency set that
