@@ -87,6 +87,39 @@
 # exits on the next actionable wake (a heartbeat at the latest), and a beacon that
 # lapses without one is what fm-guard.sh alarms on.
 #
+# THE ARM TIMES ITSELF on both sides of a handover, into firstmate's own latency ledger
+# (bin/fm-latency-lib.sh, which owns the ledger and can never fail this script).
+# state/.watch-cycle-exits.log already gives the whole reaction time indirectly -
+# one record's ended_at against the next record's started_at - and that is how a
+# 22s median reaction and a continuity gate shut 39% of an active session were
+# first measured. What it cannot say is whose 22 seconds those were. A `cmd` row
+# per measurement answers that, and the two together bracket the arm's entire
+# contribution to the gap, so whatever is left over is firstmate thinking:
+#
+#   fm-watch-arm.sh:up    getting supervision live again: from this arm being
+#                         ready to arm - after the session-lock gate - to the
+#                         moment it has started a watcher and confirmed it, or
+#                         attached to a live one, which the note names.
+#   ...:up-dormant        the same span for a member coming out of the dormant
+#                         pool, timed from when its wait for the singleton ended
+#                         because idling is not arming. It is a separate action
+#                         and not a note, because a pool handover and a cold arm
+#                         are different costs that one median would average into
+#                         a number describing neither.
+#   fm-watch-arm.sh:wake  carrying the wake out: from the watcher exiting with a
+#                         wake to this arm exiting, which is when the harness
+#                         notifies the model. It contains the lifecycle record,
+#                         the print, and the queue drain this arm does on the way
+#                         out. Its note is the wake's own reason type.
+#
+# Neither measurement can fail this script: every write is a silent no-op, and
+# the arm's exit status is its own. What they do NOT cover, stated rather than implied: an
+# attached arm's close, because a followed cycle's wake went to the arm that owns
+# it and this one carries nothing to the model; and the watcher's own blocking
+# wait between the two, which is not latency but the supervision working.
+#
+# Read them back with `bin/fm-latency.sh report`, in its measured-commands table.
+#
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
@@ -169,6 +202,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-arm-pool-lib.sh
 . "$SCRIPT_DIR/fm-arm-pool-lib.sh"
+# The arm times ITSELF into firstmate's own latency ledger; see the two
+# measurements described in the header. bin/fm-latency-lib.sh owns the ledger and
+# can never fail this script.
+# shellcheck source=bin/fm-latency-lib.sh
+. "$SCRIPT_DIR/fm-latency-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 # Detach primitive. Absent on macOS, where the arm keeps its pre-detach behaviour
@@ -465,6 +503,11 @@ announce() {
 report_attached() {
   local age
   age=$(fm_path_age "$BEAT")
+  # Supervision is live under this arm, so the arm-up measurement is over. A
+  # later successor attach inside attach_and_wait reaches this again and closes
+  # nothing, which is the library's one-measurement-per-invocation rule doing
+  # exactly what it says.
+  fm_latency_cmd_end 0 attached
   announce "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
@@ -743,7 +786,17 @@ esac
 # pool that is smaller than it reads. `exec` deliberately does NOT run this: a
 # re-entering dormant arm keeps its pid, so its record stays true across the
 # re-entry and the pool never dips through it.
-trap 'fm_arm_pool_leave' EXIT
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
+fm_arm_on_exit() {
+  local status=$1
+  fm_arm_pool_leave
+  # Closes whichever measurement is still open, and is a no-op when the arm
+  # already closed it by hand. An arm killed part-way through arming therefore
+  # still records the share of the handover it had spent, with the signal's own
+  # status in exit_code.
+  fm_latency_cmd_end "$status"
+}
+trap 'fm_arm_on_exit $?' EXIT
 
 # Wait until no healthy watcher holds the singleton. The cheap test is the whole
 # point: it is a shell builtin on the lock path, so an idle member costs
@@ -821,9 +874,24 @@ esac
 # Joining AFTER the gate, never before: an arm a non-owning session issued has
 # already declined above, and counting it would let that session's idle shells
 # stand in for ears the owning session does not have.
+# The arm-up clock starts HERE, which for a dormant member is deliberately AFTER
+# its wait for the singleton. That wait is an ear sleeping, not an arm working,
+# and a member woken after four idle hours would otherwise report a four-hour
+# arm-up and drag the median of the one number this measurement exists to give.
+# From this point both modes measure the same span: the work of getting
+# supervision live again. Both starts are also after the session-lock gate, so a
+# read-only session that declines to arm records nothing rather than a near-zero
+# arm-up.
+# The mode is carried in the ACTION rather than in the note, because a pool
+# handover and a cold arm are different costs and the report's per-command median
+# is where they are read: one action over both would average them into a number
+# that describes neither.
 if [ "$dormant" -eq 1 ]; then
   fm_arm_pool_join dormant "$slot_request" || true
   dormant_wait_for_free_lock
+  fm_latency_cmd_start fm-watch-arm.sh:up-dormant
+else
+  fm_latency_cmd_start fm-watch-arm.sh:up
 fi
 
 if [ "$mode" = restart ]; then
@@ -943,6 +1011,16 @@ owned_child_finished() {
   local rc=$1 signal reason_type status
   signal=$(cycle_signal_name "$rc")
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
+    # The arm's own share of the OTHER half of the gap: from the watcher exiting
+    # with a wake to this arm exiting, which is the moment the harness notifies
+    # the model. Everything inside it - the ledger record, the print, and the
+    # drain this arm now does on the way out - is arm cost, not firstmate's
+    # thinking, and until it was measured the two were one number.
+    # It overwrites an arm-up still open here, which is the right answer for the
+    # one path that reaches this without ever getting into position: a child that
+    # produced its wake before confirmation never armed, and what it did instead
+    # is exactly this.
+    fm_latency_cmd_start fm-watch-arm.sh:wake
     reason_type=$(watch_output_reason_type "$child_out")
     cycle_log_append "$rc" "$signal" "$reason_type" none
     if [ "$dormant" -eq 1 ]; then
@@ -955,6 +1033,7 @@ owned_child_finished() {
       print_watch_output "$child_out"
       drain_wake_queue_on_exit
     fi
+    fm_latency_cmd_end 0 "$reason_type"
     rm -f "$child_out" 2>/dev/null || true
     child=
     child_out=
@@ -1019,6 +1098,7 @@ while :; do
       cycle_refresh_lock_before
       cycle_mark_predecessor_successor "started:$child"
       follow_own_confirmed_watcher
+      fm_latency_cmd_end 0 started
       announce "watcher: started pid=$child (beacon fresh)"
       wait "$child"
       rc=$?
