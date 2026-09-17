@@ -90,8 +90,8 @@
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
-# lock identity before and after close, the cycle_outcome classification, and
-# successor disposition. The separate
+# lock identity before and after close, the cycle_outcome classification, the
+# pool depth at the handover, and successor disposition. The separate
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
 #
