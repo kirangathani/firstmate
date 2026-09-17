@@ -756,7 +756,7 @@ test_an_exemption_is_never_silent() {
     "$ROOT/bin/fm-bootstrap.sh" 2>&1 || true)
   assert_contains "$out" "MONITOR_EXEMPT: $id" "session start did not announce a task the captain had taken for himself"
   assert_contains "$out" "captain is chasing the vendor" "the session-start announcement dropped the reason"
-  pass "fm-monitor: a task the captain has taken is announced on every sweep and at every session start, never silent"
+  pass "fm-monitor: an exemption is announced on every sweep and at every session start, never silent"
 }
 
 test_unexempt_restores_monitoring() {
