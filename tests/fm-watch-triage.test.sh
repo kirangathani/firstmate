@@ -414,7 +414,10 @@ test_turn_ended_not_working_surfaced() {
   wait_for_exit "$pid" 40 || fail "watcher did not surface a turn-end whose crew is not provably working"
   grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the surfaced turn-end signal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced turn-end failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended" >/dev/null || fail "surfaced turn-end was not queued"
+  # The record is keyed by the file's name and its payload carries the task id,
+  # not the path: a wake exists to say WHO said what (the watcher's own reason
+  # line above still names the paths, and that is what classifies a cycle).
+  grep "$(printf '\tsignal\ttask.turn-ended\t')" "$drain_out" >/dev/null || fail "surfaced turn-end was not queued"
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
 }
 

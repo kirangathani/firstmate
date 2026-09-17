@@ -1030,12 +1030,25 @@ EOF
       # below: once a marker moves to the current size there is no "since the
       # last look" left to read, so a second pass would report every crewmate as
       # having written nothing.
+      # $pending holds the pre-grace scan AND the post-grace rescan concatenated,
+      # so a file that changed once appears in it TWICE. The queue tolerates that
+      # (the drain dedupes on kind+key), but a repeated LINE does not: under a
+      # runner that turns each printed line into a notification, every crewmate's
+      # words would reach the supervisor twice on every wake. So the spoken lines
+      # are deduped by file here, the same way $files is deduped above.
       spoken=
+      spoken_seen=
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         payload=$(signal_payload "$sf" "$f" "$sig")
-        spoken="$spoken
+        case " $spoken_seen " in
+          *" $f "*) ;;
+          *)
+            spoken_seen="$spoken_seen $f"
+            spoken="$spoken
   $payload"
+            ;;
+        esac
         fm_wake_append signal "$(basename "$f")" "$payload" || exit 1
       done <<EOF
 $pending
