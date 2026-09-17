@@ -248,6 +248,34 @@ test_confirm_clears_a_resumed_crew() {
   pass "fm-crew-state confirm: a provably resumed or deliberately paused crew clears the candidate"
 }
 
+# A leftover background process is not a worker that moved on. The watcher's
+# absorb path deliberately trusts `subprocess` and `attach` so it can leave a
+# busy-but-quiet pane alone, and it re-surfaces such a pane on its own wedge
+# timer. This guard has no such backstop: clearing on that evidence would
+# silence an unanswered report for as long as the process happened to live.
+test_executing_sources_do_not_clear_an_unanswered_report() {
+  local home id out src
+  id=leftover-proc-t9
+  home=$(make_home leftover "$id")
+  crew_reports "$home" "$id" "done: PR raised and green"
+
+  for src in subprocess attach; do
+    out=$(FM_TEST_CREW_STATE="state: working · source: $src · still executing" \
+      run_guard "$home" "$INCIDENT_SECS")
+    printf 'source under test: %s\n' "$src"
+    assert_contains "$out" "UNACTIONED DIRECT REPORT" \
+      "a report left unanswered was cleared by evidence that something is merely still executing"
+  done
+
+  # The control: the same state from a source that DOES prove the agent moved
+  # on still clears, so this is a rule about the evidence, not about `working`.
+  out=$(FM_TEST_CREW_STATE='state: working · source: run-step · validating (running)' \
+    run_guard "$home" "$INCIDENT_SECS")
+  assert_not_contains "$out" "UNACTIONED DIRECT REPORT" \
+    "an actively-running pipeline step must still clear the candidate"
+  pass "fm-ack-lib: evidence that something is still executing does not clear an unanswered report"
+}
+
 # An unreadable or unknown current state is inconclusive, NOT exoneration. A crew
 # whose pane died after reporting done: reads `unknown`, and that is precisely the
 # abandoned-work case this guard exists for; clearing on it would reintroduce the
@@ -1216,6 +1244,7 @@ test_the_session_start_tail_names_an_open_decision
 test_ack_rearms_on_new_status
 test_confirm_clears_a_resumed_crew
 test_unknown_state_does_not_clear
+test_executing_sources_do_not_clear_an_unanswered_report
 test_non_owed_states_stay_silent
 test_fm_send_auto_acks
 test_fm_pr_check_auto_acks

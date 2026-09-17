@@ -60,9 +60,9 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
-# Seconds between watcher poll cycles. The watcher's own loop cadence
-# (bin/fm-watch.sh's sleep), and the unit every "is this younger/older than one
-# cycle" judgement elsewhere is measured in: a detached subprocess that has
+# Seconds between watcher poll cycles: the watcher's own loop cadence
+# (bin/fm-watch.sh's sleep), and the unit every "younger or older than one
+# cycle" judgement elsewhere is measured in. A detached subprocess that has
 # outlived a poll cycle is doing real work rather than rendering a status line
 # (bin/fm-crew-state.sh), and a liveness beacon younger than one cycle belongs to
 # a watcher that was beating normally right up to the moment it exited
