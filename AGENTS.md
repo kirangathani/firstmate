@@ -90,7 +90,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   HANDOFF-<date>[-sessionN].md  volatile working state written by /handoff for the next session in this home; LOCAL, gitignored; path allocated by bin/fm-handoff.sh, read once and then consumed (section 6)
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
-  <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
+  <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth; an optional leading "[t=<epoch>] " records when the crew reported, and bin/fm-classify-lib.sh owns that grammar and the permanent both-forms parse
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.acted           written by bin/fm-ack.sh, bin/fm-send.sh, and bin/fm-pr-check.sh: firstmate acted on this task's reported state; silences the unactioned alarm until the crew's next status append (bin/fm-ack-lib.sh); removed by teardown

@@ -191,7 +191,13 @@ if [ "$1" = --follow-internal ]; then
   STATUS_FILE="$STATE_DIR/$ID.status"
   say() { printf '%s\n' "$*"; }
   CLASSIFIED=0
-  note() { printf '%s\n' "$1" >> "$STATUS_FILE"; CLASSIFIED=1; }
+  # Every line this follower appends carries the report-time prefix
+  # bin/fm-classify-lib.sh owns, so a gate or outcome reported from a detached
+  # hold can be timed the same way a crew's own report is. This script is a
+  # hardened detached process with an EXIT-trap reporting contract, so it stamps
+  # inline rather than taking on a library source it has no other need for.
+  stamp() { printf '[t=%s] ' "$(date +%s)"; }
+  note() { printf '%s%s\n' "$(stamp)" "$1" >> "$STATUS_FILE"; CLASSIFIED=1; }
 
   # The status line this process appends is the ONLY thing that tells firstmate
   # the run moved - the worker's turn ended the moment the parent returned. So a
@@ -207,8 +213,8 @@ if [ "$1" = --follow-internal ]; then
     # never observable while a stale marker still blocks acting on it.
     unlink "$MARKER" 2>/dev/null || true
     if [ "$CLASSIFIED" != 1 ]; then
-      printf 'blocked [key=nm-run]: the background attach for %s stopped before it could report what the run did; read the attach log\n' \
-        "$ID" >> "$STATUS_FILE"
+      printf '%sblocked [key=nm-run]: the background attach for %s stopped before it could report what the run did; read the attach log\n' \
+        "$(stamp)" "$ID" >> "$STATUS_FILE"
     fi
   }
   trap on_follower_exit EXIT
@@ -441,8 +447,8 @@ LOG="$TASK_TMP/nm-attach-$(date +%s).log"
 # NEXT gate instead of the one just answered. Everything that can refuse has
 # already refused by this point, so nothing is closed for a response never sent.
 if [ "$RESPOND" = respond ]; then
-  printf 'resolved [key=nm-run]: responded to the gate for %s; attaching again\n' \
-    "$ID" >> "$STATE/$ID.status"
+  printf '[t=%s] resolved [key=nm-run]: responded to the gate for %s; attaching again\n' \
+    "$(date +%s)" "$ID" >> "$STATE/$ID.status"
 fi
 
 # Detach. setsid puts the hold in its own process group and session so it is not
