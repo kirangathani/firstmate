@@ -40,6 +40,12 @@
 #                          exact command that resolves it
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+# A task the captain is driving is skipped by the signal, stale, and heartbeat
+# paths entirely (bin/fm-ack-lib.sh's fm_captain_driven). Its suppression markers
+# are still advanced as it is skipped, so nothing replays as a flood when he
+# stops driving; the first ordinary poll after that simply reads current state.
+# Its PR merge poll keeps running, because that poll is about the PR rather than
+# the pane and a merge the captain lands by hand still has to refresh the clone.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -88,6 +94,15 @@ fi
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# fm-ack-lib.sh owns fm_captain_driven: whether the captain is driving a worker
+# himself, by his own signed record or by sitting in its window. A task that is
+# his is not watched here at all - no signal wake on its status appends, no
+# stale wake on its quiet pane, no heartbeat mention - because a wake firstmate
+# is forbidden to act on is pure cost, and acting on one puts the captain's own
+# worker's question back to the captain (2026-09-17). Sourcing defines functions
+# only, and the predicate is free for a task with no exemption record.
+# shellcheck source=bin/fm-ack-lib.sh
+. "$SCRIPT_DIR/fm-ack-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -565,6 +580,42 @@ signal_payload() {  # <seen-file> <status-file> <current sig>
   fi
 }
 
+# Drop every signal row belonging to a task the captain is driving, advancing
+# that row's suppression marker on the way out, and print the rows that remain.
+#
+# The marker is advanced rather than left alone deliberately. Leaving it would
+# hold every append the captain made while driving, and hand them all back as
+# one wake the moment he stopped - a replay of a conversation he already had.
+# Advancing it means the first ordinary poll after he stops simply reads current
+# state, and the heartbeat backstop remains the safety net for a task he left
+# genuinely needing something.
+#
+# The PR fact is still recorded as the row leaves, because it is the one thing
+# in this path that is about the PR rather than the pane. record_reported_pr is
+# otherwise reached only from the surfaced branch below, so skipping it here
+# would leave a worker the captain drove to a PR with the PREVIOUS PR on record
+# and its merge poll armed for a PR nobody is watching - the exact fault that
+# recorder was written to close - and a PR he merges himself still leaves the
+# clone to refresh.
+absorb_captain_driven_signals() {  # <pending-rows> -> kept rows
+  local rows=$1 sf sig f kept='' absorbed=''
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    if fm_captain_driven "$STATE" "$(signal_id_of_file "$f")"; then
+      printf '%s' "$sig" > "$sf"
+      record_reported_pr "$f"
+      case " $absorbed " in *" $f "*) ;; *) absorbed="$absorbed $f" ;; esac
+    else
+      kept="${kept}${sf}$(printf '\t')${sig}$(printf '\t')${f}
+"
+    fi
+  done <<FMROWS
+$rows
+FMROWS
+  [ -z "$absorbed" ] || triage_log "absorbed captain-driven signal(s):$absorbed"
+  printf '%s' "$kept"
+}
+
 # THE RECORDED PR FACT FOLLOWS THE TASK, not a hand-run command.
 #
 # A worker's `done: PR <url>` line is the signal that this task's PR has changed.
@@ -733,6 +784,10 @@ heartbeat_scan_finds_actionable() {
   local f task last surfaced
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
+    # A captain-driven task never counts as a miss: the per-wake path skipped it
+    # deliberately, so treating it as one here would reintroduce through the
+    # backstop exactly the wake the skip exists to prevent.
+    fm_captain_driven "$STATE" "$task" && continue
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
     return 0
@@ -1092,6 +1147,11 @@ while :; do
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    # Everything the captain is driving leaves here, marker advanced. A batch
+    # that was ALL his ends the signal handling for this cycle without a wake.
+    pending=$(absorb_captain_driven_signals "$pending")
+  fi
+  if [ -n "$pending" ]; then
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
@@ -1178,6 +1238,17 @@ EOF
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}
+    # A window the captain is sitting in is his, not this loop's. Skipped before
+    # the pane is even captured, and its pending escalation bookkeeping is
+    # cleared as it goes, so a stale hash or wedge timer that accumulated before
+    # he sat down cannot fire the moment he gets up. Its pane hash is left where
+    # it is: on his first quiet poll afterwards it either still matches, which is
+    # an ordinary stale read of current state, or it does not, which resets the
+    # count exactly as a busy pane would.
+    if fm_captain_driven "$STATE" "$task"; then
+      rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.paused-$key"
+      continue
+    fi
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"

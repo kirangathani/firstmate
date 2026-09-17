@@ -894,9 +894,11 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
 
-# Standing monitoring exemptions, announced unprompted at every session start.
-# This is not a convenience listing. An exemption suppresses a safety alarm for a
-# task, and the entity the alarm checks is firstmate itself, which runs as the
+# Every task firstmate is NOT watching, announced unprompted at every session
+# start.
+# This is not a convenience listing. A captain-driven task has both its alarms
+# and its wakes suppressed, and the entity the alarm checks is firstmate itself,
+# which runs as the
 # same OS user as the captain and can therefore reach the signing key
 # (bin/fm-ci-waiver-lib.sh states that limit). Announcing every exemption here,
 # unconditionally and without being asked, is what makes a self-granted one
@@ -912,9 +914,22 @@ for exempt_rec in "$STATE"/*.monitor-exempt; do
   exempt_id=${exempt_rec##*/}
   exempt_id=${exempt_id%.monitor-exempt}
   if fm_ack_is_exempt "$STATE" "$exempt_id"; then
-    echo "MONITOR_EXEMPT: $exempt_id is exempt from monitoring alarms - $FM_ACK_EXEMPT_REASON (clear it with bin/fm-monitor.sh --unexempt $exempt_id)"
+    echo "MONITOR_EXEMPT: $exempt_id is the captain's - firstmate neither alarms on it nor watches it: $FM_ACK_EXEMPT_REASON (hand it back with bin/fm-monitor.sh --unexempt $exempt_id)"
   else
     echo "MONITOR_EXEMPT: $exempt_id carries an exemption record that does NOT verify against this home's key, so it is NOT exempt and still alarms - inspect $exempt_rec"
+  fi
+done
+# The same suppression, reached without a record: a human sitting in a task's
+# window. It is announced on exactly the same terms, because a blind spot the
+# captain created by walking up to a window is no more visible than one he
+# signed, and this one ends by itself the moment he leaves.
+for exempt_rec in "$STATE"/*.meta; do
+  [ -e "$exempt_rec" ] || continue
+  exempt_id=${exempt_rec##*/}
+  exempt_id=${exempt_id%.meta}
+  [ ! -e "$STATE/$exempt_id.monitor-exempt" ] || continue
+  if fm_captain_attached "$STATE" "$exempt_id"; then
+    echo "MONITOR_EXEMPT: $exempt_id is the captain's - firstmate neither alarms on it nor watches it: $FM_CAPTAIN_ATTACHED_REASON (supervision resumes on its own once you leave that window)"
   fi
 done
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then

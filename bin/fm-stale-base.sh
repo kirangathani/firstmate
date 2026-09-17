@@ -104,6 +104,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-spawned-at-lib.sh
 . "$SCRIPT_DIR/fm-spawned-at-lib.sh"
 
+# fm_captain_driven() - the one owner of "is the captain driving this worker
+# himself". A task that is his is left out of this sweep's findings: firstmate
+# is not steering it, so naming it would be an alarm nobody is allowed to act
+# on. It stays visible where blind spots are reported (bin/fm-monitor.sh,
+# bin/fm-bootstrap.sh, the fleet view), not here.
+# shellcheck source=bin/fm-ack-lib.sh
+. "$SCRIPT_DIR/fm-ack-lib.sh"
+
 TAB=$'\t'
 # A project path can never equal this, so the first task always opens a group.
 NO_PROJECT_YET=$'\001'
@@ -291,6 +299,7 @@ scan() {
     case "$META_KIND" in
       scout|secondmate) continue ;;
     esac
+    fm_captain_driven "$STATE" "$id" && continue
     project=$META_PROJECT
     worktree=$META_WORKTREE
     # A record naming neither a project nor a local copy cannot have a branch at
