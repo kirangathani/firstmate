@@ -1119,6 +1119,55 @@ test_statusline_is_silent_and_writes_nothing_without_fleet_state() {
   pass "fm-statusline: silent, and creates nothing, where there is no fleet state"
 }
 
+# A REAL linked worktree, because git writing .git as a FILE rather than a
+# directory is the whole distinction under test, and a hand-written stand-in
+# would test a shape git may not emit.
+make_linked_worktree() {  # <repo dir> <worktree dir>
+  local repo=$1 worktree=$2
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b statusline-fixture
+  git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -q --allow-empty -m initial
+  git -C "$repo" worktree add -q --detach "$worktree"
+}
+
+test_statusline_says_nothing_in_an_unmarked_linked_worktree() {
+  local repo worktree home out status
+  # A task worktree is recycled between occupants and state/ is gitignored rather
+  # than removed, so a fresh crew inherits an earlier one's empty state dir. That
+  # made a state dir alone mean "there is a fleet here" for a home that does not
+  # exist, and every crew pane rendered a confident verdict about it. The verdict
+  # could never have been right: bin/fm-spawn.sh exports FM_HOME only for a
+  # secondmate, so the pane was never reading the real home's lock.
+  repo="$TMP_ROOT/statusline-linked-repo"
+  worktree="$TMP_ROOT/statusline-linked-worktree"
+  make_linked_worktree "$repo" "$worktree"
+  mkdir -p "$worktree/state"
+  [ -f "$worktree/.git" ] || fail "the linked-worktree fixture must have a .git FILE; that is the case under test"
+
+  out=$(run_statusline "$worktree"); status=$?
+  expect_code 0 "$status" "a task worktree must not fail the status line"
+  assert_not_contains "$out" "control of fleet" "a leftover state dir in a task worktree must not produce a verdict about a fleet"
+
+  # A leased secondmate home is a linked worktree too, so .git is a file there as
+  # well; the marker is the only thing that tells the two apart, and
+  # bin/fm-primary-scope-lib.sh owns reading it.
+  printf 'secondmate-fixture\n' > "$worktree/.fm-secondmate-home"
+  printf '%s\n' "$$" > "$worktree/state/.lock"
+  out=$(run_statusline "$worktree")
+  assert_contains "$out" "in control of fleet" "a marked secondmate worktree is a home and must be answered despite its .git file"
+
+  # The control, so the silence above cannot be a status line that has simply
+  # gone quiet everywhere: only the unmarked LINKED worktree is silenced, and a
+  # home that is not one is still answered.
+  home="$TMP_ROOT/statusline-not-a-linked-worktree"
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  out=$(run_statusline "$home")
+  assert_contains "$out" "in control of fleet" "only an unmarked linked worktree may be silenced; every other home is still answered"
+  pass "fm-statusline: an unmarked linked worktree says nothing about a fleet it does not have"
+}
+
 install_statusline_base() {  # <home> <base path>
   local home=$1 base=$2
   mkdir -p "$home/config"
@@ -1353,6 +1402,7 @@ test_arm_arms_when_the_lock_holder_pid_was_reused
 test_checkpoint_is_gated_on_the_session_lock
 test_statusline_reports_fleet_control
 test_statusline_is_silent_and_writes_nothing_without_fleet_state
+test_statusline_says_nothing_in_an_unmarked_linked_worktree
 test_statusline_composes_with_the_operators_own_status_line
 test_statusline_base_reaches_a_worktree_that_has_no_config_dir
 test_statusline_fixtures_are_isolated_from_an_inherited_base
