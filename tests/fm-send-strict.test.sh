@@ -177,9 +177,61 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+test_refill_send_with_a_full_pool_delivers_then_exits() {
+  # --refill must never change what a send DOES, only what the process does after
+  # it. With the pool already full there is no room for another waiting arm, so
+  # the send has to deliver and then get out of the way promptly.
+  local dir fb home log rc got pool now i pid pids=
+  dir="$TMP_ROOT/refill-full"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home refill-full); log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-ok.meta" "window=sess:fm-lane-ok" "kind=ship" "harness=codex"
+  pool="$home/state/.arm-pool"
+  mkdir -p "$pool"
+  now=$(date +%s)
+  i=0
+  while [ "$i" -lt 6 ]; do
+    sleep 60 &
+    pid=$!
+    pids="$pids $pid"
+    printf '\t\t%s\tdormant\n' "$now" > "$pool/$pid"
+    i=$((i + 1))
+  done
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    timeout 30 "$SEND" --refill fm-lane-ok "hello captain" >/dev/null 2>/dev/null; rc=$?
+  for pid in $pids; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+
+  expect_code 0 "$rc" "a refill send with a full pool should deliver and exit 0"
+  got=$(cat "$log")
+  assert_contains "$got" "target=sess:fm-lane-ok literal=1 arg=hello captain" "a refill send must still type its literal text"
+  assert_contains "$got" "target=sess:fm-lane-ok literal=0 arg=Enter" "a refill send must still submit with Enter"
+  pass "fm-send strict: --refill still delivers the send and exits when the pool is full"
+}
+
+test_refill_send_that_fails_exits_instead_of_waiting() {
+  # The rule that keeps a failure visible: a send that did not land must come back
+  # with its error at once, never disappear into the pool where the model would
+  # hear nothing until the next wake.
+  local dir fb home err rc
+  dir="$TMP_ROOT/refill-fail"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home refill-fail); err="$dir/send.err"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_SEND_SETTLE=0 \
+    timeout 30 "$SEND" --refill fm-nosuchlane "hello captain" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a refill send to an unresolvable target exited 0"
+  [ "$rc" -ne 124 ] || fail "a failed refill send waited as a dormant arm instead of reporting its error"
+  assert_contains "$(cat "$err")" "no metadata for fm-nosuchlane" "a failed refill send must still report why it failed"
+  pass "fm-send strict: a --refill send that fails exits with its error instead of waiting"
+}
+
 test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_healthy_fm_id_send_still_works
+test_refill_send_with_a_full_pool_delivers_then_exits
+test_refill_send_that_fails_exits_instead_of_waiting

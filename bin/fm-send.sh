@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Send one line of literal text to a crewmate endpoint, then Enter.
-# Usage: fm-send.sh <target> <text...>
+# Usage: fm-send.sh [--refill] <target> <text...>
+#   --refill, only as the FIRST argument, keeps a SUCCESSFUL send alive as one
+#   of the dormant-arm pool's waiting arms instead of exiting, so the pool
+#   refills as a side effect of ordinary work and costs no model call of its
+#   own. Pass it only when running this as the harness's own background task:
+#   the process becomes the thing that waits, so a foreground caller would
+#   never get its prompt back. A failed send never reaches it.
+#   bin/fm-arm-pool-lib.sh owns the pool, its size, and that decision.
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -185,6 +192,22 @@ fm_send_resolve_target() {  # <raw-target>
   return 1
 }
 
+# --refill, when it is the FIRST argument, turns a successful send into one of the
+# waiting arms of the dormant-arm pool instead of an exit (bin/fm-arm-pool-lib.sh
+# owns that decision). It is only ever passed by a caller running this as the
+# harness's own background task, because the process then stops being a send and
+# becomes the thing that waits. A failed send never reaches it and exits with its
+# error at once, so the model hears about a failure within seconds.
+REFILL=0
+if [ "${1:-}" = "--refill" ]; then
+  REFILL=1
+  shift
+fi
+if [ -z "${1:-}" ]; then
+  echo "error: no target given; usage: fm-send.sh [--refill] <target> <text...>" >&2
+  exit 2
+fi
+
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
@@ -278,4 +301,20 @@ fi
 # and deliberately does not ack: firstmate still owes the reconcile.
 if [ -n "$TARGET_META" ]; then
   fm_ack_record "$STATE" "$(basename "$TARGET_META" .meta)" "fm-send" || true
+fi
+
+# Everything this send owes is now done: the text is submitted and verified, and
+# the ack is written. So if the caller asked, spend what is left of this already
+# paid-for process on being an ear rather than on exiting.
+# The latency row is closed by hand first because exec does not run EXIT traps,
+# and the libraries are sourced only here so an ordinary send pays nothing for a
+# path it does not take.
+if [ "$REFILL" -eq 1 ]; then
+  fm_latency_cmd_end 0
+  trap - EXIT
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  # shellcheck source=bin/fm-arm-pool-lib.sh
+  . "$SCRIPT_DIR/fm-arm-pool-lib.sh"
+  fm_arm_pool_refill_or_exit "$SCRIPT_DIR/fm-watch-arm.sh"
 fi
