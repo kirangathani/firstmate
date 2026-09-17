@@ -35,6 +35,8 @@ While a task is captain-driven, all of the following go quiet for it, and each r
 - The stale-base sweep (`bin/fm-stale-base.sh`) leaves it out of its findings.
 - The stalled-validation sweep (`bin/fm-nm-stall.sh`) leaves it out of its findings, while still observing it, so its record is current the moment supervision resumes.
 
+The skip sits ahead of the away-mode branch in both wake paths, so a task the captain declared his stays his while `state/.afk` is set and the daemon owns triage, rather than being escalated the moment he steps away.
+
 Firstmate never peeks at it, steers it, acks it, or relays a dialog out of it.
 Direct captain intervention in a worker's window is already authoritative under AGENTS.md rule 4; this makes it exclusive for as long as it lasts.
 
