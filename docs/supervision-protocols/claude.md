@@ -29,11 +29,12 @@ When this session owns supervision and away mode is not active:
    Refill only when the turn-end guard asks for it, or when a Monitor reports its own expiry, by issuing six waiting arms in one reply exactly as item 3 says.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records or a real watcher reason line.
    A `watcher: cycle-complete ...` close is handled the same way and is not a failure: an attached cycle ended by delivering its wake to the arm that owns that watcher.
-9. Refill for free: run `bin/fm-send.sh --refill ...` and `bin/fm-ack.sh --refill ...` each as its own Monitor, the same way and for the same reasons as item 3.
+9. Steering has exactly ONE form: run `bin/fm-send.sh ...` and `bin/fm-ack.sh ...` each as its own Monitor, the same way and for the same reasons as item 3 - `timeout_ms` 1800000, the command alone with `2>&1`, nothing bundled.
+   The Bash tool cannot run either one, foreground or backgrounded: the seatbelt of item 5 denies it there and names this replacement.
    These take no pool number: they become a member only if there is room, and the pool gives them the lowest free number when they do.
-   A successful one stays alive as a waiting arm while the pool has room, so ordinary steering keeps the pool topped up and the turn-end refill is only ever reached in a turn that sent nothing.
-   Their output is not something to act on, which is why they can be spent this way; a failed send or ack exits at once with its error instead.
-   Never pass `--refill` to anything you are waiting on in the foreground: that process becomes the thing that waits, so the call would never come back.
+   A successful one refills the pool by itself, staying alive as a waiting arm while the pool has room, so ordinary steering keeps the pool topped up and the turn-end refill is only ever reached in a turn that sent nothing.
+   Their output is not something to act on, which is why they can be spent this way; a failed send or ack exits at once with its error instead, as does a successful one that finds the pool already full.
+   `--refill` is still accepted and now does nothing, and only the scripts in `bin/` that need their own exit code back opt out, with `FM_ARM_POOL_NO_REFILL=1`.
 10. Ended arm, not a wake: if a waiting arm ends without a wake line - a Monitor expiry, a stopped task, or a session restart - the watcher is still running.
    The arm starts it detached from the task's process group and session, so a kill of the task does not reach it.
    Issue a fresh waiting arm to replace it, reusing the number the ended one freed; the pool carries on regardless.
