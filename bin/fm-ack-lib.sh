@@ -186,6 +186,16 @@ FM_ACK_OWED_STATES_DEFAULT='done failed parked blocked'
 # reporting done: reads unknown, and that is the case this guard exists for.
 # Clearing on unknown would silence exactly the incident it was built to catch.
 FM_ACK_CLEAR_STATES_DEFAULT='working paused'
+# The fm-crew-state.sh SOURCES that may not clear a candidate even when the
+# state they carry is one of the above. Both are evidence that something of this
+# task's is still executing, which is what the watcher needs to know before it
+# absorbs a quiet pane - but neither is evidence that the AGENT has moved past
+# the state it reported. A worker that appends `done:` and leaves a background
+# process behind reads `working - source: subprocess`, and clearing on that
+# would silence exactly the unanswered report this guard exists to catch. The
+# watcher's own absorb path deliberately does trust them; that path re-surfaces
+# on its wedge timer, and this one has no such backstop.
+FM_ACK_NONCLEARING_SOURCES_DEFAULT='subprocess attach'
 
 # How long an owed, unacked state may sit before it alarms. Ten minutes is
 # deliberately conservative: firstmate routinely takes a turn or two to trigger
@@ -250,6 +260,17 @@ fm_ack_state_is_clear() {  # <fm-crew-state state token>
   local s=$1 w
   [ -n "$s" ] || return 1
   for w in ${FM_ACK_CLEAR_STATES:-$FM_ACK_CLEAR_STATES_DEFAULT}; do
+    if [ "$s" = "$w" ]; then return 0; fi
+  done
+  return 1
+}
+
+# 0 when <source> is one this guard refuses to clear on, whatever state it
+# carries. See FM_ACK_NONCLEARING_SOURCES_DEFAULT for why these two are listed.
+fm_ack_source_is_nonclearing() {  # <fm-crew-state source token>
+  local s=$1 w
+  [ -n "$s" ] || return 1
+  for w in ${FM_ACK_NONCLEARING_SOURCES:-$FM_ACK_NONCLEARING_SOURCES_DEFAULT}; do
     if [ "$s" = "$w" ]; then return 0; fi
   done
   return 1
@@ -401,8 +422,14 @@ fm_ack_is_current() {  # <state-dir> <id>
 # every existing caller sees; splitting the read changes nothing and costs no
 # extra subprocess, since each path forks once.
 FM_ACK_CONFIRM_TIMEOUT_DEFAULT=15
-fm_ack_confirm_state_raw() {  # <id> -> fm-crew-state.sh's own state token, or empty
-  local line rc=0 bound
+# The raw read carries the reader's SOURCE as well as its state, tab-separated,
+# because two of this file's rules need different halves of the same line and
+# neither may cost a second fork: rule 3 asks which state token the reader
+# produced, and the clear/owed fold asks what evidence produced it. Callers that
+# want only the state token take the field before the tab; fm_ack_confirm_verdict
+# below splits the pair itself, so its one-argument contract is unchanged.
+fm_ack_confirm_state_raw() {  # <id> -> "<state>[<TAB><source>]", or empty
+  local line src rc=0 bound
   bound=${FM_ACK_CONFIRM_TIMEOUT:-$FM_ACK_CONFIRM_TIMEOUT_DEFAULT}
   case "$bound" in ''|*[!0-9]*) bound=$FM_ACK_CONFIRM_TIMEOUT_DEFAULT ;; esac
   if command -v fm_bounded_available >/dev/null 2>&1 && fm_bounded_available; then
@@ -415,18 +442,24 @@ fm_ack_confirm_state_raw() {  # <id> -> fm-crew-state.sh's own state token, or e
     state:*) ;;
     *) return 0 ;;
   esac
+  src=${line#*source: }
+  src=${src%% *}
   line=${line#state: }
-  printf '%s' "${line%% *}"
+  printf '%s\t%s' "${line%% *}" "$src"
 }
 
-# The three-way verdict for a state token. An empty token - unreadable, or the
-# bound expired - is `unconfirmed`, never `clear`.
-fm_ack_confirm_verdict() {  # <state-token>
-  if [ -z "$1" ]; then
+# The three-way verdict for a raw read. An empty read - unreadable, or the bound
+# expired - is `unconfirmed`, never `clear`. A `clear`-looking state whose source
+# is one this guard refuses to clear on is `unconfirmed` for the same reason: it
+# is not evidence the crew moved past what it reported.
+fm_ack_confirm_verdict() {  # <raw read, "<state>[<TAB><source>]">
+  local token=${1%%$'\t'*} src=
+  case "$1" in *$'\t'*) src=${1#*$'\t'} ;; esac
+  if [ -z "$token" ]; then
     printf 'unconfirmed'
-  elif fm_ack_state_is_clear "$1"; then
+  elif fm_ack_state_is_clear "$token" && ! fm_ack_source_is_nonclearing "$src"; then
     printf 'clear'
-  elif fm_ack_state_is_owed "$1"; then
+  elif fm_ack_state_is_owed "$token"; then
     printf 'owed'
   else
     printf 'unconfirmed'
@@ -627,7 +660,7 @@ fm_ack_classify() {  # <state-dir> <id> <grace> <now> [alarm|render]
       FM_ACK_CONFIRMS=$((FM_ACK_CONFIRMS + 1))
     fi
     FM_ACK_VERDICT=$(fm_ack_confirm_verdict "$raw")
-    if [ -n "$raw" ] && ! fm_ack_is_paused_token "$raw"; then
+    if [ -n "${raw%%$'\t'*}" ] && ! fm_ack_is_paused_token "${raw%%$'\t'*}"; then
       # The reader can see past the log: a resumed run, a finished one, a gate.
       # Whatever it is, the declared wait is over and owes no recheck.
       FM_ACK_CLASS=moved-on
