@@ -85,6 +85,8 @@
 #   FM_LINT_NO_CACHE=1 read and write no cache entries
 #   FM_LINT_LOCK       machine-wide serialisation lock (default: $TMPDIR/fm-lint.lock)
 #   FM_LINT_NO_LOCK=1  do not serialise against other runs on this machine
+#   FM_LINT_MEM_AVAILABLE_KB
+#                      substitute for /proc/meminfo MemAvailable, in kB
 #
 # Exit status is ShellCheck's own on a lint run, so a caller (CI or the gate)
 # fails exactly when ShellCheck reports a finding; a version mismatch or a
@@ -321,6 +323,37 @@ if [ -z "$JOBS" ]; then
   [ "$JOBS" -gt 8 ] && JOBS=8
 fi
 [ "$JOBS" -ge 1 ] || JOBS=1
+
+# --- memory-derived cap on that job count -----------------------------------
+# Cores say how many shards could run, memory says how many may. The lock above
+# stops two passes running at once; this stops the one pass that does run from
+# taking the machine with it, which is the other half of the same 2026-09-17
+# failure: the largest single shard measured that morning held 1.9 GB resident.
+# A shard is therefore budgeted at MEM_PER_JOB_KB and the pass may commit at
+# most half of MemAvailable, leaving the rest for everything else on the box:
+#   jobs <= (MemAvailable / 2) / MEM_PER_JOB_KB, never below 1.
+# This can only ever LOWER the count - the core cap above stays the upper bound
+# - and an explicit FM_LINT_JOBS is subject to the same ceiling, because memory
+# the machine does not have is not something a caller can opt out of.
+# FM_LINT_MEM_AVAILABLE_KB substitutes a figure for MemAvailable, which is how
+# the suite drives this from a healthy box.
+MEM_PER_JOB_KB=2000000
+mem_kb="${FM_LINT_MEM_AVAILABLE_KB:-}"
+if [ -z "$mem_kb" ] && [ -r /proc/meminfo ]; then
+  mem_kb=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo)
+fi
+case "$mem_kb" in
+  '' | *[!0-9]*) mem_kb= ;;
+esac
+if [ -n "$mem_kb" ]; then
+  mem_jobs=$((mem_kb / 2 / MEM_PER_JOB_KB))
+  [ "$mem_jobs" -ge 1 ] || mem_jobs=1
+  if [ "$mem_jobs" -lt "$JOBS" ]; then
+    printf 'fm-lint.sh: %s MB available, so capping %s shard(s) to %s.\n' \
+      "$((mem_kb / 1024))" "$JOBS" "$mem_jobs" >&2
+    JOBS="$mem_jobs"
+  fi
+fi
 
 # --- source-edge discovery --------------------------------------------------
 # The planner does not parse source statements out of shell code; ShellCheck
