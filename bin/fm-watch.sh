@@ -45,6 +45,10 @@
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
+#   signal: fm-lock ...    this home's session lock was lost mid-cycle and could
+#                          not be re-acquired, or another live session now holds
+#                          it; supervision stood down and the line names the
+#                          exact command that resolves it
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -153,6 +157,27 @@ NM_QUESTIONS_TIMEOUT=${FM_NM_QUESTIONS_TIMEOUT:-20}  # seconds bounding one revi
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+# How long a turn-end marker must have sat unseen before a BARE one - a turn-end
+# with no status line beside it - is worth a wake of its own. Default: the grace
+# above (already spent before this is measured, so a fresh marker reads ~grace
+# old) plus two poll cycles, which is the shortest window in which the pane-stale
+# layer below can see the same crew twice and surface it. Past it, that layer has
+# had its chance and did not fire - the usual cause being that no watcher was
+# running when the turn ended - so the marker is surfaced instead of absorbed.
+# Both inputs may be FRACTIONAL in a test home (FM_POLL=0.2), and a fraction is a
+# hard arithmetic error rather than a rounding, so each is floored to an integer
+# with the production default as its fallback before it is added. Without that
+# floor the whole assignment failed and left the variable unset, which under
+# set -u took the watcher down on its next read.
+turn_end_quiet_int() {  # <value> <fallback>
+  local v=${1%%.*}
+  case "$v" in
+    ''|*[!0-9]*) printf '%s' "$2" ;;
+    *) printf '%s' "$v" ;;
+  esac
+}
+TURN_END_QUIET_SECS=${FM_TURN_END_QUIET_SECS:-$(( $(turn_end_quiet_int "$SIGNAL_GRACE" 30) + $(turn_end_quiet_int "$POLL" 15) * 2 ))}
+case "$TURN_END_QUIET_SECS" in ''|*[!0-9]*) TURN_END_QUIET_SECS=60 ;; esac
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
 # grok: "Ctrl+c:cancel" (the mid-turn cancel hint in grok's keybind bar, shown iff a
@@ -599,6 +624,85 @@ signal_payload() {  # <seen-file> <status-file> <current sig>
   fi
 }
 
+# A BARE turn-end: every file that changed in this batch is a turn-end marker, so
+# the crew ended a turn and wrote nothing anybody can act on. The wake it produced
+# carried no content at all - measured on a live crewmate on 2026-09-17, which is
+# what this absorb exists for.
+# Turn-end markers exist for STALE detection, not as an event in their own right:
+# a crew that really has stopped - including one that finished through an
+# interactive pane menu and wrote no done: status - is caught within two polls by
+# the pane-stale layer below, which reads the same crew_absorb_class verdict this
+# path used to read and surfaces it as `stale:` with the pane as evidence. So
+# absorbing a bare turn-end costs the swallowed-finish guard nothing; it moves it
+# one layer down, to the layer that has something to say when it fires.
+# The one thing that layer cannot see is a window it can no longer capture at all
+# (fm_backend_capture failing skips the task), and TURN_END_QUIET_SECS is the
+# valve for exactly that: a marker nothing has spoken for by then surfaces on its
+# own rather than waiting for a pane that is never coming back.
+signal_is_bare_turn_end() {  # <file> ...
+  local f
+  [ "$#" -gt 0 ] || return 1
+  for f in "$@"; do
+    case "$f" in *.turn-ended) ;; *) return 1 ;; esac
+  done
+  return 0
+}
+
+# 0 when any marker in a bare batch has gone quiet past TURN_END_QUIET_SECS, the
+# one case where a bare turn-end still surfaces: the pane-stale layer has already
+# had its window and produced nothing, so nothing else is going to speak for this
+# crew.
+signal_turn_end_is_overdue() {  # <file> ...
+  local f
+  for f in "$@"; do
+    [ "$(age_of "$f")" -ge "$TURN_END_QUIET_SECS" ] && return 0
+  done
+  return 1
+}
+
+# THE RECORDED PR FACT FOLLOWS THE TASK, not a hand-run command.
+#
+# A worker's `done: PR <url>` line is the signal that this task's PR has changed.
+# Until this existed, only a hand-run bin/fm-pr-check.sh moved the `pr=` in
+# state/<id>.meta, so a task shipping several PRs under one id kept the PREVIOUS
+# PR's fact for as long as nobody noticed. Measured 2026-09-16 on
+# fm-lock-lineage-fix-l8, which ships seven PRs: it had reported PR 96 hours
+# earlier while the record still named PR 95, so the fleet view drew a merged
+# PR 95 beside a task that had moved on, and the merge poll armed for PR 95 kept
+# reporting it merged on every sweep - armed, and watching nothing.
+#
+# bin/fm-pr-check.sh stays the ONE writer of that fact and the one owner of
+# arming the poll; this only calls it at the moment the evidence arrives. Because
+# that script rewrites state/<id>.check.sh and its sidecar in place, re-recording
+# also retires the previous PR's poll rather than leaving a second one firing.
+#
+# It reads the STATUS FILE rather than only the bytes just appended, so a report
+# whose own wake was missed still converges the next time that task writes
+# anything, and it compares against the recorded fact first, so the ordinary case
+# - a worker re-reporting the PR already on record - costs one grep and no call.
+#
+# --from-watcher is mandatory here, not a preference: it keeps the report's
+# captain-facing relay owed, and it keeps the migration - which takes watcher
+# exclusion by TERMing this very process - out of the watcher's own call.
+# bin/fm-pr-check.sh's header owns both.
+record_reported_pr() {  # <status-file>
+  local f=$1 id url meta out
+  case "$f" in *.status) ;; *) return 0 ;; esac
+  url=$(grep -oE 'done: PR https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*' "$f" 2>/dev/null | tail -1)
+  [ -n "$url" ] || return 0
+  url=${url#done: PR }
+  id=$(signal_id_of_file "$f")
+  meta="$STATE/$id.meta"
+  [ -f "$meta" ] || return 0
+  ! grep -qxF "pr=$url" "$meta" 2>/dev/null || return 0
+  if fm_bounded_available 2>/dev/null; then
+    out=$(fm_bounded_run "$CHECK_TIMEOUT" "$SCRIPT_DIR/fm-pr-check.sh" --from-watcher "$id" "$url" 2>&1)
+  else
+    out=$("$SCRIPT_DIR/fm-pr-check.sh" --from-watcher "$id" "$url" 2>&1)
+  fi
+  triage_log "recorded reported PR for $id: $url${out:+ | $(printf '%s' "$out" | tr '\n' ' ')}"
+}
+
 run_check_process() {
   local c=$1
   shift
@@ -894,6 +998,15 @@ fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 # inherits the schedule already on disk.
 [ -e "$STATE/.last-nm-stall" ] || touch "$STATE/.last-nm-stall"
 
+# Whether the per-poll session-lock check below applies to this watcher, decided
+# once here. A watcher that does not own the home at startup never had ownership
+# to lose: bin/fm-watch-arm.sh armed it with its own announced notice, and the
+# blind-turn alarm already covers that home. Arming the check for it would turn
+# that announced state into a stand-down on the first poll. Ownership can only be
+# LOST, so the check exists to notice a loss, and only an owner can suffer one.
+LOCK_ENFORCED=
+[ "$(fm_session_lock_ownership "$STATE")" = owned ] && LOCK_ENFORCED=1
+
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -903,6 +1016,42 @@ while :; do
   # and doubling every wake.
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ]; then
     exit 0
+  fi
+
+  # Session-lock ownership, re-checked every cycle beside the self-eviction check
+  # above. It costs one file read while ownership holds, and at most a short
+  # ancestry walk, because ownership can only be lost by the session process
+  # dying, a rival session acquiring or taking over, or a hand edit.
+  # `missing` is recoverable: this watcher is the owner's descendant, so
+  # bin/fm-lock.sh re-records the owner's own pid. That re-acquire can only fail
+  # when no live session sits above this watcher at all, which means the session
+  # that armed it is gone and there is nothing left to supervise for.
+  # `other` is never recoverable here: a watcher whose session no longer owns
+  # this home must stop supervising it. The arm's gate would have refused to
+  # start it, so refusing to continue mid-life is that same rule, one poll later.
+  # Both stand-downs leave the reason in the durable queue, which is what carries
+  # it to the next session start.
+  if [ -n "$LOCK_ENFORCED" ]; then
+    case "$(fm_session_lock_ownership "$STATE")" in
+      owned) ;;
+      missing)
+        # FM_STATE_OVERRIDE is passed explicitly because bin/fm-lock.sh resolves
+        # its state dir from that variable and FM_HOME only, and never from an
+        # ambient STATE, so a bare call could acquire against a different home
+        # than the one this watcher just judged.
+        if ! FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1; then
+          reason="signal: fm-lock - this home's session lock is gone and no live session sits above this watcher, so supervision has stopped - run bin/fm-session-start.sh from the session that should own this home"
+          fm_wake_append signal fm-lock "$reason" || exit 1
+          wake "$reason"
+        fi
+        ;;
+      other)
+        fm_session_lock_read "$STATE" || true
+        reason="signal: fm-lock - another live session now holds this home ($(fm_session_lock_describe_holder "$FM_SESSION_LOCK_PID" "$FM_SESSION_LOCK_TICKS")), so this watcher stood down - run bin/fm-lock.sh status, then $(fm_session_lock_remedy "$FM_SESSION_LOCK_PID")"
+        fm_wake_append signal fm-lock "$reason" || exit 1
+        wake "$reason"
+        ;;
+    esac
   fi
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
@@ -1049,18 +1198,37 @@ EOF
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file carries a captain-relevant verb;
-    #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
-    #     NOT provably working - the crew stopped its turn with no actively-running
-    #     pipeline and no busy pane, so it may be done (even via an interactive menu
-    #     that wrote no done: status), waiting on a decision, or wedged. Absorbing
-    #     such a turn-end is exactly the swallowed-finish this change guards against.
-    # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
-    # whose crew IS provably working) in always-on mode -> advance the markers so it
-    # will not re-fire, log, and keep blocking without enqueuing. The provably-working
-    # check is the only costly one (it may run a bounded no-mistakes call), so the ||
-    # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
-    # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+    #   - it is a BARE turn-end - every changed file is a turn-end marker, so the
+    #     crew ended a turn and wrote nothing - that has gone quiet past
+    #     TURN_END_QUIET_SECS. A bare turn-end inside that window is ABSORBED
+    #     however the crew reads, because the wake it makes carries no words to
+    #     act on and the pane-stale layer below owns the crew it describes; see
+    #     signal_is_bare_turn_end for why that costs the swallowed-finish guard
+    #     nothing;
+    #   - or it is any OTHER no-verb wake (a working: note, a turn-end beside a
+    #     status write) whose crew is NOT provably working - the crew stopped its
+    #     turn with no actively-running pipeline and no busy pane, so it may be
+    #     done, waiting on a decision, or wedged.
+    # Actionable -> enqueue, advance .seen-* markers, exit. Benign in always-on
+    # mode -> advance the markers so it will not re-fire, log, and keep blocking
+    # without enqueuing. The provably-working check is the only costly one (it may
+    # run a bounded no-mistakes call), so the branch ordering reaches it ONLY for a
+    # non-afk, no-captain-verb signal that is not a fresh bare turn-end.
+    actionable=1
+    absorb_class=benign
+    # $files is a space-separated status-path list (ids carry no spaces). Split it
+    # once into an array rather than relying on word splitting at each call: a
+    # lint directive only covers one complete compound command, so an unquoted
+    # expansion inside an elif branch cannot be annotated where it sits.
+    read -r -a signal_files <<< "$files"
+    if afk_present || signal_reason_is_actionable "${signal_files[@]}"; then
+      :
+    elif signal_is_bare_turn_end "${signal_files[@]}"; then
+      signal_turn_end_is_overdue "${signal_files[@]}" || { actionable=0; absorb_class="bare turn-end"; }
+    elif signal_crew_provably_working "${signal_files[@]}"; then
+      actionable=0
+    fi
+    if [ "$actionable" -eq 1 ]; then
       # The words, not a path to them: read the bytes each file gained since the
       # last look and put them in the record AND in this watcher's own reason, so
       # the wake the model is handed already says what the crewmate said.
@@ -1095,6 +1263,7 @@ EOF
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
         mark_surfaced "$f"
+        record_reported_pr "$f"
       done <<EOF
 $pending
 EOF
@@ -1109,7 +1278,7 @@ EOF
       done <<EOF
 $pending
 EOF
-      triage_log "absorbed benign $reason"
+      triage_log "absorbed $absorb_class $reason"
     fi
   fi
 

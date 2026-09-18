@@ -126,6 +126,7 @@ state/               volatile runtime signals; gitignored
   .unactioned-*      short-lived unactioned-alarm confirm cache; never touch; removed by teardown
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
+  .watch-arm.log     the handover lines a dormant arm does not print, so a pool wake costs exactly one notification (size-capped, diagnostic only, safe to delete); docs/watcher-continuity.md owns the contract
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .latency-last .latency-turn  last harness hook event and last turn end, in epoch ms, so the latency ledger can measure the gap between them; bin/fm-latency-lib.sh owns both
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
@@ -149,6 +150,8 @@ An `ABSENT` captain, shared-captain, secondmate, or learnings file means the fir
 
 If the session lock is refused, tell the captain another active session is managing the fleet and remain read-only.
 A lock-refused session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.
+`bin/fm-lock.sh take-over <pid>` displaces that holder, and it is the CAPTAIN's alone: nothing in the code can tell a captain from an agent, so this rule is the only thing enforcing it.
+Never run it on your own initiative, and relay the refusal to the captain instead.
 
 1. **Lock** - acquires the per-home session lock first, before anything mutates shared state.
 2. **Bootstrap** - detect-only checks (tool/version problems, the shared no-mistakes daemon's liveness, GitHub auth, the worktree-tangle check, harness override, dispatch-profile validation, backlog-backend status) always run, but routine confirmations stay silent by default.
@@ -273,7 +276,7 @@ The spawn must resolve a genuine isolated task worktree distinct from the primar
 After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship or scout work as under way.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
-Steer a worker with short single-line messages through fail-closed `fm-send`; put long instructions in a file.
+Steer a worker with short single-line messages through fail-closed `fm-send`, issued as its own Monitor rather than a shell command; put long instructions in a file.
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 Supervise all live work under section 8.
 
@@ -358,6 +361,7 @@ A worker never aborts a run to shortcut its CI step: that step watches the PR it
 The `PR must be raised via no-mistakes` check is red by design on a direct-PR project's PR and on a task carrying a signed testing skip, so that command excuses it through the same owner `bin/fm-pr-merge.sh` excuses it through and names the reason alongside its green verdict; both authorities are read from the task's own record, so it must be run against the home that dispatched the task and it says so rather than reporting a verdict when it cannot read one.
 That command reports a check that never delivered a verdict about the branch - it timed out, was cancelled, could not run, or died having written nothing - as a distinct `infrastructure` outcome rather than a red, and a worker reports one and stops rather than re-running it, because a timed-out review is an alarm and a re-run hides it.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and GitHub's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
+A worker's own `done: PR <url>` line already moves that record and re-arms the poll against the PR it names, so a task shipping several PRs under one id keeps one accurate record without a hand-run; running it yourself is still what acks the report and relays the PR.
 It refuses, recording nothing and arming nothing, when that PR does not contain commits the task's own copy already holds, because the PR's checks then describe the version before them; the remedy is to steer the worker to push its branch, let the checks re-run, and run it again.
 For a no-mistakes ship task, run `bin/fm-review-attest.sh attest <id>` on that report or on a worker's `review-attest needed for <sha> on <owner>/<repo>` line, so the PR carries signed proof that the pipeline already reviewed that exact commit and the project's own AI review can skip it; a later push needs a fresh one, and that script's header owns the contract.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.

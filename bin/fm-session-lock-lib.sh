@@ -304,13 +304,25 @@ fm_session_lock_read() {
 
 # Record pid $2 as the holder of $1/.lock, with its start ticks when the kernel
 # offers them. This is the only writer of the format the readers above parse.
+#
+# The write lands through a temporary file in the SAME directory plus a rename,
+# never a truncate in place, because a reader that lands inside a truncate-then-
+# write window reads a short file, fm_session_lock_read rejects it, and ownership
+# resolves `missing` for a lock that is perfectly healthy a moment either side.
+# That used to be harmless - the next read self-corrected - but a `missing`
+# verdict now makes bin/fm-watch.sh re-acquire and, when no live session sits
+# above it, stand supervision down, so a torn read became a way to lose the
+# fleet rather than a blip. A rename within one directory is atomic, so every
+# reader sees the old holder or the new one and never a half-written file.
 fm_session_lock_write() {
-  local state=$1 pid=$2 ticks
+  local state=$1 pid=$2 ticks tmp
+  tmp=$state/.lock.tmp.${BASHPID:-$$}
   if ticks=$(fm_pid_start_ticks "$pid"); then
-    printf '%s\n%s\n' "$pid" "$ticks" > "$state/.lock"
+    printf '%s\n%s\n' "$pid" "$ticks" > "$tmp" || { rm -f "$tmp"; return 1; }
   else
-    printf '%s\n' "$pid" > "$state/.lock"
+    printf '%s\n' "$pid" > "$tmp" || { rm -f "$tmp"; return 1; }
   fi
+  mv -f "$tmp" "$state/.lock" || { rm -f "$tmp"; return 1; }
 }
 
 # True when live pid $1 is still the process whose start ticks were recorded as
@@ -477,6 +489,16 @@ fm_session_lock_describe_holder() {
 # The remedy printed after the description wherever a live holder that is not
 # this session blocks the caller. One owner so that a new sanctioned recovery
 # path reaches every surface at once.
-fm_session_lock_remedy() {
-  printf 'end that session and rerun bin/fm-session-start.sh here\n'
+# It names the holder's pid because `take-over` refuses every other pid, so a
+# remedy that did not carry it would not be runnable as printed. A caller with no
+# pid to give still gets the first half rather than an uncompletable command.
+fm_session_lock_remedy() {  # <holder pid>
+  local pid=${1:-}
+  case "$pid" in
+    ''|*[!0-9]*)
+      printf 'end that session and rerun bin/fm-session-start.sh here\n'
+      return 0
+      ;;
+  esac
+  printf 'end that session and rerun bin/fm-session-start.sh here, or, if you are certain it is not managing this fleet, bin/fm-lock.sh take-over %s (captain only)\n' "$pid"
 }

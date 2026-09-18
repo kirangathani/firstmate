@@ -233,7 +233,10 @@ steer_worker() {
     fi
     return 1
   fi
-  if "$SCRIPT_DIR/fm-send.sh" "$id" "$(steer_text "$id" "$url")" >/dev/null 2>&1; then
+  # FM_ARM_POOL_NO_REFILL: a successful fm-send now stays alive as a waiting arm
+  # unless the caller opts out (bin/fm-arm-pool-lib.sh), and this sweep has the
+  # rest of its candidates to get through, so it must get its own prompt back.
+  if FM_ARM_POOL_NO_REFILL=1 "$SCRIPT_DIR/fm-send.sh" "$id" "$(steer_text "$id" "$url")" >/dev/null 2>&1; then
     rounds_record "$id"
     # Only this one branch is acknowledged, and only this one needs to be: the
     # sweep reports every branch behind it as parked, which asks for nothing.
