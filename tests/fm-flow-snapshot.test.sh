@@ -140,6 +140,13 @@ SQL
 # --- fake tools -------------------------------------------------------------
 
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+# The attached-client reading behind captain_driving is answered by this
+# suite's own tmux fake below, pointed at an empty list by default, so every
+# row reads a controlled verdict instead of whichever tmux window the operator
+# happens to be looking at.
+CLIENTS="$TMP_ROOT/tmux-clients"
+: > "$CLIENTS"
+export FM_FAKE_TMUX_CLIENTS="$CLIENTS"
 cat > "$FAKEBIN/no-mistakes" <<SH
 #!/usr/bin/env bash
 set -u
@@ -192,6 +199,13 @@ case "${1:-}" in
   capture-pane)
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
     else printf 'all quiet\n> \n'; fi ;;
+  list-clients)
+    # The attached-client reading behind captain_driving
+    # (bin/fm-captain-driven-lib.sh). Rows come from a file so a case can change
+    # who is attached; tests/lib.sh's fm_fake_tmux_client_row writes one.
+    if [ -n "${FM_FAKE_TMUX_CLIENTS:-}" ] && [ -f "$FM_FAKE_TMUX_CLIENTS" ]; then
+      cat "$FM_FAKE_TMUX_CLIENTS"
+    fi ;;
 esac
 exit 0
 SH
@@ -1736,6 +1750,8 @@ pass "checks on a head the live run will replace are stated as superseded, with 
 # marker from its PRESENCE alone - the signature inside it is bin/fm-monitor.sh's
 # own thing to verify, never this read-only collector's - so the field is a
 # plain boolean and carries no signature or reason text.
+# The same marker is drawn, with no record at all, for a worker the captain is
+# simply sitting in the window of (docs/captain-driven.md).
 #
 # Before either marker exists, every kind reads false: this is the ordinary
 # case for every task in the base fixture.
@@ -1756,6 +1772,17 @@ got=$(jq -r '.agents[] | select(.id=="eager-dispatch-e2") | .captain_driving' "$
 got=$(jq -r '.agents[] | select(.id=="idle-sm-z2") | .captain_driving' "$TMP_ROOT/driving.json")
 [ "$got" = false ] || fail "a worker with no exemption record of its own read captain_driving true: $got"
 pass "captain_driving reads true only for the agent whose own exemption record exists"
+
+# And the other route to the same marker: no record, a client in the window.
+find "$LIVE_HOME/state" -maxdepth 1 -name '*.monitor-exempt' -delete
+fm_fake_tmux_client_row "$CLIENTS" "fm:5" "$(date +%s)"
+run_snapshot --no-ci > "$TMP_ROOT/sitting.json" 2>/dev/null
+got=$(jq -r '.agents[] | select(.id=="some-scout-x1") | .captain_driving' "$TMP_ROOT/sitting.json")
+[ "$got" = true ] || fail "a worker the captain is sitting in the window of did not read captain_driving true: $got"
+got=$(jq -r '.agents[] | select(.id=="idle-sm-z2") | .captain_driving' "$TMP_ROOT/sitting.json")
+[ "$got" = false ] || fail "a worker in another window read captain_driving true off a sibling's attached client: $got"
+: > "$CLIENTS"
+pass "captain_driving is equally true for a worker the captain is merely sitting in the window of"
 
 # --- the PR's own lifecycle rides the same read as its checks ----------------
 #
