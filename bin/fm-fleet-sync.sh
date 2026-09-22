@@ -50,6 +50,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-detach-lib.sh
+. "$SCRIPT_DIR/fm-detach-lib.sh"
+# Detached before the first fetch. This command takes 12.1 s at median and 24 s
+# at p90 over the network, and emits one line per project, which is also why it
+# detaches rather than lurking: a dozen lines through a Monitor is a dozen
+# notifications, and a Monitor emitting too many events is auto-stopped.
+fm_detach "$@"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
 

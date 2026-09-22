@@ -183,7 +183,9 @@ fleet_sync() {
   monitor_was_on=0
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
-  "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &
+  # FM_INLINE: the sweep reads this run's own output out of $tmp to build its
+  # FLEET_SYNC: lines, which a detached copy would leave empty.
+  FM_INLINE=1 "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &
   pid=$!
 
   start=$SECONDS

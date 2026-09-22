@@ -22,14 +22,14 @@ Durations are what the model waited, which includes the command text streaming a
 
 | command | calls (13d) | fg median | p90 | max | verdict |
 |---|---|---|---|---|---|
-| `fm-pr-merge.sh` | 135 | 16.7 s | 73 s | 391 s | background, as a Monitor |
-| `fm-merge-green.sh` | 50 | 28.0 s | 101 s | 279 s | background, as a Monitor |
+| `fm-pr-merge.sh` | 135 | 16.7 s | 73 s | 391 s | detaches itself |
+| `fm-merge-green.sh` | 50 | 28.0 s | 101 s | 279 s | detaches itself |
 | `fm-teardown.sh` | 103 | 8.7 s | 20 s | 78 s | background, chained with the backlog write |
 | `fm-spawn.sh` | 140 | 5.7 s | 15 s | 66 s | background |
 | `fm-pr-check.sh` | 106 | 6.0 s | 9 s | 14 s | background |
 | `fm-review-attest.sh` | 53 | 4.7 s | 8 s | 22 s | background |
 | `fm-decision-hold.sh` | 58 | 3.8 s | 11 s | 41 s | background |
-| `fm-fleet-sync.sh` | 25 | 12.1 s | 24 s | 24 s | background |
+| `fm-fleet-sync.sh` | 25 | 12.1 s | 24 s | 24 s | detaches itself |
 | `fm-ci-waiver.sh` | 14 | 4.7 s | 13 s | 13 s | background; see section 5 |
 | `sleep N; <read>` | 72 | 12.1 s | 20 s | 50 s | eliminate |
 | foreground CI-polling loops | 4 | 158 s | 536 s | 563 s | eliminate |
@@ -141,6 +141,26 @@ For a document the next session will trust, that difference is the whole point, 
 
 ## 3. How a background result reaches the model
 
+### 3.0 The vehicle: a command that detaches itself
+
+The routes below are how a result gets back once a command is off the critical path.
+What puts it there is the command itself.
+
+`bin/fm-detach-lib.sh` re-launches the script with the same arguments through `setsid(1)`, and the foreground copy exits in about 6 ms having done nothing but fork.
+[F] Measured 2026-09-17 on this machine: 16 to 27 ms for the parent, against a 2 to 3 s inline run of the same fixture.
+The caller sees an ordinary tool call that finished quickly, so there is no completion notification and nothing to re-read, which is the difference from every route below.
+
+This exists because instructing firstmate did not work.
+[F] Every one of the 135 merges in section 1.1 was issued in the foreground after `docs/supervision-protocols/claude.md` already asked for a Monitor, and #114 records the same for steering: the protocol asked for the pool-refill form and on 2026-09-17 every steer went out plain, draining the pool to its floor twice.
+
+[F] The detached child is outside everything that kills a harness task.
+It is in its own session and process group with its stdio on a file, which is the shape `bin/fm-watch-arm.sh` has used for the watcher since 2026-09-08: through 107 reapings of the arm in 13 days, the watcher it had launched was never killed once.
+`tests/fm-detach.test.sh` asserts that directly by killing the parent's process group mid-run and requiring the work to finish anyway.
+The thirty-minute Monitor cap does not apply either, because nothing is holding the child to time.
+
+[O] Not covered: `SIGKILL`, which no trap can catch, so a hard-killed child dies without recording anything.
+Its verdict would then be missing rather than wrong, and the command is no longer in the class of process anything routinely hard-kills.
+
 Three routes, in order of preference.
 
 1. **A Monitor event.**
@@ -164,22 +184,31 @@ Use `run_in_background` only where the exit code is the whole verdict, and then 
 
 Each runs as one Monitor with `timeout_ms` at the 1800000 maximum and a description naming the subject, since the description appears in every event.
 
-**Merge.** The captain's worked example: `bin/fm-pr-merge.sh` writes nothing to the PR, so its whole foreground cost is its own gates.
+**Merge, and the other two that detach themselves.** There is no shape to get right any more.
 
 ```sh
-cd <FM_HOME> && FM_HOME=$PWD bin/fm-pr-merge.sh <id> <pr-url> 2>&1 \
-  | grep --line-buffered -E '^(merged:|  number:|  status:|fm-pr-merge-refusal:|error:|summary:|note: captain-approved|TESTING WAIVER|ATTESTATION CHECK EXEMPTED|BASE RE-VERIFICATION EXEMPTED|NO CI EVIDENCE)'
+bin/fm-pr-merge.sh <id> <pr-url>
 ```
 
-Every gate, every refusal and the poll it arms are unchanged.
-The verdict is the `merged:` or `fm-pr-merge-refusal: <code>` event, so no read call is spent on it.
+Call it plainly.
+It returns in milliseconds, and its gates, its refusals and the poll it arms are all unchanged, running in the detached child.
+The same is true of `bin/fm-merge-green.sh` and `bin/fm-fleet-sync.sh`.
+Never issue one through a Monitor or a background task: the work is handed off either way, and the only difference is a completion notice for something already finished.
+
+The verdict arrives on the next wake through the results channel.
+A success carries the command's own `merged:` line and no log path, because there is nothing to chase.
+A failure carries the exit code, the log path, and the selected verdict lines themselves - the same filter this section used to ask firstmate to type - so no read call is spent on it.
+
+A successful merge also refreshes the project's clone before it reports, because the turn that used to do that no longer exists.
+It does NOT tear the task down: `bin/fm-teardown.sh`'s refusal test is about unlanded work rather than unfinished intent, so a worker whose first PR has just merged has a clean tree and would be torn down mid-series.
+
 Drop the pre-merge `bin/fm-pr-green.sh` call when the next action is the merge: the merge reads the same check rollup through the same owner and refuses on anything not green, so that call is a duplicate read.
 Keep `fm-pr-green.sh` when its verdict is itself the answer to a question.
 
-**The Monitor cap, and the one merge that must not use it.**
-[F] A Monitor is killed at thirty minutes, and `bin/fm-assert-tests-kept.sh` puts a full run on firstmate at 20 to 35 minutes; one merge under a testing waiver took 19 minutes.
-`bin/fm-pr-merge.sh` withholds its identical-file skip in exactly two cases, both firstmate-private reads the model can make first: `ci_skip=on` in `state/<id>.meta`, or a `data/no-pr-ci/<project>` marker.
-For those, use `run_in_background` with `-o pipefail` and rely on the poll wake; for every other merge, Monitor.
+**The Monitor cap no longer reaches a merge.**
+[F] A Monitor is killed at thirty minutes, and `bin/fm-assert-tests-kept.sh` puts a full run at 20 to 35 minutes; one merge under a testing waiver took 19 minutes.
+That used to force a `run_in_background` merge for a task with `ci_skip=on` or a `data/no-pr-ci/<project>` marker, which was the one shape exposed to the reaper.
+A detached merge is held to no deadline by anyone, so that exception is gone and both cases take the ordinary plain call.
 
 **Teardown, chained with its backlog write**, so the dependency is inside the chain rather than in a second model turn.
 For a scout, put its decision-hold completion ahead of the teardown in the same chain.
