@@ -19,7 +19,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-decision-hold.sh`    | Create, verify, complete, and resolve durable captain-held decisions                 |
 | `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, and Herdr-lab briefs, and apply a dispatch's testing skip to an existing ship brief |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
-| `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` symlink, and the canonical self-governance section |
+| `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md` and the canonical self-governance section, removing any leftover `CLAUDE.md` compatibility file |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, stale watcher liveness, unactioned direct reports, and stalled validations |
 | `fm-ack.sh`              | Record that firstmate acted on a direct report's terminal or firstmate-owed state    |
 | `fm-latency.sh`          | Report firstmate's own response, thinking, and command latency from `data/latency.tsv` |

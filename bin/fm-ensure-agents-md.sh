@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Ensure a project worktree follows the agent-memory file convention.
-# AGENTS.md is the real project-intrinsic knowledge file; CLAUDE.md is a
-# relative symlink to it for compatibility. Creates a minimal AGENTS.md skeleton
-# when neither file exists, promotes a real CLAUDE.md file when it is the only
-# file present, and refuses to clobber distinct real files or wrong symlinks.
+# AGENTS.md is the real and only project-intrinsic knowledge file: the supported
+# agent harnesses read it directly, so no CLAUDE.md compatibility file is
+# created. Creates a minimal AGENTS.md skeleton when no memory file exists,
+# promotes a real CLAUDE.md file when it is the only file present, and deletes a
+# CLAUDE.md that is merely a symlink to AGENTS.md or a bare "@AGENTS.md" shim so
+# a converted project stays converted. Refuses to clobber distinct real files.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and any existing AGENTS.md that still lacks it.
-# Refuses a case-variant real memory file such as a lowercase agents.md, whose
-# CLAUDE.md symlink would carry an uppercase literal target that dangles on a
-# case-sensitive filesystem (issue #389).
+# Refuses a case-variant real memory file such as a lowercase agents.md, which
+# satisfies every [ -e AGENTS.md ] test on a case-insensitive filesystem but is
+# a different file once the tree is checked out on a case-sensitive one
+# (issue #389).
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
@@ -92,7 +95,7 @@ EOF
   ensure_maintenance_section
 }
 
-is_correct_claude_symlink() {
+points_at_agents() {
   [ -L "$CLAUDE" ] || return 1
   target=$(readlink "$CLAUDE")
   case "$target" in
@@ -110,12 +113,37 @@ PY
   return 1
 }
 
+# A bare "@AGENTS.md" shim is a real file whose only content is that one
+# reference, so it carries no knowledge of its own and is safe to delete.
+is_claude_shim() {
+  [ -f "$CLAUDE" ] || return 1
+  [ ! -L "$CLAUDE" ] || return 1
+  LC_ALL=C tr -d '\r' < "$CLAUDE" | grep -v '^[[:space:]]*$' |
+    { read -r line && [ "$line" = '@AGENTS.md' ] && ! read -r _; }
+}
+
+# Delete a CLAUDE.md that only points at AGENTS.md, so a project converted to
+# AGENTS.md stays converted. Anything else is left for the callers below.
+drop_claude_compat_file() {
+  if points_at_agents; then
+    unlink "$CLAUDE"
+    echo "removed: CLAUDE.md symlink to AGENTS.md in $DIR"
+    return 0
+  fi
+  if is_claude_shim; then
+    unlink "$CLAUDE"
+    echo "removed: bare CLAUDE.md @AGENTS.md shim in $DIR"
+    return 0
+  fi
+  return 1
+}
+
 # Refuse a case-variant real memory file (issue #389). On a case-insensitive
 # filesystem an existing lowercase agents.md satisfies every [ -e AGENTS.md ]
-# test below, so the script would emit a CLAUDE.md symlink whose uppercase
-# literal target dangles once the tree is checked out on a case-sensitive
-# filesystem. Reading the real directory entries catches the mismatch on both
-# filesystem kinds; surface it for manual reconciliation instead of linking blindly.
+# test below, so the script would treat it as the conventional file while it is
+# a different path once the tree is checked out on a case-sensitive filesystem.
+# Reading the real directory entries catches the mismatch on both filesystem
+# kinds; surface it for manual reconciliation instead of writing blindly.
 for entry in *; do
   if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
     continue
@@ -123,7 +151,7 @@ for entry in *; do
   if [ "$entry" != "$AGENTS" ]; then
     case "$entry" in
       [Aa][Gg][Ee][Nn][Tt][Ss].[Mm][Dd])
-        echo "conflict: memory file is named $entry in $DIR but the convention is AGENTS.md; rename it to AGENTS.md so CLAUDE.md links portably" >&2
+        echo "conflict: memory file is named $entry in $DIR but the convention is AGENTS.md; rename it to AGENTS.md" >&2
         exit 1
         ;;
     esac
@@ -140,41 +168,35 @@ if [ -e "$AGENTS" ] && [ ! -f "$AGENTS" ]; then
 fi
 
 if [ -e "$AGENTS" ]; then
-  if [ -L "$CLAUDE" ]; then
-    if is_correct_claude_symlink; then
-      ensure_maintenance_section
-      if [ "$MAINT_INJECTED" -eq 1 ]; then
-        echo "updated: added ## Maintaining this file to AGENTS.md in $DIR"
+  if [ -e "$CLAUDE" ] || [ -L "$CLAUDE" ]; then
+    if ! drop_claude_compat_file; then
+      if [ -L "$CLAUDE" ]; then
+        echo "conflict: CLAUDE.md is a symlink in $DIR but does not point to AGENTS.md" >&2
+      elif [ -f "$CLAUDE" ]; then
+        echo "conflict: both AGENTS.md and CLAUDE.md are real files in $DIR; reconcile them manually" >&2
       else
-        echo "unchanged: AGENTS.md with CLAUDE.md -> AGENTS.md in $DIR"
+        echo "conflict: CLAUDE.md exists in $DIR but is not a regular file or symlink" >&2
       fi
-      exit 0
+      exit 1
     fi
-    echo "conflict: CLAUDE.md is a symlink in $DIR but does not point to AGENTS.md" >&2
-    exit 1
   fi
-  if [ ! -e "$CLAUDE" ]; then
-    ensure_maintenance_section
-    ln -s "$AGENTS" "$CLAUDE"
-    if [ "$MAINT_INJECTED" -eq 1 ]; then
-      echo "updated: added ## Maintaining this file to AGENTS.md and symlinked CLAUDE.md -> AGENTS.md in $DIR"
-    else
-      echo "symlinked: CLAUDE.md -> AGENTS.md in $DIR"
-    fi
-    exit 0
+  ensure_maintenance_section
+  if [ "$MAINT_INJECTED" -eq 1 ]; then
+    echo "updated: added ## Maintaining this file to AGENTS.md in $DIR"
+  else
+    echo "unchanged: AGENTS.md in $DIR"
   fi
-  if [ -f "$CLAUDE" ]; then
-    echo "conflict: both AGENTS.md and CLAUDE.md are real files in $DIR; reconcile them manually" >&2
-    exit 1
-  fi
-  echo "conflict: CLAUDE.md exists in $DIR but is not a regular file or symlink" >&2
-  exit 1
+  exit 0
 fi
 
 if [ -L "$CLAUDE" ]; then
-  if is_correct_claude_symlink; then
+  # AGENTS.md is missing, so only a literal AGENTS.md target identifies a
+  # compatibility link; anything else points somewhere we must not guess at.
+  if points_at_agents; then
+    unlink "$CLAUDE"
+    echo "removed: dangling CLAUDE.md symlink to AGENTS.md in $DIR"
     write_skeleton
-    echo "created: AGENTS.md and kept CLAUDE.md -> AGENTS.md in $DIR"
+    echo "created: AGENTS.md in $DIR"
     exit 0
   fi
   echo "conflict: CLAUDE.md is a symlink in $DIR but AGENTS.md is missing and the link does not point to AGENTS.md" >&2
@@ -183,10 +205,16 @@ fi
 
 if [ -e "$CLAUDE" ]; then
   if [ -f "$CLAUDE" ]; then
+    if is_claude_shim; then
+      unlink "$CLAUDE"
+      echo "removed: bare CLAUDE.md @AGENTS.md shim in $DIR"
+      write_skeleton
+      echo "created: AGENTS.md in $DIR"
+      exit 0
+    fi
     mv "$CLAUDE" "$AGENTS"
     ensure_maintenance_section
-    ln -s "$AGENTS" "$CLAUDE"
-    echo "promoted: moved CLAUDE.md to AGENTS.md and symlinked CLAUDE.md -> AGENTS.md in $DIR"
+    echo "promoted: moved CLAUDE.md to AGENTS.md in $DIR"
     exit 0
   fi
   echo "conflict: CLAUDE.md exists in $DIR but is not a regular file or symlink" >&2
@@ -194,5 +222,4 @@ if [ -e "$CLAUDE" ]; then
 fi
 
 write_skeleton
-ln -s "$AGENTS" "$CLAUDE"
-echo "created: AGENTS.md and CLAUDE.md -> AGENTS.md in $DIR"
+echo "created: AGENTS.md in $DIR"
