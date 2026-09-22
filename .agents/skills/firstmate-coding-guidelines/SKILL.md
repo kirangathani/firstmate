@@ -86,6 +86,7 @@ Keep instructions as the authority and discovery layer, but make repeated execut
 - It forks up to eight concurrent shellcheck processes over the whole tree, and a fleet runs several crewmates in separate worktrees of this repo at once, so "once per worker per push" is already up to eight times the workers.
 - Four simultaneous runs took all 23 GB of the captain's machine on 2026-09-17 and every shellcheck had to be killed, which each worker saw as `ShellCheck exited 143` and an aborted run with no verdict.
 - The script now takes a machine-wide lock itself so runs serialise however they are typed; a run that reports waiting is behaving correctly and must not be killed and retried.
+- It also sizes its own shard count from free memory, so a single run on a loaded machine quietly uses fewer shellcheck processes rather than all eight.
 - Never hand jq a payload that grows with the fleet through `--argjson`/`--arg`; use `fm_jq_object` from `bin/fm-jq-lib.sh`, whose header owns the contract.
 - An argv payload dies at a size threshold rather than degrading, so it fails permanently and silently once crossed: `bin/fm-fleet-snapshot.sh --json` emitted zero bytes and exited 126 at 19 tasks and a 68737-byte backlog, taking the fleet view and bearings down with it (evidence 2026-08-08, `bin/fm-jq-lib.sh`).
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
