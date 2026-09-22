@@ -74,6 +74,18 @@ export FM_LATENCY_OFF=1
 # invocation, which wins over this baseline.
 export FM_ARM_POOL_NO_REFILL=1
 
+# The same idea one step earlier, for the other way a firstmate command declines
+# to return: every fm_detach-carrying script runs its body in the test's own
+# process rather than handing it to a detached child (bin/fm-detach-lib.sh). A
+# suite that let them detach would assert against a command that had already
+# returned, so the work would still be running when the assertion ran and the
+# exit code would always be 0. The cases whose SUBJECT is the detach clear this
+# per invocation with `env -u`, which wins over this baseline.
+# The two are separate variables because they guard separate things: this one
+# stops the work being handed off, the one above stops a FINISHED command
+# staying alive as an arm.
+export FM_INLINE=1
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
