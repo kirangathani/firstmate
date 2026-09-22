@@ -66,12 +66,23 @@
 #            `PARKED BASE:`, blocks nothing and asks for nothing; it becomes NEXT
 #            on its own once the branch ahead of it lands and moves the base
 #            again, and merges forward exactly once at that point.
-# The order is the one bin/fm-merge-green.sh lands in, from the same owner of
-# dispatch time (bin/fm-spawned-at-lib.sh): a branch carrying a recorded PR is in
-# the landing queue and sorts ahead of one that is not, and within each group the
-# oldest dispatch is first, ties broken by id, so the order is total and
-# repeatable. A branch with no PR has never been validated and nothing is waiting
-# on it, so it sorts last and is NEXT only when no PR of that project is behind.
+# The order is the one bin/fm-merge-green.sh lands in, read from the one owner of
+# that question, bin/fm-landing-queue-lib.sh. A branch with no PR has never been
+# validated and nothing is waiting on it, so it sorts last and is NEXT only when
+# no PR of that project is behind.
+#
+# THE QUEUE IS RANKED OVER EVERY PR BRANCH, NOT ONLY THE BEHIND ONES. A branch
+# that has ALREADY merged the base forward and is waiting on its checks is still
+# the head of its project's landing queue, and it is silent here only because it
+# has nothing left to do. Ranking just the behind branches dropped it out of the
+# ordering and handed NEXT to the branch behind it, which then merged forward
+# immediately, watched the real head land, and paid a SECOND merge-forward and a
+# second full re-run - the exact double round the 2026-09-14 ruling above exists
+# to prevent (evidence 2026-09-22: firstmate PRs 116 level, 120 and 118 behind;
+# bin/fm-merge-green.sh named 116 next to land while this sweep named 120).
+# So a level or ahead branch that carries a recorded PR is ranked too, and when
+# it holds the head of the queue NO branch is NEXT: every behind branch is
+# PARKED behind it, nothing blocks, and nobody is steered until it lands.
 #
 # ACKNOWLEDGEMENT. A finding is silenced by `--ack <id>`, which records the
 # finding's situation key in state/<id>.stale-base-ack. The key embeds the base
@@ -98,11 +109,19 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 
-# fm_spawned_at() - the one owner of "when was this task dispatched", which is
-# the order bin/fm-merge-green.sh lands in and therefore the order this sweep
+# fm_landing_queue_key(), fm_landing_has_pr() - the one owner of the landing
+# order bin/fm-merge-green.sh lands in and therefore the order this sweep
 # queues in.
-# shellcheck source=bin/fm-spawned-at-lib.sh
-. "$SCRIPT_DIR/fm-spawned-at-lib.sh"
+# shellcheck source=bin/fm-landing-queue-lib.sh
+. "$SCRIPT_DIR/fm-landing-queue-lib.sh"
+
+# fm_captain_driven() - the one owner of "is the captain driving this worker
+# himself". A task that is his is left out of this sweep's findings: firstmate
+# is not steering it, so naming it would be an alarm nobody is allowed to act
+# on. It stays visible where blind spots are reported (bin/fm-monitor.sh,
+# bin/fm-bootstrap.sh, the fleet view), not here.
+# shellcheck source=bin/fm-ack-lib.sh
+. "$SCRIPT_DIR/fm-ack-lib.sh"
 
 TAB=$'\t'
 # A project path can never equal this, so the first task always opens a group.
@@ -264,7 +283,10 @@ lookup_worktree() {  # <porcelain-file> <path> [<resolved-path>]
 # Emits one tab-separated record per REPORTABLE task:
 #   unknown<TAB><id><TAB><situation-key><TAB><sentence>
 #   behind<TAB><id><TAB><situation-key><TAB><project><TAB><label><TAB><branch><TAB><default><TAB><behind-by>
-# A determinate all-clear emits nothing. The situation key is what an
+#   level<TAB><id><TAB><situation-key><TAB><project>...
+# A `level` record is never reported and never acknowledged: it exists only so
+# the queue pass can see a caught-up PR branch holding the head of its project's
+# landing queue. Any other determinate all-clear emits nothing. The situation key is what an
 # acknowledgement is recorded against, so it embeds the base commit and a base
 # that moves again re-alarms. A `behind` record carries fields rather than a
 # finished sentence because what that finding READS as - NEXT or PARKED - is a
@@ -291,6 +313,7 @@ scan() {
     case "$META_KIND" in
       scout|secondmate) continue ;;
     esac
+    fm_captain_driven "$STATE" "$id" && continue
     project=$META_PROJECT
     worktree=$META_WORKTREE
     # A record naming neither a project nor a local copy cannot have a branch at
@@ -402,7 +425,16 @@ scan() {
 
     git -C "$proj_dir" merge-base --is-ancestor "$base" "$pushed" 2>/dev/null
     rc=$?
-    [ "$rc" -eq 0 ] && continue
+    if [ "$rc" -eq 0 ]; then
+      # Level or ahead: this branch owes nothing and is reported nowhere. It is
+      # still recorded when it carries a PR, because it holds the head of the
+      # landing queue while it waits to land and nothing behind it should be
+      # steered past it.
+      if fm_landing_has_pr "$STATE" "$id"; then
+        emit level "$id" "level:$base" "$proj_dir" "$label" "$WT_BRANCH" "$default" ''
+      fi
+      continue
+    fi
     if [ "$rc" -ne 1 ]; then
       emit unknown "$id" "unknown:git-compare-failed:$base" \
         "cannot tell whether $id is behind: git could not compare $WT_BRANCH with origin/$default"
@@ -426,6 +458,8 @@ if [ "$MODE" = ack ] || [ "$MODE" = ack-all ]; then
   ACKED_ANY=0
   while IFS=$TAB read -r status id key text; do
     [ -n "$status" ] || continue
+    # A level record is not a finding, so there is nothing about it to silence.
+    [ "$status" != level ] || continue
     if [ "$MODE" = ack ]; then
       case " ${ACK_IDS# } " in
         *" $id "*) ;;
@@ -444,32 +478,27 @@ fi
 
 # --- the landing queue ------------------------------------------------------
 #
-# Per project, exactly one behind branch is NEXT and every other is PARKED
-# behind it. The rank puts a branch with a recorded PR ahead of one without,
-# because only a PR-bearing branch is queued to land; within a rank the order is
-# dispatch time, ties broken by id, so one branch is always the head.
-queue_sort_key() {  # <task-id> -> "<rank>:<zero-padded dispatch epoch>"
-  local id=$1 rank=1 at=
-  local meta=$STATE/$id.meta
-  if [ -f "$meta" ] && grep -q '^pr=' "$meta" 2>/dev/null; then
-    rank=0
-  fi
-  at=$(fm_spawned_at "$STATE" "$id")
-  case "${at:-}" in ''|*[!0-9]*) at=0 ;; esac
-  printf '%s:%010d' "$rank" "$at"
-}
+# Per project, at most one branch is NEXT and every other behind branch is
+# PARKED behind the head of that project's landing queue. The order comes from
+# bin/fm-landing-queue-lib.sh, the one owner shared with bin/fm-merge-green.sh;
+# ties are broken by id here, so one branch is always the head.
+#
+# The head is ranked over every branch of the project the queue can see - behind
+# and level alike - so a branch that has already caught up and is waiting to
+# land keeps the head it holds. When it does, no branch is NEXT.
 
-# One `<project><TAB><task-id>` line per project that has a behind branch,
-# naming that project's NEXT.
-NEXT_MAP=$(
+# One `<project><TAB><task-id><TAB><behind|level>` line per project that has a
+# branch in the queue, naming that project's head and what state it is in.
+QUEUE_HEADS=$(
   while IFS=$TAB read -r q_status q_id _q_key q_proj _q_rest; do
-    [ "$q_status" = behind ] || continue
-    printf '%s\t%s\t%s\n' "$q_proj" "$(queue_sort_key "$q_id")" "$q_id"
-  done <<< "$RECORDS" | sort -t"$TAB" -k1,1 -k2,2 -k3,3 | awk -F'\t' '!seen[$1]++ { print $1 "\t" $3 }'
+    case "$q_status" in behind|level) ;; *) continue ;; esac
+    printf '%s\t%s\t%s\t%s\n' "$q_proj" "$(fm_landing_queue_key "$STATE" "$q_id")" "$q_id" "$q_status"
+  done <<< "$RECORDS" | sort -t"$TAB" -k1,1 -k2,2 -k3,3 \
+    | awk -F'\t' '!seen[$1]++ { print $1 "\t" $3 "\t" $4 }'
 )
 
-next_of_project() {  # <project> -> the task id at the head of its queue
-  printf '%s\n' "$NEXT_MAP" | awk -F'\t' -v p="$1" '$1 == p { print $2; exit }'
+head_of_project() {  # <project> -> "<task-id><TAB><behind|level>"
+  printf '%s\n' "$QUEUE_HEADS" | awk -F'\t' -v p="$1" '$1 == p { print $2 "\t" $3; exit }'
 }
 
 REPORT=
@@ -480,16 +509,22 @@ HAS_UNKNOWN=0
 # `behind` one; the fields after it are set on `behind` records only.
 while IFS=$TAB read -r status id key f4 label branch default behind_by; do
   [ -n "$status" ] || continue
+  # A level branch is in the queue only so it can hold the head; it is never
+  # itself a finding.
+  [ "$status" != level ] || continue
   marker='STALE BASE'
   if [ "$status" = behind ]; then
     gap="behind origin/$default"
     [ -z "$behind_by" ] || gap="$behind_by commit(s) behind origin/$default"
-    next_id=$(next_of_project "$f4")
-    if [ "$next_id" = "$id" ]; then
+    IFS=$TAB read -r head_id head_state <<< "$(head_of_project "$f4")"
+    if [ "$head_state" = behind ] && [ "$head_id" = "$id" ]; then
       text="$id ($label) is on $branch, $gap - every CI result on it was measured against a base that no longer exists; merge origin/$default into $branch and re-verify"
+    elif [ "$head_state" = level ]; then
+      marker='PARKED BASE'
+      text="$id ($label) is on $branch, $gap - parked behind $head_id, which is already caught up and next to land for $label; it merges the base forward once, when it is next, so nothing is owed here now"
     else
       marker='PARKED BASE'
-      text="$id ($label) is on $branch, $gap - parked behind $next_id, which is next to land for $label; it merges the base forward once, when it is next, so nothing is owed here now"
+      text="$id ($label) is on $branch, $gap - parked behind $head_id, which is next to land for $label; it merges the base forward once, when it is next, so nothing is owed here now"
     fi
   else
     text=$f4

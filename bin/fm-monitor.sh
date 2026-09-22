@@ -33,7 +33,8 @@
 #               or an external wait.
 #   moved-on    the status log still shows an owed state, but the authoritative
 #               current-state read proves the worker resumed past it.
-#   exempt      the captain signed a standing exemption for this task.
+#   captain-driven  the captain is driving this worker himself, either by his
+#               own signed record or by sitting in its window right now.
 #   quiet       the last thing it reported owes firstmate nothing.
 #
 # THE EXEMPTION, and exactly what it is worth.
@@ -43,6 +44,15 @@
 #   line and its stated justification cannot be edited afterwards. Minting one
 #   requires the key; without one, --exempt refuses rather than writing an
 #   unverifiable record.
+#
+#   WHAT IT MEANS is the whole of "the captain is driving this worker himself":
+#   firstmate does not alarm on it AND the watcher does not watch it - no wake
+#   on its status appends, none on its quiet pane, no mention in a heartbeat.
+#   bin/fm-ack-lib.sh's fm_captain_driven is the one predicate every surface
+#   asks, and it is equally true with no record at all when a human is simply
+#   sitting in the task's window; --exempt is the way to say it out loud, with a
+#   reason, for a stretch longer than a sitting. docs/captain-driven.md owns the
+#   mechanics and the full list of what goes quiet.
 #
 #   Against a WORKER that is unforgeable: a worker holds no key and is told
 #   about no key. Against FIRSTMATE it is not, and this file will not pretend
@@ -54,8 +64,9 @@
 #   A self-granted exemption therefore reports itself to the captain instead of
 #   quietly removing a task from supervision.
 #
-#   An exemption suppresses the ALARM for that task and nothing else. It does not
-#   remove the task from this render, from the backlog, or from any other check.
+#   It does not remove the task from this render, from the backlog, or from the
+#   session-start digest: a worker firstmate is not watching has to be a blind
+#   spot the captain can see rather than one he has to remember.
 #   bin/fm-teardown.sh removes the record with the rest of the task's state.
 #
 # Usage:
@@ -105,7 +116,7 @@ REASON=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -h|--help) sed -n '2,68p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,79p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --quiet) ONLY_ATTENTION=1; shift ;;
     --list-exempt) MODE=list-exempt; shift ;;
     --exempt)
@@ -183,7 +194,7 @@ case "$MODE" in
       echo "error: the exemption written for '$TARGET' did not verify; nothing was recorded" >&2
       exit 2
     fi
-    printf 'exempt: %s is no longer alarmed on (%s)\n' "$TARGET" "$REASON"
+    printf 'captain-driven: %s is yours now - firstmate neither alarms on it nor watches it (%s)\n' "$TARGET" "$REASON"
     printf 'It is still reported on every sweep and at every session start.\n'
     exit 0
     ;;
@@ -197,7 +208,7 @@ case "$MODE" in
       echo "error: could not remove $(fm_ack_exempt_file "$STATE" "$TARGET")" >&2
       exit 2
     }
-    printf 'monitoring resumed: %s\n' "$TARGET"
+    printf 'supervision resumed: %s\n' "$TARGET"
     exit 0
     ;;
   list-exempt)
@@ -263,7 +274,7 @@ describe() {  # <class> <verb> <age> <verdict> <detail> <open-keys>
     pending)    printf 'just reported "%s" - not acted on yet, still inside the %ss window' "$2" "$(fm_ack_resolve_grace)" ;;
     acked)      printf 'reported "%s"; firstmate has acted, now waiting on someone else' "$2" ;;
     moved-on)   printf 'log still shows "%s" but the worker has moved past it' "$2" ;;
-    exempt)     printf 'EXEMPT by the captain: %s (worker: %s)' "$5" "$(say_worker "$4")" ;;
+    exempt)     printf 'CAPTAIN-DRIVEN, so firstmate is not watching it: %s (worker: %s)' "$5" "$(say_worker "$4")" ;;
     *)          printf 'nothing owed - last said "%s" (worker: %s)' "${2:-nothing yet}" "$(say_worker "$4")" ;;
   esac
 }
@@ -291,9 +302,9 @@ while IFS=$TAB read -r id class verb age verdict open_keys detail; do
     moved-on) N_MOVED=$((N_MOVED + 1)); ACCOUNTED="${ACCOUNTED}${line}"$'\n' ;;
     exempt)
       N_EXEMPT=$((N_EXEMPT + 1))
-      # Listed with the attention block, never the quiet one: an exemption is a
-      # standing suppression of a safety check and must stay in front of the
-      # captain for as long as it exists.
+      # Listed with the attention block, never the quiet one: a task firstmate
+      # is not watching is a standing suppression of a safety check and must
+      # stay in front of the captain for as long as it lasts.
       ATTENTION="${ATTENTION}${line}"$'\n'
       ;;
     *) N_QUIET=$((N_QUIET + 1)); ACCOUNTED="${ACCOUNTED}${line}"$'\n' ;;
@@ -307,7 +318,7 @@ TOTAL=$((N_UNACTIONED + N_RECHECK + N_PENDING + N_ACKED + N_MOVED + N_EXEMPT + N
 printf 'MONITOR SWEEP: %s task(s) supervised in %s\n' "$TOTAL" "$STATE"
 # Every class on every render, zeros included: a class that is simply absent
 # reads as "there were none" and as "we did not check it" identically.
-printf 'MONITOR COUNTS: needs-action %s | needs-recheck %s | just-reported %s | acted %s | moved-on %s | exempt %s | nothing-owed %s\n' \
+printf 'MONITOR COUNTS: needs-action %s | needs-recheck %s | just-reported %s | acted %s | moved-on %s | captain-driven %s | nothing-owed %s\n' \
   "$N_UNACTIONED" "$N_RECHECK" "$N_PENDING" "$N_ACKED" "$N_MOVED" "$N_EXEMPT" "$N_QUIET"
 
 if [ -n "$ATTENTION" ]; then

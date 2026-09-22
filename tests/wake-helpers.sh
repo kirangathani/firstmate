@@ -73,6 +73,18 @@ if [ "${1:-}" = "list-windows" ]; then
   fi
   exit 0
 fi
+if [ "${1:-}" = "list-clients" ]; then
+  # The attached-client reading behind fm_captain_attached
+  # (bin/fm-captain-driven-lib.sh). FM_FAKE_TMUX_CLIENTS names a FILE, like
+  # FM_FAKE_TMUX_CAPTURE, so a test can change who is attached while a watcher
+  # is running. Its rows are the real bytes tmux 3.4 printed for that exact -F
+  # on the live fleet on 2026-09-17:
+  #   1789646192\tfirstmate:fm-nm-upstream-port-test-gate-g2\tfirstmate:2\t@2
+  if [ -n "${FM_FAKE_TMUX_CLIENTS:-}" ] && [ -f "${FM_FAKE_TMUX_CLIENTS}" ]; then
+    cat "$FM_FAKE_TMUX_CLIENTS"
+  fi
+  exit 0
+fi
 if [ "${1:-}" = "capture-pane" ]; then
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"

@@ -1228,8 +1228,10 @@ export const kindLabel = (kind) => KIND_LABEL.get(kind) ?? String(kind ?? "worke
 
 // Whether the captain has taken this worker's window for himself - the one
 // fact `captain_driving` states, read from state/<id>.monitor-exempt's
-// presence alone. It means the same thing on every row, so it is appended the
-// same way everywhere it is drawn, never given a row-specific spelling.
+// presence or from a tmux client of his sitting in that window
+// (docs/captain-driven.md). It means the same thing on every row, so it is
+// appended the same way everywhere it is drawn, never given a row-specific
+// spelling.
 const CAPTAIN_DRIVING_NOTE = "captain driving directly in the window";
 function withDriving(detail, driving) {
   if (!driving) return detail;
