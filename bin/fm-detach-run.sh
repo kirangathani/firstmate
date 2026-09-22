@@ -34,6 +34,15 @@
 # way bin/fm-watch.sh bounds crewmate text, and the log path is the fallback for
 # whatever the selector drops.
 #
+# A COMMAND THAT DETACHES OWES THIS FILE ITS VERDICT SHAPES. Adding the detach
+# call without adding the line prefixes it prints leaves the command silently
+# reporting a bare `<name>: ok`, which is the same blind success this file exists
+# to prevent. `teardown `, `Backlog: ` and `REFUSED` carry bin/fm-teardown.sh;
+# `waived ` carries bin/fm-ci-waiver.sh; `armed:` carries bin/fm-pr-check.sh.
+# `STALE BASE`/`PARKED BASE` carry bin/fm-stale-base.sh's findings wherever they
+# surface - from bin/fm-fleet-sync.sh detached on its own, and from the same
+# sweep running inline inside a detached bin/fm-teardown.sh.
+#
 # IT NEVER FAILS THE WORK. Every step of the reporting tolerates its own failure:
 # a verdict that cannot be recorded must not change what the command did.
 set -u
@@ -53,7 +62,7 @@ shift
 
 NAME=$(basename "$TARGET" .sh)
 MAX_LINES=${FM_DETACH_REPORT_MAX_LINES:-20}
-SELECT=${FM_DETACH_SELECT:-'^(merged:|  (number|status):|fm-pr-merge-refusal:|error:|REFUSED|summary:|note: captain-approved|TESTING WAIVER|ATTESTATION CHECK EXEMPTED|BASE RE-VERIFICATION EXEMPTED|NO CI EVIDENCE|[^:]+: (STUCK|recovered|pruned):|next to land:|parked behind |write-failed:|armed:|spawned |teardown )'}
+SELECT=${FM_DETACH_SELECT:-'^(merged:|  (number|status):|fm-pr-merge-refusal:|error:|REFUSED|summary:|note: captain-approved|TESTING WAIVER|ATTESTATION CHECK EXEMPTED|BASE RE-VERIFICATION EXEMPTED|NO CI EVIDENCE|[^:]+: (STUCK|recovered|pruned):|next to land:|parked behind |write-failed:|armed:|spawned |teardown |waived |Backlog: |STALE BASE|PARKED BASE)'}
 
 # FM_INLINE is what stops the target detaching again, and it is EXPORTED so a
 # firstmate script the target calls in turn runs inline and hands back a true

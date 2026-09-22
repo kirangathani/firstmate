@@ -2483,6 +2483,82 @@ await_detach_result() {
   return 0
 }
 
+# The three commands PR 120 did not cover detach CONDITIONALLY or print verdict
+# lines of their own, and both of those are silent when they break: a command
+# that detaches the one caller who needed the answer, or one whose verdict the
+# selector drops, still exits 0 and still looks fine.
+
+test_a_watcher_side_pr_check_stays_in_the_callers_own_process() {
+  local home out
+  home=$(detach_home)
+  # bin/fm-watch.sh is not the model, so there is no turn to hand back and its
+  # own record-keeping must not disappear behind a fork it cannot observe.
+  printf 'window=x\n' > "$home/state/w1.meta"
+  out=$(env -u FM_INLINE FM_HOME="$home" "$home/bin/fm-pr-check.sh" \
+    --from-watcher w1 https://github.com/o/r/pull/1 2>&1)
+  assert_contains "$out" "armed:" \
+    "the watcher's own call detached, so its result never reached the caller that asked for it"
+  pass "a watcher-side PR check stays in the caller's own process"
+}
+
+test_a_firstmate_side_pr_check_detaches_and_reports_its_arm() {
+  local home out
+  home=$(detach_home)
+  printf 'window=x\n' > "$home/state/w2.meta"
+  out=$(env -u FM_INLINE FM_HOME="$home" "$home/bin/fm-pr-check.sh" \
+    w2 https://github.com/o/r/pull/2 2>&1)
+  [ -z "$out" ] || fail "the detaching parent printed '$out' when it should print nothing"
+  await_detach_result "$home" || fail "no verdict ever reached the results channel"
+  assert_contains "$(detach_results "$home")" "armed:" \
+    "the arm verdict did not reach the results channel, so firstmate cannot tell it happened"
+  pass "a firstmate-side PR check detaches and reports its arm"
+}
+
+test_a_detached_teardown_refusal_reaches_firstmate_as_a_failure_line() {
+  local home out
+  home=$(detach_home)
+  # A scout with no report is the cheapest of teardown's refusals and takes the
+  # same route as the unlanded-work ones: silence here would be a teardown that
+  # refused into a log nobody reads.
+  printf 'window=x\nworktree=/nonexistent/wt\nproject=nope\nkind=scout\n' \
+    > "$home/state/d1.meta"
+  out=$(env -u FM_INLINE FM_HOME="$home" "$home/bin/fm-teardown.sh" d1 2>&1)
+  [ -z "$out" ] || fail "the detaching parent printed '$out' when it should print nothing"
+  await_detach_result "$home" || fail "a refused teardown recorded nothing, which reads as success"
+  out=$(detach_results "$home")
+  assert_contains "$out" "fm-teardown: exit " \
+    "the refusal did not arrive as a failure line"
+  assert_contains "$out" "REFUSED:" \
+    "the failure line did not inline what teardown refused"
+  pass "a detached teardown refusal reaches firstmate as a failure line"
+}
+
+test_the_default_result_selector_matches_every_detached_verdict_shape() {
+  local select shape
+  # Extracted from the runner rather than restated, so narrowing the default
+  # there fails here instead of quietly dropping a command's only verdict.
+  select=$(sed -n "s/^SELECT=\${FM_DETACH_SELECT:-'\(.*\)'}$/\1/p" "$ROOT/bin/fm-detach-run.sh")
+  [ -n "$select" ] || fail "could not read the default selector out of bin/fm-detach-run.sh"
+  # One line per detaching command, in the exact shape that command prints.
+  while IFS= read -r shape; do
+    [ -n "$shape" ] || continue
+    printf 'checking shape: %s\n' "$shape"
+    printf '%s\n' "$shape" | grep -qE "$select" \
+      || fail "the default selector drops a verdict line a detaching command actually prints"
+  done <<'SHAPES'
+merged: https://github.com/o/r/pull/1
+teardown t1 complete (window w, worktree /tmp/wt)
+Backlog: t1 just finished. Run tasks-axi done t1
+REFUSED: worktree /tmp/wt has uncommitted changes.
+REFUSED REMEDY: commit them (or get the captain's explicit OK to discard, then --force).
+waived t1 at deadbeef on o/r and sent the line to the worker
+armed: state/t1.check.sh
+STALE BASE: t1 (proj) is on fm/t1, behind origin/main
+PARKED BASE: t2 (proj) is on fm/t2, parked behind t1
+SHAPES
+  pass "the default result selector matches every detached verdict shape"
+}
+
 test_every_script_sourcing_the_detach_library_also_calls_it() {
   local script sourced=0
   # Derived from the real tree, never a list. Sourcing the library and forgetting
@@ -2631,3 +2707,7 @@ test_the_detached_child_survives_a_kill_of_its_parents_group
 test_the_inline_marker_runs_the_detachable_body_in_place
 test_stdin_reaches_the_detached_child_when_the_script_asks
 test_detach_logs_are_pruned_to_the_configured_limit
+test_a_watcher_side_pr_check_stays_in_the_callers_own_process
+test_a_firstmate_side_pr_check_detaches_and_reports_its_arm
+test_a_detached_teardown_refusal_reaches_firstmate_as_a_failure_line
+test_the_default_result_selector_matches_every_detached_verdict_shape

@@ -4,6 +4,10 @@
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
+# Every unlanded-work refusal prints a `REFUSED:` line and a `REFUSED REMEDY:`
+# line. Both prefixes are load-bearing: this command is detached, and
+# bin/fm-detach-run.sh selects the lines that reach firstmate by their prefix, so
+# a remedy written without one would refuse the teardown into a log nobody reads.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -78,6 +82,9 @@
 # appended to the task timeline ledger through bin/fm-timeline.sh, which owns
 # that record. A failed ledger write is reported on stderr and never blocks
 # cleanup.
+# Teardown hands its work to a detached child and returns in milliseconds
+# (bin/fm-detach-lib.sh owns that); its completion line, its backlog reminder and
+# every refusal arrive with the next wake.
 # Usage: fm-teardown.sh <task-id> [--force | --release-lost-slot]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -136,10 +143,15 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-detach-lib.sh
+. "$SCRIPT_DIR/fm-detach-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
 fi
+# Captured before the shift, because a detached re-launch has to be the SAME
+# call, task id included.
+DETACH_ARGV=("$@")
 ID=$1
 shift
 FORCE=
@@ -163,11 +175,22 @@ fi
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
-FM_LOCK_LOG_PREFIX=teardown
-"$FM_ROOT/bin/fm-guard.sh" || true
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+# Detached from here on, once the task id, the flags and the task's own record
+# are known good so a mistyped call still fails in the caller's own turn.
+# Everything below is the measured cost - the landed-work proof, the endpoint
+# kill, the worktree return and the clone refresh - at 8.6 s median, 17.4 s p90
+# and 78.0 s max over 54 unbundled calls (data/fm-foreground-audit-f9), and it
+# is bookkeeping whose result firstmate does not need before its next action.
+# A REFUSAL IS NOT SILENCE. Every gate below prints a `REFUSED:` line and a
+# `REFUSED REMEDY:` line, both of which bin/fm-detach-run.sh selects, so a
+# refused teardown reaches firstmate as a failure line naming what to do
+# instead. So does the `Backlog:` line a completed teardown ends with.
+fm_detach "${DETACH_ARGV[@]}"
+FM_LOCK_LOG_PREFIX=teardown
+"$FM_ROOT/bin/fm-guard.sh" || true
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
@@ -859,13 +882,13 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      echo "REFUSED REMEDY: merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
     echo "uncommitted changes present" >&2
-    echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
+    echo "REFUSED REMEDY: commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
   elif [ -n "$unpushed" ]; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
@@ -876,7 +899,7 @@ validate_worktree_teardown_safety() {
     if ! work_is_landed "$branch"; then
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      echo "REFUSED REMEDY: push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi
