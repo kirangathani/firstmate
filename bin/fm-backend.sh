@@ -770,6 +770,82 @@ fm_backend_agent_alive() {  # <backend> <target> [expected-label]
   esac
 }
 
+# fm_backend_subprocess_state: is the harness under <target> WAITING ON A
+# SUBPROCESS OF ITS OWN - a tool shell, or anything else it detached and has not
+# reaped? This is the signal that tells a worker whose own shell command is
+# running from one that has genuinely stopped, and neither the busy footer nor a
+# no-mistakes run-step can see it: while a tool call runs, the harness is not
+# generating, so it renders no busy indicator, and a plain shell command has no
+# pipeline run to attribute. Prints one of:
+#   detached - a descendant of the endpoint's root process is a session leader
+#              of its OWN session, and has outlived <min-age-seconds>.
+#   none     - the tree was read and holds no such descendant.
+#   unknown  - nothing was confidently read: an unresolvable target, a backend
+#              with no verified root-pid reader, or a `ps` that did not answer.
+# Callers must never license anything from `unknown`, exactly as
+# fm_backend_agent_alive requires.
+#
+# WHY A SESSION LEADER, AND WHY AN AGE. A harness spawns two structurally
+# different kinds of child and only one of them means work. Verified on this
+# fleet 2026-09-17 against ten live claude panes (`ps -eo pid=,ppid=,sid=`):
+#   - MCP servers and other long-lived services inherit the harness's OWN
+#     session and process group (`Sl+`, sid = the pane shell's). They are
+#     present for the whole session, idle or busy, so a bare "has any child"
+#     test is TRUE for every pane forever and proves nothing.
+#   - A tool shell is setsid'd into its own session (`Ss`, sid = its own pid),
+#     which is how the harness keeps the right to kill the whole subtree.
+# So the session-leader test is what separates them. It is not sufficient on its
+# own: a claude pane also re-renders its status line through a detached
+# `/bin/sh -c .../fm-statusline.sh` continuously, idle or busy, and those live
+# well under a second. <min-age-seconds> is what excludes them - callers pass
+# one poll cycle (FM_WATCH_POLL_SECS), three orders of magnitude longer than a
+# status-line render and shorter than any command worth waiting on.
+#
+# WHAT IT DOES NOT CATCH, deliberately. Only tmux exposes a verified root pid
+# here; every other backend reads `unknown` and its callers fall back to the
+# behaviour they had before this existed. A harness that does NOT detach its
+# tool shells reads `none` for the same fail-closed reason. And a worker that
+# leaves a background process running after it has genuinely finished reads
+# `detached` for as long as that process lives - bounded, not closed, by the
+# caller's own wedge escalation (FM_STALE_ESCALATE_SECS, bin/fm-watch.sh).
+fm_backend_subprocess_state() {  # <backend> <target> <min-age-seconds> [expected-label]
+  local backend=$1 target=$2 min_age=$3 expected_label=${4:-} root table
+  case "$min_age" in
+    ''|*[!0-9]*) printf 'unknown'; return 0 ;;
+  esac
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    tmux) root=$(fm_backend_tmux_pane_pid "$target" "$expected_label" 2>/dev/null) || root= ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  case "$root" in
+    ''|*[!0-9]*) printf 'unknown'; return 0 ;;
+  esac
+  # One process-table read, walked in awk: the tree is tiny but `ps` is a fork,
+  # and this runs per idle task per classification.
+  table=$(ps -eo pid=,ppid=,sid=,etimes= 2>/dev/null) || { printf 'unknown'; return 0; }
+  [ -n "$table" ] || { printf 'unknown'; return 0; }
+  printf '%s\n' "$table" | awk -v root="$root" -v minage="$min_age" '
+    BEGIN { root = root + 0; minage = minage + 0 }
+    { p[NR] = $1 + 0; par[NR] = $2 + 0; sid[NR] = $3 + 0; age[NR] = $4 + 0; n = NR }
+    END {
+      if (n == 0) { print "unknown"; exit }
+      seen[root] = 1
+      # Rows are not parent-before-child, so sweep until the descendant set
+      # stops growing rather than assuming an order ps does not promise.
+      do {
+        more = 0
+        for (i = 1; i <= n; i++)
+          if (!seen[p[i]] && seen[par[i]]) { seen[p[i]] = 1; more = 1 }
+      } while (more)
+      for (i = 1; i <= n; i++)
+        if (p[i] != root && seen[p[i]] && sid[i] == p[i] && age[i] >= minage) {
+          print "detached"; exit
+        }
+      print "none"
+    }'
+}
+
 # --- native event push (backend-extensible) ---------------------------------
 #
 # The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks

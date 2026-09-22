@@ -26,12 +26,17 @@ const REASONS = {
   "broad-watcher-kill": "a broad process kill targeting the firstmate watcher is forbidden",
   "unclassifiable-protected-command": "unsupported or malformed shell syntax contains a protected watcher command",
   "watcher-direct": "bin/fm-watch.sh must not be run directly; arm the watcher with bin/fm-watch-arm.sh or run bin/fm-watch-checkpoint.sh instead",
+  "steer-under-bash": "the Bash tool cannot run bin/fm-send.sh or bin/fm-ack.sh; issue it as its own Monitor with timeout_ms 1800000, the command alone with 2>&1 and nothing bundled, so a successful one stays alive as a waiting arm",
 };
 
 function parseArguments(argv) {
-  const result = { command: "", root: "", home: "" };
+  const result = { command: "", root: "", home: "", steer: false };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
+    if (name === "--steer") {
+      result.steer = true;
+      continue;
+    }
     if (name === "--command" || name === "--root" || name === "--home") {
       if (i + 1 >= argv.length) throw new Error(`${name} requires a value`);
       result[name.slice(2)] = argv[i + 1];
@@ -45,6 +50,24 @@ function parseArguments(argv) {
 
 function rawMentionsProtected(command) {
   return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint))?\.sh\b/.test(normalizeLineContinuations(command));
+}
+
+// The steer scripts. They are not "protected" in the watcher sense - no shape of
+// them is blessed - because the model has exactly one way to run either: its own
+// Monitor. The Bash tool is the only thing this hook sees, so naming one in an
+// executed position from Bash is always the wrong call, and the deny carries the
+// replacement. Command POSITION is what counts: reading, grepping, or editing
+// these files stays allowed, which is why this reuses the same parser rather than
+// matching raw bytes.
+const STEER_SCRIPTS = ["bin/fm-send.sh", "bin/fm-ack.sh"];
+
+function steerIdentity(value, root) {
+  const normalized = path.normalize(value);
+  return STEER_SCRIPTS.some((relative) => normalized === relative || normalized === path.join(root, relative) || normalized.endsWith(`/${relative}`));
+}
+
+function rawMentionsSteer(command) {
+  return /(?:^|[/\s'"`(])fm-(?:send|ack)\.sh\b/.test(normalizeLineContinuations(command));
 }
 
 function rawMentionsBroadKill(command) {
@@ -728,15 +751,16 @@ function isWatcherPgrep(position, context) {
 
 function analyzeProgram(command, context, depth = 0) {
   if (depth > 12) {
-    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), steerFound: rawMentionsSteer(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const lexed = new Lexer(command).tokenize();
   if (lexed.error) {
-    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: lexed.error, protectedFound: rawMentionsProtected(command), steerFound: rawMentionsSteer(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const program = splitProgram(lexed.tokens);
   const nodeInfos = [];
   let nestedProtected = false;
+  let steerFound = false;
   let broadKill = false;
   let pgrepWatcher = false;
   let unsupported = false;
@@ -763,6 +787,7 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      steerFound ||= nested.steerFound;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -771,6 +796,8 @@ function analyzeProgram(command, context, depth = 0) {
         const nested = analyzeProgram(token.content, nodeContext, depth + 1);
         nodeNestedProtected ||= nested.protectedFound;
         broadKill ||= nested.broadKill;
+        steerFound ||= nested.steerFound;
+      steerFound ||= nested.steerFound;
         nodePgrepWatcher ||= nested.pgrepWatcher;
         if (nested.error && rawMentionsProtected(token.content)) unsupported = true;
       }
@@ -780,6 +807,8 @@ function analyzeProgram(command, context, depth = 0) {
           substitutionResults.set(substitution, nested);
           nodeNestedProtected ||= nested.protectedFound;
           broadKill ||= nested.broadKill;
+        steerFound ||= nested.steerFound;
+      steerFound ||= nested.steerFound;
           nodePgrepWatcher ||= nested.pgrepWatcher;
           if (nested.error && rawMentionsProtected(substitution.content)) unsupported = true;
         }
@@ -796,6 +825,7 @@ function analyzeProgram(command, context, depth = 0) {
     for (const script of [shellScript, sourceScript]) {
       if (!script) continue;
       nodeNestedProtected ||= Boolean(protectedIdentity(script.value, context.root)) || wordReferencesAny(script, nodeContext.protectedVariables);
+      steerFound ||= steerIdentity(script.value, context.root);
       unclassifiableProtected ||= hasUnclassifiableProtectedExpansion(script, context.root);
     }
     if (shellPayload && (!shellPayload.literal || shellPayload.subs.length > 0)) {
@@ -804,6 +834,7 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(shellPayload.value, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      steerFound ||= nested.steerFound;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(shellPayload.value)) unsupported = true;
     }
@@ -812,6 +843,7 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      steerFound ||= nested.steerFound;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -819,6 +851,7 @@ function analyzeProgram(command, context, depth = 0) {
     const executable = position.command?.value || "";
     const protectedKind = protectedIdentity(executable, context.root);
     if (hasUnclassifiableProtectedExpansion(position.command, context.root)) unclassifiableProtected = true;
+    if (steerIdentity(executable, context.root)) steerFound = true;
     const commandName = basename(executable);
     const args = position.words.slice(position.index + 1);
     if (commandName === "pkill" && args.some((word) => /fm-watch/.test(word.value) || wordReferencesAny(word, nodeContext.watcherPatterns))) broadKill = true;
@@ -849,9 +882,12 @@ function analyzeProgram(command, context, depth = 0) {
   if (unclassifiableProtected) unsupported = true;
   const broadKillFound = broadKill || (unsupported && rawMentionsBroadKill(command));
   if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound)) {
-    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+    return { error: "unsupported compound grammar", protectedFound: true, steerFound: steerFound || rawMentionsSteer(command), broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
   }
-  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  // Unsupported grammar that carries a steer script is failed closed the same way
+  // a protected one is: the classifier cannot prove which position it occupies.
+  const steerFoundOut = steerFound || (unsupported && rawMentionsSteer(command));
+  return { error: "", protectedFound, directProtected, nestedProtected, steerFound: steerFoundOut, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
 function xModePathAllowed(value, home) {
@@ -899,9 +935,12 @@ function blessedProgram(analysis, context) {
   return true;
 }
 
-function decision(command, root, home) {
+function decision(command, root, home, options = {}) {
   const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
   const analysis = analyzeProgram(command, context);
+  // Only asked when the caller says this is the Bash tool of a harness that has
+  // the Monitor replacement; bin/fm-arm-pretool-check.sh owns that condition.
+  if (options.steer && analysis.steerFound) return deny("steer-under-bash");
   if (analysis.broadKill) return deny("broad-watcher-kill");
   if (analysis.error && analysis.protectedFound) return deny("unclassifiable-protected-command");
   if (!analysis.protectedFound) return { decision: "allow" };
@@ -946,7 +985,7 @@ if (invokedDirectly()) {
     if (!args.command) {
       process.stdout.write("allow\n");
     } else {
-      const result = decision(args.command, args.root, args.home);
+      const result = decision(args.command, args.root, args.home, { steer: args.steer });
       if (result.decision === "allow") {
         process.stdout.write("allow\n");
       } else {

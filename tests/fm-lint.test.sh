@@ -54,6 +54,26 @@ pinned_ready() {
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
 }
 
+# fm_lint_fake_shellcheck <dir>: drop a fake `shellcheck` into <dir> and echo
+# that directory, for cases about how a pass is SCHEDULED rather than what it
+# finds. It reports the pinned version so fm-lint.sh's pin check passes and
+# emits no findings, which keeps a scheduling case off the real analyser and
+# off this machine's actual load.
+fm_lint_fake_shellcheck() {
+  local fake=$1
+  mkdir -p "$fake"
+  cat > "$fake/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: %s\nlicense: none\n' "$FAKE_SC_VERSION"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fake/shellcheck"
+  printf '%s\n' "$fake"
+}
+
 # fm_lint_fixture <dir>: build a miniature repo with the canonical layout
 # (bin/*.sh, bin/backends/*.sh, tests/*.sh) and a REAL source graph, so the
 # sharding and closure logic is exercised rather than mocked. fm-lint.sh
@@ -914,6 +934,53 @@ SH
   pass "fm-lint.sh passes a clean fixture"
 }
 
+test_available_memory_caps_the_shard_count() {
+  # The lock stops two passes at once; this stops the one pass that does run
+  # from taking the machine with it. Cores say how many shards could run, memory
+  # says how many may: the cap is (MemAvailable / 2) / MEM_PER_JOB_KB, and it may
+  # only ever lower the count. Both figures are injected, so the verdict does not
+  # depend on the machine running the suite.
+  local tmp fx fake out
+  tmp=$(fm_test_tmproot fm-lint-mem)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  fake=$(fm_lint_fake_shellcheck "$tmp/fakebin")
+  out=$(PATH="$fake:$PATH" FAKE_SC_VERSION="$REQUIRED" FM_LINT_NO_CACHE=1 \
+    FM_LINT_LOCK="$tmp/lint.lock" FM_LINT_JOBS=4 FM_LINT_MEM_AVAILABLE_KB=1000000 \
+    "$fx/bin/fm-lint.sh" 2>&1) || fail "the memory-capped run did not reach a verdict"$'\n'"$out"
+  assert_contains "$out" "in 1 shards" \
+    "a nearly full machine did not cap the pass to a single shard"
+  out=$(PATH="$fake:$PATH" FAKE_SC_VERSION="$REQUIRED" FM_LINT_NO_CACHE=1 \
+    FM_LINT_LOCK="$tmp/lint.lock" FM_LINT_JOBS=4 FM_LINT_MEM_AVAILABLE_KB=64000000 \
+    "$fx/bin/fm-lint.sh" 2>&1) || fail "the uncapped run did not reach a verdict"$'\n'"$out"
+  assert_contains "$out" "in 4 shards" \
+    "an idle machine was capped below the shard count it was given"
+  pass "the shard count is capped from available memory, not just cores"
+}
+
+test_verify_parity_runs_under_the_machine_lock() {
+  if ! command -v flock >/dev/null 2>&1; then
+    pass "SKIP (no flock on this host): re-entrant lock check"
+    return
+  fi
+  # --verify-parity runs a CHILD fm-lint.sh while the parent holds the lock. If
+  # that child took the lock again it would wait on the one its own parent holds
+  # and the gate would hang for ever rather than fail, which no exit status
+  # would ever report. `timeout` is what turns that hang into a verdict.
+  local tmp fx fake out rc
+  tmp=$(fm_test_tmproot fm-lint-reentrant)
+  fx="$tmp/repo"
+  fm_lint_fixture "$fx"
+  fake=$(fm_lint_fake_shellcheck "$tmp/fakebin")
+  rc=0
+  out=$(PATH="$fake:$PATH" FAKE_SC_VERSION="$REQUIRED" FM_LINT_LOCK="$tmp/lint.lock" \
+    timeout 120 "$fx/bin/fm-lint.sh" --verify-parity 2>&1) || rc=$?
+  [ "$rc" -ne 124 ] || fail "--verify-parity deadlocked against the lock its own parent holds"
+  [ "$rc" -eq 0 ] || fail "--verify-parity did not confirm parity under the lock (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "PARITY OK" "--verify-parity did not confirm parity under the lock"
+  pass "a re-entrant run holds the lock already taken instead of waiting on itself"
+}
+
 test_owner_exists_and_executable
 test_owner_defines_canonical_set
 test_ci_invokes_the_owner
@@ -942,3 +1009,5 @@ test_cache_dir_override_and_disable_survive_the_shared_default
 test_publication_never_uses_a_fixed_staging_name
 test_concurrent_runs_publish_a_whole_cache_not_a_spliced_one
 test_runs_serialise_across_the_whole_machine
+test_available_memory_caps_the_shard_count
+test_verify_parity_runs_under_the_machine_lock
