@@ -246,6 +246,19 @@ record_timings() {
 run_files() {
   local list=$1 transcript=$2 verdicts=$3
   local t rc rfailed=0 s e
+  # THE SUITE'S DETACH BASELINE, set here because this is the one place every
+  # mode runs a file through. bin/fm-detach-lib.sh makes a command hand its work
+  # to a detached child and return at once, which is right in a firstmate session
+  # and wrong under a test that asserts on the command's own exit code or on the
+  # state it removed: the assertion would run against a fork it is not watching,
+  # and a refusal the suite requires would read as an immediate 0.
+  # tests/lib.sh also exports it, but only the suites that source lib.sh get it
+  # from there, and the ones that do not - tests/fm-gotmp.test.sh,
+  # tests/fm-secondmate-safety.test.sh and the backend e2e suites - drive real
+  # teardowns too. A suite that means to exercise the detaching itself drops the
+  # marker per invocation with `env -u FM_INLINE`, as the detach tests in
+  # tests/fm-watcher-lock.test.sh do.
+  export FM_INLINE=1
   : >"$verdicts"
   [ "$transcript" = - ] || : >"$transcript"
   while IFS= read -r t; do

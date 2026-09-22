@@ -17,9 +17,17 @@ set -u
 # which the guard would otherwise refuse.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Nor does it inherit lib.sh's FM_INLINE=1 baseline, and bin/fm-teardown.sh now
+# hands its work to a detached child unless that marker is set
+# (bin/fm-detach-lib.sh). These tests assert on teardown's own exit code and on
+# the state it removed, so the body has to run in the subprocess they are
+# watching rather than in a fork they are not.
+export FM_INLINE=1
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPAWN="$ROOT/bin/fm-spawn.sh"
-TEARDOWN="$ROOT/bin/fm-teardown.sh"
+# bin/fm-teardown.sh is no longer named here: link_real_bin symlinks it with
+# every other sibling, which is the whole point of not keeping a list.
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -41,6 +49,22 @@ trap cleanup EXIT
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
 
+# Symlink every real bin/ entry that the fixture has not already stubbed. Never
+# replaces what is there, so the stubs written before it stay stubs.
+link_real_bin() {  # <fake-root>
+  local fake=$1 entry base
+  for entry in "$ROOT"/bin/*; do
+    [ -f "$entry" ] || continue
+    base=$(basename "$entry")
+    [ -e "$fake/bin/$base" ] || ln -s "$entry" "$fake/bin/$base"
+  done
+  for entry in "$ROOT"/bin/backends/*; do
+    [ -f "$entry" ] || continue
+    base=$(basename "$entry")
+    [ -e "$fake/bin/backends/$base" ] || ln -s "$entry" "$fake/bin/backends/$base"
+  done
+}
+
 # Build a fake FM_HOME/FM_ROOT so the real fm-teardown.sh (symlinked in) resolves
 # state and helper scripts inside it. Stub the helper scripts fm-teardown calls so no
 # live tmux/treehouse/fleet state is touched. A nonexistent worktree path makes both
@@ -49,22 +73,9 @@ make_fake_root() {
   local id=$1 tasktmp=$2
   local fake="$TMP_ROOT/$id"
   mkdir -p "$fake/bin/backends" "$fake/state"
-  # Symlink the REAL teardown so the test exercises actual code, not a copy.
-  ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
-  # fm-backend.sh + its tmux adapter: symlink the REAL files (teardown sources
-  # fm-backend.sh unconditionally, and dispatches the kill call through the
-  # tmux adapter; both are unchanged by this suite's fixture, just newly
-  # required siblings since the P1 backend extraction).
-  ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
-  ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
-  ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
-  ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
-  # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
-  ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
-  # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
-  ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
-  # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
-  ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # THE STUBS GO DOWN FIRST, and the real tree fills in around them below. A stub
+  # written after the symlinks would be a redirection onto a symlink, which
+  # follows it and overwrites the real script in the repository.
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -82,6 +93,15 @@ SH
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 fm_tasks_axi_backend_available() { return 1; }
 SH
+  # Every remaining entry of the real bin/, symlinked at run time rather than
+  # named, so the fixture exercises the real teardown with its real siblings.
+  # This used to be a hand-written list of exactly the ones teardown sourced, and
+  # such a list is a second copy that rots the moment the script gains a
+  # dependency: adding `. "$SCRIPT_DIR/fm-detach-lib.sh"` to bin/fm-teardown.sh
+  # made the symlinked copy abort under `set -eu` before its first command, which
+  # surfaced only as this suite's "teardown exited non-zero with a valid tasktmp"
+  # (evidence 2026-09-22, CI run 35735983604, shard 4).
+  link_real_bin "$fake"
   # Meta with a nonexistent worktree so the dirty/treehouse blocks skip.
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
@@ -155,16 +175,8 @@ test_teardown_skips_gracefully_without_tasktmp() {
   local id=td-absent-z3
   local fake="$TMP_ROOT/$id-root"
   mkdir -p "$fake/bin/backends" "$fake/state"
-  ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
-  ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
-  ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
-  ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
-  ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
-  ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
-  # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
-  ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
-  # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
-  ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # Stubs first, then the real tree around them - see make_fake_root for why the
+  # order matters and why the siblings are never listed by hand.
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -178,6 +190,7 @@ SH
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 fm_tasks_axi_backend_available() { return 1; }
 SH
+  link_real_bin "$fake"
   # No tasktmp= line at all.
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
