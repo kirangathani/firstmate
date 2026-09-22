@@ -24,13 +24,13 @@ Durations are what the model waited, which includes the command text streaming a
 |---|---|---|---|---|---|
 | `fm-pr-merge.sh` | 135 | 16.7 s | 73 s | 391 s | detaches itself |
 | `fm-merge-green.sh` | 50 | 28.0 s | 101 s | 279 s | detaches itself |
-| `fm-teardown.sh` | 103 | 8.7 s | 20 s | 78 s | background, chained with the backlog write |
-| `fm-spawn.sh` | 140 | 5.7 s | 15 s | 66 s | background |
-| `fm-pr-check.sh` | 106 | 6.0 s | 9 s | 14 s | background |
+| `fm-teardown.sh` | 103 | 8.7 s | 20 s | 78 s | detaches itself |
+| `fm-spawn.sh` | 140 | 5.7 s | 15 s | 66 s | stays foreground; see section 4 |
+| `fm-pr-check.sh` | 106 | 6.0 s | 9 s | 14 s | detaches itself |
 | `fm-review-attest.sh` | 53 | 4.7 s | 8 s | 22 s | background |
 | `fm-decision-hold.sh` | 58 | 3.8 s | 11 s | 41 s | background |
 | `fm-fleet-sync.sh` | 25 | 12.1 s | 24 s | 24 s | detaches itself |
-| `fm-ci-waiver.sh` | 14 | 4.7 s | 13 s | 13 s | background; see section 5 |
+| `fm-ci-waiver.sh` | 14 | 4.7 s | 13 s | 13 s | `waive` detaches itself |
 | `sleep N; <read>` | 72 | 12.1 s | 20 s | 50 s | eliminate |
 | foreground CI-polling loops | 4 | 158 s | 536 s | 563 s | eliminate |
 | `fm-peek.sh` | 215 | 4.7 s | 20 s | 81 s | stays foreground |
@@ -210,17 +210,27 @@ Keep `fm-pr-green.sh` when its verdict is itself the answer to a question.
 That used to force a `run_in_background` merge for a task with `ci_skip=on` or a `data/no-pr-ci/<project>` marker, which was the one shape exposed to the reaper.
 A detached merge is held to no deadline by anyone, so that exception is gone and both cases take the ordinary plain call.
 
-**Teardown, chained with its backlog write**, so the dependency is inside the chain rather than in a second model turn.
-For a scout, put its decision-hold completion ahead of the teardown in the same chain.
+**Teardown, `fm-pr-check.sh`, and `fm-ci-waiver.sh waive`** detach themselves the same way, so they are called plainly too.
 
 ```sh
-bin/fm-teardown.sh <id> && tasks-axi done <id> --pr <url> --note '<note>'
+bin/fm-teardown.sh <id>
 ```
 
-**Spawn**, filtered on the spawn summary, `error:` and refusals.
-Nothing reads a spawn's output before acting; confirming the worker is processing its instructions is a later read.
+Teardown no longer chains its backlog write, because there is no turn left to chain inside.
+Its completion line, its `Backlog:` reminder naming the exact `tasks-axi done` to run, and every `REFUSED:` line with its `REFUSED REMEDY:` all arrive on the next wake, and the backlog write follows from there.
+For a scout, its decision-hold completion still has to land before the teardown, since teardown enforces that gate.
+`bin/fm-pr-check.sh --from-watcher` is exempt: that caller is `bin/fm-watch.sh`, which is not the model.
+`bin/fm-ci-waiver.sh --print-only` and `sign` are exempt for the reason a dry run is - the printed line is what the caller asked for.
 
-**The rest of the bookkeeping set**, each 3 to 7 s and roughly 300 calls in the sample: `fm-pr-check.sh` run alone, `fm-review-attest.sh attest`, `fm-stale-base.sh --ack`, `fm-nm-stall.sh --ack`, `fm-nm-questions.sh answer`, `fm-monitor.sh --exempt`, `fm-handoff.sh arm` and `consume`, `fm-decision-hold.sh hold` and `resolve`, and backlog writes.
+**Spawn stays foreground.**
+It is 5.7 s at median and 66 s at worst, and all of that is upfront: the worktree lease, the isolation assertion that refuses to let a task start in the primary checkout, and the `state/<id>.meta` write that every supervision read keys off.
+Detaching it would return before any of those exist, so the peek that handles a trust dialog within about 20 s of dispatch would find a shell still running `treehouse get` rather than a worker, and the fleet view, the turn-end guard and the drift report would all see a dispatch with no durable record behind it.
+There is no slow tail to split off, because the slow part comes before the assertion rather than after it.
+
+**`fm-stale-base.sh --ack` stays foreground too**, on measurement rather than on contract.
+Its sweep is 0.5 to 0.65 s of real work against a live fleet (measured 2026-09-22, three runs), so almost all of its 2.9 s median is the per-call overhead a detached vehicle pays as well; 22 calls in 13 days put the whole saving at about 13 s.
+
+**The rest of the bookkeeping set**, each 3 to 7 s and roughly 300 calls in the sample: `fm-review-attest.sh attest`, `fm-nm-stall.sh --ack`, `fm-nm-questions.sh answer`, `fm-monitor.sh --exempt`, `fm-handoff.sh arm` and `consume`, `fm-decision-hold.sh hold` and `resolve`, and backlog writes.
 
 **Eliminate rather than background**: `sleep N` followed by a read, and any CI-polling loop.
 The watcher wakes on every status append and turn end, and the PR poll wakes on merged and, where the standing merge rule is configured, on green.

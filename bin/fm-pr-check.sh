@@ -23,6 +23,10 @@
 #   reported PR. It is bin/fm-bootstrap.sh's to run at session start, and a live
 #   watcher has already passed that.
 #
+#   IT IS NOT DETACHED. Firstmate's own call hands this work to a detached child
+#   and returns in milliseconds (bin/fm-detach-lib.sh owns that); the watcher is
+#   not the model, so there is no turn to give back.
+#
 #   IT DOES NOT RUN THE GUARD EITHER. bin/fm-guard.sh prints diagnostics for
 #   firstmate to read; on this path nobody reads them, and its unactioned
 #   predicate may fork a crew-state confirm per task, which is not a cost a
@@ -39,6 +43,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+
+# shellcheck source=bin/fm-detach-lib.sh
+. "$SCRIPT_DIR/fm-detach-lib.sh"
 
 FROM_WATCHER=0
 if [ "${1-}" = --from-watcher ]; then
@@ -66,6 +73,19 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
+
+# Detached from here on, once the arguments and the task record are known good
+# so a malformed call still fails in the caller's own turn. Everything below is
+# the measured cost - the quarantine migration, two gh reads over the network
+# and the poll arm - at 6.0 s median and 14.0 s max over 38 unbundled calls
+# (data/fm-foreground-audit-f9). Firstmate reads none of it before its next
+# action: the PR it relays to the captain is the one it just passed in, and the
+# `armed:` line and every refusal reach it through the results channel.
+#
+# --from-watcher is EXEMPT. That caller is bin/fm-watch.sh, not the model, so
+# there is no turn to hand back; detaching there would only put the watcher's
+# own record-keeping behind a fork it cannot observe.
+[ "$FROM_WATCHER" -eq 1 ] || fm_detach "$@"
 
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while

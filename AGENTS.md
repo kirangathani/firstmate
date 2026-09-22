@@ -403,7 +403,8 @@ A status line is a wake event, not current state; use `bin/fm-crew-state.sh` whe
 A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed.
 
 Firstmate's own bookkeeping commands run off its critical path by construction rather than by instruction.
-`bin/fm-pr-merge.sh`, `bin/fm-merge-green.sh`, and `bin/fm-fleet-sync.sh` hand their work to a detached child and return in milliseconds, so call them plainly and never through a Monitor or a background task, which would only add a completion notice for work that has already been handed off.
+`bin/fm-pr-merge.sh`, `bin/fm-merge-green.sh`, `bin/fm-fleet-sync.sh`, `bin/fm-teardown.sh`, `bin/fm-pr-check.sh`, and `bin/fm-ci-waiver.sh waive` hand their work to a detached child and return in milliseconds, so call them plainly and never through a Monitor or a background task, which would only add a completion notice for work that has already been handed off.
+A detached teardown no longer chains its backlog write: its `Backlog:` line names the exact command and arrives with its completion.
 Each records one verdict line that arrives with the next wake, carrying its log path and the reason whenever the outcome is worth chasing, so nothing is read back and nothing is waited for.
 `docs/background-bookkeeping.md` owns which commands these are, what each was measured to cost, and the delivery route.
 

@@ -10,6 +10,11 @@
 #   fm-ci-waiver.sh waive <task-id> [--print-only]  read the worker's own request,
 #                                                   sign it, and steer the line back
 #
+# `waive` hands its work to a detached child and returns in milliseconds
+# (bin/fm-detach-lib.sh owns that); its verdict and any refusal arrive with the
+# next wake. `--print-only`, `sign`, `publish` and `init` stay in the foreground:
+# each one's output is the thing the caller asked for.
+#
 # THE SECRET
 # One MASTER key per firstmate home, stored at $FM_HOME/config/ci-waiver-secret
 # (local, gitignored, mode 0600). The master is never published anywhere. What
@@ -88,6 +93,9 @@ esac
 
 # shellcheck source=bin/fm-ci-waiver-lib.sh
 . "$SCRIPT_DIR/fm-ci-waiver-lib.sh"
+
+# shellcheck source=bin/fm-detach-lib.sh
+. "$SCRIPT_DIR/fm-detach-lib.sh"
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -194,6 +202,9 @@ sign_waiver() {
   fm_ci_waiver_line "$ID" "$SHA" "$SIG"
 }
 
+# Captured before the shift, because a detached re-launch has to be the SAME
+# call, subcommand included.
+DETACH_ARGV=("$@")
 cmd=$1
 shift
 
@@ -285,6 +296,14 @@ case "$cmd" in
       esac
     done
     fm_ci_waiver_valid_task_id "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+    # Detached from here on, once the arguments are known good so a malformed
+    # call still fails in the caller's own turn. Signing the line and steering it
+    # back costs 4.7 s at median and 12.8 s at max over 10 unbundled calls
+    # (data/fm-foreground-audit-f9), most of it the bin/fm-send.sh at the end,
+    # and firstmate reads none of it: the line goes to the worker, not to it.
+    # --print-only is EXEMPT, for the same reason bin/fm-merge-green.sh exempts
+    # its dry run: it sends nothing, so the printed line IS what the caller reads.
+    [ "$PRINT_ONLY" -eq 1 ] || fm_detach "${DETACH_ARGV[@]+"${DETACH_ARGV[@]}"}"
     STATUS_FILE="$STATE/$ID.status"
     if [ ! -f "$STATUS_FILE" ] || [ -L "$STATUS_FILE" ]; then
       echo "error: no status file for task $ID at $STATUS_FILE, so there is no request to waive" >&2
