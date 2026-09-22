@@ -14,8 +14,8 @@ test_created_agents_md_includes_self_governance() {
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "fm-ensure-agents-md.sh failed for empty project"
   agents="$repo/AGENTS.md"
   assert_present "$agents" "AGENTS.md was not created"
-  assert_present "$repo/CLAUDE.md" "CLAUDE.md symlink was not created"
-  [ -L "$repo/CLAUDE.md" ] || fail "CLAUDE.md is not a symlink"
+  assert_absent "$repo/CLAUDE.md" "a CLAUDE.md compatibility file was created"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "a CLAUDE.md symlink was created"
   assert_grep "## Maintaining this file" "$agents" "self-governance section heading missing"
   assert_grep "Keep this file for knowledge useful to almost every future agent session in this project." "$agents" \
     "self-governance section lost the future-session bar"
@@ -40,7 +40,7 @@ EOF
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "fm-ensure-agents-md.sh failed for CLAUDE.md promotion"
   agents="$repo/AGENTS.md"
   assert_present "$agents" "AGENTS.md was not created during promotion"
-  [ -L "$repo/CLAUDE.md" ] || fail "CLAUDE.md is not a symlink after promotion"
+  assert_absent "$repo/CLAUDE.md" "CLAUDE.md survived promotion"
   assert_grep "Run tests with \`make test\`." "$agents" \
     "promotion lost existing CLAUDE.md content"
   count=$(grep -Fc "## Maintaining this file" "$agents")
@@ -80,7 +80,7 @@ test_existing_agents_md_with_symlink_gains_self_governance() {
   assert_grep "## Maintaining this file" "$agents" "existing AGENTS.md did not gain the self-governance section"
   count=$(grep -Fc "## Maintaining this file" "$agents")
   [ "$count" -eq 1 ] || fail "injection wrote $count self-governance sections"
-  [ -L "$repo/CLAUDE.md" ] || fail "CLAUDE.md is no longer a symlink after injection"
+  assert_absent "$repo/CLAUDE.md" "the CLAUDE.md symlink was not removed"
   # Re-run must be a byte-exact no-op reporting unchanged.
   cp "$agents" "$repo/.after-first"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
@@ -100,7 +100,7 @@ test_existing_agents_md_without_claude_gains_section_and_symlink() {
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
     || fail "fm-ensure-agents-md.sh failed for existing AGENTS.md without CLAUDE.md"
   assert_contains "$out" "updated:" "injection without CLAUDE.md did not report an update"
-  [ -L "$repo/CLAUDE.md" ] || fail "CLAUDE.md symlink was not created"
+  assert_absent "$repo/CLAUDE.md" "a CLAUDE.md compatibility file was created"
   assert_grep "Deploy with kubectl." "$agents" "injection dropped existing AGENTS.md content"
   count=$(grep -Fc "## Maintaining this file" "$agents")
   [ "$count" -eq 1 ] || fail "injection wrote $count self-governance sections"
@@ -200,6 +200,46 @@ test_lowercase_agents_md_refuses_case_fragile_symlink() {
   pass "fm-ensure-agents-md.sh: refuses a case-variant lowercase agents.md (issue #389)"
 }
 
+test_bare_claude_shim_is_removed_beside_agents_md() {
+  local repo out
+  repo="$TMP_ROOT/shim-project"
+  mkdir -p "$repo"
+  printf '# Existing agent memory\n\n## Maintaining this file\n\nKeep it short.\n' > "$repo/AGENTS.md"
+  printf '@AGENTS.md\n' > "$repo/CLAUDE.md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed for a bare CLAUDE.md shim"
+  assert_contains "$out" "removed:" "removing the bare shim was not reported"
+  assert_absent "$repo/CLAUDE.md" "the bare CLAUDE.md @AGENTS.md shim was not removed"
+  assert_grep "Keep it short." "$repo/AGENTS.md" "shim removal disturbed AGENTS.md"
+  pass "fm-ensure-agents-md.sh: removes a bare CLAUDE.md @AGENTS.md shim"
+}
+
+test_claude_file_with_real_content_is_still_promoted() {
+  local repo out
+  repo="$TMP_ROOT/content-claude-project"
+  mkdir -p "$repo"
+  printf '# Memory\n\n@AGENTS.md is not all this file says.\n' > "$repo/CLAUDE.md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed promoting a CLAUDE.md with real content"
+  assert_contains "$out" "promoted:" "a CLAUDE.md with real content was not promoted"
+  assert_absent "$repo/CLAUDE.md" "CLAUDE.md survived promotion of a real file"
+  assert_grep "is not all this file says." "$repo/AGENTS.md" "promotion lost CLAUDE.md content"
+  pass "fm-ensure-agents-md.sh: a CLAUDE.md with real content is promoted, not deleted"
+}
+
+test_dangling_claude_symlink_is_removed_and_skeleton_created() {
+  local repo out
+  repo="$TMP_ROOT/dangling-project"
+  mkdir -p "$repo"
+  ln -s AGENTS.md "$repo/CLAUDE.md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed for a dangling CLAUDE.md symlink"
+  assert_contains "$out" "removed:" "removing the dangling symlink was not reported"
+  assert_absent "$repo/CLAUDE.md" "the dangling CLAUDE.md symlink was not removed"
+  assert_present "$repo/AGENTS.md" "AGENTS.md was not created beside the dangling symlink"
+  pass "fm-ensure-agents-md.sh: removes a dangling CLAUDE.md symlink and creates AGENTS.md"
+}
+
 test_created_agents_md_includes_self_governance
 test_promoted_claude_md_includes_self_governance
 test_promoted_claude_md_without_trailing_newline_keeps_blank_separator
@@ -209,3 +249,6 @@ test_existing_agents_md_with_section_reports_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged
 test_existing_crlf_agents_md_without_section_preserves_crlf
 test_lowercase_agents_md_refuses_case_fragile_symlink
+test_bare_claude_shim_is_removed_beside_agents_md
+test_claude_file_with_real_content_is_still_promoted
+test_dangling_claude_symlink_is_removed_and_skeleton_created

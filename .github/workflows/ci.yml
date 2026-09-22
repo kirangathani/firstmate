@@ -217,7 +217,7 @@ jobs:
       - name: Symlinks must stay intact
         run: |
           set -eu
-          [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "::error::CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
+          if [ -e CLAUDE.md ] || [ -L CLAUDE.md ]; then echo "::error::CLAUDE.md must not exist; AGENTS.md is the only instruction file"; exit 1; fi
           [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
       - name: Personal fleet paths must not be tracked
         run: |

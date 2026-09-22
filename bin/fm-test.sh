@@ -499,8 +499,8 @@ tr '\n' '\0' <"$TMP/tracked" | xargs -0 -r grep -Il '' -- >"$TMP/scan.raw" 2>/de
 cat "$TMP/files" >>"$TMP/scan.raw"
 LC_ALL=C sort -u "$TMP/scan.raw" >"$TMP/scan"
 
-# Tracked symlinks: CLAUDE.md -> AGENTS.md and .claude/skills -> ../.agents/skills
-# mean a test naming the link depends on the target, which is the path git
+# A tracked symlink such as .claude/skills -> ../.agents/skills means a test
+# naming the link depends on the target, which is the path git
 # reports as changed.
 : >"$TMP/links"
 git ls-files -s 2>/dev/null | awk -F'\t' '$0 ~ /^120000 / { print $2 }' >"$TMP/linkpaths" || true

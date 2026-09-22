@@ -50,7 +50,7 @@
 # whole match out: "bin/*.sh" in bin/fm-lint.sh draws edges to every tracked
 # file under bin/, which is exactly right for a tool that lints all of them.
 # Tracked symlinks draw an edge to their resolved target, so a test naming
-# CLAUDE.md depends on AGENTS.md.
+# .claude/skills depends on .agents/skills.
 #
 # WHAT THIS PLANNER DOES NOT MODEL
 # --------------------------------
