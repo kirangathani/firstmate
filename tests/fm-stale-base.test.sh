@@ -449,6 +449,113 @@ test_next_flips_to_the_sibling_once_the_head_of_the_queue_lands() {
   pass "fm-stale-base: the next branch to land takes over once the one ahead lands"
 }
 
+# --- the head of the queue has already caught up ----------------------------
+#
+# 2026-09-22: firstmate PR 116 (oldest dispatch) had already merged origin/main
+# forward and was waiting on its checks, while PRs 120 and 118 were behind.
+# bin/fm-merge-green.sh named 116 next to land; this sweep, ranking only the
+# BEHIND branches, dropped 116 out of the ordering entirely and named 120 next.
+# Steering 120 there costs it a second merge-forward and a second full re-run
+# the moment 116 lands, which is the exact double round the queue exists to
+# prevent. So while the head is caught up, nothing is NEXT.
+
+# caught_up <world> <worktree> <branch>: apply the merge-forward remedy, so this
+# branch contains the current base and is waiting only on its checks.
+caught_up() {
+  local w=$1 wt=$2 branch=$3
+  git -C "$wt" merge -q --no-edit origin/main
+  git -C "$wt" push -q origin "$branch"
+  git -C "$w/projects/proj" fetch -q origin
+}
+
+test_a_caught_up_head_of_the_queue_steers_nobody() {
+  local w wt1 out status
+  w=$(new_world caught-up-head-of-the-queue-steers-nobody)
+  wt1=$(queue_task "$w" h1 fm/h1 1000 https://example.invalid/pull/116)
+  push_branch "$wt1" fm/h1
+  push_branch "$(queue_task "$w" h2 fm/h2 2000 https://example.invalid/pull/120)" fm/h2
+  push_branch "$(queue_task "$w" h3 fm/h3 3000 https://example.invalid/pull/118)" fm/h3
+  advance_origin "$w"
+  caught_up "$w" "$wt1" fm/h1
+
+  out=$(run_sweep "$w"); status=$?
+
+  expect_code 0 "$status" "with the head of the queue already caught up nothing is owed, so the sweep must not block a turn end"
+  assert_not_contains "$out" "STALE BASE:" "no branch may be named next to land while the head of the queue is waiting to land"
+  assert_contains "$out" "PARKED BASE: h2" "the branch behind the head must be parked, not steered"
+  assert_contains "$out" "PARKED BASE: h3" "every branch behind the head must be parked"
+  assert_contains "$out" "parked behind h1" "a parked branch must name the head it is waiting on"
+  assert_contains "$out" "already caught up" "the parked line must say the head is caught up and waiting to land"
+  assert_not_contains "$out" "merge origin/main into fm/h2" "a parked branch must not be told to merge the base forward"
+  assert_not_contains "$out" "merge origin/main into fm/h3" "a parked branch must not be told to merge the base forward"
+  pass "fm-stale-base: a caught-up head of the queue parks every branch behind it and steers nobody"
+}
+
+test_a_caught_up_branch_with_no_pr_does_not_hold_the_queue() {
+  local w wt1 out status
+  w=$(new_world caught-up-branch-with-no-pr-does-not-hold-the-queue)
+  # Dispatched first and already on the current base, but never validated and
+  # with no PR, so nothing is waiting on it to land and it holds nothing up.
+  wt1=$(queue_task "$w" nopr fm/nopr 1000)
+  push_branch "$wt1" fm/nopr
+  push_branch "$(queue_task "$w" haspr fm/haspr 2000 https://example.invalid/pull/9)" fm/haspr
+  advance_origin "$w"
+  caught_up "$w" "$wt1" fm/nopr
+
+  out=$(run_sweep "$w"); status=$?
+
+  expect_code 1 "$status" "the queued branch must still report"
+  assert_contains "$out" "STALE BASE: haspr" "a caught-up branch with no PR must not park the branch that is actually queued to land"
+  pass "fm-stale-base: a caught-up branch with no PR does not hold up the landing queue"
+}
+
+test_the_queue_moves_on_once_the_caught_up_head_lands() {
+  local w wt1 out status
+  w=$(new_world queue-moves-on-once-the-caught-up-head-lands)
+  wt1=$(queue_task "$w" m1 fm/m1 1000 https://example.invalid/pull/1)
+  push_branch "$wt1" fm/m1
+  push_branch "$(queue_task "$w" m2 fm/m2 2000 https://example.invalid/pull/2)" fm/m2
+  advance_origin "$w"
+  caught_up "$w" "$wt1" fm/m1
+  out=$(run_sweep "$w")
+  assert_contains "$out" "PARKED BASE: m2" "m2 must start parked behind the caught-up head"
+
+  # m1 lands: its PR goes in, main moves again, and cleanup removes its record.
+  find "$w/state" -name 'm1.meta' -delete
+  advance_origin "$w"
+
+  out=$(run_sweep "$w"); status=$?
+  expect_code 1 "$status" "the branch that is now next to land must report"
+  assert_contains "$out" "STALE BASE: m2" "m2 must become the branch next to land once the head of the queue lands"
+  assert_contains "$out" "merge origin/main into fm/m2 and re-verify" "m2 must now be given the merge-forward remedy - its one per landing cycle"
+  pass "fm-stale-base: the queue moves on once the caught-up head of it lands"
+}
+
+test_ack_under_a_caught_up_head_re_alarms_when_the_base_moves() {
+  local w wt1 out status
+  w=$(new_world ack-under-a-caught-up-head-re-alarms)
+  wt1=$(queue_task "$w" k1 fm/k1 1000 https://example.invalid/pull/1)
+  push_branch "$wt1" fm/k1
+  push_branch "$(queue_task "$w" k2 fm/k2 2000 https://example.invalid/pull/2)" fm/k2
+  advance_origin "$w"
+  # k2 was steered and acknowledged while it was the head, before k1 caught up.
+  run_sweep "$w" --ack k2 >/dev/null || fail "--ack must succeed"
+  caught_up "$w" "$wt1" fm/k1
+
+  out=$(run_sweep "$w"); status=$?
+  expect_code 0 "$status" "an acknowledged finding must stay quiet at the same base"
+  [ -z "$out" ] || fail "acknowledged finding still reported under a caught-up head: $out"
+
+  # A second landing moves the base again, which is a new finding for k2 and
+  # must alarm past the acknowledgement made at the old base.
+  find "$w/state" -name 'k1.meta' -delete
+  advance_origin "$w"
+  out=$(run_sweep "$w"); status=$?
+  expect_code 1 "$status" "a base that moves again must re-alarm past the acknowledgement"
+  assert_contains "$out" "STALE BASE: k2" "the re-alarm must name the task again"
+  pass "fm-stale-base: an acknowledgement made under a caught-up head still re-alarms when the base moves"
+}
+
 test_a_branch_with_a_pr_outranks_one_without() {
   local w out status
   w=$(new_world a-branch-with-a-pr-outranks-one-without)
@@ -579,6 +686,10 @@ test_only_the_next_branch_to_land_is_asked_to_merge_forward
 test_parked_findings_alone_do_not_fail_the_sweep
 test_next_flips_to_the_sibling_once_the_head_of_the_queue_lands
 test_a_branch_with_a_pr_outranks_one_without
+test_a_caught_up_head_of_the_queue_steers_nobody
+test_a_caught_up_branch_with_no_pr_does_not_hold_the_queue
+test_the_queue_moves_on_once_the_caught_up_head_lands
+test_ack_under_a_caught_up_head_re_alarms_when_the_base_moves
 test_ack_silences_until_the_base_moves_again
 test_ack_all_silences_every_current_finding
 test_ack_only_touches_the_named_task

@@ -100,12 +100,12 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    # Measured basis (2026-08-03): the serial loop took 863s on main in CI and
-    # per-file local timing puts the heaviest round-robin shard at ~40% of the
-    # suite, so the worst shard is ~6 minutes of tests plus under a minute of
-    # setup. 10 minutes leaves 3+ minutes of headroom on that worst shard while
-    # a hung test now trips 5 minutes sooner than the old whole-suite cap.
-    timeout-minutes: 10
+    # Measured basis (2026-09-22): the last five main runs of shard 4 on
+    # identical code took 8m32s, 7m26s, 4m40s, 4m41s, and 4m12s, so runner
+    # load alone now pushes the worst shard past the old 10-minute cap. 20
+    # minutes leaves ~11 minutes of headroom over the slowest observed run
+    # while still tripping a hung shard well before the old whole-suite era.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
         with:
@@ -217,7 +217,7 @@ jobs:
       - name: Symlinks must stay intact
         run: |
           set -eu
-          [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "::error::CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
+          if [ -e CLAUDE.md ] || [ -L CLAUDE.md ]; then echo "::error::CLAUDE.md must not exist; AGENTS.md is the only instruction file"; exit 1; fi
           [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
       - name: Personal fleet paths must not be tracked
         run: |
