@@ -12,6 +12,13 @@
 # The pre-existing fast-forward / already-current / local-only / no-origin paths
 # must be unchanged, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
 #
+# It also pins the one dirty tree that is NOT stuck: a clone on its default branch,
+# strictly behind origin/<default>, whose every tracked dirty path already holds the
+# state the target has for it (deleted here and deleted there, or edited here to the
+# target's exact content). That clone fast-forwards and reports the reconciled count;
+# a dirty path the target does NOT reconcile keeps the STUCK behaviour for the whole
+# clone, even alongside a reconciled one.
+#
 # It also pins the orphaned .git/packed-refs.lock recovery in the fetch step
 # (fetch_with_packed_refs_lock_guard, backed by bin/fm-lock-lib.sh's shared
 # staleness proof): a provably-stale lock is retried then removed and the clone
@@ -79,6 +86,25 @@ advance_origin() {
   work="$home/work-$name"
   commit_file "$work" file.txt "$msg" "$msg"
   git -C "$work" push -q origin main
+}
+
+# seed_tracked <home> <name> <file>: add <file> on origin and pull it into the
+# clone, so the clone's HEAD tracks it and the clone is level with origin again.
+seed_tracked() {
+  local home=$1 name=$2 file=$3
+  commit_file "$home/work-$name" "$file" seeded "add $file"
+  git -C "$home/work-$name" push -q
+  git -C "$home/projects/$name" pull -q --ff-only
+}
+
+# delete_on_origin <home> <name> <file>: push a commit deleting <file>, so the clone
+# is one commit behind a target that no longer has it.
+delete_on_origin() {
+  local home=$1 name=$2 file=$3 work
+  work="$home/work-$name"
+  git -C "$work" rm -q "$file"
+  git -C "$work" commit -qm "delete $file"
+  git -C "$work" push -q
 }
 
 head_sha() { git -C "$1" rev-parse HEAD; }
@@ -274,6 +300,82 @@ test_dirty_is_stuck_untouched() {
   [ "$(head_sha "$clone")" = "$before" ] || fail "dirty clone HEAD was moved"
   grep -q "uncommitted edit" "$clone/file.txt" || fail "dirty working-tree change was discarded"
   pass "dirty working tree is reported STUCK and left untouched"
+}
+
+test_worktree_deletion_the_target_also_deletes_fast_forwards() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" gamma-del)
+  seed_tracked "$home" gamma-del CLAUDE.md
+  delete_on_origin "$home" gamma-del CLAUDE.md
+  unlink "$clone/CLAUDE.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "gamma-del: synced" "a worktree deletion the target also deletes fast-forwards"
+  assert_contains "$out" "1 reconciled local change(s)" "the reconciled count is reported"
+  assert_not_contains "$out" "STUCK" "a fully reconciled dirty tree is not STUCK"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] || fail "clone was not fast-forwarded"
+  [ -z "$(git -C "$clone" status --porcelain)" ] || fail "tree is not clean after the reconciled fast-forward"
+  [ ! -e "$clone/CLAUDE.md" ] || fail "the deleted file came back"
+  pass "a worktree deletion the target also deletes fast-forwards and leaves a clean tree"
+}
+
+test_worktree_edit_matching_the_target_blob_fast_forwards() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" gamma-edit)
+  advance_origin "$home" gamma-edit C1
+  # The captain hand-applied exactly what C1 landed: same bytes, uncommitted.
+  printf 'C1\n' > "$clone/file.txt"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "gamma-edit: synced" "a worktree edit equal to the target blob fast-forwards"
+  assert_contains "$out" "1 reconciled local change(s)" "the reconciled edit is counted"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] || fail "clone was not fast-forwarded"
+  [ -z "$(git -C "$clone" status --porcelain)" ] || fail "tree is not clean after the reconciled fast-forward"
+  [ "$(cat "$clone/file.txt")" = "C1" ] || fail "working-tree content changed"
+  pass "a worktree edit whose content equals the target blob fast-forwards"
+}
+
+test_worktree_deletion_the_target_keeps_is_stuck_untouched() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" gamma-keep)
+  seed_tracked "$home" gamma-keep KEEP.md
+  advance_origin "$home" gamma-keep C1
+  before=$(head_sha "$clone")
+  unlink "$clone/KEEP.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "gamma-keep: STUCK:" "a deletion the target still keeps stays STUCK"
+  assert_contains "$out" "uncommitted changes" "STUCK still names the dirty state"
+  assert_not_contains "$out" "reconciled" "an unreconciled deletion is never reported as reconciled"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "unreconciled dirty clone HEAD was moved"
+  [ ! -e "$clone/KEEP.md" ] || fail "the worktree deletion was undone"
+  pass "a worktree deletion the target still has is reported STUCK and left untouched"
+}
+
+test_one_unreconciled_path_keeps_the_whole_clone_stuck() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" gamma-mixed)
+  seed_tracked "$home" gamma-mixed CLAUDE.md
+  delete_on_origin "$home" gamma-mixed CLAUDE.md
+  before=$(head_sha "$clone")
+  unlink "$clone/CLAUDE.md"
+  printf 'unreconciled edit\n' >> "$clone/file.txt"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "gamma-mixed: STUCK:" "one unreconciled path keeps the clone STUCK"
+  assert_not_contains "$out" "reconciled local change" "a mixed dirty tree is never fast-forwarded"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "mixed dirty clone HEAD was moved"
+  [ ! -e "$clone/CLAUDE.md" ] || fail "the reconciled deletion was undone"
+  grep -q "unreconciled edit" "$clone/file.txt" || fail "the unreconciled edit was discarded"
+  pass "a reconciled path alongside an unreconciled one leaves the whole clone STUCK"
 }
 
 test_non_default_branch_is_stuck_untouched() {
@@ -688,6 +790,10 @@ test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
 test_dirty_is_stuck_untouched
+test_worktree_deletion_the_target_also_deletes_fast_forwards
+test_worktree_edit_matching_the_target_blob_fast_forwards
+test_worktree_deletion_the_target_keeps_is_stuck_untouched
+test_one_unreconciled_path_keeps_the_whole_clone_stuck
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
