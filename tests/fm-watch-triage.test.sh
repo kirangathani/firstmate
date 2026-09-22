@@ -32,6 +32,9 @@ UNAME_S=$(uname)
 
 # Common watcher knobs: tight poll/grace, no check or heartbeat cadence unless a
 # test overrides them, so a test only exercises the path it targets. FM_CREW_STATE_BIN
+# The extras go through env(1), not straight into the prefix: a quoted expansion
+# is a command word by the time bash looks for assignments, so "$@" alone made
+# the first extra the command and the watcher never ran.
 # points at the case's hermetic fake fm-crew-state.sh (installed by make_case) so the
 # absorb-only-when-provably-working triage reads a canned verdict; a test fixes that
 # verdict via FM_FAKE_CREW_STATE in its environment before calling watch_bg.
@@ -39,7 +42,7 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env "$@" "$WATCH" > "$out" &
 }
 
 # Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it
@@ -385,7 +388,11 @@ test_turn_ended_provably_working_absorbed() {
   # A busy pane is the second form of positive evidence (covers a queued
   # continuation right after the turn-end).
   export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
-  watch_bg "$state" "$fakebin" "$out"
+  # Pinned wide so this case exercises the absorb and not the quiet window: the
+  # window's default is derived from the poll and grace, which this harness sets
+  # to a second each, so a marker would age past it while the watcher was still
+  # lingering and surface for a reason this case is not about.
+  watch_bg "$state" "$fakebin" "$out" FM_TURN_END_QUIET_SECS=3600
   pid=$!
   if ! wait_cycle "$pid" "$state" 30; then
     reap "$pid"; fail "watcher exited for a turn-end whose crew is provably working (should absorb): $(cat "$out")"
@@ -396,10 +403,64 @@ test_turn_ended_provably_working_absorbed() {
   pass "a bare turn-end whose crew is provably working (busy pane) is absorbed"
 }
 
+# --- a BARE turn-end is absorbed until it has gone quiet ----------------------
+# A turn-end marker with no status line beside it carries nothing to act on: the
+# wake it makes says only that a turn ended, which is what the captain measured on
+# 2026-09-17 and asked to stop paying a notification for. It is absorbed inside
+# TURN_END_QUIET_SECS however the crew reads, and the pane-stale layer owns the
+# crew it describes from there - including the swallowed finish, which reaches
+# firstmate as a `stale:` wake carrying the pane instead of as a bare turn-end
+# carrying nothing.
+
+test_bare_turn_ended_absorbed_inside_the_quiet_window() {
+  local dir state fakebin out pid
+  dir=$(make_case turn-ended-bare); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  : > "$state/task.turn-ended"
+  # The crew is NOT provably working - the reading that used to surface this on
+  # its own - so this case is exactly the one the new rule changes.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out" FM_TURN_END_QUIET_SECS=3600
+  pid=$!
+  if ! wait_cycle "$pid" "$state" 40; then
+    reap "$pid"; fail "watcher exited for a bare turn-end inside the quiet window (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a bare turn-end inside the quiet window printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a bare turn-end inside the quiet window enqueued a durable wake record"
+  [ -s "$state/.seen-task_turn-ended" ] || fail "the absorbed bare turn-end did not advance its .seen-* suppressor"
+  grep -F 'absorbed bare turn-end' "$state/.watch-triage.log" >/dev/null \
+    || fail "the absorbed bare turn-end was not logged as one: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  reap "$pid"
+  pass "a bare turn-end inside the quiet window is absorbed (no exit, no queue, suppressor advanced)"
+}
+
+test_turn_ended_beside_a_status_write_is_not_bare() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case turn-ended-with-status); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  # A no-verb status line beside the marker. The batch is not bare, so it falls
+  # through to the provably-working read exactly as it always did: the crew has
+  # stopped, so it surfaces. This is the "unless a status line accompanies it"
+  # half of the rule, and it is what keeps a crew's own words reaching firstmate.
+  printf 'working: compiling step 2\n' > "$state/task.status"
+  : > "$state/task.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out" FM_TURN_END_QUIET_SECS=3600
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher absorbed a turn-end that arrived beside a status write"
+  grep -F "signal: " "$out" >/dev/null || fail "watcher did not print the surfaced signal"
+  grep -F "$state/task.status" "$out" >/dev/null || fail "the surfaced reason did not name the status file"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced batch failed"
+  grep "$(printf '\tsignal\ttask.status\t')" "$drain_out" >/dev/null || fail "the accompanying status write was not queued"
+  pass "a turn-end that arrives beside a status write is not bare and still surfaces"
+}
+
 # --- a no-verb signal whose crew is NOT provably working SURFACES -------------
 # This is the swallowed-finish fix: a crew that finished (or stopped and waits)
 # reports its final turn-end with no captain-relevant status and no running
 # pipeline, so the wake must surface instead of being absorbed.
+# Since 2026-09-17 a BARE turn-end must also have gone quiet past
+# TURN_END_QUIET_SECS, which this case forces with a zero window; the case above
+# covers the same crew inside the window.
 
 test_turn_ended_not_working_surfaced() {
   local dir state fakebin out drain_out pid
@@ -409,7 +470,7 @@ test_turn_ended_not_working_surfaced() {
   # No running pipeline, no busy pane: the crew has stopped (e.g. it finished via
   # an interactive menu and wrote no done: status). Default unknown verdict.
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
-  watch_bg "$state" "$fakebin" "$out"
+  watch_bg "$state" "$fakebin" "$out" FM_TURN_END_QUIET_SECS=0
   pid=$!
   wait_for_exit "$pid" 40 || fail "watcher did not surface a turn-end whose crew is not provably working"
   grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the surfaced turn-end signal"
@@ -708,6 +769,99 @@ test_stale_limit_dialog_respects_declared_pause() {
   grep -F "usage-limit dialog" "$out" >/dev/null && fail "a declared limit pause was re-escalated with the dialog reason"
   unset FM_FAKE_CREW_STATE
   pass "a declared limit pause is never re-escalated through the dialog path"
+}
+
+# --- a captain-exempt task's stale is absorbed on the bounded cadence --------
+#
+# A task the captain has signed out of monitoring was still surfacing a stale
+# wake every poll, spending an arm on a pane nobody was going to act on - which
+# is what the exemption already said. It absorbs on the same bounded cadence a
+# declared pause uses, so a forgotten exemption still re-surfaces once a window.
+# The signature is the authority: an unsigned record is not an exemption, which
+# tests/fm-unactioned-guard.test.sh owns and is not re-asserted here.
+
+# Sign a real exemption for <id> in <home>, through the owner that mints them.
+# A hand-written record would be rejected by design, so this must go through
+# bin/fm-monitor.sh exactly as the captain's own command does.
+grant_exemption() {  # <home-dir> <id> <reason>
+  local home=$1 id=$2 reason=$3
+  mkdir -p "$home/config"
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$home/config/ci-waiver-secret"
+  chmod 600 "$home/config/ci-waiver-secret"
+  FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-monitor.sh" --exempt "$id" --reason "$reason" >/dev/null 2>&1 \
+    || fail "could not mint a signed exemption for $id"
+  [ -f "$home/state/$id.monitor-exempt" ] || fail "no exemption record was written for $id"
+}
+
+# The fixture both cases share: an exempt task on a stale pane whose crew reads
+# as stopped, which is precisely the shape that used to surface every cycle.
+setup_exempt_stale_case() {  # <case-name> -> sets EX_DIR EX_STATE EX_FAKEBIN EX_WINDOW EX_KEY EX_HASH EX_CAPTURE
+  local name=$1 sig
+  EX_DIR=$(make_case "$name"); EX_STATE="$EX_DIR/state"; EX_FAKEBIN="$EX_DIR/fakebin"
+  EX_CAPTURE="$EX_DIR/pane.txt"
+  EX_WINDOW="test:fm-exempted"
+  printf 'idle composer, captain is driving this one' > "$EX_CAPTURE"
+  printf 'window=%s\nkind=ship\n' "$EX_WINDOW" > "$EX_STATE/exempted.meta"
+  printf 'working: captain took this over by hand\n' > "$EX_STATE/exempted.status"
+  sig=$(seen_sig "$EX_STATE/exempted.status")
+  printf '%s' "$sig" > "$EX_STATE/.seen-exempted_status"
+  EX_KEY=$(printf '%s' "$EX_WINDOW" | tr ':/.' '___')
+  EX_HASH=$(hash_text "$(cat "$EX_CAPTURE")")
+  printf '%s' "$EX_HASH" > "$EX_STATE/.hash-$EX_KEY"
+  printf '1\n' > "$EX_STATE/.count-$EX_KEY"
+  grant_exemption "$EX_DIR" exempted "the captain is driving this window himself"
+}
+
+test_exempt_stale_absorbed() {
+  local out drain_out pid
+  setup_exempt_stale_case exempt-stale-absorbed
+  out="$EX_DIR/watch.out"; drain_out="$EX_DIR/drain.out"
+  # Stopped crew: without the exemption this surfaces immediately, which is what
+  # test_nonterminal_stale_not_working_surfaced above pins.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  # A re-surface window far longer than this test runs, so the only thing that
+  # can end the watcher here is a surface the exemption should have absorbed.
+  PATH="$EX_FAKEBIN:$PATH" FM_FAKE_TMUX_WINDOW="$EX_WINDOW" FM_FAKE_TMUX_CAPTURE="$EX_CAPTURE" \
+    FM_STATE_OVERRIDE="$EX_STATE" FM_CONFIG_OVERRIDE="$EX_DIR/config" \
+    FM_CREW_STATE_BIN="$EX_FAKEBIN/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_cycle "$pid" "$EX_STATE" 40 2 \
+    || fail "watcher exited on an exempt task's stale instead of absorbing it"
+  reap "$pid"
+  [ ! -s "$EX_STATE/.wake-queue" ] || {
+    FM_STATE_OVERRIDE="$EX_STATE" "$DRAIN" > "$drain_out" 2>/dev/null || true
+    fail "an exempt task's stale was queued: $(cat "$drain_out")"
+  }
+  unset FM_FAKE_CREW_STATE
+  pass "a captain-exempt task's stale pane is absorbed instead of surfaced"
+}
+
+test_exempt_stale_resurfaces_after_the_cadence() {
+  local out drain_out pid
+  setup_exempt_stale_case exempt-stale-resurface
+  out="$EX_DIR/watch.out"; drain_out="$EX_DIR/drain.out"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  # The cadence is anchored on the status file's own age, so a zero-length
+  # window is what makes an already-quiet task due for its recheck now. That is
+  # the same knob the declared-pause cases drive the cadence with.
+  PATH="$EX_FAKEBIN:$PATH" FM_FAKE_TMUX_WINDOW="$EX_WINDOW" FM_FAKE_TMUX_CAPTURE="$EX_CAPTURE" \
+    FM_STATE_OVERRIDE="$EX_STATE" FM_CONFIG_OVERRIDE="$EX_DIR/config" \
+    FM_CREW_STATE_BIN="$EX_FAKEBIN/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=0 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "an exempt task past its recheck window never re-surfaced - a forgotten exemption would rot invisibly"
+  FM_STATE_OVERRIDE="$EX_STATE" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the exempt re-surface failed"
+  grep -F "captain-exempt from monitoring" "$drain_out" >/dev/null \
+    || fail "the re-surfaced wake did not say the exemption is what held it: $(cat "$drain_out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a captain-exempt task re-surfaces once its recheck window has passed"
 }
 
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
@@ -1592,6 +1746,8 @@ test_crew_absorb_class_classifier
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
+test_bare_turn_ended_absorbed_inside_the_quiet_window
+test_turn_ended_beside_a_status_write_is_not_bare
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
@@ -1600,6 +1756,8 @@ test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_stale_limit_dialog_surfaced_despite_provably_working
 test_stale_limit_dialog_respects_declared_pause
+test_exempt_stale_absorbed
+test_exempt_stale_resurfaces_after_the_cadence
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

@@ -28,7 +28,7 @@ This skill is the on-demand render of that same predicate, for when the captain 
 
 2. **Act on what it found, before reporting.**
    A `NEEDS ACTION` line is not a status to relay, it is work firstmate already owed.
-   Do what each one owes now - trigger the validation, record and arm the PR, relay the decision or failure to the captain, steer the blocker - and only then record it with `bin/fm-ack.sh <id> "<what you did>"`.
+   Do what each one owes now - trigger the validation, record and arm the PR, relay the decision or failure to the captain, steer the blocker - and only then record it with `bin/fm-ack.sh <id> "<what you did>"`, issued as its own Monitor like every send.
    A `NEEDS A RECHECK` line owes no action at all - it owes a look: read that task's pane, re-verify what it says it is waiting on, and record what you verified with `bin/fm-ack.sh <id> "<what you verified>"`, which buys one more window before the next recheck is owed.
    Treat the worker's stated reason as a claim rather than a fact, because it is exactly the thing nobody has checked; a wrong premise is the failure this verdict exists to catch.
    A stalled validation is answered the same way and recorded with `bin/fm-nm-stall.sh --ack <id>`: read the named step, decide or relay, and never restart or abort the run on the finding alone.

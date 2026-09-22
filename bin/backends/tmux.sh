@@ -227,6 +227,24 @@ fm_backend_tmux_current_command() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
 }
 
+# fm_backend_tmux_pane_pid: <target>'s pane process id - tmux's own
+# `#{pane_pid}`, the shell tmux started the pane with, and the root of the
+# process tree the harness and everything it spawns hangs under. Resolved
+# STRICTLY first, for exactly the reason fm_backend_tmux_agent_alive gives
+# below: display-message falls back to the session's current window and exits 0
+# for any name, so an unresolved target would hand back a NEIGHBOURING pane's
+# pid and every reading taken from it would describe the wrong task. Prints
+# nothing and returns non-zero on a gone window or any tmux error.
+fm_backend_tmux_pane_pid() {  # <target> [expected-label]
+  local pid
+  fm_backend_tmux_target_exists "$1" "${2:-}" || return 1
+  pid=$(tmux display-message -p -t "$1" '#{pane_pid}' 2>/dev/null) || return 1
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s' "$pid"
+}
+
 # fm_backend_tmux_agent_alive: CONFIDENT liveness of a live harness-agent
 # PROCESS in <target>'s pane, distinct from fm_backend_target_exists's
 # pane-PRESENCE-only check (a pane that still exists but is sitting at a bare

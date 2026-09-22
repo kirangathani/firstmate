@@ -311,7 +311,10 @@ EOF
       echo "waiver for $ID covers $REQ_SHA on $REQ_REPO (not sent)"
       exit 0
     fi
-    if FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-send.sh" "$ID" "$LINE"; then
+    # FM_ARM_POOL_NO_REFILL: a successful fm-send now stays alive as a waiting arm
+    # unless the caller opts out (bin/fm-arm-pool-lib.sh); this command still has
+    # its own result to report, so it must get its own prompt back.
+    if FM_ARM_POOL_NO_REFILL=1 FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-send.sh" "$ID" "$LINE"; then
       echo "waived $ID at $REQ_SHA on $REQ_REPO and sent the line to the worker"
     else
       echo "error: the waiver line above is valid but could not be delivered to $ID; steer it by hand" >&2

@@ -191,6 +191,65 @@ The classifier deliberately reports `unknown` for `node`/`python`/`python3` rath
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
+## Subprocess probe: is the harness waiting on a shell of its own (2026-09-17)
+
+`fm_backend_tmux_agent_alive` above answers "is an agent running in this pane".
+It cannot answer a second question the watcher needs: is that agent currently *waiting on a subprocess of its own*?
+`#{pane_current_command}` reports the harness throughout, exactly as the section above verified, so a worker whose test suite has been running for forty minutes looks identical to one that stopped.
+Neither does the busy footer help, because while a tool call runs the harness is not generating and renders no busy indicator, and a plain shell command has no no-mistakes run to attribute.
+That gap surfaced five stale wakes in fifteen minutes across three workers on the main home on 2026-09-17, each of which was provably mid-work.
+
+`fm_backend_tmux_pane_pid` (`bin/backends/tmux.sh`) reads `#{pane_pid}`, the root of the pane's process tree, behind the same strict target resolve `fm_backend_tmux_agent_alive` uses and for the same reason.
+`fm_backend_subprocess_state` (`bin/fm-backend.sh`) walks that tree with one `ps -eo pid=,ppid=,sid=,etimes=` read and answers `detached`, `none`, or `unknown`.
+
+### Why a session leader, and why an age bound
+
+A harness spawns two structurally different kinds of child, and only one of them means work.
+Measured on this box against ten live `claude` panes, 2026-09-17:
+
+```sh
+$ ps -o pid=,sid=,pgid=,stat=,lstart=,comm= -p 621276      # the harness
+ 621276  617405  621276 Sl+  Thu Sep 17 09:30:50 2026 claude
+$ ps --ppid 621276 -o pid=,sid=,pgid=,stat=,lstart=,comm=  # its children
+ 624176  617405  621276 Sl+  Thu Sep 17 09:30:53 2026 npm exec @supab
+ 624191  617405  621276 Sl+  Thu Sep 17 09:30:53 2026 node
+ 624228  617405  621276 Sl+  Thu Sep 17 09:30:53 2026 uv
+ 908481  908481  908481 Ss   Thu Sep 17 10:20:04 2026 bash
+1196986 1196986 1196986 Ss   Thu Sep 17 10:24:57 2026 bash
+```
+
+The MCP servers inherit the harness's own session and process group (`sid` is the pane shell's, `pgid` is the harness's, flag `+`) and start within seconds of it, living for the whole session.
+So "does the harness have any child" is true for every pane, always, and proves nothing.
+The two `bash` children are tool shells: each is a session leader of its own session (`sid == pgid == pid`, flag `Ss`), which is how the harness keeps the right to kill a whole subtree, and each was minutes old.
+Confirmed by their command lines, which carry `claude`'s own Bash-tool preamble:
+
+```sh
+$ ps -o pid=,etimes=,args= -p 908481
+ 908481     884 /bin/bash -c source /home/kiran/.claude/shell-snapshots/snapshot-bash-...sh 2>/dev/null || true && shopt -u extglob ...
+```
+
+The session-leader test alone is still not enough.
+A `claude` pane re-renders its status line through a detached `/bin/sh -c .../fm-statusline.sh` continuously, idle or busy, and sampling the process table three times in a row caught one in every pane every time:
+
+```sh
+$ ps -eo pid=,sid=,etimes=,args= | awk '$1==$2 && $3<3'
+1965271 1965271       0 /bin/sh -c "${CLAUDE_PROJECT_DIR:-$PWD}"/bin/fm-statusline.sh 2>/dev/null
+1965328 1965328       0 /bin/sh -c "${CLAUDE_PROJECT_DIR:-$PWD}"/bin/fm-statusline.sh 2>/dev/null
+```
+
+Those live under a second; a tool shell worth waiting on lives for minutes.
+The caller therefore passes a minimum age, and `bin/fm-crew-state.sh` passes one poll cycle (`FM_WATCH_POLL_SECS_INT`, owned by `bin/fm-classify-lib.sh`) - three orders of magnitude longer than a status-line render and shorter than any command worth waiting on.
+Running the finished probe across the same fleet separated the two classes exactly: panes holding a minutes-old tool shell read `detached`, panes holding only a status-line render read `none`, and a name that resolves to no window read `unknown`.
+
+### What it does not catch
+
+Only tmux has a verified root-pid reader, so every other backend reads `unknown` and its callers keep the behaviour they had before this existed - the same fail-closed rule `fm_backend_agent_alive` sets, and never a licence to treat `unknown` as `none`.
+A harness that does not detach its tool shells reads `none` for the same reason; that is a missed absorb, not a wrong one.
+`ps -eo sid=` is Linux-verified only; a host whose `ps` rejects that column reads `unknown`.
+And a worker that leaves a background process running after it has genuinely finished reads `detached` for as long as that process lives.
+That last one is bounded rather than closed, by the watcher's own wedge escalation (`FM_STALE_ESCALATE_SECS`, `bin/fm-watch.sh`), which still surfaces a provably-working stale once it has been quiet too long.
+It is also why `bin/fm-ack-lib.sh` refuses to clear an unanswered report on this source: a leftover process is evidence that something is executing, not that the agent moved past the state it reported.
+
 ## Limitations
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.

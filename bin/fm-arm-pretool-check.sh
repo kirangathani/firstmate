@@ -13,13 +13,23 @@
 # Usage:
 #   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh
 #   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false]
+#                              [--tool <name>] [--claude]
 #
 # Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex.
+# Claude and Codex, and the tool name from .tool_name or .toolName.
 # CLI mode is used by OpenCode and Pi after their adapters extract the exact
-# command string.
+# command string; --tool carries the tool name when the adapter knows it.
 # --background remains accepted for compatibility, but harness-native tracked
 # background execution is not itself a policy signal.
+#
+# --claude is the one signal that this harness has the Monitor tool, so it alone
+# turns on the steer-under-bash rule: bin/fm-send.sh and bin/fm-ack.sh are denied
+# in an executed position, because a Monitor-issued one stays alive as a waiting
+# arm and a Bash-issued one cannot. Only the Claude registration passes it.
+# The rule is further scoped to a tool name that is empty or Bash, so a future
+# wildcard registration cannot deny the Monitor it recommends. Claude Code's
+# tracked registration uses the Bash matcher, which a Monitor call does not
+# match at all; docs/arm-pretool-check.md records that evidence.
 #
 # Exit/output contract:
 #   ALLOW - exit 0 and no output.
@@ -70,14 +80,19 @@ fi
 CMD=""
 CMD_SET=0
 BACKGROUND=""
+TOOL=""
 CLAUDE_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude]
+Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false]
+                               [--tool <name>] [--claude]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex tool_input.command).
+toolInput.command, or Claude/Codex tool_input.command), and the tool name from
+tool_name or toolName.
+--claude additionally denies bin/fm-send.sh and bin/fm-ack.sh in an executed
+position, for a tool name that is empty or Bash.
 Exits 0 to allow and 2 to deny.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
@@ -107,6 +122,15 @@ while [ "$#" -gt 0 ]; do
       BACKGROUND=${1#--background=}
       shift
       ;;
+    --tool)
+      [ "$#" -gt 1 ] || { echo "error: --tool requires a value" >&2; exit 2; }
+      TOOL=$2
+      shift 2
+      ;;
+    --tool=*)
+      TOOL=${1#--tool=}
+      shift
+      ;;
     --claude)
       CLAUDE_MODE=1
       shift
@@ -132,6 +156,15 @@ if [ "$CMD_SET" -eq 0 ]; then
   # Kept for transport parity only.
   # shellcheck disable=SC2034
   BACKGROUND=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.background // .tool_input.background // false)' 2>/dev/null) || BACKGROUND=false
+  TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || TOOL=""
+fi
+
+# The steer-under-bash rule applies only where the Monitor replacement exists.
+STEER=0
+if [ "$CLAUDE_MODE" -eq 1 ]; then
+  case "$TOOL" in
+    ""|Bash) STEER=1 ;;
+  esac
 fi
 
 [ -n "$CMD" ] || exit 0
@@ -165,15 +198,21 @@ PREFILTER=${PREFILTER//\"/}
 PREFILTER=${PREFILTER//\'/}
 PREFILTER=${PREFILTER//$'\n'/}
 PREFILTER=${PREFILTER//$'\r'/}
-case "$CMD" in
-  *"\$'"*|*'$"'*) ;;
-  *)
-    case "$PREFILTER" in
-      *fm-watch*) ;;
-      *) exit 0 ;;
-    esac
-    ;;
+DELEGATE=0
+case "$PREFILTER" in
+  *fm-watch*) DELEGATE=1 ;;
 esac
+# The steer scripts join the prefilter's substring set only while the rule that
+# can deny them is on, so an unsteered call keeps today's fast path exactly.
+if [ "$STEER" -eq 1 ]; then
+  case "$PREFILTER" in
+    *fm-send*|*fm-ack*) DELEGATE=1 ;;
+  esac
+fi
+case "$CMD" in
+  *"\$'"*|*'$"'*) DELEGATE=1 ;;
+esac
+[ "$DELEGATE" -eq 1 ] || exit 0
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
@@ -183,7 +222,9 @@ POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 
-POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" 2>/dev/null) || exit 0
+POLICY_ARGS=(--command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME")
+[ "$STEER" -eq 1 ] && POLICY_ARGS+=(--steer)
+POLICY_OUTPUT=$(node "$POLICY" "${POLICY_ARGS[@]}" 2>/dev/null) || exit 0
 [ -n "$POLICY_OUTPUT" ] || exit 0
 
 TAB=$(printf '\t')

@@ -65,6 +65,15 @@ unset CLAUDE_PID
 # wins over this baseline.
 export FM_LATENCY_OFF=1
 
+# Keep an ordinary test send or ack out of the dormant-arm pool. Refill is the
+# DEFAULT shape now (bin/fm-arm-pool-lib.sh, bin/fm-send.sh, bin/fm-ack.sh): a
+# successful one execs a waiting arm instead of exiting, and in a scratch home
+# with an empty pool that arm waits for a watcher lock that no test will ever
+# release, so the suite would hang rather than fail. Off for the whole process
+# and every child; the cases whose SUBJECT is the refill set it explicitly per
+# invocation, which wins over this baseline.
+export FM_ARM_POOL_NO_REFILL=1
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
