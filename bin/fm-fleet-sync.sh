@@ -11,6 +11,21 @@
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
+# One dirty tree is exempt from that STUCK: a clone on its default branch, strictly
+# behind origin/<default>, whose every tracked dirty path ALREADY holds the state
+# origin/<default> has for it - a file deleted in the worktree that the target also
+# deletes, or one whose worktree content hashes to the target's blob. The captain
+# hand-applying a change that then landed on the default branch produces exactly
+# this, and refusing it leaves the clone a commit behind forever even though the
+# fast-forward would leave the worktree byte-identical. Such a clone is
+# fast-forwarded and reported "synced <a>..<b> (N reconciled local change(s))".
+# Reconciliation is decided by pure reads; the paths are then staged (their staged
+# content is byte-identical to what the fast-forward lands, so nothing is discarded)
+# because `merge --ff-only` refuses a worktree that differs from the index. Untracked
+# files never make a path unreconciled, but a tree dirty ONLY in untracked files is
+# still STUCK as before. Any dirty path the target does not reconcile - including a
+# rename, a submodule, or a type change - keeps the STUCK behaviour for the whole
+# clone. Nothing here stashes, checks out, resets, or cleans.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
@@ -287,6 +302,46 @@ stuck_state() {
   printf '%s\n' "$s"
 }
 
+# True when tracked path $1's CURRENT worktree state already equals the state
+# $BASE holds for it: both absent, or both present with the same blob content.
+# Pure reads. A symlink, directory, submodule, or anything else not a regular file
+# is never reconciled.
+path_matches_base() {
+  local p=$1 target wt
+  target=$(git -C "$PROJ" rev-parse --quiet --verify "$BASE:$p" 2>/dev/null) || target=
+  if [ ! -e "$PROJ/$p" ] && [ ! -L "$PROJ/$p" ]; then
+    [ -z "$target" ]
+    return
+  fi
+  [ -n "$target" ] || return 1
+  [ -f "$PROJ/$p" ] && [ ! -L "$PROJ/$p" ] || return 1
+  wt=$(git -C "$PROJ" hash-object -- "$PROJ/$p" 2>/dev/null) || return 1
+  [ "$wt" = "$target" ]
+}
+
+# Collect the dirty paths when EVERY tracked one is already reconciled by $BASE,
+# into RECONCILED_PATHS. Returns non-zero - leaving the caller on the STUCK path -
+# as soon as one dirty path is not reconciled, on a rename/copy (two paths, and the
+# ff does not produce that state), or when the only dirtiness is untracked files.
+collect_reconciled_dirty() {
+  local rec=() entry x y path
+  RECONCILED_PATHS=()
+  while IFS= read -r -d '' entry; do
+    x=${entry:0:1}
+    y=${entry:1:1}
+    path=${entry:3}
+    [ "$x$y" != "??" ] || continue
+    case "$x$y" in
+      *R*|*C*) return 1 ;;
+    esac
+    [ -n "$path" ] || return 1
+    path_matches_base "$path" || return 1
+    rec+=("$path")
+  done < <(git -C "$PROJ" status --porcelain -z 2>/dev/null)
+  [ "${#rec[@]}" -gt 0 ] || return 1
+  RECONCILED_PATHS=("${rec[@]}")
+}
+
 # Loud, quantified report for a clone we deliberately leave untouched. Includes
 # how far behind origin/<default> it is, so a chronically-stuck clone is visibly
 # distinct from a benign one-off skip.
@@ -301,6 +356,9 @@ report_stuck() {
 # open branch is measured against changes, and the first instant the new base
 # exists in this home at all.
 SYNC_BASE_MOVED=no
+
+# Set by collect_reconciled_dirty, read by sync_project.
+RECONCILED_PATHS=()
 
 sync_project() {
   PROJ=$1
@@ -359,6 +417,7 @@ sync_project() {
   dirty=no
   [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
   recovered=no
+  reconciled=0
 
   if [ "$cur" != "$DEFAULT" ]; then
     # Off the default branch. Auto-recover only the one unambiguously safe drift:
@@ -384,9 +443,24 @@ sync_project() {
       return 0
     fi
   elif [ "$dirty" = yes ]; then
-    # On the default branch but with uncommitted changes we must not disturb.
-    report_stuck "$(stuck_state)"
-    return 0
+    # On the default branch with uncommitted changes. Normally untouchable, with
+    # the one exception documented at the top of this file: strictly behind the
+    # base, and every tracked dirty path already holds the state the base has for
+    # it, so the fast-forward reconciles all of them and changes no file content.
+    if git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE" 2>/dev/null \
+        && [ "$(git -C "$PROJ" rev-parse "$DEFAULT")" != "$(git -C "$PROJ" rev-parse "$BASE")" ] \
+        && collect_reconciled_dirty; then
+      # Stage exactly those paths: `merge --ff-only` refuses a worktree differing
+      # from the index, and what is staged is byte-identical to what it lands.
+      if ! git -C "$PROJ" add -A -- "${RECONCILED_PATHS[@]}" >/dev/null 2>&1; then
+        report_stuck "$(stuck_state)"
+        return 0
+      fi
+      reconciled=${#RECONCILED_PATHS[@]}
+    else
+      report_stuck "$(stuck_state)"
+      return 0
+    fi
   fi
 
   if ! git -C "$PROJ" rev-parse --verify --quiet "$DEFAULT^{commit}" >/dev/null; then
@@ -433,6 +507,8 @@ sync_project() {
   }
   if [ "$recovered" = yes ]; then
     echo "$label: recovered: re-attached $DEFAULT, synced $before..$after"
+  elif [ "$reconciled" -gt 0 ]; then
+    echo "$label: synced $before..$after ($reconciled reconciled local change(s))"
   else
     echo "$label: synced $before..$after"
   fi
