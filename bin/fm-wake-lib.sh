@@ -182,6 +182,49 @@ fm_watcher_healthy() {
   return 0
 }
 
+# fm_watcher_takeover_pending <state-dir> <pool-depth> [poll-seconds]
+#
+# 0 when no watcher holds the lock but one is provably ABOUT TO: supervision is
+# mid-handover, not off. Read only after fm_watcher_healthy has already said no.
+#
+# The handover it describes is the pool's normal operation, not an error. The
+# watcher that fires exits, and the next dormant arm takes the singleton over
+# with no model call in between (bin/fm-arm-pool-lib.sh). That leaves a gap of a
+# few seconds in which the lock names a process that has exited, which is
+# exactly what fm_watcher_healthy reports as "no live watcher". Measured on this
+# home 2026-09-17: one wake fired, the successor arm announced itself four
+# seconds later, and a turn-end guard that ran in between demanded a six-arm
+# refill while five arms were already waiting. The extras exited at once as
+# pool-full, so the cost was six wasted model calls.
+#
+# Both halves are required, and each rules out a different real failure:
+#   - a beacon younger than one poll cycle means the watcher that just released
+#     the lock was beating normally right up to the moment it went. A stale
+#     beacon means supervision stopped some time ago, which is the blackout
+#     reason 1 exists to catch, and no pool depth may excuse it.
+#   - at least one pool member means somebody is actually waiting to take over.
+#     An empty pool during a gap means nothing will, so it still alarms.
+# An unreadable pool depth is not a member count, so it is not a takeover.
+#
+# <poll-seconds> defaults to FM_WATCH_POLL_SECS_INT when its owner
+# (bin/fm-classify-lib.sh) has been sourced, and to the watcher's own default
+# otherwise, so this never invents a window of its own.
+fm_watcher_takeover_pending() {  # <state-dir> <pool-depth> [poll-seconds]
+  local state=$1 depth=$2 poll=${3:-${FM_WATCH_POLL_SECS_INT:-15}} age
+  case "$depth" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$depth" -ge 1 ] || return 1
+  case "$poll" in
+    ''|*[!0-9]*) poll=15 ;;
+  esac
+  age=$(fm_path_age "$state/.last-watcher-beat")
+  case "$age" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$age" -lt "$poll" ]
+}
+
 fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \

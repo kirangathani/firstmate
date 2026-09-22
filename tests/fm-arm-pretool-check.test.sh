@@ -301,6 +301,72 @@ test_stdin_unrelated_command_allowed() {
   pass "stdin: unrelated command is a fast allow"
 }
 
+# --- steer scripts under the Bash tool -----------------------------------------
+#
+# fm-send and fm-ack have one form: the model issues each as its own Monitor, so
+# a successful one stays alive as a waiting arm. The Bash tool cannot keep that
+# process, so running either one there is denied and the deny names the
+# replacement. Only --claude turns the rule on, because Monitor is Claude-only:
+# denying it for a harness with no replacement would leave it no way to steer.
+#
+# The tracked claude registration matchers on Bash, and a Monitor call does not
+# fire a Bash-matched hook at all (evidence in docs/arm-pretool-check.md), so
+# the Monitor case below pins the second belt: even a future wildcard
+# registration must not deny the replacement the deny message recommends.
+steer_exit() {  # <payload-json> [--claude ...] -> echoes the exit code
+  local payload=$1
+  shift
+  printf '%s' "$payload" | "$CHECK" "$@" >/dev/null 2>&1
+  printf '%s' "$?"
+}
+
+test_steer_under_bash_is_denied() {
+  local rc err
+  err=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"bin/fm-send.sh fm-lane-ok hello captain"}}' \
+    | "$CHECK" --claude 2>&1 >/dev/null)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "a Bash-tool fm-send must be denied, got exit $rc"
+  assert_contains "$err" "steer-under-bash" "the deny must carry its stable reason code"
+  assert_contains "$err" "Monitor" "the deny must name the Monitor replacement"
+  assert_contains "$err" "1800000" "the deny must name the timeout_ms the replacement uses"
+  pass "steer: bin/fm-send.sh from the Bash tool is denied with the Monitor replacement"
+}
+
+test_steer_under_bash_is_denied_when_backgrounded() {
+  local rc
+  rc=$(steer_exit '{"tool_name":"Bash","tool_input":{"command":"bin/fm-ack.sh lane-ok relayed","run_in_background":true}}' --claude)
+  [ "$rc" -eq 2 ] || fail "a backgrounded Bash-tool fm-ack must be denied too, got exit $rc"
+  pass "steer: a backgrounded Bash-tool fm-ack is denied the same way"
+}
+
+test_steer_under_monitor_is_allowed() {
+  local rc
+  # The verified Monitor PreToolUse payload: a command field named exactly as
+  # Bash's, alongside description and timeout_ms.
+  rc=$(steer_exit '{"tool_name":"Monitor","tool_input":{"description":"steer the worker","timeout_ms":1800000,"command":"bin/fm-send.sh fm-lane-ok hello 2>&1"}}' --claude)
+  [ "$rc" -eq 0 ] || fail "the Monitor replacement must be allowed, got exit $rc"
+  pass "steer: the same command under the Monitor tool is allowed"
+}
+
+test_steer_is_only_denied_for_a_harness_with_the_replacement() {
+  local rc
+  rc=$(steer_exit '{"tool_name":"Bash","tool_input":{"command":"bin/fm-send.sh fm-lane-ok hello"}}')
+  [ "$rc" -eq 0 ] || fail "a harness with no Monitor must keep its only steering shape, got exit $rc"
+  pass "steer: without --claude the rule is off, so no harness is left unable to steer"
+}
+
+test_reading_and_editing_the_steer_scripts_stays_allowed() {
+  local rc payload
+  for payload in \
+    '{"tool_name":"Bash","tool_input":{"command":"cat bin/fm-send.sh"}}' \
+    '{"tool_name":"Bash","tool_input":{"command":"grep -n refill bin/fm-ack.sh"}}' \
+    '{"tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ bin/fm-ack.sh"}}'; do
+    rc=$(steer_exit "$payload" --claude)
+    [ "$rc" -eq 0 ] || fail "command position is what counts; working on these files must stay allowed: $payload"
+  done
+  pass "steer: reading, grepping, and editing the steer scripts stays allowed"
+}
+
 test_prefilter_is_strict_superset() {
   local rc
   # A command with no fm-watch substring is fast-allowed by the transport
@@ -545,6 +611,11 @@ test_stdin_claude_codex_schema_allow
 test_stdin_claude_codex_schema_deny
 test_stdin_unrelated_command_allowed
 test_prefilter_is_strict_superset
+test_steer_under_bash_is_denied
+test_steer_under_bash_is_denied_when_backgrounded
+test_steer_under_monitor_is_allowed
+test_steer_is_only_denied_for_a_harness_with_the_replacement
+test_reading_and_editing_the_steer_scripts_stays_allowed
 test_failopen_empty_stdin
 test_failopen_garbage_stdin
 test_failopen_missing_jq

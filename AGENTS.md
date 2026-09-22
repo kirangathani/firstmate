@@ -150,6 +150,8 @@ An `ABSENT` captain, shared-captain, secondmate, or learnings file means the fir
 
 If the session lock is refused, tell the captain another active session is managing the fleet and remain read-only.
 A lock-refused session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.
+`bin/fm-lock.sh take-over <pid>` displaces that holder, and it is the CAPTAIN's alone: nothing in the code can tell a captain from an agent, so this rule is the only thing enforcing it.
+Never run it on your own initiative, and relay the refusal to the captain instead.
 
 1. **Lock** - acquires the per-home session lock first, before anything mutates shared state.
 2. **Bootstrap** - detect-only checks (tool/version problems, the shared no-mistakes daemon's liveness, GitHub auth, the worktree-tangle check, harness override, dispatch-profile validation, backlog-backend status) always run, but routine confirmations stay silent by default.
@@ -274,7 +276,7 @@ The spawn must resolve a genuine isolated task worktree distinct from the primar
 After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship or scout work as under way.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
-Steer a worker with short single-line messages through fail-closed `fm-send`; put long instructions in a file.
+Steer a worker with short single-line messages through fail-closed `fm-send`, issued as its own Monitor rather than a shell command; put long instructions in a file.
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 Supervise all live work under section 8.
 

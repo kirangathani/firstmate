@@ -15,7 +15,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|subprocess|attach|status-log|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -55,7 +55,13 @@
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
+#      recorded backend's pane busy state, then to two signals that catch the
+#      shape a busy footer cannot - a worker idle at its composer while its own
+#      shell command runs, which is not generating and so renders no busy
+#      indicator: a detached subprocess of the endpoint's process tree older
+#      than one poll cycle (`subprocess`, fm_backend_subprocess_state owns the
+#      reading), and a live no-mistakes attach (`attach`, whose record
+#      bin/fm-nm-attach.sh owns). Then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail. A busy pane reports
 #      working EXCEPT when the recorded worktree is off the fm/<id> contract and
@@ -960,6 +966,52 @@ if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
   fi
   emit working pane "harness busy"
 fi
+
+# Two further positive signals, for the shape neither the run-step path nor the
+# busy footer above can see: a worker whose OWN shell command is running while
+# its composer sits idle. The harness is not generating for that whole span, so
+# it renders no busy indicator, and a plain shell command has no pipeline run to
+# attribute - so the reader used to fall through to the status log and this crew
+# read as stopped. Measured 2026-09-17: five stale wakes in fifteen minutes on
+# three workers that were each provably mid-work this way.
+#
+# Both carry their own `source:` token rather than reusing `pane`, because they
+# are different evidence with different blind spots, and a reader of this line
+# should be able to tell which one answered. bin/fm-classify-lib.sh's
+# crew_absorb_class is the one owner of which sources count as provably working.
+#
+# 1. A detached subprocess of the endpoint's process tree, older than one poll
+#    cycle. fm_backend_subprocess_state owns the whole reading, including why a
+#    session leader is the test and why the age bound is needed; it answers
+#    `unknown` for every backend without a verified root-pid reader, and only a
+#    literal `detached` is trusted here.
+if [ "$KIND" != secondmate ] \
+  && [ "$(fm_backend_subprocess_state "$TASK_BACKEND" "$BACKEND_TARGET" "$FM_WATCH_POLL_SECS_INT" "$EXPECTED_LABEL" 2>/dev/null)" = detached ]; then
+  if [ "$WT_FOREIGN" = 1 ] || wt_ownership_unproven; then
+    emit unknown subprocess "harness waiting on a subprocess, but no run of this task's own is attributable"
+  fi
+  emit working subprocess "harness waiting on a subprocess of its own"
+fi
+
+# 2. A live no-mistakes attach. bin/fm-nm-attach.sh owns that record - first
+#    line the follower's pid, second its log - and owns the rule that a recorded
+#    pid which is no longer alive is a dead hold's leftover, never a hold. A live
+#    one means a pipeline run IS in flight for this branch and simply was not
+#    attributable above, so it is read here rather than trusted over the
+#    run-step path. Subject to the same ownership tiers as the two signals above,
+#    so every healthy-verdict site in this file still fails closed together.
+NM_ATTACH_PID=$(sed -n '1p' "$STATE/$ID.nm-attach" 2>/dev/null || true)
+case "$NM_ATTACH_PID" in
+  ''|*[!0-9]*) ;;
+  *)
+    if kill -0 "$NM_ATTACH_PID" 2>/dev/null; then
+      if [ "$WT_FOREIGN" = 1 ] || wt_ownership_unproven; then
+        emit unknown attach "a pipeline attach is live, but no run of this task's own is attributable"
+      fi
+      emit working attach "pipeline attach live (pid $NM_ATTACH_PID)"
+    fi
+    ;;
+esac
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real
 # run-state. A decision-closing event - resolved: (fm-classify-lib.sh's

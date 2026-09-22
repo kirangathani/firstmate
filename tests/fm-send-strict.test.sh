@@ -81,6 +81,28 @@ SH
   printf '%s\n' "$fb"
 }
 
+# Running fm-send from a shim bin/ is the only way to observe the refill without
+# arming a real watcher against a scratch home: the exec target is hard-coded
+# relative to the script's own directory. Every entry except fm-watch-arm.sh is
+# symlinked from the real bin/ at run time, never listed here, because a
+# hand-maintained list is a second copy of fm-send's dependency set and rots the
+# moment it gains a sibling.
+make_shim_bin() {  # <name> -> echoes the shim bin dir
+  local name=$1 bin f
+  bin="$TMP_ROOT/$name/bin"
+  mkdir -p "$bin"
+  for f in "$ROOT"/bin/*; do
+    [ "${f##*/}" = "fm-watch-arm.sh" ] && continue
+    ln -s "$f" "$bin/${f##*/}"
+  done
+  cat > "$bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'stub-arm: %s\n' "$*"
+SH
+  chmod +x "$bin/fm-watch-arm.sh"
+  printf '%s\n' "$bin"
+}
+
 setup_home() {  # <name> -> echoes home dir
   local home="$TMP_ROOT/$1-$RANDOM"
   mkdir -p "$home/state"
@@ -177,19 +199,76 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+test_a_successful_send_becomes_a_waiting_arm_when_the_pool_has_room() {
+  # The whole point of the one shape: the model already paid for this call, so a
+  # send that has delivered spends what is left of itself being an ear.
+  local dir fb home bin log out rc
+  dir="$TMP_ROOT/refill-room"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home refill-room); bin=$(make_shim_bin refill-room)
+  log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-ok.meta" "window=sess:fm-lane-ok" "kind=ship" "harness=codex"
+
+  out=$(env -u FM_ARM_POOL_NO_REFILL PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 timeout 30 "$bin/fm-send.sh" fm-lane-ok "hello captain" 2>&1); rc=$?
+
+  expect_code 0 "$rc" "a send with room in the pool should hand off to the arm cleanly"
+  assert_contains "$(cat "$log")" "target=sess:fm-lane-ok literal=1 arg=hello captain" "the refill must not change what the send DOES"
+  assert_contains "$out" "stub-arm: --dormant" "a successful send should exec a dormant waiting arm"
+  pass "fm-send strict: a successful send refills the pool by default"
+}
+
+test_a_key_send_becomes_a_waiting_arm_too() {
+  # The trust-dialog form firstmate uses (--key Enter against a raw window
+  # target) goes through the same one shape, so it must refill the same way.
+  local dir fb home bin log out rc
+  dir="$TMP_ROOT/refill-key"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home refill-key); bin=$(make_shim_bin refill-key)
+  log="$dir/tmux.log"; : > "$log"
+
+  out=$(env -u FM_ARM_POOL_NO_REFILL PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 timeout 30 "$bin/fm-send.sh" sess:fm-lane-ok --key Enter 2>&1); rc=$?
+
+  expect_code 0 "$rc" "a --key send with room in the pool should hand off to the arm cleanly"
+  assert_contains "$(cat "$log")" "target=sess:fm-lane-ok literal=0 arg=Enter" "the refill must not change what a --key send DOES"
+  assert_contains "$out" "stub-arm: --dormant" "a successful --key send should exec a dormant waiting arm"
+  pass "fm-send strict: a --key send refills the pool the same way"
+}
+
+test_the_opt_out_returns_the_send_to_its_caller() {
+  # What every bin/ script that steers a worker relies on: it has more to do
+  # after the steer, so it must get its own prompt back instead of becoming an
+  # arm. tests/fm-arm-pool-refill.test.sh pins that no such script forgets it.
+  local dir fb home bin log out rc
+  dir="$TMP_ROOT/refill-optout"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home refill-optout); bin=$(make_shim_bin refill-optout)
+  log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-ok.meta" "window=sess:fm-lane-ok" "kind=ship" "harness=codex"
+
+  out=$(FM_ARM_POOL_NO_REFILL=1 PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 timeout 30 "$bin/fm-send.sh" fm-lane-ok "hello captain" 2>&1); rc=$?
+
+  expect_code 0 "$rc" "an opted-out send should return to its caller"
+  assert_contains "$(cat "$log")" "target=sess:fm-lane-ok literal=1 arg=hello captain" "the opt-out must not change what the send DOES"
+  assert_not_contains "$out" "stub-arm" "an opted-out send must never become a waiting arm"
+  pass "fm-send strict: FM_ARM_POOL_NO_REFILL returns the send to its caller"
+}
+
 test_refill_send_with_a_full_pool_delivers_then_exits() {
-  # --refill must never change what a send DOES, only what the process does after
-  # it. With the pool already full there is no room for another waiting arm, so
-  # the send has to deliver and then get out of the way promptly.
-  local dir fb home log rc got pool now i pid pids=
+  # A full pool has no room for another waiting arm, so the send has to deliver
+  # and then get out of the way promptly. --refill rides along here as the
+  # accepted no-op it now is: it must select nothing and change nothing.
+  local dir fb home log rc got pool now i pid target pids=''
   dir="$TMP_ROOT/refill-full"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home refill-full); log="$dir/tmux.log"; : > "$log"
   fm_write_meta "$home/state/lane-ok.meta" "window=sess:fm-lane-ok" "kind=ship" "harness=codex"
   pool="$home/state/.arm-pool"
   mkdir -p "$pool"
+  # Filled to the pool's OWN target, read from the library that owns it, so this
+  # still describes a full pool if that number ever changes.
+  target=$(bash -c '. "$1/bin/fm-arm-pool-lib.sh"; printf %s "$FM_ARM_POOL_TARGET"' _ "$ROOT")
   now=$(date +%s)
   i=0
-  while [ "$i" -lt 6 ]; do
+  while [ "$i" -lt "$target" ]; do
     sleep 60 &
     pid=$!
     pids="$pids $pid"
@@ -197,17 +276,18 @@ test_refill_send_with_a_full_pool_delivers_then_exits() {
     i=$((i + 1))
   done
 
-  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+  env -u FM_ARM_POOL_NO_REFILL PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
     timeout 30 "$SEND" --refill fm-lane-ok "hello captain" >/dev/null 2>/dev/null; rc=$?
   for pid in $pids; do
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   done
 
-  expect_code 0 "$rc" "a refill send with a full pool should deliver and exit 0"
+  expect_code 0 "$rc" "a send with a full pool should deliver and exit 0"
   got=$(cat "$log")
-  assert_contains "$got" "target=sess:fm-lane-ok literal=1 arg=hello captain" "a refill send must still type its literal text"
-  assert_contains "$got" "target=sess:fm-lane-ok literal=0 arg=Enter" "a refill send must still submit with Enter"
+  assert_contains "$got" "target=sess:fm-lane-ok literal=1 arg=hello captain" "a full-pool send must still type its literal text"
+  assert_contains "$got" "target=sess:fm-lane-ok literal=0 arg=Enter" "a full-pool send must still submit with Enter"
   pass "fm-send strict: --refill still delivers the send and exits when the pool is full"
 }
 
@@ -219,11 +299,11 @@ test_refill_send_that_fails_exits_instead_of_waiting() {
   dir="$TMP_ROOT/refill-fail"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home refill-fail); err="$dir/send.err"
 
-  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_SEND_SETTLE=0 \
+  env -u FM_ARM_POOL_NO_REFILL PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_SEND_SETTLE=0 \
     timeout 30 "$SEND" --refill fm-nosuchlane "hello captain" >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -ne 0 ] || fail "a refill send to an unresolvable target exited 0"
-  [ "$rc" -ne 124 ] || fail "a failed refill send waited as a dormant arm instead of reporting its error"
-  assert_contains "$(cat "$err")" "no metadata for fm-nosuchlane" "a failed refill send must still report why it failed"
+  [ "$rc" -ne 0 ] || fail "a send to an unresolvable target exited 0"
+  [ "$rc" -ne 124 ] || fail "a failed send waited as a dormant arm instead of reporting its error"
+  assert_contains "$(cat "$err")" "no metadata for fm-nosuchlane" "a failed send must still report why it failed"
   pass "fm-send strict: a --refill send that fails exits with its error instead of waiting"
 }
 
@@ -233,5 +313,8 @@ test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_healthy_fm_id_send_still_works
+test_a_successful_send_becomes_a_waiting_arm_when_the_pool_has_room
+test_a_key_send_becomes_a_waiting_arm_too
+test_the_opt_out_returns_the_send_to_its_caller
 test_refill_send_with_a_full_pool_delivers_then_exits
 test_refill_send_that_fails_exits_instead_of_waiting

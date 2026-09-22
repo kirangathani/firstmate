@@ -19,6 +19,9 @@
 # It blocks for FIVE independent reasons, reported together in one banner so a
 # permanently broken watcher cannot hide the others:
 #   1. in-flight work with no live watcher (the original blind-turn reason),
+#      excluding the seconds in which one watcher has exited and the next
+#      dormant arm is taking the watch over - a handover is supervision working,
+#      not supervision missing (fm_watcher_takeover_pending, bin/fm-wake-lib.sh),
 #   2. the branch NEXT to land in a project whose CI was measured against a base
 #      that has since moved (bin/fm-stale-base.sh, which owns that predicate, the
 #      landing queue, and the remedy; a branch it reports as parked behind
@@ -171,8 +174,26 @@ fm_supervision_status "$STATE" "$GRACE"
 # this session is the one that should take the lock and arm.
 [ "$(fm_session_lock_ownership "$STATE")" = other ] && exit 0
 
+# The dormant-arm pool's depth, read ONCE and used by two reasons below. It is
+# file reads over one small directory, so it costs a turn end nothing.
+# bin/fm-arm-pool-lib.sh owns the count and both numbers; this only gives its
+# verdict a consequence.
+POOL_DEPTH=$(fm_arm_pool_count 2>/dev/null || printf '')
+
 blind=0
 fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || blind=1
+# ...unless supervision is mid-handover rather than off. When the watcher that
+# just fired has exited and the next dormant arm has not yet taken the singleton
+# over, the lock names a dead pid for a few seconds and the check above reads
+# that as a blackout. fm_watcher_takeover_pending (bin/fm-wake-lib.sh) owns the
+# distinction and the evidence; it requires BOTH a beacon younger than one poll
+# cycle and a pool member waiting, so a genuinely stale beacon or an empty pool
+# still blocks exactly as before. Reason 5 below is untouched: a pool at or
+# below its floor still ends the turn with a refill, whether or not a handover
+# is under way.
+if [ "$blind" = 1 ] && fm_watcher_takeover_pending "$STATE" "$POOL_DEPTH"; then
+  blind=0
+fi
 
 # Second, independent block reason: an in-flight branch that no longer contains
 # its project's current default-branch head. Every CI result on such a branch was
@@ -257,14 +278,10 @@ if [ -x "$SCRIPT_DIR/fm-nm-stall.sh" ]; then
 fi
 
 # Fifth, independent block reason: the dormant-arm pool has fallen to its floor.
-# bin/fm-arm-pool-lib.sh owns the count and both numbers; this only gives the
-# verdict a consequence. It is file reads over one small directory, so it costs a
-# turn end nothing.
 #
-# It is measured even when reason 1 is already blocking, because the two say
-# different things: reason 1 is "nothing is watching now", this is "the next few
-# wakes have nobody waiting to take over". The refill answers both.
-POOL_DEPTH=$(fm_arm_pool_count 2>/dev/null || printf '')
+# Measured even when reason 1 is already blocking, because the two say different
+# things: reason 1 is "nothing is watching now", this is "the next few wakes have
+# nobody waiting to take over". The refill answers both.
 POOL_SHORT=
 # The numbers a refill should reuse, so the model does not have to invent labels
 # and end up with `dormant arm 2` beside `dormant arm A` in the captain's chat.
