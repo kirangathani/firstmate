@@ -48,7 +48,7 @@ This skill is the on-demand render of that same predicate, for when the captain 
 
 ## Captain-driven tasks
 
-A task the captain is driving is not firstmate's to watch: it produces no wake, owes no alarm, and is never peeked at, steered, acked, or relayed out of.
+A task the captain is driving owes no alarm and is never peeked at, steered, acked, or relayed out of; its quiet pane still gets one bounded recheck per window, which is the only wake it produces.
 A worker with a human sitting in its window is already captain-driven with no command at all, and stops being so shortly after that human leaves; `docs/captain-driven.md` owns the mechanics.
 The sweep reports every such task with its reason, so say which tasks are currently the captain's whenever you report the sweep.
 

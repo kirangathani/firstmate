@@ -1694,23 +1694,61 @@ test_captain_driven_stale_pane_absorbed() {
   pane_hash=$(hash_text "finished, awaiting review")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  # A wedge timer left over from before he sat down: it must not fire while the
-  # window is his, and must not be sitting there ready to fire the moment it is
-  # not. test_terminal_stale_surfaced is the same fixture with nobody attached.
-  printf '1\n' > "$state/.stale-since-$key"
   write_client_row "$clients" "$window" "$(date +%s)"
+  # A re-surface window far longer than this test runs, so the only thing that
+  # can end the watcher here is a surface the absorb should have held. The same
+  # knob test_exempt_stale_absorbed uses for the signed record, because the
+  # captain ruled the two routes behave identically.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CLIENTS="$clients" \
-    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=999999 FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_cycle "$pid" "$state" 40; then
-    reap "$pid"; fail "watcher exited for a captain-driven task's quiet pane: $(cat "$out")"
+  if ! wait_cycle "$pid" "$state" 40 2; then
+    reap "$pid"; fail "watcher exited on a captain-driven task's quiet pane instead of absorbing it: $(cat "$out")"
   fi
-  [ ! -s "$out" ] || fail "a captain-driven task's quiet pane printed a wake reason: $(cat "$out")"
-  [ ! -s "$state/.wake-queue" ] || fail "a captain-driven task's quiet pane enqueued a durable wake record"
-  [ ! -e "$state/.stale-since-$key" ] || fail "the skipped window kept a wedge timer that would fire the moment the captain left"
+  [ ! -s "$out" ] || fail "a captain-driven task's quiet pane printed a wake reason inside the window: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a captain-driven task's quiet pane enqueued a durable wake record inside the window"
   reap "$pid"
-  pass "a captain-driven task's quiet pane wakes nobody and its wedge timer is stood down"
+  pass "a captain-driven task's quiet pane is absorbed inside the recheck window, not surfaced every poll"
+}
+
+# The other half of the captain's ruling: a window he is merely SITTING in is
+# held on exactly the bounded cadence his signed record gets, so a task he walked
+# away from still gets its one recheck rather than going silent forever. The
+# signed record's own version of this is test_exempt_stale_resurfaces_after_the_cadence.
+test_captain_driven_stale_resurfaces_after_the_cadence() {
+  local dir state fakebin out drain_out clients capture_file window key pane_hash sig pid
+  dir=$(make_case captain-driven-resurface); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; clients="$dir/clients.txt"; capture_file="$dir/pane.txt"
+  window="sess:fm-quiet"
+  printf 'idle prompt, finished' > "$capture_file"
+  fm_write_meta "$state/quiet.meta" "window=$window" "kind=ship"
+  printf 'working: captain took this over by hand\n' > "$state/quiet.status"
+  sig=$(seen_sig "$state/quiet.status"); printf '%s' "$sig" > "$state/.seen-quiet_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, finished")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  write_client_row "$clients" "$window" "$(date +%s)"
+  # A zero-length window makes an already-quiet task due for its recheck now,
+  # the same knob the declared-pause and signed-record cases drive it with.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CLIENTS="$clients" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=0 FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || { reap "$pid"; fail "a captain-driven task past its recheck window never re-surfaced - one he walked away from would go silent forever"; }
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the captain-driven re-surface failed"
+  # The wake wording is PR 115's own, shared by both routes; what distinguishes
+  # this one is the parenthetical naming the window rather than a signed reason.
+  grep -F "captain-exempt from monitoring" "$drain_out" >/dev/null \
+    || fail "the re-surfaced wake did not say the captain is what held it: $(cat "$drain_out")"
+  grep -F "its window" "$drain_out" >/dev/null \
+    || fail "the re-surfaced wake did not name the window the captain is sitting in: $(cat "$drain_out")"
+  pass "a task the captain is sitting in re-surfaces once its recheck window has passed, exactly as a signed one does"
 }
 
 test_supervision_resumes_when_the_captain_leaves() {
@@ -1775,6 +1813,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_captain_driven_signal_absorbed
 test_captain_driven_stale_pane_absorbed
+test_captain_driven_stale_resurfaces_after_the_cadence
 test_supervision_resumes_when_the_captain_leaves
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status

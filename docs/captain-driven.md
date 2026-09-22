@@ -29,13 +29,17 @@ A task is captain-driven when either source says so, and the signed record wins 
 
 While a task is captain-driven, all of the following go quiet for it, and each reads the one predicate rather than either source:
 
-- `bin/fm-watch.sh` does not wake firstmate for it: no wake on its status appends, none on its quiet pane, no wedge escalation, and no mention in the heartbeat backstop.
-  None of its wakes reach the durable queue, so none of them spends a waiting arm.
+- `bin/fm-watch.sh` does not wake firstmate on its status appends, on a wedge escalation, or through the heartbeat backstop.
+  Those wakes never reach the durable queue, so none of them spends a waiting arm.
+- Its quiet pane is absorbed rather than surfaced, but on the bounded re-surface cadence a declared pause uses, so it wakes firstmate once per `FM_PAUSE_RESURFACE_SECS` and the wake says the task is the captain's.
+  That is the captain's own ruling, and it is deliberately not "no wake at all": `bin/fm-watch.sh` gained that cadence for the signed record before this change, and one recheck a window is what keeps a task he has forgotten from rotting invisibly.
+  Both routes to the verdict arrive at that same branch and share its wake wording, so a window he is sitting in and a record he signed behave identically; the parenthetical in the wake is what tells them apart.
 - The unactioned-direct-report predicate (`bin/fm-ack-lib.sh`) classifies it captain-driven instead of owed, which is what takes it out of the turn-end guard and out of `bin/fm-monitor.sh`'s needs-action count.
 - The stale-base sweep (`bin/fm-stale-base.sh`) leaves it out of its findings.
 - The stalled-validation sweep (`bin/fm-nm-stall.sh`) leaves it out of its findings, while still observing it, so its record is current the moment supervision resumes.
 
-The skip sits ahead of the away-mode branch in both wake paths, so a task the captain declared his stays his while `state/.afk` is set and the daemon owns triage, rather than being escalated the moment he steps away.
+The signal skip sits ahead of the away-mode branch, so a task the captain declared his stays his while `state/.afk` is set and the daemon owns triage, rather than being escalated the moment he steps away.
+The stale branch sits below it, as it did for the signed record before this change, so away mode still hands every stale pane to the daemon.
 
 Firstmate never peeks at it, steers it, acks it, or relays a dialog out of it.
 Direct captain intervention in a worker's window is already authoritative under AGENTS.md rule 4; this makes it exclusive for as long as it lasts.
@@ -85,6 +89,6 @@ The attached reading ends on its own.
 Switching window or detaching ends it immediately, because the client is then viewing something else; `FM_CAPTAIN_DRIVEN_GRACE` (default 600 seconds, the documented constant in `bin/fm-captain-driven-lib.sh`) only covers a window left selected while the captain is away from the keyboard.
 
 Resumption never replays what it suppressed.
-The watcher advances each skipped signal's suppression marker as it skips it, and clears the skipped window's pending wedge bookkeeping on every poll, so there is no backlog of wakes waiting to arrive at once.
+The watcher advances each skipped signal's suppression marker as it skips it, and the stale path's own bounded cadence keeps no backlog either, so there is no queue of wakes waiting to arrive at once.
 The first ordinary poll after the captain leaves simply reads current state.
 If he left a worker genuinely needing something, the heartbeat backstop finds it there and surfaces it once, which is the intended safety net rather than a leak.

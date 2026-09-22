@@ -15,11 +15,12 @@
 # five surfaced wakes in fifteen minutes across three workers (2026-09-17).
 # A declared external-wait pause is the separate idle absorb case and re-surfaces
 # only on its long bounded cadence, although its initial no-verb status signal
-# still surfaces in normal mode. A task the captain has signed out of monitoring
-# (state/<id>.monitor-exempt, verified through fm_ack_is_exempt) is absorbed on
-# that same bounded cadence: the exemption already said nobody is going to act
-# on that pane, so surfacing it every cycle spends a wake for nothing, while the
-# bounded recheck keeps a forgotten exemption from rotting invisibly.
+# still surfaces in normal mode. A task the captain has taken himself - his
+# signed state/<id>.monitor-exempt, or a tmux client of his sitting in the
+# window, both read through fm_captain_driven - is absorbed on that same bounded
+# cadence: being his already said nobody else is going to act on that pane, so
+# surfacing it every cycle spends a wake for nothing, while the bounded recheck
+# keeps one he has forgotten from rotting invisibly.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -51,9 +52,12 @@
 #                          exact command that resolves it
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
-# A task the captain is driving is skipped by the signal, stale, and heartbeat
-# paths entirely (bin/fm-ack-lib.sh's fm_captain_driven). Its suppression markers
-# are still advanced as it is skipped, so nothing replays as a flood when he
+# A task the captain is driving is skipped by the signal and heartbeat paths
+# entirely (bin/fm-ack-lib.sh's fm_captain_driven), while its stale pane rides
+# the bounded re-surface cadence above rather than being skipped outright - the
+# captain's ruling, so that both routes to the verdict behave identically and a
+# task he has forgotten still gets its one recheck a window. Its skipped signals
+# still advance their suppression markers, so nothing replays as a flood when he
 # stops driving; the first ordinary poll after that simply reads current state.
 # Its PR merge poll keeps running, because that poll is about the PR rather than
 # the pane and a merge the captain lands by hand still has to refresh the clone.
@@ -441,21 +445,27 @@ handle_paused_stale() {  # <window> <task> <hash> [what-is-holding-it]
 # Forget a window's bounded-cadence bookkeeping, including the throttle marker
 # that keeps handle_paused_stale's re-surface to once per window.
 #
-# A captain-exempt task is the one case that must survive this. Its absorb runs
-# on every poll rather than once per distinct pane hash (nothing about an
-# exemption is tied to what the pane is showing), so the throttle marker is the
-# ONLY thing keeping it to one re-surface per window - and the callers below
-# clear on "the last status line is not a pause", which is true of nearly every
-# exempt task. Clearing it each cycle would leave the marker permanently fresh,
-# the re-surface would fire on every poll, and the exemption would produce the
-# exact wake flood it exists to stop. Guarded here, in the one owner of the
-# clearing, rather than at each call site, so a later call site cannot reopen it.
+# A captain-driven task is the one case that must survive this. Its absorb runs
+# on every poll rather than once per distinct pane hash (nothing about the
+# captain having taken it is tied to what the pane is showing), so the throttle
+# marker is the ONLY thing keeping it to one re-surface per window - and the
+# callers below clear on "the last status line is not a pause", which is true of
+# nearly every such task. Clearing it each cycle would leave the marker
+# permanently fresh, the re-surface would fire on every poll, and it would
+# produce the exact wake flood it exists to stop. Guarded here, in the one owner
+# of the clearing, rather than at each call site, so a later call site cannot
+# reopen it.
+#
+# It reads the whole captain-driven verdict, not just the signed record: a task
+# he is merely sitting in reaches handle_paused_stale by the same branch and
+# needs the same throttle, and a guard that covered only half of that would
+# flood on exactly the case this change was written for.
 clear_pause_state() {  # <window>
   local win=$1 key
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  fm_ack_is_exempt "$STATE" "$(window_to_task "$win" "$STATE")" && return 0
+  fm_captain_driven "$STATE" "$(window_to_task "$win" "$STATE")" && return 0
   rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
 }
 
@@ -1352,17 +1362,6 @@ EOF
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}
-    # A window the captain is sitting in is his, not this loop's. Skipped before
-    # the pane is even captured, and its pending escalation bookkeeping is
-    # cleared as it goes, so a stale hash or wedge timer that accumulated before
-    # he sat down cannot fire the moment he gets up. Its pane hash is left where
-    # it is: on his first quiet poll afterwards it either still matches, which is
-    # an ordinary stale read of current state, or it does not, which resets the
-    # count exactly as a busy pane would.
-    if fm_captain_driven "$STATE" "$task"; then
-      rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.paused-$key"
-      continue
-    fi
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
@@ -1417,22 +1416,28 @@ EOF
             printf '%s' "$h" > "$sf"
             wake "stale: $w"
           fi
-        elif fm_ack_is_exempt "$STATE" "$task"; then
-          # The captain has signed this task out of monitoring, which is a
-          # standing statement that its quiet pane is not firstmate's to chase -
-          # typically a window the captain is driving themselves. Surfacing it
-          # every cycle spends a wake on a task nobody is going to act on, which
-          # is what the exemption already said. Absorbed on the SAME bounded
-          # cadence a declared pause uses, so a forgotten exemption still
-          # re-surfaces once a window rather than rotting invisibly. The
-          # verifier is the owner's; an unsigned or hand-written record is not
-          # an exemption and never reaches here.
+        elif fm_captain_driven "$STATE" "$task"; then
+          # The captain has taken this task himself, which is a standing
+          # statement that its quiet pane is not firstmate's to chase. Surfacing
+          # it every cycle spends a wake on a task nobody is going to act on,
+          # which is what being his already said. Absorbed on the SAME bounded
+          # cadence a declared pause uses, so a task he has forgotten still
+          # re-surfaces once a window rather than rotting invisibly.
+          #
+          # BOTH routes to that verdict arrive here, on identical terms
+          # (captain's ruling): his signed record, and a tmux client of his
+          # sitting in the window. The verifier is the owner's; an unsigned or
+          # hand-written record is not a record and never reaches here.
           #
           # Deliberately BELOW the usage-limit dialog check above, which is
           # untouched: a harness frozen at a provider prompt is not quiet
           # because the captain is driving it.
+          # The wake's own wording is PR 115's, unchanged, and both routes share
+          # it: the captain ruled that nothing of PR 115 is removed, and the
+          # parenthetical is what tells the two apart - his signed reason, or
+          # the window he is sitting in.
           handle_paused_stale "$w" "$task" "$h" \
-            "captain-exempt from monitoring ($FM_ACK_EXEMPT_REASON) - rechecked on a long cadence; confirm the exemption still holds" \
+            "captain-exempt from monitoring ($FM_CAPTAIN_DRIVEN_REASON) - rechecked on a long cadence; confirm the exemption still holds" \
             captain-exempt
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
