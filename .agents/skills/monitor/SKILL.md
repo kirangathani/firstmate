@@ -1,6 +1,6 @@
 ---
 name: monitor
-description: Force a complete per-task monitoring sweep of every direct report this home supervises, and report what each one is owed. Use when the captain invokes /monitor, says "monitor everything", "go over every task", "heartbeat", "check on everything", "are you on top of the fleet", or asks whether anything has been left unanswered. Also use to grant or clear a captain-signed per-task monitoring exemption. It reads fleet state and acts on what it finds; it never tears down a task, merges a PR, or dispatches new work as a side effect of sweeping.
+description: Force a complete per-task monitoring sweep of every direct report this home supervises, and report what each one is owed. Use when the captain invokes /monitor, says "monitor everything", "go over every task", "heartbeat", "check on everything", "are you on top of the fleet", or asks whether anything has been left unanswered. Also use to grant or clear the captain's own standing declaration that a task is his to drive. It reads fleet state and acts on what it finds; it never tears down a task, merges a PR, or dispatches new work as a side effect of sweeping.
 user-invocable: true
 metadata:
   internal: true
@@ -46,9 +46,13 @@ This skill is the on-demand render of that same predicate, for when the captain 
    A sweep is not a substitute for the live supervision cycle.
    If any work is under way, confirm the cycle is running per the emitted session-start operating block before the turn ends.
 
-## Per-task exemption
+## Captain-driven tasks
 
-The captain, and only the captain, can exempt a task from monitoring alarms:
+A task the captain is driving owes no alarm and is never peeked at, steered, acked, or relayed out of; its quiet pane still gets one bounded recheck per window, which is the only wake it produces.
+A worker with a human sitting in its window is already captain-driven with no command at all, and stops being so shortly after that human leaves; `docs/captain-driven.md` owns the mechanics.
+The sweep reports every such task with its reason, so say which tasks are currently the captain's whenever you report the sweep.
+
+The captain, and only the captain, can also declare it explicitly, for a stretch longer than a sitting:
 
 ```
 bin/fm-monitor.sh --exempt <task-id> --reason "<why>"
@@ -59,12 +63,12 @@ bin/fm-monitor.sh --list-exempt
 Firstmate may run these on the captain's explicit instruction and must not grant one on its own initiative.
 The reason is required and is signed along with the task id, so it cannot be edited afterwards.
 
-Say plainly what an exemption is worth when the captain asks for one.
-It stops that task alarming; it does not hide it.
-The task still appears on every sweep and is announced at every session start until the exemption is cleared or the task is finished.
-It survives restarts and does not expire on its own.
+Say plainly what the record is worth when the captain asks for one.
+It stops firstmate alarming on that task and stops the watcher waking for it; it does not hide it.
+The task still appears on every sweep and is announced at every session start until the record is cleared or the task is finished.
+It survives restarts and does not expire on its own, which is exactly what distinguishes it from a sitting.
 
-If the sweep reports an exemption record that does not verify, treat it as not exempt - it still alarms - and tell the captain, because it means either a record that was not signed by this home or a signing key that has changed.
+If the sweep reports a record that does not verify, treat the task as not captain-driven - it still alarms and is still watched - and tell the captain, because it means either a record that was not signed by this home or a signing key that has changed.
 
 ## Boundaries
 
