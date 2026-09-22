@@ -65,7 +65,7 @@
 #
 # Usage: fm-merge-green.sh [--dry-run] [<task-id>...]
 #   With no task ids, every task in this home whose record carries a pr= is a
-#   candidate, oldest dispatch first (bin/fm-spawned-at-lib.sh). With task ids,
+#   candidate, oldest dispatch first (bin/fm-landing-queue-lib.sh). With task ids,
 #   only those, in the same order.
 #   --dry-run merges nothing and steers nobody. It prints the same table, with
 #   each candidate's greenness read through bin/fm-pr-green.sh - the same
@@ -90,8 +90,8 @@ fm_refuse_if_gate_agent
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-spawned-at-lib.sh
-. "$SCRIPT_DIR/fm-spawned-at-lib.sh"
+# shellcheck source=bin/fm-landing-queue-lib.sh
+. "$SCRIPT_DIR/fm-landing-queue-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 
@@ -130,18 +130,15 @@ fi
 # --- candidate selection ------------------------------------------------------
 # A candidate is a task record carrying a recorded pr=. A secondmate record
 # never carries one and a scout never opens a PR, so neither needs excluding by
-# kind. The order is dispatch order, oldest first, read through the one owner of
-# that question; a record with no readable dispatch time sorts on 0 and ties are
-# broken by id, so the order is total and repeatable.
+# kind. Both the pr= predicate and the order are read through
+# bin/fm-landing-queue-lib.sh, the one owner of the landing queue, so this loop
+# and bin/fm-stale-base.sh's parked/next split cannot drift into two answers
+# about which branch is next to land.
 CANDIDATES=
 collect_candidate() {  # <id>
-  local id=$1 at
-  local meta=$STATE/$id.meta
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  grep -q '^pr=' "$meta" || return 1
-  at=$(fm_spawned_at "$STATE" "$id")
-  case "${at:-}" in ''|*[!0-9]*) at=0 ;; esac
-  CANDIDATES=$CANDIDATES$at$TAB$id$'\n'
+  local id=$1
+  fm_landing_has_pr "$STATE" "$id" || return 1
+  CANDIDATES=$CANDIDATES$(fm_landing_queue_key "$STATE" "$id")$TAB$id$'\n'
   return 0
 }
 
@@ -169,7 +166,8 @@ if [ -z "$CANDIDATES" ]; then
   exit 0
 fi
 
-ORDERED=$(printf '%s' "$CANDIDATES" | sort -t"$TAB" -k1,1n -k2,2)
+# The key is fixed-width, so a plain lexicographic sort orders it.
+ORDERED=$(printf '%s' "$CANDIDATES" | sort -t"$TAB" -k1,1 -k2,2)
 
 # --- update-round bookkeeping -------------------------------------------------
 # One line per steer this switch has sent for a task, so the summary can report
@@ -265,7 +263,7 @@ record() {  # <outcome> <id> <url>
 # Read on fd 9, not stdin: this loop runs bin/fm-pr-merge.sh, gh, and
 # bin/fm-send.sh, any of which may read stdin and would otherwise eat the
 # rest of the candidate list.
-while IFS="$TAB" read -r _at id <&9; do
+while IFS="$TAB" read -r _key id <&9; do
   [ -n "${id:-}" ] || continue
   meta=$STATE/$id.meta
   url=$(grep '^pr=' "$meta" | tail -1 | cut -d= -f2-)
