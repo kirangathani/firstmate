@@ -125,9 +125,9 @@ Measured 2026-08-09 on this machine (Linux 6.6.87.2-microsoft-standard-WSL2), `f
 The healthy case forks no current-state reader at all, which is what keeps it flat; the unactioned case pays one confirm and then serves it from `state/.unactioned-<id>` for the cache TTL, against a stub reader deliberately given a 0.3s delay.
 For scale, the stale-base sweep already on this same path measures ~0.2s across a ten-task fleet.
 
-The one thing that stops it is a captain-signed per-task exemption in `state/<task-id>.monitor-exempt`, written only by `bin/fm-monitor.sh --exempt`, whose header owns the record and its limits.
-An unsigned or unverifiable record is not an exemption, so the alarm cannot be silenced by writing a file.
-Every standing exemption is announced at session start by `bin/fm-bootstrap.sh`, which is what makes a self-granted one report itself rather than quietly drop a task out of supervision.
+The one thing that stops it is the task being the captain's own to drive, by either route `bin/fm-ack-lib.sh`'s `fm_captain_driven` combines: a captain-signed record in `state/<task-id>.monitor-exempt`, written only by `bin/fm-monitor.sh --exempt`, or a human sitting in the task's window right now.
+`docs/captain-driven.md` owns that contract and the rest of what goes quiet with it.
+An unsigned or unverifiable record is not one, so the alarm cannot be silenced by writing a file, and neither route is silent: both are announced at session start by `bin/fm-bootstrap.sh`, which is what makes a self-granted one report itself rather than quietly drop a task out of supervision.
 
 `bin/fm-monitor.sh` renders the same predicate for every supervised task on demand, and is what the captain's `/monitor` reaches.
 The alarm surface stays silent when clean; the render surface names every task and every class including zeros, because a silent all-clear cannot be told apart from not having looked.

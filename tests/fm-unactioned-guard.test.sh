@@ -576,10 +576,10 @@ test_sweep_accounts_for_every_task_and_every_class() {
 
   # Every class named on the counts line, including the ones that are zero.
   local class
-  for class in needs-action just-reported acted moved-on exempt nothing-owed; do
+  for class in needs-action just-reported acted moved-on captain-driven nothing-owed; do
     assert_contains "$out" "$class" "counts line dropped the '$class' class - an absent class reads as 'none' and as 'not checked' identically"
   done
-  assert_contains "$out" "exempt 0" "a zero class must be printed as a zero, not omitted"
+  assert_contains "$out" "captain-driven 0" "a zero class must be printed as a zero, not omitted"
   pass "fm-monitor: the sweep names every supervised task and every class, zeros included"
 }
 
@@ -778,16 +778,16 @@ test_an_exemption_is_never_silent() {
 
   # Still on the render, with its reason, even in the trimmed view.
   out=$(run_monitor "$home" "$INCIDENT_SECS")
-  assert_contains "$out" "EXEMPT by the captain" "the sweep hid an exempted task"
+  assert_contains "$out" "CAPTAIN-DRIVEN" "the sweep hid a task the captain had taken for himself"
   assert_contains "$out" "captain is chasing the vendor" "the sweep hid the exemption's stated reason"
   out=$(run_monitor "$home" "$INCIDENT_SECS" --quiet)
-  assert_contains "$out" "EXEMPT by the captain" \
-    "the trimmed view hid the exemption - a standing suppression of a safety check must stay in front of the captain"
+  assert_contains "$out" "CAPTAIN-DRIVEN" \
+    "the trimmed view hid it - a standing suppression of a safety check must stay in front of the captain"
 
   # And announced at session start without anyone asking for it.
   out=$(FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1 || true)
-  assert_contains "$out" "MONITOR_EXEMPT: $id" "session start did not announce a standing exemption"
+  assert_contains "$out" "MONITOR_EXEMPT: $id" "session start did not announce a task the captain had taken for himself"
   assert_contains "$out" "captain is chasing the vendor" "the session-start announcement dropped the reason"
   pass "fm-monitor: an exemption is announced on every sweep and at every session start, never silent"
 }

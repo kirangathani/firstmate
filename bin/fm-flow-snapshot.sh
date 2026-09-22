@@ -148,6 +148,12 @@ command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; ex
 # shared rather than two written.
 # shellcheck source=bin/fm-spawned-at-lib.sh
 . "$SCRIPT_DIR/fm-spawned-at-lib.sh"
+# The automatic half of "the captain is driving this worker": a human sitting in
+# its window. Only this half is sourced, never bin/fm-ack-lib.sh's combined
+# verdict, because that one verifies the signed record's signature and this
+# collector deliberately verifies nothing.
+# shellcheck source=bin/fm-captain-driven-lib.sh
+. "$SCRIPT_DIR/fm-captain-driven-lib.sh"
 
 NOW_EPOCH=${FM_FLOW_SNAPSHOT_NOW_EPOCH:-$(date -u +%s)}
 # The database fallback measures an in-flight step against the SAME clock every
@@ -736,13 +742,18 @@ row_common() {  # <task-json>
   FM_ROW_MODE=$(printf '%s' "$task" | jq -r '.mode // ""')
   FM_ROW_PROJECT=$(printf '%s' "$task" | jq -r '.project // ""')
   FM_ROW_WORKTREE=$(printf '%s' "$task" | jq -r '.paths.worktree.path // ""')
-  # The captain's own record that he has taken this worker's window himself:
-  # state/<id>.monitor-exempt, written by `bin/fm-monitor.sh --exempt` and
-  # removed by `--unexempt`. Presence is the whole answer - the signature inside
-  # it is bin/fm-monitor.sh's own thing to verify, and this view only draws a
-  # marker, never an authority.
+  # Whether the captain has taken this worker's window himself, by either of the
+  # two routes bin/fm-ack-lib.sh's fm_captain_driven combines: his own
+  # state/<id>.monitor-exempt record (`bin/fm-monitor.sh --exempt`, removed by
+  # `--unexempt`), or a tmux client of his sitting in the window right now.
+  # Presence is the whole answer for the record - the signature inside it is
+  # bin/fm-monitor.sh's own thing to verify, and this view only draws a marker,
+  # never an authority - while the attached reading needs no signature at all.
   FM_ROW_CAPTAIN_DRIVING=false
-  [ ! -e "$STATE_DIR/$FM_ROW_ID.monitor-exempt" ] || FM_ROW_CAPTAIN_DRIVING=true
+  if [ -e "$STATE_DIR/$FM_ROW_ID.monitor-exempt" ] \
+     || fm_captain_attached "$STATE_DIR" "$FM_ROW_ID"; then
+    FM_ROW_CAPTAIN_DRIVING=true
+  fi
   FM_ROW_WINDOW=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
   FM_ROW_ENDPOINT_ALIVE=$(printf '%s' "$task" | jq -r 'if .endpoint.exists then "true" else "false" end')
   # `endpoint.exists` only says a pane is there. The deeper probe asks what is
