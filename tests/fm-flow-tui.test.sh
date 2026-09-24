@@ -599,9 +599,12 @@ assert_contains "$plain" "idle" "a quiet second mate was not drawn as idle"
 assert_not_contains "$plain" "unknown" "a quiet second mate was drawn as an unknown state"
 assert_not_contains "$plain" "no current-state source available" \
   "a quiet second mate carried the reason for an alarm that is not there"
-# The colour is the assertion, not the word: red, magenta and yellow are this
-# view's alarm slots and none of them may appear on a healthy idle row.
-for alarm in $'\x1b[91m' $'\x1b[95m' $'\x1b[93m'; do
+# The colour is the assertion, not the word: magenta and yellow are this view's
+# remaining alarm slots and neither may appear on a healthy idle row. The
+# failure slot is NOT listed, and cannot be: the captain's 2026-09-24 ruling
+# moved failure onto the same pink a kind label, a scouting word and the run
+# counter already wear, so its presence on a row says nothing either way.
+for alarm in $'\x1b[95m' $'\x1b[93m'; do
   case $out in
     *"$alarm"*) fail "a quiet second mate's row used an alarm colour" ;;
   esac
@@ -1149,10 +1152,18 @@ pass "every check count survives at any width the tally itself fits in"
 # A skipped stage must not look like one that has simply not been reached.
 # `skipped` and `pending` shared the dim slot, so the only difference on screen
 # was the four-letter timer word underneath.
+# The HEAD line is excluded from both reads, and deliberately: the run counter
+# lives there and wears this same slot, so a whole-frame grep would find the
+# skipped colour on every row whatever its stages are drawn as, and pass for a
+# reason that has nothing to do with the stages this case is about.
+without_head() {  # <id>
+  grep -v -- "$1"
+}
 skipcolour=$(render "$(snap "[$(agent_with sk4 '[]' "$LOCALSKIP")]")" |
-  grep -o $'\x1b\\[94m' | head -1)
+  without_head sk4 | grep -o $'\x1b\\[94m' | head -1)
 [ -n "$skipcolour" ] || fail "a skipped stage is not drawn in its own colour"
-pending_only=$(render "$(snap "[$(agent_with sk5 "$(steps_all pending)")]")")
+pending_only=$(render "$(snap "[$(agent_with sk5 "$(steps_all pending)")]")" |
+  without_head sk5)
 printf '%s' "$pending_only" | grep -q $'\x1b\[94m' &&
   fail "a stage that has merely not started was drawn in the skipped colour"
 pass "a skipped stage is visually distinct from one that has not been reached"
@@ -1373,7 +1384,9 @@ FLAT=$(printf '%s' "$SCOUT" | jq '.worker={harness:"claude",model:"claude-opus-5
 out=$(render "$(snap "[$FLAT]")")
 assert_contains "$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')" "opus 5 xhigh" \
   "a worker with no pipeline lost its own model label"
-for slot in '\x1b[91m' '\x1b[95m' '\x1b[93m'; do
+# The failure slot is absent for the reason the idle second mate case states:
+# it is shared with this row's own kind label and run counter.
+for slot in '\x1b[95m' '\x1b[93m'; do
   assert_not_contains "$out" "$(printf '%b' "$slot")" \
     "a healthy pipeline-less worker's row was painted in an alarm colour"
 done
@@ -1598,48 +1611,85 @@ node "$TMP_ROOT/align.mjs" "$TUI" "$ALIGN" ||
 pass "every detail line starts in its box's own first column"
 pass "a blank row always precedes the check tally"
 
-# --- the run counter, in red, beside the agent id ----------------------------
+# --- the run counter, on every row, in three named classes -------------------
 #
 # The captain asked for the number of runs this branch has been through the
-# pipeline, next to the agent id, in red. Both header variants carry it - the
-# inverse one drawn on the selected row and the ordinary one on every other -
-# because a row losing the count the moment it is selected is a count that
-# disappears exactly when the captain is looking at it.
+# pipeline, next to the agent id. Both header variants carry it - the inverse
+# one drawn on the selected row and the ordinary one on every other - because a
+# row losing the count the moment it is selected is a count that disappears
+# exactly when the captain is looking at it.
 #
-# Asserted against the escape the renderer actually emits, not against the
-# plain text, because "in red" is the whole of the request: a counter rendered
-# in the default foreground would pass a plain-text assertion.
+# It is drawn on EVERY row (2026-09-16: "make it consistent, when something is
+# on the first run we still say run #1"), because a blank was saying three
+# different things - no run yet, no pipeline at all, and a pipeline nobody
+# could read - in the one way that says none of them.
+#
+# Asserted against the escapes the renderer actually emits, not against the
+# plain text, because the colour is half the request: a counter in the default
+# foreground would pass a plain-text assertion. The slots are read out of the
+# renderer's own paint table rather than written down here, so the ruling that
+# moved this from red to pink on 2026-09-24 moves the assertion with it.
 
 cat >"$TMP_ROOT/runcount.mjs" <<'JS'
-const { render } = await import(process.argv[2]);
+const { render, PAINT } = await import(process.argv[2]);
 const snap = JSON.parse(process.argv[3]);
 let bad = 0;
 const say = (m) => { console.error(m); bad++; };
-// The renderer's own red slot, read from the file rather than written down
-// here, so a palette change moves the assertion with it.
-const RED = "\x1b[91m";
+// The renderer's own slots, taken by painting a character with them, so the
+// codes here can never be a second copy of the palette that drifts from it.
+const slot = (paint) => /\x1b\[([0-9;]*)m/.exec(paint("x"))[1];
+// The captain's pink: the failure slot, which is what he asked the counter to
+// share. Coupling the assertion to PAINT.failed is the point - "the same pink"
+// is the request, so a change that moved one and not the other must fail here.
+const PINK = `\x1b[${slot(PAINT.failed)}m`;
+const UNREADABLE = `\x1b[${slot(PAINT.unknown)}m`;
 
 const headFor = (frame, id) => frame.find((l) => l.includes(id)) ?? "";
+const withAgents = (fn) => {
+  const doc = JSON.parse(process.argv[3]);
+  doc.agents = doc.agents.map(fn);
+  return render(doc, { rows: 60, cols: 200, sel: 0, cell: -1 });
+};
 
 // sel 0 puts the FIRST agent on the inverse header and leaves the second on
 // the ordinary one, so one frame exercises both variants.
 const frame = render(snap, { rows: 60, cols: 200, sel: 0, cell: -1 });
 for (const [id, variant] of [["run3a", "inverse"], ["run3b", "ordinary"]]) {
   const head = headFor(frame, id);
-  if (!head.includes(`${RED}Run #3`)) say(`${variant} header carries no red run counter: ${JSON.stringify(head)}`);
+  if (!head.includes(`${PINK}Run #3`)) say(`${variant} header carries no pink run counter: ${JSON.stringify(head)}`);
+  if (head.includes("\x1b[91m")) say(`${variant} header still paints something in the retired red slot`);
   const idAt = head.indexOf(id);
   const runAt = head.indexOf("Run #3");
   if (idAt < 0 || runAt < idAt) say(`${variant} header did not put the counter after the id: ${JSON.stringify(head)}`);
 }
 
-// A worker the snapshot states no number for gets nothing at all - no zero, no
-// placeholder - on either variant.
-const none = JSON.parse(process.argv[3]);
-none.agents = none.agents.map((a) => ({ ...a, run_number: null }));
-const blank = render(none, { rows: 60, cols: 200, sel: 0, cell: -1 });
+// No run yet is its own mark, on both variants, and it is NOT a blank: a blank
+// is what used to say this, "no pipeline at all", and "nobody could read it"
+// all at once.
+const blank = withAgents((a) => ({ ...a, run_number: null }));
 for (const id of ["run3a", "run3b"]) {
   const head = headFor(blank, id);
-  if (/Run #/.test(head)) say(`a null run number still drew a counter: ${JSON.stringify(head)}`);
+  if (/Run #/.test(head)) say(`a null run number drew a numbered counter: ${JSON.stringify(head)}`);
+  if (!head.includes(`${PINK}Run -`)) say(`a null run number drew no not-yet marker: ${JSON.stringify(head)}`);
+}
+
+// A pipeline the collector could not read is a third mark, in the unknown
+// colour: it is not a reading at all, and must not look like one.
+const unread = withAgents((a) => ({
+  ...a, run_number: null, collection: { ok: false, reason: "axi status failed (exit 1)" },
+}));
+for (const id of ["run3a", "run3b"]) {
+  const head = headFor(unread, id);
+  if (!head.includes(`${UNREADABLE}Run ?`)) say(`an unreadable pipeline drew no unreadable counter: ${JSON.stringify(head)}`);
+  if (head.includes("Run -")) say(`an unreadable pipeline drew the not-yet marker: ${JSON.stringify(head)}`);
+}
+
+// And a row with no pipeline of its own carries the mark too, which is the
+// whole of "on every row".
+const scout = withAgents((a) => ({ ...a, pipeline: false, kind: "scout", run_number: null }));
+for (const id of ["run3a", "run3b"]) {
+  const head = headFor(scout, id);
+  if (!head.includes(`${PINK}Run -`)) say(`a row with no pipeline carries no counter: ${JSON.stringify(head)}`);
 }
 process.exit(bad ? 1 : 0);
 JS
@@ -1648,7 +1698,7 @@ RUNDOC=$(snap "[$(agent_with run3a "$(steps_all completed)" '{"run_number":3}'),
                 $(agent_with run3b "$(steps_all completed)" '{"run_number":3}')]")
 node "$TMP_ROOT/runcount.mjs" "$TUI" "$RUNDOC" ||
   fail "the run counter is missing, mispositioned, uncoloured, or drawn from nothing"
-pass "the run counter renders in red after the agent id on both header variants"
+pass "the run counter renders on every row in the pink slot, with its own mark for no run yet and for a pipeline nobody could read"
 
 # --- a run that ended under a live worker, and a CI head that will not land ---
 #
@@ -1675,7 +1725,12 @@ pass "the run counter renders in red after the agent id on both header variants"
 # moves to the pre-merge box; every finished box is the runner's centre green.
 
 cat >"$TMP_ROOT/verdicts.mjs" <<'JS'
-const { render, layout, CELL_WIDTHS, STEPS, BLOCK, ciVerdict, premergeVerdict, dur } = await import(process.argv[2]);
+const { render, layout, CELL_WIDTHS, STEPS, BLOCK, ciVerdict, premergeVerdict, dur, PAINT } = await import(process.argv[2]);
+// The renderer's own slots, painted and read back, so a palette ruling moves
+// every assertion below with it instead of leaving them asserting a colour the
+// captain replaced.
+const slot = (paint) => /\x1b\[([0-9;]*)m/.exec(paint("x"))[1];
+const FAILED = slot(PAINT.failed);
 const base = JSON.parse(process.argv[3]);
 const COLS = 200, ROWS = 60;
 let bad = 0;
@@ -1737,11 +1792,11 @@ const stale = {
   if (r.times[at("building")] !== dur(1625000)) say(`building does not count since the run ended: "${r.times[at("building")]}"`);
   if (!r.mid(at("building")).includes("1;92")) say(`no runner band on the building box: ${r.mid(at("building"))}`);
   if (r.words[at("review")] !== "FAIL") say(`the failed step lost its FAIL: "${r.words[at("review")]}"`);
-  if (r.mid(at("review")) !== "91") say(`the failed box is not red alone: ${r.mid(at("review"))}`);
+  if (r.mid(at("review")) !== FAILED) say(`the failed box is not the failure colour alone: ${r.mid(at("review"))}`);
   if (r.mid(at("intent")) !== "92") say(`a finished box is not the runner's green: ${r.mid(at("intent"))}`);
   if (r.mid(at("test")) !== "2") say(`a pending box is not dim: ${r.mid(at("test"))}`);
   if (!r.head.includes("run failed: daemon shutting down")) say(`the head line does not say how the run ended: ${JSON.stringify(r.head)}`);
-  if (!r.headRaw.includes("\x1b[91mrun failed: daemon shutting down")) say("the run's end is not painted red");
+  if (!r.headRaw.includes(`\x1b[${FAILED}mrun failed: daemon shutting down`)) say("the run's end is not painted in the failure colour");
   if (!r.header.includes("0 ready to merge")) say(`header: ${r.header}`);
 }
 // The same run with the worker gone: nothing is building, nothing moves, and
@@ -1823,7 +1878,7 @@ expectCI(sup({ main_moved: null, new_commits: null, reason: "the run has no copy
   }
   if (!r.mid(at("review")).includes("97") || !r.mid(at("review")).includes("1;92")) say(`running box: ${r.mid(at("review"))}`);
   if (r.mid(at("document")) !== "2") say(`pending docs box: ${r.mid(at("document"))}`);
-  if (!r.headRaw.includes("\x1b[91mRun #5")) say("the run counter lost its red");
+  if (!r.headRaw.includes(`\x1b[${FAILED}mRun #5`)) say("the run counter left the failure slot the captain asked it to share");
 }
 // A red head is a red head, superseded or not: a failure on the branch is a
 // fact the captain wants, and it is not the false green this rule guards.
@@ -1832,6 +1887,79 @@ expectCI(sup({ main_moved: null, new_commits: null, reason: "the run has no copy
   red.ci = { ...red.ci, failed: 1, passed: 3 };
   if (ciVerdict(red) !== "failed") say(`a failed check on a superseded head read as ${ciVerdict(red)}`);
 }
+// --- case 2b: a check that failed while its siblings are still running ------
+//
+// kunchenguid/no-mistakes PR 1104, head ca88ebd, 2026-09-24. The rollup GitHub
+// returned held thirteen entries, every one of them a check run on that head -
+// no stale head, and `PR must be raised via no-mistakes` PASSED, so the
+// excusable check was never in play either. `Greptile Review` completed FAILURE
+// at 10:09:48Z and `test (windows-steps)` ran until 10:24:31Z, so for fifteen
+// minutes the cell drew a finished-failure verdict over a run that was still
+// going: "the whole time we are progressing it just says FAIL as well and is
+// red instead of showing the runner bar".
+//
+// The counts here are that PR at 10:15Z, which is the frame in his screenshot:
+// twelve checks, seven passed, one failed, one skipped, three still pending.
+{
+  const midrun = {
+    ...live, id: "ci-midrun",
+    ci: { ...live.ci, head: RUN_HEAD, superseded: null,
+          total: 12, passed: 7, failed: 1, pending: 3, skipped: 1, excused: 0 },
+    active_steps: [{ step: "ci", status: "running", active_for: "8m21s", active_ms: 501000,
+                     last_activity: "", agent_pid: "", round: "" }],
+  };
+  const r = rowsFor(midrun);
+  if (ciVerdict(midrun) !== "running-failed") say(`a failure beside pending checks read as ${ciVerdict(midrun)}`);
+  if (r.words[CI] !== "7/12 running") say(`the mid-run CI cell says "${r.words[CI]}"`);
+  if (r.times[CI] !== dur(501000)) say(`the mid-run CI cell stopped counting: "${r.times[CI]}"`);
+  if (r.r3[CI] !== "1 fail so far") say(`the failure already in is not stated: "${r.r3[CI]}"`);
+  if (!r.mid(CI).includes("1;92")) say(`the mid-run CI box lost its runner band: ${r.mid(CI)}`);
+  if (r.mid(CI).includes(FAILED)) say(`the mid-run CI box is painted as a finished failure: ${r.mid(CI)}`);
+  if (r.words[PRE] !== "") say(`pre-merge asked for the word mid-run: "${r.words[PRE]}"`);
+  if (!r.header.includes("0 ready to merge")) say(`the header counted a mid-run PR: ${r.header}`);
+  // The tally has always carried the fail count and still does; the cell no
+  // longer contradicts it.
+  if (!r.facts.includes("1 fail")) say(`the tally lost the failure: ${r.facts}`);
+
+  // It is the same on the FIRST pass through the box, which is what he asked
+  // about - "I don't know if this is an issue the first time code reaches the
+  // GitHubCI box as well". Nothing about this depends on a previous run.
+  const firstRun = { ...midrun, id: "ci-midrun-first", run_number: 1 };
+  if (ciVerdict(firstRun) !== "running-failed") say(`a first run read as ${ciVerdict(firstRun)}`);
+
+  // And the moment the last check reports, it IS the verdict: red, FAIL, no
+  // band. Withholding it then would be the opposite lie.
+  const finished = { ...midrun, id: "ci-finished",
+    ci: { ...midrun.ci, passed: 10, pending: 0 } };
+  const rf = rowsFor(finished);
+  if (ciVerdict(finished) !== "failed") say(`a finished red run read as ${ciVerdict(finished)}`);
+  if (rf.words[CI] !== "10/12 FAIL") say(`the finished CI cell says "${rf.words[CI]}"`);
+  if (rf.mid(CI) !== FAILED) say(`the finished CI box is not the failure colour alone: ${rf.mid(CI)}`);
+  if (rf.r3[CI] !== "") say(`the finished CI cell still counts failures so far: "${rf.r3[CI]}"`);
+
+  // A clean run in progress is untouched: no failure row, and the same
+  // counter and band it has always had.
+  const clean = { ...midrun, id: "ci-clean", ci: { ...midrun.ci, failed: 0, passed: 8 } };
+  const rc2 = rowsFor(clean);
+  if (ciVerdict(clean) !== "running") say(`a clean run in progress read as ${ciVerdict(clean)}`);
+  if (rc2.words[CI] !== "8/12 running") say(`a clean mid-run CI cell says "${rc2.words[CI]}"`);
+  if (rc2.r3[CI] !== "") say(`a clean mid-run CI cell invented a failure row: "${rc2.r3[CI]}"`);
+
+  // A worker that is gone is not counting, whatever the rollup still says, so
+  // the mid-run cell loses its band and its elapsed exactly as the clean one
+  // already does.
+  const gone = rowsFor({ ...midrun, id: "ci-midrun-gone", endpoint_alive: false });
+  if (gone.mid(CI).includes("1;92")) say(`a gone worker's mid-run CI box kept the band: ${gone.mid(CI)}`);
+  if (gone.times[CI] !== "") say(`a gone worker's mid-run CI box kept counting: "${gone.times[CI]}"`);
+  if (gone.r3[CI] !== "1 fail so far") say(`a gone worker's mid-run CI box dropped the failure: "${gone.r3[CI]}"`);
+
+  // The widest count the field has to hold, so the row never needs shortening.
+  const many = { ...midrun, id: "ci-many-fail",
+    ci: { ...midrun.ci, total: 99, passed: 40, failed: 12, pending: 47 } };
+  const rm2 = rowsFor(many);
+  if (rm2.r3[CI] !== "12 fail so far") say(`a two-digit failure count did not fit: "${rm2.r3[CI]}"`);
+}
+
 // --- case 3: a PR that is no longer the captain's to decide -----------------
 //
 // PR 92 merged at 2026-09-15 23:17:58Z, and the next morning the view drew it
