@@ -51,7 +51,13 @@
 #     costs. No process scans, no globbing over the fleet, no network, no git.
 #     The linked-worktree test below is part of that budget, and is why it stats
 #     .git and reads the secondmate marker rather than asking git anything.
-#   - It never writes anything under state/, and never creates it.
+#     The watcher-pool strip (below) adds one more bounded read of its own: a
+#     directory listing capped at bin/fm-arm-pool-lib.sh's pool target (six) plus
+#     one kill -0 per live record, never a scan of the whole process table.
+#   - It never writes anything under state/, and never creates it. The strip
+#     sources bin/fm-wake-lib.sh, whose own `mkdir -p "$STATE"` is a no-op here
+#     because this point in the script is only reached once state/ is already
+#     known to exist (the earlier `[ -d "$STATE" ]` guard).
 #   - It degrades QUIETLY: when ownership cannot be determined it prints no fleet
 #     line rather than a wrong or alarming answer. Two cases are exactly that: a
 #     missing state dir, and an unmarked linked worktree, which is every crewmate
@@ -179,15 +185,149 @@ home_label=${FM_HOME%/}
 home_label=${home_label##*/}
 [ -n "$home_label" ] || home_label=firstmate
 
+# --- watcher pool strip ------------------------------------------------------
+# Right-aligned on the fleet line: one distinctly-marked cell for the LIVE
+# watcher, one filled box per waiting dormant arm, hollow boxes for empty slots
+# up to bin/fm-arm-pool-lib.sh's pool target. Captain's request, screenshot
+# 2026-09-17 ("add some blue boxes right aligned here ... where it gives the
+# number of watchers"), launch confirmed 2026-09-24.
+#
+# Colour choice: bin/fm-flow-tui.mjs's own palette comment names sgr("94") as
+# the slot it calls `blue` in code, but its own later ruling (docs/flow-tui.md
+# "Pink, not red") records that this exact slot renders PINK in the captain's
+# terminal theme, not blue - so reusing it here would silently ship pink boxes
+# under a "blue boxes" request. Nothing in this repo documents which SGR code
+# renders blue for him. SGR 34 (plain, non-bright blue) is used instead: themes
+# that retint the bright ANSI slots for accent colours - which is exactly what
+# happened to slot 94 - most commonly leave the plain-intensity slots at their
+# ordinary hue, so 34 is the best available guess, not a verified one.
+FM_STATUSLINE_BLUE=$(printf '\033[34m')
+FM_STATUSLINE_BLUE_BOLD=$(printf '\033[1;34m')
+FM_STATUSLINE_RESET=$(printf '\033[0m')
+fm_statusline_tab=$(printf '\t')
+
+fm_statusline_pid_alive() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$1" 2>/dev/null
+}
+
+# Terminal width: Claude Code sets COLUMNS in the environment before running a
+# statusLine command (its JSON payload carries no width field at all), so that
+# is the primary source; `tput cols` covers a hand run from an interactive
+# shell. Echoes nothing and fails when neither is available.
+fm_statusline_term_width() {
+  case "${COLUMNS:-}" in
+    ''|*[!0-9]*) ;;
+    *) printf '%s' "$COLUMNS"; return 0 ;;
+  esac
+  local cols
+  command -v tput >/dev/null 2>&1 || return 1
+  cols=$(tput cols 2>/dev/null) || return 1
+  case "$cols" in
+    ''|*[!0-9]*) return 1 ;;
+    *) printf '%s' "$cols"; return 0 ;;
+  esac
+}
+
+# Whether the pool has ever been joined here is decided ONCE, at the top level,
+# never inside fm_statusline_watcher_strip: that function's output is always
+# captured with `$(...)`, which runs it in a SUBSHELL, so a global it assigned
+# there (the plain-column width used for right-alignment below) would vanish
+# the moment the subshell exits. Sourcing the two pool libraries here, in the
+# real shell, is what makes fm_arm_pool_live_records and FM_ARM_POOL_TARGET
+# available to the function without that trap.
+FM_STATUSLINE_STRIP_WIDTH=3
+FM_STATUSLINE_POOL_DIR="$STATE/.arm-pool"
+if [ -d "$FM_STATUSLINE_POOL_DIR" ]; then
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  # shellcheck source=bin/fm-arm-pool-lib.sh
+  . "$SCRIPT_DIR/fm-arm-pool-lib.sh"
+  FM_STATUSLINE_STRIP_WIDTH=$((FM_ARM_POOL_TARGET * 3))
+fi
+
+fm_statusline_watcher_strip() {
+  local watch_pid live live_slot taken n out=
+  watch_pid=$(cat "$STATE/.watch.lock/pid" 2>/dev/null || true)
+  live=0
+  fm_statusline_pid_alive "$watch_pid" && live=1
+
+  if [ ! -d "$FM_STATUSLINE_POOL_DIR" ]; then
+    # Zero-cost path: this home has never joined the pool (old-style single
+    # watcher), so it costs one stat and renders as one cell instead of six.
+    if [ "$live" = 1 ]; then
+      printf '%s[@]%s' "$FM_STATUSLINE_BLUE_BOLD" "$FM_STATUSLINE_RESET"
+    else
+      printf '[.]'
+    fi
+    return 0
+  fi
+
+  # Consumes fm_arm_pool_live_records/fm_arm_pool_taken_slots rather than
+  # re-parsing the pool directory or that library's internal record format by
+  # hand, per bin/fm-arm-pool-lib.sh's own header.
+  live_slot=
+  if [ "$live" = 1 ]; then
+    live_slot=$(fm_arm_pool_live_records | while IFS="$fm_statusline_tab" read -r pid slot; do
+      [ "$pid" = "$watch_pid" ] || continue
+      printf '%s' "$slot"
+      break
+    done)
+  fi
+  taken=$(fm_arm_pool_taken_slots)
+
+  n=1
+  while [ "$n" -le "$FM_ARM_POOL_TARGET" ]; do
+    if [ -n "$live_slot" ] && [ "$n" = "$live_slot" ]; then
+      out="$out${FM_STATUSLINE_BLUE_BOLD}[@]${FM_STATUSLINE_RESET}"
+    elif printf '%s\n' "$taken" | grep -qx "$n"; then
+      out="$out${FM_STATUSLINE_BLUE}[#]${FM_STATUSLINE_RESET}"
+    else
+      out="${out}[.]"
+    fi
+    n=$((n + 1))
+  done
+  printf '%s' "$out"
+}
+
+# Right-aligns the strip on <text> when the terminal width is known and it
+# fits; never wraps the row. Width known but too narrow: drop the strip and
+# keep the text. Width unknown (no COLUMNS, no tput - piped, no tty): the
+# enumerated fallback still shows the strip, placed right after the text with
+# two spaces, since this script has no way to tell whether that would wrap and
+# dropping it here would leave the feature invisible in most non-interactive
+# runs, including a hand test of this very script.
+fm_statusline_compose_row() {  # <text> <strip>
+  local text=$1 strip=$2 width pad
+  if [ -z "$strip" ]; then
+    printf '%s\n' "$text"
+    return 0
+  fi
+  if width=$(fm_statusline_term_width); then
+    pad=$((width - ${#text} - FM_STATUSLINE_STRIP_WIDTH))
+    if [ "$pad" -ge 1 ]; then
+      printf '%s%*s%s\n' "$text" "$pad" '' "$strip"
+    else
+      printf '%s\n' "$text"
+    fi
+    return 0
+  fi
+  printf '%s  %s\n' "$text" "$strip"
+}
+
 case "$(fm_session_lock_ownership "$STATE")" in
   owned)
-    printf '%s - in control of fleet\n' "$home_label"
+    fleet_text=$(printf '%s - in control of fleet' "$home_label")
     ;;
   other)
-    printf '%s - not in control of fleet (another session holds it; end that session or run bin/fm-session-start.sh once it is gone)\n' "$home_label"
+    fleet_text=$(printf '%s - not in control of fleet (another session holds it; end that session or run bin/fm-session-start.sh once it is gone)' "$home_label")
     ;;
   *)
-    printf '%s - not in control of fleet (no session holds it; run bin/fm-session-start.sh)\n' "$home_label"
+    fleet_text=$(printf '%s - not in control of fleet (no session holds it; run bin/fm-session-start.sh)' "$home_label")
     ;;
 esac
+
+fm_statusline_compose_row "$fleet_text" "$(fm_statusline_watcher_strip)"
 exit 0

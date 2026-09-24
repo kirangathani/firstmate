@@ -403,6 +403,194 @@ test_real_operator_status_line_still_renders_every_segment() {
   pass "render: the live operator status line composes, and the recorded fixture still matches it"
 }
 
+# --- watcher pool strip ------------------------------------------------------
+# bin/fm-statusline.sh appends a right-aligned strip of boxes to the fleet line:
+# one distinctly-marked cell for the live watcher, a filled blue box per
+# waiting dormant arm, and a hollow box for each empty slot up to
+# bin/fm-arm-pool-lib.sh's pool target. These cases render that strip end to
+# end, the same way the cases above render the base line, at a fixed 120-column
+# width (the width the PR screenshot uses) so the expected string is exact.
+#
+# A synthetic pool record matches bin/fm-arm-pool-lib.sh's own on-disk format
+# exactly (identity, session, timestamp, role, slot, tab-separated), with the
+# identity and session fields left empty: an empty identity is accepted on any
+# host regardless of /proc support, and an empty session matches what
+# fm_arm_pool_session reads when no state/.lock is present, which none of these
+# cases create. Every case uses a real, live pid for its record - a synthetic
+# pid that names no real process is exactly what that library's own pruning
+# discards as dead.
+FM_STATUSLINE_TEST_BLUE=$'\033[34m'
+FM_STATUSLINE_TEST_BLUE_BOLD=$'\033[1;34m'
+FM_STATUSLINE_TEST_RESET=$'\033[0m'
+NO_SESSION_FLEET_TEXT='home - not in control of fleet (no session holds it; run bin/fm-session-start.sh)'
+
+POOL_SPAWNED_PIDS=()
+pool_test_cleanup() {
+  local p
+  for p in "${POOL_SPAWNED_PIDS[@]:-}"; do
+    [ -n "$p" ] && kill "$p" 2>/dev/null
+  done
+  fm_test_cleanup
+}
+trap pool_test_cleanup EXIT
+
+# spawn_pool_member <state dir> <slot>: writes a live-pid record in <slot> and
+# leaves the pid in SPAWN_PID. NEVER called through `$(...)`: the background
+# `sleep` inherits that command substitution's write end of its capture pipe,
+# so the substitution blocks for the full 300s waiting for a close that a
+# backgrounded job never gives it. Redirecting the job's own stdio away from
+# the caller's descriptors is the fix, not just working around the symptom -
+# but a global out-parameter sidesteps the whole class of the bug here, and
+# also lets POOL_SPAWNED_PIDS accumulate in THIS shell rather than in a
+# subshell whose array the caller could never see.
+SPAWN_PID=
+spawn_pool_member() {
+  local state=$1 slot=$2
+  sleep 300 >/dev/null 2>&1 &
+  SPAWN_PID=$!
+  POOL_SPAWNED_PIDS+=("$SPAWN_PID")
+  mkdir -p "$state/.arm-pool"
+  printf '\t\t%s\tdormant\t%s\n' "$(date +%s)" "$slot" > "$state/.arm-pool/$SPAWN_PID"
+}
+
+# mark_watch_live <state dir> <pid>: names <pid> as the live watcher.
+mark_watch_live() {
+  mkdir -p "$1/.watch.lock"
+  printf '%s\n' "$2" > "$1/.watch.lock/pid"
+}
+
+# expected_fleet_row <text> <strip> <strip width> <term width>: the same
+# right-align arithmetic bin/fm-statusline.sh's fm_statusline_compose_row uses,
+# so a case asserts the documented contract rather than a copy-pasted number.
+expected_fleet_row() {
+  local text=$1 strip=$2 strip_w=$3 width=$4 pad
+  pad=$((width - ${#text} - strip_w))
+  printf '%s%*s%s' "$text" "$pad" '' "$strip"
+}
+
+strip_ansi() {
+  printf '%s' "$1" | sed -E 's/\x1b\[[0-9;]*m//g'
+}
+
+# render_pool <home> [COLUMNS=n]: the fleet line alone, base composition
+# skipped by pointing CLAUDE_CONFIG_DIR at a path with no settings.json, so
+# fm_statusline_user_base resolves nothing and BASE stays empty.
+render_pool() {
+  local home=$1
+  shift
+  render "$(build_payload "$home")" \
+    -u FM_STATUSLINE_BASE FM_HOME="$home" HOME="$home" \
+    CLAUDE_CONFIG_DIR="$home-no-config" "$@"
+}
+
+test_watcher_strip_empty_pool() {
+  local home rendered expected
+  home="$TMP_ROOT/pool-empty/home"
+  mkdir -p "$home/state/.arm-pool"
+
+  rendered=$(render_pool "$home" COLUMNS=120)
+  expected=$(expected_fleet_row "$NO_SESSION_FLEET_TEXT" '[.][.][.][.][.][.]' 18 120)
+  [ "$rendered" = "$expected" ] ||
+    fail "empty pool: expected"$'\n'"$expected"$'\n'"got"$'\n'"$rendered"
+  [ "$(strip_ansi "$rendered")" = "$expected" ] ||
+    fail "empty pool: the strip carried unexpected ANSI codes"
+  pass "render: an empty pool draws six hollow boxes, right-aligned to the terminal width"
+}
+
+test_watcher_strip_one_live() {
+  local home pid rendered expected raw
+  home="$TMP_ROOT/pool-one-live/home"
+  mkdir -p "$home/state"
+  spawn_pool_member "$home/state" 1; pid=$SPAWN_PID
+  mark_watch_live "$home/state" "$pid"
+
+  rendered=$(render_pool "$home" COLUMNS=120)
+  raw="${FM_STATUSLINE_TEST_BLUE_BOLD}[@]${FM_STATUSLINE_TEST_RESET}[.][.][.][.][.]"
+  expected=$(expected_fleet_row "$NO_SESSION_FLEET_TEXT" "$raw" 18 120)
+  [ "$rendered" = "$expected" ] ||
+    fail "one live: expected"$'\n'"$expected"$'\n'"got"$'\n'"$rendered"
+  [ "$(strip_ansi "$rendered")" = "$(expected_fleet_row "$NO_SESSION_FLEET_TEXT" '[@][.][.][.][.][.]' 18 120)" ] ||
+    fail "one live: the ANSI-stripped strip did not read [@][.][.][.][.][.]"
+  pass "render: the sole live watcher draws distinctly marked, with five hollow slots behind it"
+}
+
+test_watcher_strip_live_plus_three_dormant() {
+  local home pid1 rendered expected raw
+  home="$TMP_ROOT/pool-live-plus-three/home"
+  mkdir -p "$home/state"
+  spawn_pool_member "$home/state" 1; pid1=$SPAWN_PID
+  spawn_pool_member "$home/state" 2
+  spawn_pool_member "$home/state" 3
+  spawn_pool_member "$home/state" 4
+  mark_watch_live "$home/state" "$pid1"
+
+  rendered=$(render_pool "$home" COLUMNS=120)
+  raw="${FM_STATUSLINE_TEST_BLUE_BOLD}[@]${FM_STATUSLINE_TEST_RESET}"
+  raw="$raw${FM_STATUSLINE_TEST_BLUE}[#]${FM_STATUSLINE_TEST_RESET}"
+  raw="$raw${FM_STATUSLINE_TEST_BLUE}[#]${FM_STATUSLINE_TEST_RESET}"
+  raw="$raw${FM_STATUSLINE_TEST_BLUE}[#]${FM_STATUSLINE_TEST_RESET}[.][.]"
+  expected=$(expected_fleet_row "$NO_SESSION_FLEET_TEXT" "$raw" 18 120)
+  [ "$rendered" = "$expected" ] ||
+    fail "live plus three dormant: expected"$'\n'"$expected"$'\n'"got"$'\n'"$rendered"
+  [ "$(strip_ansi "$rendered")" = "$(expected_fleet_row "$NO_SESSION_FLEET_TEXT" '[@][#][#][#][.][.]' 18 120)" ] ||
+    fail "live plus three dormant: the ANSI-stripped strip did not read [@][#][#][#][.][.]"
+  pass "render: a live watcher plus three waiting dormant arms draws four filled boxes and two hollow"
+}
+
+test_watcher_strip_full() {
+  local home slot pid live_pid rendered expected raw n
+  home="$TMP_ROOT/pool-full/home"
+  mkdir -p "$home/state"
+  raw=
+  for n in 1 2 3 4 5 6; do
+    spawn_pool_member "$home/state" "$n"; pid=$SPAWN_PID
+    if [ "$n" = 1 ]; then
+      live_pid=$pid
+      raw="${FM_STATUSLINE_TEST_BLUE_BOLD}[@]${FM_STATUSLINE_TEST_RESET}"
+    else
+      raw="$raw${FM_STATUSLINE_TEST_BLUE}[#]${FM_STATUSLINE_TEST_RESET}"
+    fi
+  done
+  mark_watch_live "$home/state" "$live_pid"
+
+  rendered=$(render_pool "$home" COLUMNS=120)
+  expected=$(expected_fleet_row "$NO_SESSION_FLEET_TEXT" "$raw" 18 120)
+  [ "$rendered" = "$expected" ] ||
+    fail "full pool: expected"$'\n'"$expected"$'\n'"got"$'\n'"$rendered"
+  [ "$(strip_ansi "$rendered")" = "$(expected_fleet_row "$NO_SESSION_FLEET_TEXT" '[@][#][#][#][#][#]' 18 120)" ] ||
+    fail "full pool: the ANSI-stripped strip did not read [@][#][#][#][#][#]"
+  pass "render: a full pool draws the live watcher plus five filled boxes, none hollow"
+}
+
+test_watcher_strip_absent_pool() {
+  local home rendered expected
+  home="$TMP_ROOT/pool-absent/home"
+  mkdir -p "$home/state"
+
+  [ ! -d "$home/state/.arm-pool" ] || fail "absent pool: the fixture must have no .arm-pool directory"
+  rendered=$(render_pool "$home" COLUMNS=120)
+  expected=$(expected_fleet_row "$NO_SESSION_FLEET_TEXT" '[.]' 3 120)
+  [ "$rendered" = "$expected" ] ||
+    fail "absent pool: expected"$'\n'"$expected"$'\n'"got"$'\n'"$rendered"
+  pass "render: a home that has never joined the pool draws one hollow cell, the old-style single watcher"
+}
+
+test_watcher_strip_narrow_width_drops_it() {
+  local home slot pid live_pid rendered
+  home="$TMP_ROOT/pool-narrow/home"
+  mkdir -p "$home/state"
+  for slot in 1 2 3 4 5 6; do
+    spawn_pool_member "$home/state" "$slot"; pid=$SPAWN_PID
+    [ "$slot" = 1 ] && live_pid=$pid
+  done
+  mark_watch_live "$home/state" "$live_pid"
+
+  rendered=$(render_pool "$home" COLUMNS=40)
+  [ "$rendered" = "$NO_SESSION_FLEET_TEXT" ] ||
+    fail "narrow width: the strip must be dropped rather than wrap the row, got:"$'\n'"$rendered"
+  pass "render: a terminal too narrow for the strip drops it and keeps the text intact"
+}
+
 test_render_with_no_local_base_configured_at_all
 test_render_in_a_task_worktree_with_no_state_dir
 test_render_inside_tmux_carries_the_whole_base_line
@@ -411,3 +599,9 @@ test_render_with_genuinely_no_base_command_anywhere
 test_a_self_referential_user_setting_does_not_recurse
 test_the_payload_reaches_the_base_command_unchanged
 test_real_operator_status_line_still_renders_every_segment
+test_watcher_strip_empty_pool
+test_watcher_strip_one_live
+test_watcher_strip_live_plus_three_dormant
+test_watcher_strip_full
+test_watcher_strip_absent_pool
+test_watcher_strip_narrow_width_drops_it
