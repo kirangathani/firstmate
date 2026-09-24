@@ -134,6 +134,16 @@ How the setting reaches each location differs, because `config/` is gitignored a
 - **Secondmate home.** `statusline-base` is in `FM_INHERITABLE_CONFIG` (`bin/fm-config-inherit-lib.sh`), so the primary propagates it as a real `config/statusline-base` file on every convergence, and the secondmate reads its own copy. An item the primary does not set is mirrored as absence downstream, so clearing it downstream needs no extra step, and absence downstream now falls through to tier 3 rather than to nothing.
 - **Crewmate or scout task worktree.** A plain `git worktree` has no `config/` and no `state/`, so there is no file to read. `bin/fm-spawn.sh` exports `FM_STATUSLINE_BASE` into the worker's launch environment when the dispatching home set one explicitly, which is how a deliberate per-home choice reaches the worker; nothing is exported when the dispatching home has no setting, and no spawn ever fails over it. A worker that inherits no export resolves tier 3 for itself, so a task worktree shows the operator's own status line either way.
 
+### The watcher pool strip
+
+`bin/fm-statusline.sh` appends a strip of boxes to the right edge of the fleet-control line, drawn from `bin/fm-arm-pool-lib.sh`'s own on-disk dormant-arm-pool records rather than from any process scan.
+`[@]` marks the pool member currently holding the watcher singleton; `[#]` marks a waiting dormant arm; `[.]` marks an empty slot, up to the pool's target size (six).
+A home that has never joined the pool at all - the old-style single watcher, no `state/.arm-pool` directory - costs one stat and draws one cell instead of six.
+The strip is right-aligned to the terminal width, read from `$COLUMNS` (Claude Code sets it before running a `statusLine` command; its JSON payload carries no width field) or `tput cols` as a fallback for a hand run.
+A width that is known but too narrow to fit the strip drops it rather than wrapping the row; a width that cannot be determined at all still shows the strip, placed right after the text with two spaces, because dropping it there would make the feature invisible in most non-interactive runs.
+Every cell is drawn in SGR 34 (plain blue), not the `sgr("94")` slot `bin/fm-flow-tui.mjs` also calls `blue` in code - that slot renders pink in the captain's own terminal theme per its "Pink, not red" ruling (`docs/flow-tui.md`), and nothing else in this repo documents which code renders blue for him.
+`tests/fm-statusline-render.test.sh` renders the strip end to end against a synthetic pool directory, asserting the exact output both with its ANSI codes and with them stripped.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` as `bin/fm-test.sh --local` so no-mistakes runs firstmate's bash behavior suite directly.
