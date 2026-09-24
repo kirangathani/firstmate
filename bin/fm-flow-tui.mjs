@@ -35,6 +35,19 @@
 //                     --open-cmd, and only it knows what that command does to
 //                     the captain's terminal or how to get back. Default:
 //                     "enter: open this worker's window".
+//   --open-pr-cmd C   watch only. Shell command run when the captain presses
+//                     enter while the stage cursor is on one of the two cells
+//                     that BELONG to the PR - push+PR and GITHUB CI - with the
+//                     same FM_FLOW_* environment --open-cmd gets. OPT-IN, no
+//                     default. Unlike --open-cmd the viewer does NOT suspend
+//                     for it: opening a browser is not something the captain
+//                     watches happen in this terminal, so it runs in the
+//                     background and its own first line of output is flashed
+//                     when it returns.
+//   --open-pr-hint T  watch only. What the row says enter will do while the
+//                     cursor is on one of those two cells. Same reason the
+//                     caller owns it. Default: "enter: open this PR in your
+//                     browser".
 //
 // THE TWO CHANNELS ARE SEPARATE, AND THAT IS THE WHOLE POINT.
 // The snapshot arrives on stdin, so stdin is a PIPE and can never be a
@@ -534,6 +547,16 @@ const INDENT = 2;
 // columns on the same frame. The widest ordinary spacing is already five, so at
 // full width nothing moves at all.
 const PR_LABEL_W = 5;
+// The two cells that are ABOUT the PR rather than about the worker: the box
+// that pushed it and the box reporting its checks. Enter means something
+// different on them, so they are derived from the step list and the cell order
+// rather than written down as numbers a step inserted anywhere would move.
+// Exported so a test addresses them the way the renderer does.
+export const PR_CELLS = new Set([
+  STEPS.findIndex((s) => s.key === "pr"),
+  STEPS.length,
+]);
+export const isPRCell = (cell) => PR_CELLS.has(cell);
 // The gutter LEAVING push+PR, which is the one the PR number rides. Derived
 // from where that step actually sits rather than from the end of the row, so a
 // step added after it does not silently move the label onto another connector.
@@ -1067,6 +1090,28 @@ export function prLabel(agent) {
 }
 
 const DEFAULT_OPEN_HINT = "enter: open this worker's window";
+const DEFAULT_OPEN_PR_HINT = "enter: open this PR in your browser";
+
+// What the selected row says enter will do, which now depends on WHERE the
+// stage cursor is. It has to be the truth for that exact cell: the row already
+// promised on every frame what enter would do, and a promise that stopped being
+// true the moment the cursor moved one cell right would be worse than the
+// silence this replaced.
+//
+// A row with no PR recorded says so rather than advertising an action that
+// would do nothing. That is the same rule the cell beneath it follows, where a
+// task with no PR draws a dash instead of a blank.
+// Whether enter on THIS row, with the cursor HERE, is about the PR. A worker
+// with no pipeline draws none of these cells, so the stage cursor says nothing
+// about its row whatever index it happens to be parked at, and enter there
+// keeps meaning what it always did.
+export const opensPR = (agent, cell) => hasPipeline(agent) && isPRCell(cell);
+
+export function enterHint(agent, cell, hints = {}) {
+  if (!opensPR(agent, cell)) return hints.window || DEFAULT_OPEN_HINT;
+  if (!agent?.pr?.url) return "enter: no PR recorded for this task yet";
+  return hints.pr || DEFAULT_OPEN_PR_HINT;
+}
 
 // How many times this branch has been through the pipeline, INCLUDING the run
 // on screen. A run is one `no-mistakes axi run` - one row in the daemon's own
@@ -1466,7 +1511,7 @@ export function headerLine(segs, cols) {
 export function render(snap, opts) {
   const {
     rows, cols, anim = 0, sel = 0, cell = -1, top: topIn = 0,
-    flash = "", note = "", openHint = "",
+    flash = "", note = "", openHint = "", openPrHint = "",
   } = opts;
   const agents = snap.agents ?? [];
   const lay = layout(cols, cell < 0 ? 0 : cell);
@@ -1531,9 +1576,12 @@ export function render(snap, opts) {
   shown.forEach((a, i) => {
     const n = win.top + i;
     const selected = n === sel;
+    // The sentence is resolved per ROW and per CELL rather than handed down as
+    // one string, because enter no longer does one thing.
+    const hint = enterHint(a, cell, { window: openHint, pr: openPrHint });
     out.push(...(hasPipeline(a)
-      ? agentBlock(a, n + 1, selected, cell, anim, lay, openHint)
-      : compactBlock(a, n + 1, selected, openHint)));
+      ? agentBlock(a, n + 1, selected, cell, anim, lay, hint)
+      : compactBlock(a, n + 1, selected, hint)));
     out.push("");
   });
 
@@ -1543,7 +1591,10 @@ export function render(snap, opts) {
   out.push(
     (scroll ? green(scroll) : "") +
       dim(
-        "up/down agent   left/right stage   enter open worker   " +
+        // Which of the two enter does is named on the selected row itself, per
+        // cell, so this line says only that there are two rather than spelling
+        // out cell names a row's own hint states more precisely.
+        "up/down agent   left/right stage   enter open worker or PR   " +
           "r refresh   q quit",
       ),
   );
@@ -1560,6 +1611,7 @@ function parseArgs(argv) {
   const o = {
     watch: false, cols: null, rows: null, tick: 0, tickGiven: false,
     refreshCmd: "", refreshMs: 10000, openCmd: "", openHint: "",
+    openPrCmd: "", openPrHint: "",
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -1571,6 +1623,8 @@ function parseArgs(argv) {
     else if (a === "--refresh-ms") o.refreshMs = Number(argv[++i]);
     else if (a === "--open-cmd") o.openCmd = String(argv[++i] ?? "");
     else if (a === "--open-hint") o.openHint = String(argv[++i] ?? "");
+    else if (a === "--open-pr-cmd") o.openPrCmd = String(argv[++i] ?? "");
+    else if (a === "--open-pr-hint") o.openPrHint = String(argv[++i] ?? "");
     else if (a === "-h" || a === "--help") o.help = true;
     else { o.bad = a; }
   }
@@ -1613,6 +1667,7 @@ async function main() {
     process.stdout.write(
       "usage: fm-flow-snapshot.sh --json | fm-flow-tui.mjs [--cols N] [--rows N] [--tick N]\n" +
         "       [--watch [--refresh-cmd CMD] [--refresh-ms N] [--open-cmd CMD] [--open-hint TEXT]\n" +
+        "       [--open-pr-cmd CMD] [--open-pr-hint TEXT]]\n" +
         "       bin/fm-flow.sh is the captain-facing entry point and wires all three up.\n",
     );
     return 0;
@@ -1621,9 +1676,11 @@ async function main() {
     process.stderr.write(`fm-flow-tui: unknown argument ${opts.bad}\n`);
     return 2;
   }
-  if (!opts.watch && (opts.refreshCmd || opts.openCmd || opts.openHint)) {
+  if (!opts.watch && (opts.refreshCmd || opts.openCmd || opts.openHint ||
+      opts.openPrCmd || opts.openPrHint)) {
     process.stderr.write(
-      "fm-flow-tui: --refresh-cmd, --open-cmd and --open-hint need --watch\n",
+      "fm-flow-tui: --refresh-cmd, --open-cmd, --open-hint, --open-pr-cmd and " +
+        "--open-pr-hint need --watch\n",
     );
     return 2;
   }
@@ -1759,6 +1816,7 @@ function watch(snap0, cols0, rows0, opts) {
       ageSeconds: opts.tickGiven ? 0 : ageOf(snap),
       note,
       openHint: opts.openHint,
+      openPrHint: opts.openPrHint,
     });
     process.stdout.write(frame.join("\n") + "\n");
     return 0;
@@ -1832,6 +1890,7 @@ function watch(snap0, cols0, rows0, opts) {
       flash,
       note,
       openHint: opts.openHint,
+      openPrHint: opts.openPrHint,
       ageSeconds: ageOf(snap),
     });
     let buf = "\x1b[?2026h";
@@ -1890,6 +1949,16 @@ function watch(snap0, cols0, rows0, opts) {
   // window, which is the exact defect class this fleet cares about most. What
   // the command SAYS it did is what reaches the footer; the exit code only
   // decides whether that is an outcome or a failure.
+  // What every command this view runs is told about the selected agent. One
+  // object, because the two routes must describe the same row the same way.
+  const flowEnv = (a) => ({
+    FM_FLOW_ID: a.id ?? "",
+    FM_FLOW_WINDOW: a.window ?? "",
+    FM_FLOW_WORKTREE: a.worktree ?? "",
+    FM_FLOW_PROJECT: a.project ?? "",
+    FM_FLOW_PR: a.pr?.url ?? "",
+  });
+
   const handOver = (cmd, a) => {
     // Our OWN stdout, not a fresh open of /dev/tty, and it is handed to the
     // child as both its stdin and its stdout. A terminal is opened read-write,
@@ -1915,14 +1984,7 @@ function watch(snap0, cols0, rows0, opts) {
       res = spawnSync("/bin/sh", ["-c", cmd], {
         encoding: "utf8",
         stdio: ttyFd == null ? ["ignore", "ignore", "pipe"] : [ttyFd, ttyFd, "pipe"],
-        env: {
-          ...process.env,
-          FM_FLOW_ID: a.id ?? "",
-          FM_FLOW_WINDOW: a.window ?? "",
-          FM_FLOW_WORKTREE: a.worktree ?? "",
-          FM_FLOW_PROJECT: a.project ?? "",
-          FM_FLOW_PR: a.pr?.url ?? "",
-        },
+        env: { ...process.env, ...flowEnv(a) },
       });
     } catch (e) {
       // spawnSync itself refusing to start is still a failure, and the screen
@@ -1939,13 +2001,43 @@ function watch(snap0, cols0, rows0, opts) {
     return { res, threw, ttyFd };
   };
 
-  // Enter is AGENT-scoped, not cell-scoped: it opens the selected worker's
-  // window whichever cell is highlighted. No cell carries an action of its own,
-  // including GITHUB CI, and the selected agent's row says so on every frame
-  // rather than leaving the captain to find out by pressing it.
+  // Enter opens the PR when the stage cursor is on one of the two cells that
+  // are about the PR, and the worker's window everywhere else. It is the only
+  // cell-scoped key on this view, and it is cell-scoped for the reason the
+  // captain gave: "the push+PR box can allow me to press enter on it to open
+  // the browser on the link to the active PR". The URL is the one the row is
+  // already identified by, so nothing new is looked up.
+  //
+  // This one does NOT suspend the view. --open-cmd may be a full-screen program
+  // the captain sits in, which is why that path hands over the terminal; a
+  // browser opens on another machine's desktop and returns at once, so
+  // suspending for it would blank the fleet view for a blink and give nothing
+  // back. It runs in the background and its own first line reaches the footer
+  // when it returns, by the same rule: what the command SAYS it did, never what
+  // its exit code implies.
+  const openPR = (a) => {
+    if (!a.pr?.url) { setFlash(`${a.id}: no PR recorded for this task yet`); return; }
+    if (!opts.openPrCmd) { setFlash(`no PR-open command wired up; the PR is ${a.pr.url}`); return; }
+    setFlash(`opening ${a.pr.url}`);
+    execFile(
+      "/bin/sh",
+      ["-c", opts.openPrCmd],
+      {
+        encoding: "utf8", timeout: 30000, killSignal: "SIGKILL",
+        env: { ...process.env, ...flowEnv(a) },
+      },
+      (err, stdout, stderr) => {
+        const said = firstLine(stderr) || firstLine(stdout);
+        setFlash(err ? `open failed: ${said || err.message}` : said || `opened ${a.pr.url}`);
+        paint();
+      },
+    );
+  };
+
   const open = () => {
     const a = (snap.agents ?? [])[sel];
     if (!a) return;
+    if (opensPR(a, cell)) { openPR(a); return; }
     if (!opts.openCmd) {
       setFlash(`no open command wired up; that worker is at ${a.window || "an unrecorded window"}`);
       return;
