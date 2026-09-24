@@ -192,3 +192,87 @@ plain=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')
 assert_contains "$plain" "no PR recorded for this task yet" \
   "a row with no PR did not say so on the screen the captain was looking at"
 pass "a row with no PR says so on screen and runs nothing, rather than swallowing the key"
+
+# --- THE INVARIANT: a row can never show both a CI FAIL and an upstream wait --
+#
+# The captain asked for this one by name. The two contradict each other outright
+# - a task whose checks have gone red has something to do, which is the opposite
+# of purely waiting - and the gate behind the declaration already makes the pair
+# unreachable: a red check refuses it, and the recheck drops a record whose
+# checks went red afterwards (tests/fm-upstream-wait.test.sh asserts both).
+#
+# That is a claim about a PROCESS. This is a claim about a FRAME, and it is
+# asserted separately because a record that survived a window it should not
+# have, a hand-written document, or a recheck that could not reach GitHub all
+# arrive at the renderer looking identical. It is driven through a real terminal
+# for the same reason the cases above are: the frame the captain reads is the
+# thing being claimed about.
+
+# The renderer's own slots, read from it rather than written down, so a palette
+# ruling moves these assertions with it.
+read -r LILAC UNREADABLE FAILED <<EOF
+$(node --input-type=module -e \
+  'const m = await import(process.argv[1]);
+   const slot = (p) => /\x1b\[([0-9;]*)m/.exec(p("x"))[1];
+   process.stdout.write([slot(m.PAINT.upstream), slot(m.PAINT.unknown), slot(m.PAINT.failed)].join(" "))' \
+  "$TUI" 2>/dev/null </dev/null)
+EOF
+[ -n "$LILAC" ] || fail "the renderer states no upstream-wait colour"
+[ "$LILAC" != "$UNREADABLE" ] || fail "the upstream-wait colour is the unreadable colour"
+[ "$LILAC" != "$FAILED" ] || fail "the upstream-wait colour is the failure colour"
+pass "the upstream-wait colour is a slot of its own, distinct from the failure and unreadable colours"
+
+waiting_ship() {  # <id> <ci-json> -> one agent carrying a standing upstream wait
+  ship "$1" "$(jq -n --arg u "$PR_URL" '{url:$u,number:126}')" |
+    jq --argjson ci "$2" '.upstream_wait = {
+         waiting: true,
+         action: "the no-mistakes maintainer has to merge PR 1104"
+       } | .ci = ($ci + {collection:{ok:true,reason:""},checks:[],
+         excused_authority:[], head:"abc1234", pr_state:"OPEN", superseded:null})'
+}
+
+GREEN_CI='{"total":12,"passed":12,"failed":0,"pending":0,"skipped":0,"excused":0}'
+RED_CI='{"total":12,"passed":10,"failed":1,"pending":0,"skipped":1,"excused":0}'
+
+# A frame with BOTH facts set. The record says waiting; the rollup says a check
+# failed. The failure is the fact, and the record is the thing that has gone
+# stale, so the row says exactly that and never paints the wait.
+SNAP=$(snapshot "[$(waiting_ship contra "$RED_CI")]")
+out=$(drive "$SNAP" "" "$TMP_ROOT/m5" --open-pr-cmd true)
+plain=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')
+assert_contains "$plain" "FAIL" "the failure vanished from a row carrying an upstream wait"
+assert_not_contains "$plain" "waiting on action from upstream" \
+  "a row with a failing check still claimed to be waiting on upstream"
+assert_contains "$plain" "upstream-wait record is stale" \
+  "the row dropped the stale record without saying it had"
+case $out in
+  *$'\x1b['"$LILAC"m*) fail "a row with a failing check painted the upstream-wait colour" ;;
+esac
+assert_contains "$out" $'\x1b['"$UNREADABLE"m \
+  "the stale record was not reported in the unreadable colour"
+pass "a row can never show both a CI FAIL and waiting on action from upstream"
+
+# The reverse, so the case above is not passing because nothing draws the wait
+# at all: over checks that are all green it draws on the row AND on the CI box.
+SNAP=$(snapshot "[$(waiting_ship lilac "$GREEN_CI")]")
+out=$(drive "$SNAP" "" "$TMP_ROOT/m6" --open-pr-cmd true)
+plain=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')
+assert_contains "$plain" "waiting on action from upstream: the no-mistakes maintainer has to merge PR 1104" \
+  "the row did not name the action it is waiting on"
+assert_contains "$plain" "action needed" "the CI box did not say the ball is upstream"
+assert_contains "$plain" "from upstream" "the CI box's sentence was cut"
+assert_contains "$plain" "12/12 passed" "the CI box stopped reporting the checks it knows about"
+assert_not_contains "$plain" "upstream-wait record is stale" "a green row reported its record stale"
+assert_contains "$out" $'\x1b['"$LILAC"m "the upstream wait was not drawn in its own colour"
+pass "an upstream wait over all-green checks draws its own colour on the row and on the GITHUB CI box"
+
+# Both standing declarations can hold at once, and each is its own sentence: the
+# captain sitting in a window does not stop a PR waiting on a maintainer.
+BOTH=$(snapshot "[$(waiting_ship both "$GREEN_CI" | jq '.captain_driving = true')]")
+out=$(drive "$BOTH" "" "$TMP_ROOT/m7" --open-pr-cmd true)
+plain=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')
+assert_contains "$plain" "captain driving directly in the window" \
+  "the captain-driving marker was swallowed by the upstream wait"
+assert_contains "$plain" "waiting on action from upstream" \
+  "the upstream wait was swallowed by the captain-driving marker"
+pass "a row the captain is driving AND that is waiting on upstream shows both, because both are true"

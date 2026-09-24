@@ -2135,3 +2135,73 @@ JS
 node "$TMP_ROOT/verdicts.mjs" "$TUI" "$(snap "[$(agent_with tmpl '[]' '{}')]")" ||
   fail "the ended-run and superseded-CI frames do not draw as the captain ruled"
 pass "an ended run rebuilds with the band and its reason, a superseded CI head is yellow with the captain's sentences, and green means passed on the head that will land"
+
+# --- the standing upstream wait, on a row with no pipeline -------------------
+#
+# The captain's own no-PR case: "a scouting agent who has submitted an issue and
+# is waiting for it to be marked ready-for-pr before starting the PR build". A
+# scout draws no stage boxes, so its wait rides the facts row beside the state
+# word, in the same colour and with the same sentence a pipeline row's head
+# carries. tests/fm-flow-tui-pty.test.sh drives the pipeline row through a real
+# terminal and owns the FAIL invariant; this is the compact half and the pure
+# state function beneath both.
+
+cat >"$TMP_ROOT/upstream.mjs" <<'JS'
+const { render, upstreamWaitState, upstreamWaitNote, PAINT } = await import(process.argv[2]);
+let bad = 0;
+const say = (m) => { console.error(m); bad++; };
+const slot = (p) => /\x1b\[([0-9;]*)m/.exec(p("x"))[1];
+const LILAC = `\x1b[${slot(PAINT.upstream)}m`;
+const plain = (f) => f.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+
+const scout = {
+  id: "scout-issue", branch: "fm/scout-issue", project: "/p/firstmate",
+  worktree: "/wt", window: "fm:2", kind: "scout", pipeline: false,
+  endpoint_alive: true, captain_driving: false,
+  state: { ok: true, value: "working", detail: "", reason: "" },
+  upstream_wait: { waiting: true, action: "issue 900 to be labelled ready-for-pr" },
+};
+const snap = {
+  schema: "fm-flow-snapshot.v2", generated_epoch: 1790000000,
+  fm_home: "/home/x/firstmate", agents: [scout],
+};
+const frame = render(snap, { rows: 60, cols: 200, sel: 0, cell: -1 });
+const out = plain(frame);
+if (!out.includes("waiting on action from upstream: issue 900 to be labelled ready-for-pr")) {
+  say(`a scout row does not carry its wait: ${JSON.stringify(out)}`);
+}
+if (!frame.join("\n").includes(LILAC)) say("a scout's wait is not drawn in its own colour");
+// The fixed scout caption is untouched: the wait is a segment beside it, never
+// a replacement for the row's own words.
+if (!out.includes("no pipeline view as this is a scout agent")) {
+  say("the scout caption was replaced by the wait");
+}
+
+// The state function beneath every drawing of it. A row with no record says so;
+// a row whose checks failed reports the record stale rather than the wait.
+const none = { ...scout, upstream_wait: { waiting: false, action: "" } };
+if (upstreamWaitState(none) !== "none") say(`a row with no record read ${upstreamWaitState(none)}`);
+if (upstreamWaitNote(none) !== "") say("a row with no record produced a note");
+if (upstreamWaitState(scout) !== "waiting") say(`a standing wait read ${upstreamWaitState(scout)}`);
+
+const ci = (o) => ({ collection: { ok: true, reason: "" }, checks: [], excused: 0,
+                     skipped: 0, pr_state: "OPEN", superseded: null, ...o });
+const red = { ...scout, pipeline: true,
+  pr: { url: "https://x/pull/1", number: 1 },
+  ci: ci({ total: 12, passed: 10, failed: 1, pending: 0 }) };
+if (upstreamWaitState(red) !== "stale") say(`a wait over a failed check read ${upstreamWaitState(red)}`);
+// And while a check is still running with one already red, which is the state
+// item 1 introduced: that is not a clean run either, so the record is stale
+// there too rather than only once everything has reported.
+const midrun = { ...red, ci: ci({ total: 12, passed: 7, failed: 1, pending: 3 }) };
+if (upstreamWaitState(midrun) !== "stale") say(`a wait over a mid-run failure read ${upstreamWaitState(midrun)}`);
+// A wait with no action named still says the thing it does know.
+const bare = { ...scout, upstream_wait: { waiting: true, action: "" } };
+if (upstreamWaitNote(bare) !== "waiting on action from upstream") {
+  say(`a wait with no action named produced ${JSON.stringify(upstreamWaitNote(bare))}`);
+}
+process.exit(bad ? 1 : 0);
+JS
+node "$TMP_ROOT/upstream.mjs" "$TUI" ||
+  fail "a standing upstream wait is not drawn on a row with no pipeline, or its state reads wrong"
+pass "a row with no pipeline carries its upstream wait beside its own caption, and a wait over a failing check reads stale rather than waiting"
