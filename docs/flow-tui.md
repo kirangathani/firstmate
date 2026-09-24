@@ -788,8 +788,8 @@ The captain's ruling, recorded here as the contract:
 
 | CI cell | colour | first row | why |
 |---|---|---|---|
-| any check failed | red | `N/N FAIL` | unchanged |
-| checks still running on the head that will land | white, with the runner | `N/N running` | unchanged |
+| every check finished and one failed | the failure colour | `N/N FAIL` | unchanged |
+| checks still running on the head that will land | white, with the runner | `N/N running` | unchanged, and it now holds whether or not one has already failed - see the section below |
 | every check passed on the head that will land | green - `PAINT.passed`, the runner band's own centre token | `N/N passed` | the colour is the verdict and nothing else |
 | passed, or running, on a head the live run will replace | yellow | the sentences below | never bright green, so nobody is tempted to merge a head that will not land |
 | not read, no PR, nothing ran | unchanged | | |
@@ -816,7 +816,83 @@ The comparison is claimed only on the evidence for it: a GitHub head that was re
 
 One more colour changed under the same ruling.
 Every finished box - `PAINT.done`, including a finished `building` - is the runner band's centre green, so a row reads green up to the box the runner is circling, white for that one, dim beyond; the trail is built from the named painters so the three uses are one token.
-`Run #N` stays red, as it was: the captain did not ask for it to change.
+`Run #N` stayed red under that ruling, because he had not asked for it to change; on 2026-09-24 he did, and the section below is where it went.
+
+## A failure is the CI cell's verdict only once nothing is still running
+
+The captain, 2026-09-24: "when we fail github ci in one run, it reads something like 10/12 FAIL and turns red. Then we move back to the coding agent and rerun the pipeline. But then when we get to the Github CI stage again, we now progress from 1/12 2/12 ... but the whole time we are progressing it just says FAIL as well and is red instead of showing the runner bar, and running or something."
+
+His reading was that the red was left over from the previous run.
+It was not, and the two candidate mechanisms were ruled out against the PR he was watching before anything changed.
+
+Measured on `kunchenguid/no-mistakes` PR 1104, head `ca88ebdb`, 2026-09-24:
+
+```
+gh pr view 1104 --repo kunchenguid/no-mistakes --json statusCheckRollup,headRefOid,state
+-> 13 rollup entries, head ca88ebdb1c1c3c4ecf870d98d84de8dafb2e2607, state OPEN
+
+gh api repos/kunchenguid/no-mistakes/commits/ca88ebdb.../check-runs
+-> 13 check runs, every one of them on that same head
+```
+
+- Not a stale head.
+  `gh pr view --json statusCheckRollup` reads the rollup of the PR's LAST commit, and all thirteen entries matched the thirteen check runs GitHub holds for that commit.
+  Nothing from a previous head was in it.
+  The thirteen collapse to twelve checks because `PR must be raised via no-mistakes` had been re-run, which the collector's workflow-plus-name supersession already handles.
+- Not the excusable check either.
+  `PR must be raised via no-mistakes` PASSED on this PR - it is an upstream PR the pipeline itself raised - so the attestation excusal was never reached.
+
+What actually happened is in the check-run timings:
+
+| check | conclusion | started | completed |
+|---|---|---|---|
+| `Greptile Review` | failure | 10:06:54Z | 10:09:48Z |
+| `test (ubuntu-latest)` | success | 10:06:55Z | 10:14:13Z |
+| `test (windows-core)` | success | 10:06:54Z | 10:15:59Z |
+| `test (macos-latest)` | success | 10:07:00Z | 10:18:54Z |
+| `test (windows-git)` | success | 10:06:55Z | 10:24:02Z |
+| `test (windows-steps)` | success | 10:06:54Z | 10:24:31Z |
+
+One check went red three minutes in and the slowest ran for another fifteen.
+`ciVerdict` returned `failed` on `failed > 0` before it ever asked whether anything was still pending, so for those fifteen minutes the cell drew a finished-failure verdict - `7/12 FAIL`, red, no runner - over a run that was still going, beside a counter the captain could watch climbing.
+Both facts were true and the cell was telling him only one of them, in the shape that reads as final.
+It is the same on the first pass through the box as on the fifth: nothing about it depends on there having been a previous run.
+
+So a failure is this cell's VERDICT only when there is nothing left to hear from.
+While any check on this head is still pending the cell stays `running` - the runner band, the white box, `N/N running`, and the elapsed under it - and states the failure in its own words on the detail row below: `1 fail so far`, in the failure colour.
+`12 fail so far` is fourteen columns inside a fifteen-column row, so the count never needs shortening.
+
+Neither half of that is optional.
+Dropping the failure until the run finished would cost the captain the fifteen minutes he could have spent fixing it, and painting the whole cell as a failure is the final claim this rule exists to stop making.
+The full tally on the facts line is unchanged and has always carried the fail count; what changed is that the cell no longer contradicts it.
+
+A failure on a head the live run will replace is a separate question and is unchanged: a red head is a red head, superseded or not, which is the 2026-09-15 ruling recorded above.
+
+## Pink, not red, and the run counter on every row
+
+Two rulings from 2026-09-24, in his words: "change the run numbers to make them pink instead of red", and "change the githubci FAIL and other failed boxes to the same pink not red".
+
+Pink is what his terminal theme renders for `sgr("94")`, the slot `scouting` and `skipped` already use, so nothing here is a new colour: `PAINT.failed` moved into that slot and every failure on the view follows, because they all read the table rather than painting themselves.
+That is the whole of the change: the `GITHUB CI` cell's `FAIL`, a failed stage box, a compact row's `failed` state word, and the note naming how a run ended.
+`sgr("91")` has no remaining use and is gone, so there is no second failure colour left to drift.
+
+`magenta`, `sgr("95")`, is deliberately NOT merged into it.
+It means the view could not find out - an unreadable collection, an unknown status, a PR state nobody could read - and "nobody knows" has to stay tellable apart from "this failed".
+
+One consequence is worth stating rather than discovering: a failed box and a skipped box now wear the same colour, told apart by the word underneath.
+That is the reverse of why `skipped` was given a slot of its own, and it is the captain's call rather than an oversight - he asked for this colour twice, by name, on the same day.
+
+The run counter moved to the same slot and, by his 2026-09-16 ruling, is now drawn on every row.
+"why does it say run #1 for this agent but doesn't say that for any of the other agent even though they are also on their first runs... make it consistent."
+The rows he was comparing were self-consistent - the bare ones had no run at all - but a blank said that in exactly the way it also said two other things, so three facts arrived as the same nothing.
+
+| what the row knows | mark |
+|---|---|
+| this branch has had N pipeline runs, the one on screen included | `Run #N` |
+| no run exists yet: still building, or a worker that runs no pipeline | `Run -` |
+| the collector could not read this task's pipeline | `Run ?` |
+
+The first two are pink; the third wears the unknown colour, because it is not a reading at all and his standing rule is that a thing never evaluated must never look like one that was.
 
 ## The PR number rides the connector leaving push+PR
 

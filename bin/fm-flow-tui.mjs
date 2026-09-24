@@ -68,7 +68,6 @@ const dim = sgr("2");
 const green = sgr("92");
 const greenBold = sgr("1;92");
 const yellow = sgr("93");
-const red = sgr("91");
 const cyan = sgr("96");
 const white = sgr("97");
 const whiteBold = sgr("1;97");
@@ -78,6 +77,14 @@ const magenta = sgr("95");
 // not been reached - the difference surviving only in the timer word beneath
 // it. Deliberately-not-run and not-yet-run are different facts and must not be
 // told apart by squinting at four characters.
+//
+// This slot renders PINK in the captain's terminal theme, and he asked for it
+// by that name twice on 2026-09-24: "change the run numbers to make them pink
+// instead of red" and "change the githubci FAIL and other failed boxes to the
+// same pink not red". So it now carries `failed` and the run counter as well as
+// `skipped` and `scouting`. `magenta` (95) stays the unreadable slot and is
+// deliberately NOT merged into it: "nobody could find out" must stay
+// distinguishable from "this failed".
 const blue = sgr("94");
 
 // The marching trail. Hard rule, learned by looking at it against the
@@ -188,12 +195,16 @@ export function stepState(status) {
 // `passed` is the same token on the GITHUB CI cell, and means the checks passed
 // on the head that will land; that cell's colour is its verdict and nothing
 // else, so waiting on the captain's word is no longer drawn there.
-const PAINT = {
+// Exported because a test asserting "the failed box wears the failure colour"
+// must read the slot from here rather than write an SGR code of its own down:
+// a palette change the captain asks for has to move the assertion with it, not
+// leave a green suite asserting the colour he replaced.
+export const PAINT = {
   live: white,
   done: green,
   passed: green,
   waiting: yellow,
-  failed: red,
+  failed: blue,
   pending: dim,
   skipped: blue,
   unknown: magenta,
@@ -780,7 +791,21 @@ export function ciVerdict(agent) {
   const ci = agent.ci;
   if (!ci || ci.collection?.ok === false) return agent.pr?.url ? "unread" : "none";
   const { total = 0, failed = 0, pending = 0, excused = 0 } = ci;
-  if (failed > 0) return "failed";
+  // A failure is this cell's VERDICT only once there is nothing left to hear
+  // from. While checks on this same head are still running, the run has not
+  // finished and `N/N FAIL` is a final-sounding claim about a thing that is
+  // still happening - which is exactly what the captain reported on
+  // 2026-09-24: "the whole time we are progressing it just says FAIL and is
+  // red instead of showing the runner bar".
+  //
+  // Measured on kunchenguid/no-mistakes PR 1104, head ca88ebd, that day. The
+  // rollup carried no stale head and no excusable check: `Greptile Review`
+  // completed FAILURE at 10:09:48 while `test (windows-steps)` ran until
+  // 10:24:31, so for fifteen minutes the cell reported a finished failure
+  // beside a counter that was still climbing. Both facts are true, and the
+  // cell now says both: it keeps the runner band and the counter, and states
+  // the failure in its own words on a row of its own.
+  if (failed > 0) return pending > 0 ? "running-failed" : "failed";
   if (total === 0) return "none";
   // An excused check is an authorized RED, not evidence that anything ran, so
   // bin/fm-pr-merge.sh subtracts it before asking whether this PR reported any
@@ -836,7 +861,7 @@ export function ciCommit(agent) {
 
 function ciBox(agent, anim) {
   const ci = agent.ci;
-  const { passed = 0, total = 0 } = ci ?? {};
+  const { passed = 0, total = 0, failed = 0 } = ci ?? {};
   switch (ciVerdict(agent)) {
     // No PR yet is a real "not reached". Having a PR whose checks were not
     // collected is NOT: drawing it dim would claim CI has not started when the
@@ -849,9 +874,10 @@ function ciBox(agent, anim) {
     }
     case "failed": {
       const b = box("GITHUB CI", "failed", CIW, { dashed: true, timer: `${passed}/${total} FAIL` });
-      return { ...b, timer: red(b.timer) };
+      return { ...b, timer: PAINT.failed(b.timer) };
     }
-    case "running": {
+    case "running":
+    case "running-failed": {
       const state = liveIsCredible(agent) ? "live" : "unknown";
       // CI is the pipeline's longest wait, so it counts up exactly like the
       // step boxes beside it, through the same one owner of the active row so
@@ -859,14 +885,28 @@ function ciBox(agent, anim) {
       // cell drawn `unknown` because its worker is gone is not counting, and an
       // elapsed under a state that is not counting would be a lie.
       const timer2 = state === "live" ? dur(activeMs(agent, { key: "ci" })) : "";
+      // A check that has already gone red while its siblings are still running
+      // is stated here rather than promoted to the box's verdict. Hiding it
+      // until the run finishes would cost the captain the fifteen minutes he
+      // could have spent fixing it; drawing the whole cell red would be the
+      // finished-failure claim this branch exists to stop making. `12 fail so
+      // far` is 14 columns inside the 15-column detail row, so the count never
+      // needs shortening.
+      const failing = failed > 0 ? `${failed} fail so far` : "";
       const b = box("GITHUB CI", state, CIW, {
         dashed: true,
         timer: `${passed}/${total} running`,
         timer2,
+        model: failing,
         anim,
       });
       const paint = PAINT[state] ?? dim;
-      return { ...b, timer: paint(b.timer), timer2: timer2 ? paint(b.timer2) : b.timer2 };
+      return {
+        ...b,
+        timer: paint(b.timer),
+        timer2: timer2 ? paint(b.timer2) : b.timer2,
+        model: failing ? PAINT.failed(b.model) : b.model,
+      };
     }
     case "nothing-ran": {
       const b = box("GITHUB CI", "unknown", CIW, { dashed: true, timer: "nothing ran" });
@@ -1036,12 +1076,31 @@ const DEFAULT_OPEN_HINT = "enter: open this worker's window";
 // slot every other colour on this view comes from, so it re-skins with the
 // terminal theme rather than staying neon against it.
 //
-// Nothing at all when the collector states no number: a worker that runs no
-// pipeline, a branch with no run yet, or a database that could not be read.
-// A placeholder there would be a claim the snapshot did not make.
+// It is drawn on EVERY row, and that is the captain's own ruling of 2026-09-16:
+// "why does it say run #1 for this agent but doesn't say that for any of the
+// other agent even though they are also on their first runs... make it
+// consistent". The rows he was comparing were self-consistent - the bare ones
+// had no run yet - but a blank said so in the same way it said two other
+// things, so three different facts arrived on screen as the same nothing.
+//
+// Three classes, each with its own mark, by his standing display rule that a
+// thing never evaluated must never look like a zero:
+//   Run #N   this branch has been through the pipeline N times, that run
+//            included
+//   Run -    no run exists yet: a task still building, or a worker that runs no
+//            pipeline at all
+//   Run ?    the collector could not read this task's pipeline, so it has no
+//            number to state either way
+//
+// Pink rather than red, by his ruling of 2026-09-24 - the same slot `scouting`
+// already uses - except the unreadable class, which wears this view's unknown
+// colour everywhere else and has to stay tellable apart from the two classes
+// that are a real reading.
 function runCounter(agent) {
   const nRuns = agent.run_number;
-  return Number.isInteger(nRuns) && nRuns > 0 ? `  ${red(`Run #${nRuns}`)}` : "";
+  if (Number.isInteger(nRuns) && nRuns > 0) return `  ${blue(`Run #${nRuns}`)}`;
+  if (agent.collection?.ok === false) return `  ${magenta("Run ?")}`;
+  return `  ${blue("Run -")}`;
 }
 
 // How the branch's latest run ended, when it ended without completing, in the
@@ -1116,7 +1175,7 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   // rather than replacing it: the run's end and the worker's absence are two
   // facts, and either can hold without the other.
   const ended = runEnd(agent);
-  if (ended) notes.push(red(ended));
+  if (ended) notes.push(PAINT.failed(ended));
   // A run the CLI would not render, read straight from the daemon database
   // instead. Muted, because the row is healthy - but stated, because these
   // steps are not the view `no-mistakes axi status` would have printed. It sits
@@ -1202,7 +1261,10 @@ const CREW_STATE_PAINT = new Map([
   ["parked", yellow],
   ["blocked", yellow],
   ["paused", dim],
-  ["failed", red],
+  // Through the paint table, not a painter of its own: a failed worker and a
+  // failed stage are the same fact to the captain and he changes their colour
+  // in one place.
+  ["failed", PAINT.failed],
   ["unknown", magenta],
   // The captain's ruling, 2026-09-15: a scout row must never show its raw
   // status line - he read "working · captain ruled in-window - no round cap
