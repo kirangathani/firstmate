@@ -1,0 +1,55 @@
+# bin/fm-flow-snapshot.sh driven by hand over a synthetic fleet home
+# FM_HOME=/tmp/fmflow-live.JTWNtW/home  (fake no-mistakes / gh / tmux on PATH; clock pinned via FM_FLOW_SNAPSHOT_NOW_EPOCH=1790279596)
+
+$ fm-flow-snapshot.sh | jq -r ".schema, .generated, .generated_epoch"
+fm-flow-snapshot.v1
+2026-09-24T19:53:16Z
+1790279596
+
+$ fm-flow-snapshot.sh | jq -r per-worker summary
+remote-never-probed  pipeline=true  endpoint_alive="unknown"  run=/  step=building  ci=[t0 p0 f0 ?0 s0]  ok=true  no pipeline run for this branch
+ship-alpha  pipeline=true  endpoint_alive=true  run=01LIVERUNAAAAAAAAAAAAAAAA2/running  step=ci  ci=[t5 p2 f1 ?1 s1]  ok=true  
+ship-building  pipeline=true  endpoint_alive=true  run=/  step=building  ci=[t0 p0 f0 ?0 s0]  ok=true  no pipeline run for this branch
+ship-mr  pipeline=true  endpoint_alive=true  run=/  step=building  ci=[t0 p0 f0 ?0 s0]  ok=true  no pipeline run for this branch
+ship-wedged  pipeline=true  endpoint_alive=true  run=01LIVERUNAAAAAAAAAAAAAAAA3/running  step=-  ci=[t0 p0 f0 ?0 s0]  ok=false  axi status failed (exit 1): error: the daemon said no
+scout-recon  pipeline=false  endpoint_alive=true  run=/  step=-  ci=[t0 p0 f0 ?0 s0]  ok=true  this worker runs no pipeline
+$ fm-flow-snapshot.sh | jq -r ".omitted"
+[{"id":"gone-ghost","kind":"ship","window":"fm:99","reason":"recorded window no longer exists"}]
+
+--- a wedged worker reports the pipeline's own words, colour stripped, and the document still succeeds ---
+axi status failed (exit 1): error: the daemon said no
+
+--- GitHub check rollup for ship-alpha (PR 25): superseded Lint attempt counted nowhere, NEUTRAL counted skipped, commit status kept distinct ---
+{"checks":[{"kind":"check","name":"Lint","conclusion":"SUCCESS","verdict":"passed"},{"kind":"check","name":"Behavior tests","conclusion":"FAILURE","verdict":"failed"},{"kind":"check","name":"Docs","conclusion":"","verdict":"pending"},{"kind":"check","name":"Advisory","conclusion":"NEUTRAL","verdict":"skipped"},{"kind":"status","name":"legacy/commit-status","conclusion":"SUCCESS","verdict":"passed"}],"total":5,"passed":2,"failed":1,"pending":1,"skipped":1,"pr_state":"OPEN","head":"bb73f233"}
+
+--- a block carrying an unknown column (round_active_for, inserted 4th), a quoted comma and a raw TAB ---
+fixture row:     ci,running,1h2m3s,30s,"37s ago: log: waiting, then polling	tail","4242",second
+{"step":"ci","status":"running","active_for":"1h2m3s","active_ms":3723000,"last_activity":"37s ago: log: waiting, then polling\ttail","agent_pid":"4242","round":"second"}
+raw tab bytes in the emitted document: 0   ESC bytes: 0
+
+--- the building phase ---
+{"steps":[{"step":"building","status":"running","findings":0,"duration_ms":0}],"active_steps":[{"step":"building","status":"running","active_for":"","active_ms":3600000,"last_activity":"","agent_pid":"","round":""}]}
+{"step":"building","status":"completed","findings":0,"duration_ms":null}
+
+$ fm-flow-snapshot.sh --no-ci   (gh call log truncated first)
+run=01LIVERUNAAAAAAAAAAAAAAAA2  ci.total=0  ci.reason=skipped
+gh invocations recorded during --no-ci: 0
+gh invocations recorded without --no-ci: 1 -> pr view 25 --repo example/project --json statusCheckRollup,headRefOid,state
+
+$ fm-flow-snapshot.sh --task ship-alpha
+agents=1  id=ship-alpha
+
+--- exit codes ---
+--not-a-flag -> 2
+--task with no id -> 2
+--json (removed alias) -> 2
+--help -> 0
+unreadable fleet -> 1 ; stdout bytes=0 ; stderr=fm-flow-snapshot: fleet snapshot unavailable; refusing to emit an empty fleet
+
+--- a link this view cannot read checks for, vs a task with no link at all ---
+ship-building  pr=none  ci.ok=false  ci.reason=no pull request recorded for this task  ci.total=0
+ship-mr  pr=https://gitlab.example.com/group/project/-/merge_requests/7  ci.ok=false  ci.reason=checks are read for GitHub pull requests only  ci.total=0
+
+--- read-only by construction: FM_HOME and every worktree byte-identical before and after a full snapshot ---
+FM_HOME unchanged (names, sizes and mtimes identical)
+task worktrees and project unchanged

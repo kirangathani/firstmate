@@ -1,0 +1,502 @@
+{
+  "schema": "fm-flow-snapshot.v1",
+  "generated": "2026-09-24T19:53:16Z",
+  "generated_epoch": 1790279596,
+  "fm_home": "/tmp/fmflow-live.JTWNtW/home",
+  "agents": [
+    {
+      "id": "remote-never-probed",
+      "branch": "fm/remote-never-probed",
+      "project": "/tmp/fmflow-live.JTWNtW/project",
+      "worktree": "/tmp/fmflow-live.JTWNtW/wt/remote-never-probed",
+      "window": "",
+      "kind": "ship",
+      "mode": "no-mistakes",
+      "pipeline": true,
+      "state": null,
+      "endpoint_alive": "unknown",
+      "agent_alive": "not_checked",
+      "worker": {
+        "harness": "claude",
+        "model": null,
+        "effort": null
+      },
+      "pr": {
+        "url": null,
+        "number": null
+      },
+      "collection": {
+        "ok": true,
+        "reason": "no pipeline run for this branch",
+        "source": "axi",
+        "at": "2026-09-24T19:53:16Z",
+        "epoch": 1790279596
+      },
+      "run": {
+        "present": false,
+        "id": "",
+        "status": "",
+        "error": "",
+        "head": ""
+      },
+      "steps": [
+        {
+          "step": "building",
+          "status": "running",
+          "findings": 0,
+          "duration_ms": 0
+        }
+      ],
+      "active_steps": [
+        {
+          "step": "building",
+          "status": "running",
+          "active_for": "",
+          "active_ms": 3451000,
+          "last_activity": "",
+          "agent_pid": "",
+          "round": ""
+        }
+      ],
+      "ci": {
+        "collection": {
+          "ok": false,
+          "reason": "no pull request recorded for this task"
+        },
+        "checks": [],
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "pending": 0,
+        "skipped": 0,
+        "head": "",
+        "pr_state": ""
+      }
+    },
+    {
+      "id": "ship-alpha",
+      "branch": "fm/ship-alpha",
+      "project": "/tmp/fmflow-live.JTWNtW/project",
+      "worktree": "/tmp/fmflow-live.JTWNtW/wt/ship-alpha",
+      "window": "fm:1",
+      "kind": "ship",
+      "mode": "no-mistakes",
+      "pipeline": true,
+      "state": null,
+      "endpoint_alive": true,
+      "agent_alive": "not_checked",
+      "worker": {
+        "harness": "claude",
+        "model": "opus-5",
+        "effort": "high"
+      },
+      "pr": {
+        "url": "https://github.com/example/project/pull/25",
+        "number": 25
+      },
+      "collection": {
+        "ok": true,
+        "reason": "",
+        "source": "axi",
+        "at": "2026-09-24T19:53:16Z",
+        "epoch": 1790279596
+      },
+      "run": {
+        "present": true,
+        "id": "01LIVERUNAAAAAAAAAAAAAAAA2",
+        "status": "running",
+        "error": "",
+        "head": "bb73f233"
+      },
+      "steps": [
+        {
+          "step": "building",
+          "status": "completed",
+          "findings": 0,
+          "duration_ms": null
+        },
+        {
+          "step": "intent",
+          "status": "completed",
+          "findings": 0,
+          "duration_ms": 22
+        },
+        {
+          "step": "rebase",
+          "status": "completed",
+          "findings": 0,
+          "duration_ms": 981
+        },
+        {
+          "step": "review",
+          "status": "completed",
+          "findings": 2,
+          "duration_ms": 176257
+        },
+        {
+          "step": "test",
+          "status": "completed",
+          "findings": 1,
+          "duration_ms": 249567
+        },
+        {
+          "step": "document",
+          "status": "completed",
+          "findings": 0,
+          "duration_ms": 149799
+        },
+        {
+          "step": "lint",
+          "status": "completed",
+          "findings": 0,
+          "duration_ms": 1127597
+        },
+        {
+          "step": "push",
+          "status": "completed",
+          "findings": 0,
+          "duration_ms": 2411
+        },
+        {
+          "step": "pr",
+          "status": "completed",
+          "findings": 0,
+          "duration_ms": 36162
+        },
+        {
+          "step": "ci",
+          "status": "running",
+          "findings": 0,
+          "duration_ms": 0
+        }
+      ],
+      "active_steps": [
+        {
+          "step": "ci",
+          "status": "running",
+          "active_for": "1h2m3s",
+          "active_ms": 3723000,
+          "last_activity": "37s ago: log: waiting, then polling\ttail",
+          "agent_pid": "4242",
+          "round": "second"
+        }
+      ],
+      "ci": {
+        "collection": {
+          "ok": true,
+          "reason": ""
+        },
+        "checks": [
+          {
+            "kind": "check",
+            "workflow": "CI",
+            "name": "Lint",
+            "started": "2026-09-24T06:10:00Z",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "verdict": "passed"
+          },
+          {
+            "kind": "check",
+            "workflow": "CI",
+            "name": "Behavior tests",
+            "started": "2026-09-24T06:10:00Z",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "verdict": "failed"
+          },
+          {
+            "kind": "check",
+            "workflow": "CI",
+            "name": "Docs",
+            "started": "2026-09-24T06:11:00Z",
+            "status": "IN_PROGRESS",
+            "conclusion": "",
+            "verdict": "pending"
+          },
+          {
+            "kind": "check",
+            "workflow": "CI",
+            "name": "Advisory",
+            "started": "2026-09-24T06:10:00Z",
+            "status": "COMPLETED",
+            "conclusion": "NEUTRAL",
+            "verdict": "skipped"
+          },
+          {
+            "kind": "status",
+            "workflow": "",
+            "name": "legacy/commit-status",
+            "started": "2026-09-24T06:10:00Z",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "verdict": "passed"
+          }
+        ],
+        "total": 5,
+        "passed": 2,
+        "failed": 1,
+        "pending": 1,
+        "skipped": 1,
+        "head": "bb73f233",
+        "pr_state": "OPEN"
+      }
+    },
+    {
+      "id": "ship-building",
+      "branch": "fm/ship-building",
+      "project": "/tmp/fmflow-live.JTWNtW/project",
+      "worktree": "/tmp/fmflow-live.JTWNtW/wt/ship-building",
+      "window": "fm:2",
+      "kind": "ship",
+      "mode": "no-mistakes",
+      "pipeline": true,
+      "state": null,
+      "endpoint_alive": true,
+      "agent_alive": "not_checked",
+      "worker": {
+        "harness": "claude",
+        "model": "opus-5",
+        "effort": "high"
+      },
+      "pr": {
+        "url": null,
+        "number": null
+      },
+      "collection": {
+        "ok": true,
+        "reason": "no pipeline run for this branch",
+        "source": "axi",
+        "at": "2026-09-24T19:53:16Z",
+        "epoch": 1790279596
+      },
+      "run": {
+        "present": false,
+        "id": "",
+        "status": "",
+        "error": "",
+        "head": ""
+      },
+      "steps": [
+        {
+          "step": "building",
+          "status": "running",
+          "findings": 0,
+          "duration_ms": 0
+        }
+      ],
+      "active_steps": [
+        {
+          "step": "building",
+          "status": "running",
+          "active_for": "",
+          "active_ms": 3600000,
+          "last_activity": "",
+          "agent_pid": "",
+          "round": ""
+        }
+      ],
+      "ci": {
+        "collection": {
+          "ok": false,
+          "reason": "no pull request recorded for this task"
+        },
+        "checks": [],
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "pending": 0,
+        "skipped": 0,
+        "head": "",
+        "pr_state": ""
+      }
+    },
+    {
+      "id": "ship-mr",
+      "branch": "fm/ship-mr",
+      "project": "/tmp/fmflow-live.JTWNtW/project",
+      "worktree": "/tmp/fmflow-live.JTWNtW/wt/ship-mr",
+      "window": "fm:3",
+      "kind": "ship",
+      "mode": "no-mistakes",
+      "pipeline": true,
+      "state": null,
+      "endpoint_alive": true,
+      "agent_alive": "not_checked",
+      "worker": {
+        "harness": "claude",
+        "model": "opus-5",
+        "effort": "high"
+      },
+      "pr": {
+        "url": "https://gitlab.example.com/group/project/-/merge_requests/7",
+        "number": 7
+      },
+      "collection": {
+        "ok": true,
+        "reason": "no pipeline run for this branch",
+        "source": "axi",
+        "at": "2026-09-24T19:53:16Z",
+        "epoch": 1790279596
+      },
+      "run": {
+        "present": false,
+        "id": "",
+        "status": "",
+        "error": "",
+        "head": ""
+      },
+      "steps": [
+        {
+          "step": "building",
+          "status": "running",
+          "findings": 0,
+          "duration_ms": 0
+        }
+      ],
+      "active_steps": [
+        {
+          "step": "building",
+          "status": "running",
+          "active_for": "",
+          "active_ms": 3600000,
+          "last_activity": "",
+          "agent_pid": "",
+          "round": ""
+        }
+      ],
+      "ci": {
+        "collection": {
+          "ok": false,
+          "reason": "checks are read for GitHub pull requests only"
+        },
+        "checks": [],
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "pending": 0,
+        "skipped": 0,
+        "head": "",
+        "pr_state": ""
+      }
+    },
+    {
+      "id": "ship-wedged",
+      "branch": "fm/ship-wedged",
+      "project": "/tmp/fmflow-live.JTWNtW/project",
+      "worktree": "/tmp/fmflow-live.JTWNtW/wt/ship-wedged",
+      "window": "fm:5",
+      "kind": "ship",
+      "mode": "no-mistakes",
+      "pipeline": true,
+      "state": null,
+      "endpoint_alive": true,
+      "agent_alive": "not_checked",
+      "worker": {
+        "harness": "claude",
+        "model": "opus-5",
+        "effort": "high"
+      },
+      "pr": {
+        "url": null,
+        "number": null
+      },
+      "collection": {
+        "ok": false,
+        "reason": "axi status failed (exit 1): error: the daemon said no",
+        "source": "axi",
+        "at": "2026-09-24T19:53:16Z",
+        "epoch": 1790279596
+      },
+      "run": {
+        "present": true,
+        "id": "01LIVERUNAAAAAAAAAAAAAAAA3",
+        "status": "running",
+        "error": "",
+        "head": ""
+      },
+      "steps": [],
+      "active_steps": [],
+      "ci": {
+        "collection": {
+          "ok": false,
+          "reason": "no pull request recorded for this task"
+        },
+        "checks": [],
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "pending": 0,
+        "skipped": 0,
+        "head": "",
+        "pr_state": ""
+      }
+    },
+    {
+      "id": "scout-recon",
+      "branch": "fm/scout-recon",
+      "project": "/tmp/fmflow-live.JTWNtW/project",
+      "worktree": "/tmp/fmflow-live.JTWNtW/wt/scout-recon",
+      "window": "fm:4",
+      "kind": "scout",
+      "mode": "local-only",
+      "pipeline": false,
+      "state": {
+        "ok": true,
+        "value": "unknown",
+        "source": "pane",
+        "detail": "harness state unavailable (unknown missing)",
+        "reason": ""
+      },
+      "endpoint_alive": true,
+      "agent_alive": "not_checked",
+      "worker": {
+        "harness": "claude",
+        "model": "opus-5",
+        "effort": "high"
+      },
+      "pr": {
+        "url": null,
+        "number": null
+      },
+      "collection": {
+        "ok": true,
+        "reason": "this worker runs no pipeline",
+        "source": "",
+        "at": "2026-09-24T19:53:16Z",
+        "epoch": 1790279596
+      },
+      "run": {
+        "present": false,
+        "id": "",
+        "status": "",
+        "error": "",
+        "head": ""
+      },
+      "steps": [],
+      "active_steps": [],
+      "ci": {
+        "collection": {
+          "ok": false,
+          "reason": "this worker runs no pipeline, so no checks are read"
+        },
+        "checks": [],
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "pending": 0,
+        "skipped": 0,
+        "head": "",
+        "pr_state": ""
+      }
+    }
+  ],
+  "omitted": [
+    {
+      "id": "gone-ghost",
+      "kind": "ship",
+      "window": "fm:99",
+      "reason": "recorded window no longer exists"
+    }
+  ]
+}

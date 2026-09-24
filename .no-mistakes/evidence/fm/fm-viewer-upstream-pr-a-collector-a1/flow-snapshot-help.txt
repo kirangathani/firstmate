@@ -1,0 +1,73 @@
+fm-flow-snapshot.sh - read-only per-agent pipeline snapshot.
+
+Output contract: one JSON object on stdout with schema `fm-flow-snapshot.v1`.
+This header owns that wire format, the flags, the environment knobs, and the
+exit codes.
+
+The command is read-only. It takes no session lock, drains no wakes, arms no
+watcher, and writes nothing. Nothing in firstmate calls it; it exists to be
+run by hand.
+
+It layers over bin/fm-fleet-snapshot.sh, which stays the single owner of fleet
+state, and adds two things that document does not carry: the named pipeline
+step each agent is on, and its GitHub check rollup.
+
+An agent here is a task with a worker behind it, whatever its kind. A
+`state/<id>.meta` outlives the window it names, so membership is decided by
+`endpoint.exists`, bin/fm-fleet-snapshot.sh's own reading of
+fm_backend_target_exists. Only a recorded endpoint that PROVABLY no longer
+resolves is dropped, to `omitted`, named and counted rather than drawn.
+`endpoint.exists` null means liveness was never established rather than
+established as dead - which is every REMOTE worker, since that reader does
+not probe one - so those are drawn with `endpoint_alive: "unknown"`, the
+same three-way reading bin/fm-fleet-view.sh renders. Omitting them would
+make this view disagree with the rest of firstmate about who is running. Kind decides only what an agent CARRIES:
+a `pipeline:true` agent carries a no-mistakes run, its steps and its GitHub
+checks, and a `pipeline:false` agent - a scout, a second mate - carries the
+fleet document's own `current_state` instead. Pipeline agents are emitted
+first, so the wire order is the draw order.
+
+Run attribution goes through bin/fm-nm-run-lib.sh, the repository's single
+owner of which no-mistakes run belongs to a branch. A worker cannot forge that
+answer, which is why it is read here rather than self-reported.
+
+Limits, stated because a blank cell should never read as a measured zero:
+
+  - Checks are read for GitHub pull requests only; a GitLab merge request or
+    a Gerrit change reports as not read. The read is a direct `gh pr view
+    --json statusCheckRollup` because fm_pr_github_read_record in
+    bin/fm-pr-lib.sh returns a PR's state and merged flag, not its rollup.
+  - The building phase starts at the task record's modification time, which is
+    approximate: bin/fm-pr-check.sh rewrites that record when it notes the PR.
+    Once a run exists the phase reports completed with no duration, because no
+    machine record states when the run began.
+  - A run whose pipeline executed outside the task's own copy of the
+    repository, such as a scratch clone raising a PR elsewhere, does not
+    resolve here, and that row reports its run as unestablished.
+  - Crew state and endpoint liveness are whatever bin/fm-fleet-snapshot.sh
+    published, read at ITS observation time rather than at draw time. That
+    keeps one owner for each, at the cost of a state as old as the document.
+
+Usage:
+  fm-flow-snapshot.sh [--no-ci] [--task <id>]
+
+  --no-ci       skip every GitHub read this command can reach, so the whole
+                snapshot is local. It suppresses the check read here and sets
+                FM_CREW_STATE_NO_FORGE for the fleet read, whose crew-state
+                reader would otherwise make a bounded forge call of its own
+  --task <id>   restrict the snapshot to one task, for a targeted refresh
+
+Environment knobs:
+  FM_FLOW_SNAPSHOT_NM_TIMEOUT     seconds bounding one `no-mistakes axi
+                                  status` read (default 10)
+  FM_FLOW_SNAPSHOT_GH_TIMEOUT     seconds bounding one `gh pr view` (default
+                                  20)
+  FM_FLOW_SNAPSHOT_NOW_EPOCH      override the clock, in epoch seconds. It is
+                                  the ONLY clock input: the ISO timestamp
+                                  beside it is derived from this, so both
+                                  always describe the same instant
+
+Exit codes: 0 snapshot emitted, 1 a dependency or the fleet read failed,
+2 usage error. A per-agent collection failure is NOT an error: it is reported
+in that agent's `collection` object and the snapshot still succeeds, because
+one wedged worker must not blank the whole view.
