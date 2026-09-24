@@ -29,6 +29,13 @@
 #                     the viewer runs when the captain presses enter; it is a
 #                     normal command and can be run on its own.
 #
+# Enter has a second meaning, on the two cells that are about the PR rather
+# than about the worker - push+PR and GITHUB CI. There it opens that task's PR
+# in the captain's browser, through bin/fm-open-url.sh, which is the single
+# owner of "open a url on this machine" and the only piece that knows the WSL
+# route to the Windows browser. This script wires that command and the sentence
+# the row says about it; docs/flow-tui.md owns why enter is cell-scoped at all.
+#
 # Environment knobs:
 #   FM_FLOW_OPEN_DRY_RUN   --open only. Print the action it would take and the
 #                          argv it would run, change nothing, exit 0. The three
@@ -52,7 +59,7 @@ STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 export FM_HOME
 
 usage() {
-  sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 SNAP_ARGS=()
@@ -231,5 +238,7 @@ fi
   --refresh-ms "$REFRESH_MS" \
   --open-cmd "$(printf '%q' "$SCRIPT_DIR/fm-flow.sh") --open \"\$FM_FLOW_ID\"" \
   --open-hint "$OPEN_HINT" \
+  --open-pr-cmd "$(printf '%q' "$SCRIPT_DIR/fm-open-url.sh") \"\$FM_FLOW_PR\"" \
+  --open-pr-hint "enter: open this PR in your browser" \
   <"$first"
 exit $?

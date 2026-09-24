@@ -75,6 +75,19 @@ assert_contains "$refresh" "alpha-1" "the refresh command dropped --task"
 assert_contains "$refresh" "fm-flow-snapshot.sh" "the refresh command does not run the collector"
 pass "the refresh command carries the same collector arguments as the first frame"
 
+# Enter has a second meaning on the two cells that are about the PR, and this
+# is where the command behind it is wired. The viewer knows nothing about how
+# to open a url on this machine; it is handed the one script that does, with
+# the PR link the view already identified the row by.
+prcmd=$(grep -A1 -- '--open-pr-cmd' "$FAKE_TUI_ARGV" | tail -1)
+[ -n "$prcmd" ] || fail "no --open-pr-cmd was passed to the viewer"
+assert_contains "$prcmd" "fm-open-url.sh" "the PR-open command does not run the url opener"
+assert_contains "$prcmd" 'FM_FLOW_PR' "the PR-open command does not carry the selected row's PR"
+prhint=$(grep -A1 -- '--open-pr-hint' "$FAKE_TUI_ARGV" | tail -1)
+assert_contains "$prhint" "browser" "the PR-open hint does not say the browser is where it goes"
+[ -x "$ROOT/bin/fm-open-url.sh" ] || fail "the url opener that command names is not executable"
+pass "the viewer is handed the url opener and the sentence saying enter opens the PR in a browser"
+
 # Running it must reproduce the first frame's own invocation, not an
 # approximation of it. Comparing the two logged argv lines is the check.
 first=$(head -1 "$FAKE_SNAPSHOT_LOG")

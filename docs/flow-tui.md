@@ -311,8 +311,8 @@ The row also states in plain words that the skip is captain-authorised, naming w
 
 ## Enter opens the worker's window, or it says it did not
 
-Enter is agent-scoped.
-It opens the selected worker's window whatever cell is highlighted; no cell carries an action of its own, including `GITHUB CI`, and the selected agent's row says what enter does on every frame rather than leaving the captain to discover it by pressing.
+Enter opens the selected worker's window, and the selected agent's row says what enter does on every frame rather than leaving the captain to discover it by pressing.
+The two cells that are about the PR rather than about the worker are the one exception, and they are the section below.
 
 Which terminal moves is the whole of `--open`, and the first version got it wrong.
 `tmux select-window` changes the target session's current window and does nothing whatever to the terminal the command was typed in.
@@ -336,6 +336,37 @@ That terminal is the viewer's own stdout, not a fresh open of `/dev/tty`, becaus
 Finally, the footer reports what the command SAID it did, not what its exit code implies.
 `--open` prints its own outcome line - `switched to <window>`, `back from <window>`, or the error - and the viewer flashes that.
 A message reporting an action that did not occur is worse than an error, so an exit code alone is never enough to claim one.
+
+### On the push+PR and GITHUB CI cells, enter opens the PR instead
+
+The captain, 2026-09-24: "Can we also add a link to the PR on github? We can make it so that the push+PR box can allow me to press enter on it to open the browser on the link to the active PR? Does this work? Presumably fairly seamless as we already need to keep track of the PR URLs I think for identification?"
+
+It does, and nothing new is looked up: the URL is `agent.pr.url`, the same recorded link the row is already identified by and the same one every check on the row was read through.
+
+`GITHUB CI` carries the action too.
+It is about that same PR - it is the PR's own checks - so a captain who has stepped right onto it to read a failure is one keystroke from the page that explains it.
+`pre-merge` does NOT: that cell is about the merge gate firstmate runs, not about the link.
+`PR_CELLS` derives both indices from the step list rather than writing numbers down, so a stage inserted anywhere moves them with it.
+
+A row with no pipeline draws none of these cells, so the stage cursor says nothing about it whatever index it happens to be parked at, and enter there keeps its ordinary meaning.
+A row that has the cells but no PR recorded yet says exactly that - `enter: no PR recorded for this task yet` - rather than advertising an action that would do nothing when pressed.
+That is the same rule the gutter beneath it already follows, where a task with no PR draws a dash instead of a blank.
+
+Two mechanics differ from `--open-cmd`, both on purpose.
+
+The viewer does NOT suspend for this one.
+`--open-cmd` may be a full-screen program the captain sits in, which is why that path hands over the terminal entirely; a browser opens on another machine's desktop and returns at once, so suspending for it would blank the fleet view for a blink and give nothing back.
+It runs in the background and its own first line of output reaches the footer when it returns - what the command SAYS it did, never what its exit code implies, which is the rule the window case was fixed for.
+
+And the command itself is `bin/fm-open-url.sh`, the single owner of "open a url on this machine", because that answer is not one command here.
+Firstmate runs in WSL2 while the browser is on the Windows host, so the ladder is `$BROWSER`, then `wslview`, `xdg-open`, `open`, and under WSL `powershell.exe -Command Start-Process` and finally `explorer.exe`.
+That script's header owns the ladder and its own flags; two facts about it belong here because they are contracts rather than mechanics.
+
+The url is validated before either Windows rung can see it.
+It arrives from a PR link recorded in fleet state and those two rungs splice it into another interpreter's command line, so anything that is not plain `http(s)` with a conservative character set is refused with the reason and nothing is run at all.
+
+`explorer.exe` reports a handover rather than a success.
+It returns 1 on a url it opened perfectly well, so its exit code is not a verdict, and claiming an open on it would be exactly the lie the `--open` outcome line was fixed for.
 
 ## The timer is two rows, because two states had a word and no time
 
@@ -936,6 +967,20 @@ The row then draws the stages the run reports, and the title stops naming `direc
 This is the opposite of inferring the mode from an ABSENT run, which the paragraph above rightly refuses.
 Absence is also what a wedged worker and a pipeline that has not started yet look like, so it says nothing; a run that was read, with steps on it, says something, and nothing else has to be guessed.
 A read that FAILED is excluded on the same test: it observed nothing, so it refutes nothing, and that row is drawn unknown as before.
+
+### The keyboard path is tested through a real terminal
+
+Every other assertion about this renderer calls `render()` directly, which is the right boundary for what it draws and no boundary at all for what happens when a key is pressed.
+The keyboard only exists in watch mode: it opens `/dev/tty`, puts it in raw mode, and runs a command with the selected agent in its environment, none of which is reachable without a controlling terminal.
+So `tests/fm-flow-tui-pty.test.sh` drives the viewer on a pseudo-terminal from python3's own `pty`, sends the arrow keys that move the stage cursor and then enter, and asserts which command ran and what it was told about the row.
+`node-pty` is deliberately not introduced: a dependency for one test file is a worse trade than twenty lines of stdlib.
+
+The child's stdin is reopened onto the snapshot FILE after the fork, which is the two-channel design above holding: the document arrives on stdin and the keys come from `/dev/tty`, which the fork has already made the slave side of that pty.
+
+One hazard is worth naming because it cost a silent hang.
+`bin/fm-flow-tui.mjs` decides it was invoked directly by comparing `import.meta.url` with `process.argv[1]`, and under `node -e '<script>' <path>` the path IS `argv[1]`, so a test that imports the module to read a constant out of it runs its `main()` - which waits on stdin for a snapshot.
+With stdin an open pipe rather than a terminal or a closed descriptor, that wait never ends and the whole suite hangs on its first line with no output at all.
+Every such probe therefore reads from `/dev/null`.
 
 ## Cost
 

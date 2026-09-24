@@ -21,16 +21,22 @@ TUI="$ROOT/bin/fm-flow-tui.mjs"
 # written down here: a cell added to STEPS changes what a narrowed frame must
 # say it is showing, and a number copied into this file would go on asserting
 # the old row.
+# Stdin is /dev/null on both probes below, and that is load-bearing rather than
+# tidiness. The renderer decides it was invoked directly by comparing
+# import.meta.url with process.argv[1], and under `node -e <script> <path>` the
+# path IS argv[1], so importing it here runs its main() - which waits on stdin
+# for a snapshot. With stdin an open pipe (a CI runner, a background shell) that
+# wait never ends and the whole suite hangs on line one with no output at all.
 NCELLS=$(node --input-type=module -e \
   'const m = await import(process.argv[1]); process.stdout.write(String(m.CELL_WIDTHS.length))' \
-  "$TUI")
+  "$TUI" 2>/dev/null </dev/null)
 # Which box the push+PR stage is, counting from the left. The connector label
 # below is read as the field just after it, so this comes from the renderer's
 # own step list rather than from a position that a step inserted anywhere to its
 # left or right would quietly move.
 PRBOX=$(node --input-type=module -e \
   'const m = await import(process.argv[1]); process.stdout.write(String(m.STEPS.findIndex((s) => s.key === "pr") + 1))' \
-  "$TUI")
+  "$TUI" 2>/dev/null </dev/null)
 TMP_ROOT=$(fm_test_tmproot fm-flow-tui)
 mkdir -p "$TMP_ROOT"
 
@@ -645,40 +651,121 @@ for cols in 40 60 80 100 130 200; do
 done
 pass "a fleet of both block heights never overflows the terminal in either direction"
 
-# --- what enter does is stated on the selected row, whatever cell is on -------
+# --- what enter does is stated on the selected row, for the cell it is on -----
 #
 # Stepping right onto GITHUB CI used to leave a highlighted cell and nothing
-# saying what enter would do to it. Enter is agent-scoped, no cell carries an
-# action of its own, and the row says so on every frame.
+# saying what enter would do to it. The row says so on every frame - and since
+# 2026-09-24 enter no longer does one thing, so the sentence has to be true for
+# the cell the cursor is actually on rather than for the row in general.
 
 DOC3=$(snap "[$(agent_with e1 "$(steps_all completed)")]")
 out=$(render "$DOC3" | sed 's/\x1b\[[0-9;]*m//g')
 assert_contains "$out" "enter: open this worker's window" "the selected row does not say what enter does"
 
-# The cell is only reachable through the arrow keys, so the frame is asked for
-# directly. Cell 7 is GITHUB CI, the one the captain pressed enter on.
+# Every cell index comes from the renderer's own PR_CELLS rather than being
+# written down: a stage inserted anywhere would move them, and a number copied
+# out of one frame would go on asserting the old row.
 cat >"$TMP_ROOT/hint.mjs" <<'JS'
-const { render } = await import(process.argv[2]);
+const { render, PR_CELLS, CELL_WIDTHS } = await import(process.argv[2]);
 const snap = JSON.parse(process.argv[3]);
+const withPR = JSON.parse(process.argv[3]);
+withPR.agents = withPR.agents.map((a) => ({
+  ...a, pr: { url: "https://github.com/kirangathani/firstmate/pull/51", number: 51 },
+}));
 const plain = (f) => f.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
 let bad = 0;
-for (const cell of [-1, 0, 4, 7, 8]) {
-  const out = plain(render(snap, { rows: 60, cols: 200, sel: 0, cell }));
-  if (!out.includes("enter: open this worker's window")) {
-    console.error(`cell ${cell}: the selected row does not say what enter does`);
-    bad++;
+const say = (m) => { console.error(m); bad++; };
+const draw = (doc, o) => plain(render(doc, { rows: 60, cols: 200, sel: 0, ...o }));
+
+const others = [-1, ...CELL_WIDTHS.map((_, i) => i).filter((i) => !PR_CELLS.has(i))];
+for (const cell of others) {
+  for (const [doc, label] of [[snap, "no PR"], [withPR, "with a PR"]]) {
+    const out = draw(doc, { cell });
+    if (!out.includes("enter: open this worker's window")) {
+      say(`cell ${cell}, ${label}: the row does not say enter opens the worker`);
+    }
   }
 }
-const custom = plain(render(snap, {
-  rows: 60, cols: 200, sel: 0, cell: 7, openHint: "enter: attach (detach to come back)",
+// The two cells that are about the PR say the other thing, and only for a row
+// that HAS one.
+for (const cell of PR_CELLS) {
+  const has = draw(withPR, { cell });
+  if (!has.includes("enter: open this PR in your browser")) {
+    say(`cell ${cell}: a row with a PR does not offer to open it`);
+  }
+  if (has.includes("open this worker's window")) {
+    say(`cell ${cell}: a PR cell still advertises the window`);
+  }
+  // A row with no PR says so rather than advertising an action that would do
+  // nothing when pressed.
+  const none = draw(snap, { cell });
+  if (!none.includes("enter: no PR recorded for this task yet")) {
+    say(`cell ${cell}: a row with no PR does not say so`);
+  }
+}
+
+// Both sentences belong to the caller, for the same reason: only it knows what
+// its own commands do to this terminal.
+const custom = draw(withPR, {
+  cell: 0, openHint: "enter: attach (detach to come back)",
+});
+if (!custom.includes("detach to come back")) say("--open-hint did not reach the row");
+if (custom.includes("open this worker's window")) say("--open-hint did not replace the default");
+const customPR = draw(withPR, {
+  cell: [...PR_CELLS][0], openPrHint: "enter: open PR 51 on github.com",
+});
+if (!customPR.includes("open PR 51 on github.com")) say("--open-pr-hint did not reach the row");
+if (customPR.includes("open this PR in your browser")) say("--open-pr-hint did not replace the default");
+
+// A worker with no pipeline draws none of these cells, so the stage cursor
+// says nothing about its row: enter there keeps meaning what it always did,
+// whatever index the cursor is parked at.
+const flat = JSON.parse(process.argv[3]);
+flat.agents = flat.agents.map((a) => ({
+  ...a, pipeline: false, kind: "scout",
+  pr: { url: "https://github.com/kirangathani/firstmate/pull/51", number: 51 },
 }));
-if (!custom.includes("detach to come back")) { console.error("--open-hint did not reach the row"); bad++; }
-if (custom.includes("open this worker's window")) { console.error("--open-hint did not replace the default"); bad++; }
+for (const cell of PR_CELLS) {
+  const out = draw(flat, { cell });
+  if (!out.includes("enter: open this worker's window")) {
+    say(`cell ${cell}: a row with no pipeline took a stage cell's meaning`);
+  }
+}
 process.exit(bad ? 1 : 0);
 JS
 node "$TMP_ROOT/hint.mjs" "$TUI" "$DOC3" ||
-  fail "the enter hint is missing on some cell, or the caller's hint did not reach it"
-pass "the selected agent states what enter does whichever cell is highlighted"
+  fail "the enter hint is wrong for some cell, or a caller's hint did not reach it"
+pass "the selected agent states what enter does for the cell the cursor is on, and a row with no PR says so instead of offering one"
+
+# --- which cells belong to the PR, and what enter does there -----------------
+#
+# The captain, 2026-09-24: "We can make it so that the push+PR box can allow me
+# to press enter on it to open the browser on the link to the active PR?". The
+# GITHUB CI box beside it is about the same PR, so it carries the same action.
+cat >"$TMP_ROOT/prcells.mjs" <<'JS'
+const { PR_CELLS, opensPR, STEPS, CELL_WIDTHS } = await import(process.argv[2]);
+let bad = 0;
+const say = (m) => { console.error(m); bad++; };
+// Exactly two cells, and they are the push+PR box and the one to its right.
+const pr = STEPS.findIndex((s) => s.key === "pr");
+if (PR_CELLS.size !== 2) say(`PR_CELLS holds ${PR_CELLS.size} cells`);
+if (!PR_CELLS.has(pr)) say("the push+PR cell is not a PR cell");
+if (!PR_CELLS.has(STEPS.length)) say("the GITHUB CI cell is not a PR cell");
+// pre-merge is NOT one: it is about the merge gate, not the PR link.
+if (PR_CELLS.has(CELL_WIDTHS.length - 1)) say("pre-merge was counted as a PR cell");
+const ship = { pipeline: true, pr: { url: "https://x/pull/1" } };
+const scout = { pipeline: false, pr: { url: "https://x/pull/1" } };
+for (const cell of PR_CELLS) {
+  if (!opensPR(ship, cell)) say(`opensPR said no on PR cell ${cell}`);
+  if (opensPR(scout, cell)) say(`opensPR said yes on a row with no pipeline, cell ${cell}`);
+}
+if (opensPR(ship, -1)) say("opensPR said yes with the cursor on the head");
+if (opensPR(ship, 0)) say("opensPR said yes on the building cell");
+process.exit(bad ? 1 : 0);
+JS
+node "$TMP_ROOT/prcells.mjs" "$TUI" ||
+  fail "the cells enter opens the PR from are not the push+PR and GITHUB CI cells"
+pass "enter opens the PR from the push+PR and GITHUB CI cells only, and never from a row with no pipeline"
 
 # The caller owns that sentence end to end: only it knows what its --open-cmd
 # does to the captain's terminal and how to get back.
@@ -687,6 +774,14 @@ out=$(setsid node "$TUI" --watch --cols 200 --rows 60 --tick 0 \
   sed 's/\x1b\[[0-9;]*m//g')
 assert_contains "$out" "detach to come back" "--open-hint did not survive the flag path"
 pass "--open-hint replaces the default sentence about what enter does"
+
+# The PR half of it travels the same route, and both new flags are refused
+# outside watch mode exactly as the two they join.
+node "$TUI" --open-pr-cmd true --cols 200 --rows 60 <<<"$DOC3" >/dev/null 2>&1
+expect_code 2 $? "--open-pr-cmd outside watch mode"
+node "$TUI" --open-pr-hint x --cols 200 --rows 60 <<<"$DOC3" >/dev/null 2>&1
+expect_code 2 $? "--open-pr-hint outside watch mode"
+pass "the PR-open flags are refused outside watch mode, like every other shell-out flag"
 
 # --- keys arrive in chunks, and in two encodings -----------------------------
 #
