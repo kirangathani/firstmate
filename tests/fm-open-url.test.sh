@@ -118,6 +118,9 @@ pass "a machine with no opener refuses and names every rung it tried"
 # it into another interpreter's command line, so it is validated before either
 # can see it. These are refusals, not escapes: nothing is run at all.
 D=$(only wslview powershell.exe)
+# The literal bytes matter here, so none of these may expand in this shell:
+# each one is a value the script under test must refuse to pass on.
+# shellcheck disable=SC2016
 for bad in \
   "https://github.com/x/y/pull/1'; Start-Process calc; '" \
   'https://github.com/x/$(id)' \
