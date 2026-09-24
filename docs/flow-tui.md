@@ -274,13 +274,39 @@ The detail is the fixed sentence `no pipeline view as this is a scout agent`, ne
 
 The collector still calls `bin/fm-crew-state.sh` for a scout and carries its answer on the wire exactly as it does for a secondmate - reading it is not the defect, drawing it unfiltered is - so a future row kind that needs the real read can still have it; the override lives entirely in the renderer's `compactState()`.
 
-### The captain-driving marker: one record, drawn the same way everywhere
+### Two standing declarations, drawn the same way everywhere
+
+#### The captain-driving marker: one record, drawn the same way everywhere
 
 `state/<id>.monitor-exempt` is the captain's own signed record that he has taken a worker's window for himself (`bin/fm-monitor.sh --exempt`, cleared by `--unexempt`; `AGENTS.md` section 2), and a tmux client of his sitting in that window says the same thing with no record at all (`docs/captain-driven.md`).
 The collector states it as `captain_driving`, a plain boolean with no signature or reason attached - verifying the signature is `bin/fm-monitor.sh`'s job, and this read-only collector only reports whether the record exists or a tmux client of the captain's is currently sitting in the task's window.
 
 It means the same thing whatever kind of row carries it, so it is drawn the same way on every kind rather than being given a row-specific spelling: the fixed sentence `captain driving directly in the window`, appended to whatever detail the row already carries (or standing alone when that detail is otherwise empty, as on an idle secondmate's row).
 A scout's row therefore reads `no pipeline view as this is a scout agent · captain driving directly in the window`, and a ship row carries the same sentence among its head's other agent-wide notes - authority, `worker gone`, `unreadable: ...` - because a pipeline row has no single "detail" field the way a compact row does.
+
+#### The upstream wait: the same slot, its own colour, and its own refusal
+
+`state/<id>.upstream-wait` is firstmate's own signed declaration that a task has nothing left to do and is purely waiting on somebody outside the fleet.
+`docs/captain-driven.md` owns the gate behind it and everything it suppresses; this section owns what the row draws.
+
+It arrives as `upstream_wait`, an object rather than a boolean, and that is the difference from the marker above: "waiting on action from upstream" with no action named is a sentence the captain cannot act on, so the record's own plain English rides the wire with it.
+Presence and that field are the whole read, for the same reason the marker above is presence only - verifying the signature is the gate's job, and this view draws a marker, never an authority.
+
+It is drawn in the same slot and the same position as `captain driving directly in the window`, because it answers the same question that marker does - why is firstmate not watching this worker - and the two are told apart by their colour and by what follows them.
+Both can hold at once and both are drawn: the captain sitting in a window does not stop a PR waiting on a maintainer.
+The `GITHUB CI` cell turns the same colour with `action needed from upstream` wrapped over its first two detail rows, and keeps its own `N/N passed` on the row beneath: the cell is saying who the ball is with, not forgetting what it knows about the PR.
+
+The colour is lilac, `38;5;147`, and it is the ONE value in this view that is not a terminal palette slot - the exception to the colour policy stated at the top of this document.
+Every slot is carrying a meaning already: 94 is failure, skipped and scouting, 95 is unreadable, 96 is identity, 93 is waiting on the captain.
+A sixteen-colour view cannot grow a seventh meaning without one of those becoming ambiguous.
+The exception is narrow on purpose: the token is used by exactly two places drawing the same fact, so if it reads wrong against a theme there is one value to change rather than a hue spread through the frame.
+
+**A row can never show both a CI failure and this wait.**
+They contradict each other outright - a task whose checks have gone red has something to do, which is the opposite of purely waiting - and the gate already makes the pair unreachable, refusing a red check and dropping a record whose checks go red afterwards.
+The renderer refuses independently anyway, because "unreachable" is a claim about a process and this is a claim about a frame: a record that survived a window it should not have, a hand-written document, or a recheck that could not reach GitHub all arrive here looking identical.
+In every one of them the failure is the fact and the record is what has gone stale, so the failure keeps its own colour and its own words and the record is reported stale in the unreadable colour.
+Never lilac over red, and never a silent drop either - a suppression that vanished without saying why is how a task stops being watched by accident.
+`tests/fm-flow-tui-pty.test.sh` asserts it through a real terminal, under that name.
 
 ### Blocks are two heights, so the window is solved once
 
@@ -424,6 +450,7 @@ Both are additive `v2` fields: a consumer that ignores them reads exactly the do
       "run_number": 5,
       "endpoint_alive": true,
       "captain_driving": false,
+      "upstream_wait": {"waiting": false, "action": ""},
       "skips": { "local": false, "ci": false },
       "rework": null,
       "worker": { "harness": "claude", "model": "claude-opus-5", "effort": "high" },
@@ -499,6 +526,7 @@ Both are additive `v2` fields: a consumer that ignores them reads exactly the do
       },
       "endpoint_alive": true,
       "captain_driving": false,
+      "upstream_wait": {"waiting": false, "action": ""},
       "skips": { "local": false, "ci": false },
       "worker": { "harness": "claude", "model": null, "effort": "xhigh" },
       "pr": { "url": null, "number": null },

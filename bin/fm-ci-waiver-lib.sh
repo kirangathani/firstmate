@@ -96,6 +96,32 @@ FM_CI_WAIVER_DISPATCH_LOCAL_SKIP='local_skip'
 # an exemption's stated justification cannot be edited after it was granted
 # without invalidating it.
 FM_CI_WAIVER_MONITOR_EXEMPT_SCHEME='fm-monitor-exempt.v1'
+# A domain of its own for the per-task UPSTREAM WAIT recorded in
+# state/<id>.upstream-wait (bin/fm-upstream-wait.sh owns the record and the gate
+# that has to pass before one is written; bin/fm-ack-lib.sh owns the verdict).
+#
+# Separate from the exemption domain above rather than sharing it, because the
+# two say different things and are granted on different authority: the exemption
+# is the captain taking a worker for himself, and this is firstmate declaring
+# that a task it verified is purely waiting on somebody outside the fleet. A
+# shared domain would let a record minted for one be moved to the other by
+# renaming the file, which is exactly the widening the dispatch tokens keep apart
+# by naming their flag in the payload.
+#
+# It matters more here than for the exemption, because the thing this suppresses
+# is suppressed on a CREW'S say-so. The captain's stated error case is a worker
+# "lazily pretending they are waiting on upstream when they are not", and a
+# worker holds no key: it cannot mint this, cannot extend it, and cannot obtain
+# one for a task the gate refused. The same residual limit against FIRSTMATE
+# stated above applies unchanged, and is answered the same way - every standing
+# wait is named with its reason on every monitor render and at every session
+# start, and its gate re-runs on the recheck cadence, so a wait that stopped
+# being true drops itself rather than standing on the signature it was given.
+#
+# The awaited action is the second payload field, so it is signed with the task
+# id: what a wait says it is waiting for cannot be edited after the gate that
+# verified it passed.
+FM_CI_WAIVER_UPSTREAM_WAIT_SCHEME='fm-upstream-wait.v1'
 # A THIRD domain, for deriving the per-repository secret that is published to a
 # repository's Actions secrets.
 #
@@ -251,6 +277,18 @@ fm_ci_waiver_monitor_exempt_token() {
 # stdin.
 fm_ci_waiver_monitor_exempt_check() {
   fm_ci_waiver_hmac_check "$FM_CI_WAIVER_MONITOR_EXEMPT_SCHEME" "$1" "$2" "$3"
+}
+
+# fm_ci_waiver_upstream_wait_token <task-id> <awaited-action>; secret on stdin.
+# The value bin/fm-upstream-wait.sh records in state/<id>.upstream-wait.
+fm_ci_waiver_upstream_wait_token() {
+  fm_ci_waiver_hmac_hex "$FM_CI_WAIVER_UPSTREAM_WAIT_SCHEME" "$1" "$2"
+}
+
+# fm_ci_waiver_upstream_wait_check <task-id> <awaited-action> <candidate-hex>;
+# secret on stdin.
+fm_ci_waiver_upstream_wait_check() {
+  fm_ci_waiver_hmac_check "$FM_CI_WAIVER_UPSTREAM_WAIT_SCHEME" "$1" "$2" "$3"
 }
 
 # fm_ci_waiver_repo_key <owner/repo>; the MASTER secret on stdin. Prints the hex

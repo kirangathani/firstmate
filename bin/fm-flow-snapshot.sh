@@ -754,6 +754,30 @@ row_common() {  # <task-json>
      || fm_captain_attached "$STATE_DIR" "$FM_ROW_ID"; then
     FM_ROW_CAPTAIN_DRIVING=true
   fi
+  # The sibling standing declaration: firstmate verified this task has nothing
+  # left to do and is purely waiting on somebody outside the fleet
+  # (bin/fm-upstream-wait.sh's gate, signed by bin/fm-monitor.sh
+  # --upstream-wait). It is carried as its OWN field rather than folded into the
+  # one above, because they are different facts about a worker and the row draws
+  # each of them - both can hold at once.
+  #
+  # The ACTION is on the wire as well as the boolean, and that is the difference
+  # from the captain-driving marker: "waiting on action from upstream" with no
+  # action named is a sentence the captain cannot act on, and the record carries
+  # the plain English he asked the crewmate for. Presence and the third field
+  # are the whole read, for the same reason the marker above is presence only -
+  # verifying the signature is the gate's job, and this view draws a marker,
+  # never an authority. A record that does not verify still draws the marker
+  # here and is reported as NOT verifying everywhere authority is decided
+  # (bin/fm-monitor.sh, bin/fm-bootstrap.sh), which is where a forged one has to
+  # surface.
+  FM_ROW_UPSTREAM_WAITING=false
+  FM_ROW_UPSTREAM_ACTION=
+  if [ -f "$STATE_DIR/$FM_ROW_ID.upstream-wait" ]; then
+    FM_ROW_UPSTREAM_WAITING=true
+    FM_ROW_UPSTREAM_ACTION=$(awk -F'\t' 'NR==1 {print $3; exit}' \
+      "$STATE_DIR/$FM_ROW_ID.upstream-wait" 2>/dev/null || true)
+  fi
   FM_ROW_WINDOW=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
   FM_ROW_ENDPOINT_ALIVE=$(printf '%s' "$task" | jq -r 'if .endpoint.exists then "true" else "false" end')
   # `endpoint.exists` only says a pane is there. The deeper probe asks what is
@@ -1097,6 +1121,8 @@ agent_json() {  # <task-json>
     --argjson pr_num "${pr_num:-null}" \
     --argjson rework "$rework" \
     --argjson captain_driving "$FM_ROW_CAPTAIN_DRIVING" \
+    --argjson upstream_waiting "$FM_ROW_UPSTREAM_WAITING" \
+    --arg upstream_action "$FM_ROW_UPSTREAM_ACTION" \
     --argjson skip_local "$skip_local" \
     --argjson skip_ci "$skip_ci" \
     --argjson run_number "$run_number" \
@@ -1115,6 +1141,7 @@ agent_json() {  # <task-json>
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
       captain_driving:$captain_driving,
+      upstream_wait:{waiting:$upstream_waiting, action:$upstream_action},
       skips:{local:$skip_local, ci:$skip_ci},
       rework:$rework,
       worker:{
@@ -1214,6 +1241,8 @@ compact_json() {  # <task-json>
     --argjson endpoint_alive "$FM_ROW_ENDPOINT_ALIVE" \
     --argjson state "$state" \
     --argjson captain_driving "$FM_ROW_CAPTAIN_DRIVING" \
+    --argjson upstream_waiting "$FM_ROW_UPSTREAM_WAITING" \
+    --arg upstream_action "$FM_ROW_UPSTREAM_ACTION" \
     --argjson ci "$CI_EMPTY" \
     '{
       id:$id, branch:$branch, project:$project, worktree:$worktree,
@@ -1224,6 +1253,7 @@ compact_json() {  # <task-json>
       endpoint_alive:$endpoint_alive,
       agent_alive:$agent_alive,
       captain_driving:$captain_driving,
+      upstream_wait:{waiting:$upstream_waiting, action:$upstream_action},
       skips:{local:false, ci:false},
       rework:null,
       worker:{

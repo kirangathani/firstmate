@@ -934,6 +934,21 @@ for exempt_rec in "$STATE"/*.meta; do
     echo "MONITOR_EXEMPT: $exempt_id is the captain's - firstmate neither alarms on it nor watches it: $FM_CAPTAIN_ATTACHED_REASON (supervision resumes on its own once you leave that window)"
   fi
 done
+# The sibling suppression, announced on exactly the same terms and for exactly
+# the same reason: a task firstmate has declared purely waiting on somebody
+# outside the fleet is one it neither alarms on nor watches, so it has to be a
+# blind spot the captain can see. Its own gate re-runs on the recheck cadence,
+# which is what an exemption has no equivalent of, so the line says so.
+for wait_rec in "$STATE"/*.upstream-wait; do
+  [ -e "$wait_rec" ] || continue
+  wait_id=${wait_rec##*/}
+  wait_id=${wait_id%.upstream-wait}
+  if fm_upstream_waiting "$STATE" "$wait_id"; then
+    echo "UPSTREAM_WAIT: $wait_id is waiting on action from upstream - firstmate neither alarms on it nor watches it: $FM_UPSTREAM_WAIT_ACTION (verified: $FM_UPSTREAM_WAIT_EVIDENCE; resume it with bin/fm-monitor.sh --upstream-resume $wait_id)"
+  else
+    echo "UPSTREAM_WAIT: $wait_id carries an upstream-wait record that does NOT verify against this home's key, so it is NOT waiting and still alarms - inspect $wait_rec"
+  fi
+done
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   secondmate_liveness_sweep

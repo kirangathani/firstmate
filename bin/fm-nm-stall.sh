@@ -129,11 +129,12 @@ if [ -r "$SCRIPT_DIR/fm-bounded-lib.sh" ]; then
   . "$SCRIPT_DIR/fm-bounded-lib.sh"
 fi
 
-# fm_captain_driven() - the one owner of "is the captain driving this worker
-# himself". A task that is his is left out of this sweep's findings: firstmate
-# is not steering it, so naming it would be an alarm nobody is allowed to act
-# on. It stays visible where blind spots are reported (bin/fm-monitor.sh,
-# bin/fm-bootstrap.sh, the fleet view), not here.
+# fm_supervision_suspended() - the one owner of "should this worker wake or alarm
+# firstmate at all". Two standing declarations answer no: the captain driving it
+# himself, and a verified upstream wait. A task under either is left out of this
+# sweep's findings, because firstmate is not steering it and naming it would be
+# an alarm nobody is allowed to act on. It stays visible where blind spots are
+# reported (bin/fm-monitor.sh, bin/fm-bootstrap.sh, the fleet view), not here.
 # shellcheck source=bin/fm-ack-lib.sh
 . "$SCRIPT_DIR/fm-ack-lib.sh"
 
@@ -402,7 +403,7 @@ scan() {
     id=${meta##*/}
     id=${id%.meta}
     task_is_in_domain "$meta" || continue
-    fm_captain_driven "$STATE" "$id" && continue
+    fm_supervision_suspended "$STATE" "$id" && continue
     read_record "$id" || continue
     frozen=$((REC_LAST - REC_FIRST))
     [ "$frozen" -ge "$STALL_SECS" ] || continue

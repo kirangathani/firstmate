@@ -99,6 +99,20 @@ const magenta = sgr("95");
 // deliberately NOT merged into it: "nobody could find out" must stay
 // distinguishable from "this failed".
 const blue = sgr("94");
+// LILAC, and the one place in this view that is not a terminal palette slot.
+// The captain asked for "waiting on action from upstream" to sit "in lilac next
+// to the 'captain driving directly from window' message", and the palette has
+// no slot left that is not already carrying a meaning: 94 is now failure,
+// skipped and scouting; 95 is unreadable; 96 is identity; 93 is waiting on the
+// captain. A sixteen-colour view cannot grow a seventh meaning without one of
+// those becoming ambiguous, so this one meaning gets a 256-colour value of its
+// own.
+//
+// The colour policy above still holds for everything else, and the exception is
+// narrow on purpose: this token is used by exactly two places, both drawing the
+// same fact, so if it reads wrong against a theme there is one value to change
+// rather than a hue spread through the frame.
+const lilac = sgr("38;5;147");
 
 // The marching trail. Hard rule, learned by looking at it against the
 // captain's skin: NO cell of the trail may be darker than the border it runs
@@ -221,6 +235,10 @@ export const PAINT = {
   pending: dim,
   skipped: blue,
   unknown: magenta,
+  // Not a step state: no pipeline step is ever `upstream`. It is here so the
+  // CI cell reaches its colour through the same table every other cell does,
+  // rather than painting itself.
+  upstream: lilac,
 };
 
 // --- the captain's testing skips --------------------------------------------
@@ -885,6 +903,24 @@ export function ciCommit(agent) {
 function ciBox(agent, anim) {
   const ci = agent.ci;
   const { passed = 0, total = 0, failed = 0 } = ci ?? {};
+  // Asked BEFORE the verdict, and only ever reached when the checks are not a
+  // failure - upstreamWaitState is what guarantees that, so the invariant is
+  // enforced in one place rather than re-derived here. The checks keep their
+  // own count on the row below the sentence: this cell is saying who the ball
+  // is with, not replacing what it knows about the PR.
+  if (upstreamWaitState(agent) === "waiting") {
+    const [l1 = "", l2 = ""] = wrapWords("action needed from upstream", CIW + 2);
+    const tally = total ? `${passed}/${total} passed` : "";
+    const b = box("GITHUB CI", "upstream", CIW, {
+      dashed: true, timer: l1, timer2: l2, model: tally,
+    });
+    return {
+      ...b,
+      timer: lilac(b.timer),
+      timer2: l2 ? lilac(b.timer2) : b.timer2,
+      model: tally ? green(b.model) : b.model,
+    };
+  }
   switch (ciVerdict(agent)) {
     // No PR yet is a real "not reached". Having a PR whose checks were not
     // collected is NOT: drawing it dim would claim CI has not started when the
@@ -1212,6 +1248,10 @@ function agentBlock(agent, n, selected, cell, anim, lay, openHint) {
   // separate "detail" field the way a compact row does, so the note rides the
   // head beside the other agent-wide facts rather than any one step cell.
   if (agent.captain_driving === true) notes.push(cyan(CAPTAIN_DRIVING_NOTE));
+  // Beside it, never instead of it: both can hold, and each says a different
+  // thing about why firstmate is not watching this worker.
+  const waitNote = upstreamWaitHeadNote(agent);
+  if (waitNote) notes.push(waitNote);
   if (agent.collection?.ok === false) notes.push(magenta(`unreadable: ${agent.collection.reason}`));
   else if (agent.endpoint_alive === false) notes.push(magenta("worker gone"));
   // A run that ended without completing says how, here, because a nine-column
@@ -1340,6 +1380,70 @@ export const kindLabel = (kind) => KIND_LABEL.get(kind) ?? String(kind ?? "worke
 // appended the same way everywhere it is drawn, never given a row-specific
 // spelling.
 const CAPTAIN_DRIVING_NOTE = "captain driving directly in the window";
+
+// The sibling standing declaration, and the captain's own words for it. It sits
+// in the same slot and the same position, because it answers the same question
+// the marker beside it does - why is firstmate not watching this worker - and
+// the two are told apart by their colour and by what follows them, never by
+// where they are.
+//
+// Both can hold at once, so both are drawn: the captain sitting in a window
+// does not stop a PR waiting on an upstream maintainer, and a row that showed
+// one and swallowed the other would say firstmate is not watching for a reason
+// that is only half the truth.
+//
+// The recorded action follows the sentence, because "waiting on action from
+// upstream" alone is not something the captain can act on. The record carries
+// the plain English the crewmate was asked for and the gate verified, and it is
+// the whole point of the declaration being a record rather than a flag.
+const UPSTREAM_WAIT_NOTE = "waiting on action from upstream";
+
+// Whether this row carries a standing upstream wait, and what it says is being
+// awaited. The snapshot STATES it, like every other fact on this row.
+export const upstreamWaiting = (agent) => agent?.upstream_wait?.waiting === true;
+
+export function upstreamWaitNote(agent) {
+  if (!upstreamWaiting(agent)) return "";
+  const action = String(agent?.upstream_wait?.action ?? "").trim();
+  return action ? `${UPSTREAM_WAIT_NOTE}: ${action}` : UPSTREAM_WAIT_NOTE;
+}
+
+// THE INVARIANT: a row can never show a CI failure AND "waiting on action from
+// upstream" at once. They contradict each other outright - a task whose checks
+// have gone red has something to do, which is the opposite of purely waiting -
+// and the captain asked for a test that the rendered view cannot show both.
+//
+// The gate makes the pair unreachable upstream of here: a red check refuses the
+// declaration, and the recheck drops a record whose checks went red afterwards.
+// This is the renderer refusing INDEPENDENTLY, because "unreachable" is a claim
+// about a process and this is a claim about a frame. A record that survived a
+// window it should not have, a hand-written document, or a recheck that could
+// not reach GitHub all arrive here looking identical, and in every one of them
+// the failure is the fact and the record is the thing that has gone stale.
+//
+// So the row says so: the failure keeps its own colour and its own words, and
+// the record is reported in the unreadable colour as stale. Never lilac over
+// red, and never a silent drop either - a suppression that vanished without
+// saying why is how a task stops being watched by accident.
+export function upstreamWaitState(agent) {
+  if (!upstreamWaiting(agent)) return "none";
+  const v = ciVerdict(agent);
+  return v === "failed" || v === "running-failed" ? "stale" : "waiting";
+}
+
+const UPSTREAM_WAIT_STALE_NOTE =
+  "upstream-wait record is stale: a check on this PR has failed, so this task is not purely waiting";
+
+// The note this row's head carries for its standing upstream wait, already
+// painted, or "" when it has none. One owner, because the pipeline head and the
+// compact facts row must not describe the same record two ways.
+export function upstreamWaitHeadNote(agent) {
+  switch (upstreamWaitState(agent)) {
+    case "waiting": return lilac(upstreamWaitNote(agent));
+    case "stale": return magenta(UPSTREAM_WAIT_STALE_NOTE);
+    default: return "";
+  }
+}
 function withDriving(detail, driving) {
   if (!driving) return detail;
   return detail ? `${detail} · ${CAPTAIN_DRIVING_NOTE}` : CAPTAIN_DRIVING_NOTE;
@@ -1413,6 +1517,14 @@ function compactBlock(agent, n, selected, openHint) {
   const st = compactState(agent);
   const bits = [st.paint(st.word)];
   if (st.detail) bits.push(dim(st.detail));
+  // The standing upstream wait rides this row, in its own colour, beside the
+  // captain-driving sentence compactState already folded into the detail. It is
+  // a segment of its own rather than part of that detail because it has a
+  // colour of its own, and it is drawn here for the same reason it is drawn on
+  // a pipeline head: a scout waiting for a maintainer to stamp an issue is the
+  // captain's named no-PR case, so this row kind is one that will carry it.
+  const waitNote = upstreamWaitHeadNote(agent);
+  if (waitNote) bits.push(waitNote);
   // This worker has no step cells to hang its model on, and it is still an
   // agent working on one. It rides the facts row rather than the title,
   // painted cyan - never an alarm slot, because a healthy idle second mate's
