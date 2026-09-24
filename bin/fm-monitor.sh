@@ -35,6 +35,9 @@
 #               current-state read proves the worker resumed past it.
 #   captain-driven  the captain is driving this worker himself, either by his
 #               own signed record or by sitting in its window right now.
+#   upstream-wait  firstmate verified this task has nothing left to do and is
+#               purely waiting on somebody outside the fleet. Its gate is
+#               bin/fm-upstream-wait.sh's and re-runs on the recheck cadence.
 #   quiet       the last thing it reported owes firstmate nothing.
 #
 # THE EXEMPTION, and exactly what it is worth.
@@ -69,12 +72,32 @@
 #   spot the captain can see rather than one he has to remember.
 #   bin/fm-teardown.sh removes the record with the rest of the task's state.
 #
+# THE SIBLING DECLARATION, and what makes it different.
+#   state/<id>.upstream-wait, one line:
+#   <epoch>\t<hmac-hex>\t<awaited action>\t<evidence the gate saw>. It says
+#   firstmate verified that a task has nothing left to do and is waiting on
+#   somebody outside the fleet, which suspends the same supervision the
+#   exemption does and is reported as its own class rather than folded into it.
+#
+#   --upstream-wait is granted here, beside --exempt, because this is where
+#   firstmate comes to declare a standing suppression. What it is NOT is a
+#   decision made here: bin/fm-upstream-wait.sh runs the gate first, and this
+#   signs only what that gate passed. The captain's stated error case is a
+#   crewmate "lazily pretending they are waiting on upstream when they are not",
+#   so the crewmate's own yes is one of the gate's conditions and never the
+#   grant. That script's header owns every condition and the recheck.
+#
 # Usage:
 #   fm-monitor.sh                          sweep and render every task
 #   fm-monitor.sh --quiet                  render only tasks needing attention
 #   fm-monitor.sh --exempt <id> --reason <why>   sign a standing exemption
 #   fm-monitor.sh --unexempt <id>          drop an exemption
 #   fm-monitor.sh --list-exempt            show standing exemptions
+#   fm-monitor.sh --upstream-wait <id> --reason <what is awaited>
+#                                          run bin/fm-upstream-wait.sh's gate and,
+#                                          only if it passes, sign the wait
+#   fm-monitor.sh --upstream-resume <id>   drop an upstream wait
+#   fm-monitor.sh --list-upstream-wait     show standing upstream waits
 # Exit: 0 nothing needs firstmate's attention, 1 at least one unactioned report,
 #       overdue recheck, or stalled validation, 2 bad usage or a refused exemption.
 set -u
@@ -106,6 +129,9 @@ usage: fm-monitor.sh [--quiet]
        fm-monitor.sh --exempt <task-id> --reason "<why>"
        fm-monitor.sh --unexempt <task-id>
        fm-monitor.sh --list-exempt
+       fm-monitor.sh --upstream-wait <task-id> --reason "<what is awaited>"
+       fm-monitor.sh --upstream-resume <task-id>
+       fm-monitor.sh --list-upstream-wait
 EOF
 }
 
@@ -116,7 +142,7 @@ REASON=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -h|--help) sed -n '2,79p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,102p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --quiet) ONLY_ATTENTION=1; shift ;;
     --list-exempt) MODE=list-exempt; shift ;;
     --exempt)
@@ -131,6 +157,19 @@ while [ "$#" -gt 0 ]; do
       TARGET=$2
       shift 2
       ;;
+    --upstream-wait)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      MODE=upstream-wait
+      TARGET=$2
+      shift 2
+      ;;
+    --upstream-resume)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      MODE=upstream-resume
+      TARGET=$2
+      shift 2
+      ;;
+    --list-upstream-wait) MODE=list-upstream-wait; shift ;;
     --reason)
       [ "$#" -ge 2 ] || { usage; exit 2; }
       REASON=$2
@@ -153,6 +192,19 @@ require_known_task() {  # <id>
   fi
 }
 
+# Both records are one tab-separated line, so a reason carrying a newline or a
+# tab would produce a record that reads back as a different reason than the one
+# that was signed.
+require_single_line_reason() {  # <reason>
+  case "$1" in
+    *"$TAB"*|*"
+"*)
+      echo "error: --reason must be a single line with no tab characters" >&2
+      exit 2
+      ;;
+  esac
+}
+
 # --- exemption verbs ---------------------------------------------------------
 
 case "$MODE" in
@@ -162,16 +214,7 @@ case "$MODE" in
       echo "error: --exempt needs --reason \"<why>\"; an exemption with no stated reason is an unexplained blind spot" >&2
       exit 2
     fi
-    # The record is one line and the reason is its last field, so a reason
-    # carrying a newline or a tab would produce a record that reads back as a
-    # different reason than the one that was signed.
-    case "$REASON" in
-      *"$TAB"*|*"
-"*)
-        echo "error: --reason must be a single line with no tab characters" >&2
-        exit 2
-        ;;
-    esac
+    require_single_line_reason "$REASON"
     if ! fm_ci_waiver_secret_readable "$SECRET_FILE"; then
       echo "error: no signing key at $SECRET_FILE, so this exemption cannot be signed." >&2
       echo "       An unsigned marker would let firstmate or a worker exempt itself from being checked," >&2
@@ -211,6 +254,74 @@ case "$MODE" in
     printf 'supervision resumed: %s\n' "$TARGET"
     exit 0
     ;;
+  upstream-wait)
+    require_known_task "$TARGET"
+    if [ -z "$REASON" ]; then
+      echo "error: --upstream-wait needs --reason \"<what is awaited>\"; a wait with no stated action is one nobody can re-verify" >&2
+      exit 2
+    fi
+    require_single_line_reason "$REASON"
+    # The gate runs FIRST, and its refusal is the whole answer: nothing is
+    # signed for a task that is not purely waiting, and the conditions it names
+    # are what firstmate acts on. bin/fm-upstream-wait.sh's header owns them.
+    if ! GATE=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-upstream-wait.sh" --gate "$TARGET" --reason "$REASON" 2>&1); then
+      printf '%s\n' "$GATE" >&2
+      echo "error: the gate refused, so no upstream wait was recorded for '$TARGET'" >&2
+      exit 2
+    fi
+    # The action that gets SIGNED is the crewmate's own words from the gate,
+    # never the --reason typed here, so what the record says is being awaited is
+    # the same sentence the gate read and verified against.
+    ACTION=$(printf '%s\n' "$GATE" | sed -n 's/^gate action: //p' | head -1)
+    EVIDENCE=$(printf '%s\n' "$GATE" | sed -n 's/^gate evidence: //p' | head -1)
+    [ -n "$ACTION" ] || ACTION=$REASON
+    require_single_line_reason "$ACTION"
+    if ! fm_ci_waiver_secret_readable "$SECRET_FILE"; then
+      echo "error: no signing key at $SECRET_FILE, so this wait cannot be signed." >&2
+      echo "       An unsigned marker would let a worker suspend its own supervision by writing a file," >&2
+      echo "       which is the exact pretending this gate exists to stop. Run 'bin/fm-ci-waiver.sh init' first." >&2
+      exit 2
+    fi
+    SIG=$(fm_ci_waiver_upstream_wait_token "$TARGET" "$ACTION" < "$SECRET_FILE") || SIG=
+    if [ -z "$SIG" ]; then
+      echo "error: could not sign the upstream wait for '$TARGET'" >&2
+      exit 2
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$(fm_ack_now)" "$SIG" "$ACTION" "$EVIDENCE" \
+      > "$(fm_upstream_wait_file "$STATE" "$TARGET")" || {
+      echo "error: could not write $(fm_upstream_wait_file "$STATE" "$TARGET")" >&2
+      exit 2
+    }
+    # Verify what was just written rather than trusting the write, for the
+    # reason --exempt does: a record that does not read back is a blind spot in
+    # the other direction.
+    if ! fm_upstream_waiting "$STATE" "$TARGET"; then
+      find "$STATE" -maxdepth 1 -name "$TARGET.upstream-wait" -delete 2>/dev/null || true
+      echo "error: the upstream wait written for '$TARGET' did not verify; nothing was recorded" >&2
+      exit 2
+    fi
+    printf 'upstream wait: %s is waiting on %s - firstmate neither alarms on it nor watches it\n' "$TARGET" "$ACTION"
+    printf 'The gate saw: %s\n' "$EVIDENCE"
+    printf 'It re-runs on every recheck, so this drops itself the moment that stops being true.\n'
+    exit 0
+    ;;
+  upstream-resume)
+    require_known_task "$TARGET"
+    if [ ! -f "$(fm_upstream_wait_file "$STATE" "$TARGET")" ]; then
+      printf 'no upstream wait recorded for %s\n' "$TARGET"
+      exit 0
+    fi
+    find "$STATE" -maxdepth 1 -name "$TARGET.upstream-wait" -delete 2>/dev/null || {
+      echo "error: could not remove $(fm_upstream_wait_file "$STATE" "$TARGET")" >&2
+      exit 2
+    }
+    printf 'supervision resumed: %s\n' "$TARGET"
+    exit 0
+    ;;
+  list-upstream-wait)
+    exec env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-upstream-wait.sh" --list
+    ;;
   list-exempt)
     FOUND=0
     for f in "$STATE"/*.monitor-exempt; do
@@ -242,6 +353,7 @@ N_PENDING=0
 N_ACKED=0
 N_MOVED=0
 N_EXEMPT=0
+N_UPSTREAM=0
 N_QUIET=0
 ATTENTION=
 ACCOUNTED=
@@ -275,6 +387,7 @@ describe() {  # <class> <verb> <age> <verdict> <detail> <open-keys>
     acked)      printf 'reported "%s"; firstmate has acted, now waiting on someone else' "$2" ;;
     moved-on)   printf 'log still shows "%s" but the worker has moved past it' "$2" ;;
     exempt)     printf 'CAPTAIN-DRIVEN, so firstmate is not watching it: %s (worker: %s)' "$5" "$(say_worker "$4")" ;;
+    upstream-wait) printf 'WAITING ON ACTION FROM UPSTREAM, verified: %s. Firstmate is not watching it, and the check re-runs on every recheck' "$5" ;;
     *)          printf 'nothing owed - last said "%s" (worker: %s)' "${2:-nothing yet}" "$(say_worker "$4")" ;;
   esac
 }
@@ -307,19 +420,26 @@ while IFS=$TAB read -r id class verb age verdict open_keys detail; do
       # stay in front of the captain for as long as it lasts.
       ATTENTION="${ATTENTION}${line}"$'\n'
       ;;
+    upstream-wait)
+      N_UPSTREAM=$((N_UPSTREAM + 1))
+      # Same block, same reason. It is a verified suppression rather than the
+      # captain's own, which changes who granted it and nothing about its
+      # needing to stay visible.
+      ATTENTION="${ATTENTION}${line}"$'\n'
+      ;;
     *) N_QUIET=$((N_QUIET + 1)); ACCOUNTED="${ACCOUNTED}${line}"$'\n' ;;
   esac
 done <<EOF
 $ROWS
 EOF
 
-TOTAL=$((N_UNACTIONED + N_RECHECK + N_PENDING + N_ACKED + N_MOVED + N_EXEMPT + N_QUIET))
+TOTAL=$((N_UNACTIONED + N_RECHECK + N_PENDING + N_ACKED + N_MOVED + N_EXEMPT + N_UPSTREAM + N_QUIET))
 
 printf 'MONITOR SWEEP: %s task(s) supervised in %s\n' "$TOTAL" "$STATE"
 # Every class on every render, zeros included: a class that is simply absent
 # reads as "there were none" and as "we did not check it" identically.
-printf 'MONITOR COUNTS: needs-action %s | needs-recheck %s | just-reported %s | acted %s | moved-on %s | captain-driven %s | nothing-owed %s\n' \
-  "$N_UNACTIONED" "$N_RECHECK" "$N_PENDING" "$N_ACKED" "$N_MOVED" "$N_EXEMPT" "$N_QUIET"
+printf 'MONITOR COUNTS: needs-action %s | needs-recheck %s | just-reported %s | acted %s | moved-on %s | captain-driven %s | upstream-wait %s | nothing-owed %s\n' \
+  "$N_UNACTIONED" "$N_RECHECK" "$N_PENDING" "$N_ACKED" "$N_MOVED" "$N_EXEMPT" "$N_UPSTREAM" "$N_QUIET"
 
 if [ -n "$ATTENTION" ]; then
   printf '%s' "$ATTENTION" | while IFS= read -r l; do printf 'MONITOR: %s\n' "$l"; done

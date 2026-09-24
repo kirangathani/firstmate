@@ -596,15 +596,119 @@ fm_captain_driven() {  # <state-dir> <id>
   return 1
 }
 
+# --- the per-task upstream wait ---------------------------------------------
+#
+# The record lives at state/<id>.upstream-wait, one line:
+#   <epoch>\t<hmac-hex>\t<awaited action>\t<evidence the gate verified>
+# bin/fm-upstream-wait.sh owns minting it and the gate that has to pass first;
+# this file owns believing it.
+#
+# It is the sibling of the exemption above and it is NOT the same fact. An
+# exemption says the captain has taken a worker for himself. This says firstmate
+# verified that a task has nothing left to do: its work is pushed, its PR is open
+# and green, and what it is waiting for is somebody outside this fleet. The two
+# can hold at once and each is reported as itself.
+#
+# The captain's own error case, 2026-09-24: "the key error case to avoid is
+# crewmates lazily pretending they are waiting on upstream when they are not, so
+# we need to think about how to mechanically enforce this." A worker's word is
+# never what writes this record - the gate is - and a worker holds no key, so it
+# can neither mint one nor extend one the gate refused.
+
+fm_upstream_wait_file() {  # <state-dir> <id>
+  printf '%s' "$1/$2.upstream-wait"
+}
+
+# 0 iff <id> carries an upstream wait whose signature this home's key
+# reproduces. Every failure path returns non-zero, for the reason
+# fm_ack_is_exempt states: a predicate that fell back to "waiting" whenever it
+# could not check would be silenced by deleting a file.
+# On success FM_UPSTREAM_WAIT_ACTION holds the signed plain-English action,
+# FM_UPSTREAM_WAIT_EVIDENCE what the gate saw, and FM_UPSTREAM_WAIT_AT when it
+# was granted.
+FM_UPSTREAM_WAIT_ACTION=
+# shellcheck disable=SC2034 # Read by bin/fm-upstream-wait.sh and bin/fm-bootstrap.sh.
+FM_UPSTREAM_WAIT_EVIDENCE=
+# shellcheck disable=SC2034 # Read by bin/fm-upstream-wait.sh and bin/fm-bootstrap.sh.
+FM_UPSTREAM_WAIT_AT=
+fm_upstream_waiting() {  # <state-dir> <id>
+  local f rec ts sig action evidence secret
+  FM_UPSTREAM_WAIT_ACTION=
+  FM_UPSTREAM_WAIT_EVIDENCE=
+  FM_UPSTREAM_WAIT_AT=
+  f=$(fm_upstream_wait_file "$1" "$2")
+  [ -f "$f" ] || return 1
+  IFS= read -r rec < "$f" 2>/dev/null || return 1
+  ts=${rec%%$'\t'*}
+  case "$ts" in ''|*[!0-9]*) return 1 ;; esac
+  rec=${rec#*$'\t'}
+  sig=${rec%%$'\t'*}
+  fm_ci_waiver_valid_sig "$sig" || return 1
+  case "$rec" in *$'\t'*) rec=${rec#*$'\t'} ;; *) return 1 ;; esac
+  # The evidence field is optional on the wire and is NOT signed: it is what the
+  # gate saw at the moment it passed, which the recheck replaces wholesale, so
+  # signing it would invalidate the record every time the gate looked again.
+  # What is signed is the task and the action, which is what must not drift.
+  case "$rec" in
+    *$'\t'*) action=${rec%%$'\t'*}; evidence=${rec#*$'\t'} ;;
+    *) action=$rec; evidence= ;;
+  esac
+  [ -n "$action" ] || return 1
+  secret=$(fm_ack_secret_file "$1")
+  fm_ci_waiver_secret_readable "$secret" || return 1
+  fm_ci_waiver_upstream_wait_check "$2" "$action" "$sig" < "$secret" || return 1
+  FM_UPSTREAM_WAIT_ACTION=$action
+  # shellcheck disable=SC2034 # Read by bin/fm-upstream-wait.sh and bin/fm-bootstrap.sh.
+  FM_UPSTREAM_WAIT_EVIDENCE=$evidence
+  # shellcheck disable=SC2034 # Read by bin/fm-upstream-wait.sh and bin/fm-bootstrap.sh.
+  FM_UPSTREAM_WAIT_AT=$ts
+  return 0
+}
+
+# 0 when supervision is suspended for <id> by EITHER standing declaration, which
+# is the question every supervision surface actually asks: should this task wake
+# firstmate, be peeked at, or alarm. FM_SUSPENDED_SOURCE names which one -
+# `signed`, `attached` or `upstream-wait` - and FM_SUSPENDED_REASON says it in
+# the captain's own terms.
+#
+# One predicate rather than two tests at each call site, for the reason
+# fm_captain_driven is one: two surfaces asking the question differently is how
+# a worker ends up watched by one and not the other. The captain-driven routes
+# are asked FIRST and unchanged, so a task that is both reports as his.
+# shellcheck disable=SC2034 # Read by bin/fm-monitor.sh and bin/fm-watch.sh.
+FM_SUSPENDED_SOURCE=
+FM_SUSPENDED_REASON=
+fm_supervision_suspended() {  # <state-dir> <id>
+  FM_SUSPENDED_SOURCE=
+  FM_SUSPENDED_REASON=
+  if fm_captain_driven "$1" "$2"; then
+    # shellcheck disable=SC2034 # Read by bin/fm-monitor.sh and bin/fm-watch.sh.
+    FM_SUSPENDED_SOURCE=$FM_CAPTAIN_DRIVEN_SOURCE
+    # shellcheck disable=SC2034 # Read by bin/fm-monitor.sh and bin/fm-watch.sh.
+    FM_SUSPENDED_REASON=$FM_CAPTAIN_DRIVEN_REASON
+    return 0
+  fi
+  if fm_upstream_waiting "$1" "$2"; then
+    # shellcheck disable=SC2034 # Read by bin/fm-monitor.sh and bin/fm-watch.sh.
+    FM_SUSPENDED_SOURCE=upstream-wait
+    # shellcheck disable=SC2034 # Read by bin/fm-monitor.sh and bin/fm-watch.sh.
+    FM_SUSPENDED_REASON=$FM_UPSTREAM_WAIT_ACTION
+    return 0
+  fi
+  return 1
+}
+
 # --- the predicate ----------------------------------------------------------
 #
 # fm_ack_classify is the ONE owner of "has this task been actioned". It sets:
-#   FM_ACK_CLASS    unactioned | recheck | pending | acked | moved-on | exempt | quiet
+#   FM_ACK_CLASS    unactioned | recheck | pending | acked | moved-on | exempt |
+#                   upstream-wait | quiet
 #   FM_ACK_VERB     the last status verb ('' when the task has no status log)
 #   FM_ACK_AGE      seconds since that log was last appended (-1 when unknown)
 #   FM_ACK_VERDICT  the crew-state confirm's answer, or '' when none was made
 #   FM_ACK_LAST     the crew's own last status line, as evidence
-#   FM_ACK_REASON   why the captain is driving it, for class `exempt`
+#   FM_ACK_REASON   why the captain is driving it for class `exempt`, and the
+#                   plain-English action being awaited for class `upstream-wait`
 #   FM_ACK_OPEN_KEYS the still-open decision keys, space separated ('' when none)
 #   FM_ACK_PAUSE_AGE seconds the declared wait has stood (-1 when not paused or
 #                   when the wait cannot be dated)
@@ -629,6 +733,17 @@ FM_ACK_REASON=
 FM_ACK_OPEN_KEYS=
 FM_ACK_PAUSE_AGE=-1
 FM_ACK_CONFIRMS=0
+
+# Which class the suspension just read maps to. One place, because classify
+# reaches the same decision from three branches and three copies of a two-way
+# map is three chances for one of them to report the wrong standing declaration.
+fm_ack_suspended_class() {
+  case "$FM_SUSPENDED_SOURCE" in
+    upstream-wait) printf 'upstream-wait' ;;
+    *) printf 'exempt' ;;
+  esac
+}
+
 fm_ack_classify() {  # <state-dir> <id> <grace> <now> [alarm|render]
   local state=$1 id=$2 grace=$3 now=$4 mode=${5:-alarm}
   local log last verb m age fp verdict raw cap owed=0 paused_owed=0 window
@@ -680,13 +795,17 @@ fm_ack_classify() {  # <state-dir> <id> <grace> <now> [alarm|render]
     fi
   fi
 
-  # A captain-driven task outranks every other class, so the render always names
-  # it and the alarm path can never fire on one. In alarm mode the cost is paid
-  # only by a task that would otherwise alarm; in render mode it is paid for
-  # every task, because the captain is owed the full accounting.
-  if [ "$mode" = render ] && fm_captain_driven "$state" "$id"; then
-    FM_ACK_CLASS=exempt
-    FM_ACK_REASON=$FM_CAPTAIN_DRIVEN_REASON
+  # A task whose supervision is suspended outranks every other class, so the
+  # render always names it and the alarm path can never fire on one. In alarm
+  # mode the cost is paid only by a task that would otherwise alarm; in render
+  # mode it is paid for every task, because the captain is owed the full
+  # accounting. Which standing declaration suspended it is carried through as
+  # its own class, because "the captain has this" and "firstmate verified it is
+  # waiting on somebody outside the fleet" are different facts about a worker
+  # and reporting them as one would hide which one is standing.
+  if [ "$mode" = render ] && fm_supervision_suspended "$state" "$id"; then
+    FM_ACK_CLASS=$(fm_ack_suspended_class)
+    FM_ACK_REASON=$FM_SUSPENDED_REASON
     if [ "$FM_ACK_CONFIRMS" -lt "$cap" ]; then
       FM_ACK_VERDICT=$(fm_ack_confirm_state "$id")
       FM_ACK_CONFIRMS=$((FM_ACK_CONFIRMS + 1))
@@ -702,9 +821,9 @@ fm_ack_classify() {  # <state-dir> <id> <grace> <now> [alarm|render]
     # never expire. Then confirm, for the same reason rules 1 and 2 confirm: the
     # status log is a wake-event history, and a worker whose run has resumed is
     # not waiting on anything regardless of what its last line still says.
-    if [ "$mode" != render ] && fm_captain_driven "$state" "$id"; then
-      FM_ACK_CLASS=exempt
-      FM_ACK_REASON=$FM_CAPTAIN_DRIVEN_REASON
+    if [ "$mode" != render ] && fm_supervision_suspended "$state" "$id"; then
+      FM_ACK_CLASS=$(fm_ack_suspended_class)
+      FM_ACK_REASON=$FM_SUSPENDED_REASON
       return 0
     fi
     raw=
@@ -751,9 +870,9 @@ fm_ack_classify() {  # <state-dir> <id> <grace> <now> [alarm|render]
     return 0
   fi
 
-  if [ "$mode" != render ] && fm_captain_driven "$state" "$id"; then
-    FM_ACK_CLASS=exempt
-    FM_ACK_REASON=$FM_CAPTAIN_DRIVEN_REASON
+  if [ "$mode" != render ] && fm_supervision_suspended "$state" "$id"; then
+    FM_ACK_CLASS=$(fm_ack_suspended_class)
+    FM_ACK_REASON=$FM_SUSPENDED_REASON
     return 0
   fi
 
@@ -835,7 +954,8 @@ fm_ack_unactioned() {  # <state-dir> [grace-seconds]
 #   <id>\t<class>\t<verb>\t<age-seconds>\t<confirm-verdict>\t<open-keys>\t<detail>
 # <age-seconds> is how long the declared wait has stood for class `recheck` and
 # how long ago the log was last appended otherwise. <detail> is the signed reason
-# for class `exempt` and the crew's own last status line otherwise; <open-keys> is the still-open decision keys, space separated.
+# for class `exempt`, the signed awaited action for class `upstream-wait`, and
+# the crew's own last status line otherwise; <open-keys> is the still-open decision keys, space separated.
 # Optional fields are "-" when empty, for the reason fm_ack_unactioned states. Always returns 0; bin/fm-monitor.sh owns the render itself.
 fm_ack_sweep() {  # <state-dir> [grace-seconds]
   local state=$1 grace meta id now detail age
@@ -847,7 +967,10 @@ fm_ack_sweep() {  # <state-dir> [grace-seconds]
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
     fm_ack_classify "$state" "$id" "$grace" "$now" render
-    if [ "$FM_ACK_CLASS" = exempt ]; then detail=$FM_ACK_REASON; else detail=$FM_ACK_LAST; fi
+    case "$FM_ACK_CLASS" in
+      exempt|upstream-wait) detail=$FM_ACK_REASON ;;
+      *) detail=$FM_ACK_LAST ;;
+    esac
     if [ "$FM_ACK_CLASS" = recheck ]; then age=$FM_ACK_PAUSE_AGE; else age=$FM_ACK_AGE; fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$id" "$FM_ACK_CLASS" "${FM_ACK_VERB:--}" "$age" "${FM_ACK_VERDICT:--}" \

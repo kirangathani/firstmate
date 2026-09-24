@@ -1215,7 +1215,7 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.acted" "$sub_state/$child_id.stale-base-ack" "$sub_state/$child_id.monitor-exempt" "$sub_state/.unactioned-$child_id" "$sub_state/$child_id.nm-progress" "$sub_state/$child_id.nm-stall-ack" "$sub_state/$child_id.nm-questions" "$sub_state/$child_id.merge-green-rounds"
+    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.acted" "$sub_state/$child_id.stale-base-ack" "$sub_state/$child_id.monitor-exempt" "$sub_state/$child_id.upstream-wait" "$sub_state/.upstream-rechecked-$child_id" "$sub_state/.unactioned-$child_id" "$sub_state/$child_id.nm-progress" "$sub_state/$child_id.nm-stall-ack" "$sub_state/$child_id.nm-questions" "$sub_state/$child_id.merge-green-rounds"
   done
 }
 
@@ -1389,7 +1389,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/$ID.acted" "$STATE/$ID.stale-base-ack" "$STATE/$ID.monitor-exempt" "$STATE/.unactioned-$ID" "$STATE/$ID.nm-progress" "$STATE/$ID.nm-stall-ack" "$STATE/$ID.nm-questions" "$STATE/$ID.merge-green-rounds" "$STATE/$ID.nm-attach"
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/$ID.acted" "$STATE/$ID.stale-base-ack" "$STATE/$ID.monitor-exempt" "$STATE/$ID.upstream-wait" "$STATE/.upstream-rechecked-$ID" "$STATE/.unactioned-$ID" "$STATE/$ID.nm-progress" "$STATE/$ID.nm-stall-ack" "$STATE/$ID.nm-questions" "$STATE/$ID.merge-green-rounds" "$STATE/$ID.nm-attach"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   # FM_INLINE: teardown's own refresh, part of this teardown rather than a
   # separate detached command whose verdict would arrive without its context.

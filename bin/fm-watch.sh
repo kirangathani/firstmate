@@ -407,6 +407,36 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
+# Re-run the gate behind a verified upstream wait, on the same bounded cadence
+# the pane's own re-surface uses, and drop the record when it no longer passes.
+#
+# It has to be throttled here rather than inside handle_paused_stale, because
+# this branch runs on EVERY stale poll (nothing about a standing declaration is
+# tied to what the pane is showing) while the gate costs two GitHub reads. The
+# throttle is its own marker and its own window: the pane's re-surface marker is
+# advanced only when a wake is actually emitted, so sharing it would tie how
+# often the claim is checked to how often the captain is told about it.
+#
+# The whole call is bounded and its failure is silent, by the rule every watcher
+# probe follows: a GitHub read that hangs or a gh that is missing must not stop
+# the watcher. A recheck that could not run leaves the record standing, which is
+# the same answer as not being due yet, and the next window asks again.
+recheck_upstream_wait() {  # <task>
+  local task=$1 rf rf_age
+  rf="$STATE/.upstream-rechecked-$task"
+  rf_age=$(age_of "$rf")
+  [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
+  date +%s > "$rf"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 90 env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-upstream-wait.sh" --recheck "$task" >/dev/null 2>&1 || true
+  else
+    env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-upstream-wait.sh" --recheck "$task" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
 # Absorb a stale pane under a declared external-wait pause (paused:), a
 # dead-agent captain-held transfer, or a captain-signed monitoring exemption,
 # and re-surface it once every PAUSE_RESURFACE_SECS for a recheck so it cannot
@@ -465,7 +495,7 @@ clear_pause_state() {  # <window>
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  fm_captain_driven "$STATE" "$(window_to_task "$win" "$STATE")" && return 0
+  fm_supervision_suspended "$STATE" "$(window_to_task "$win" "$STATE")" && return 0
   rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
 }
 
@@ -670,7 +700,7 @@ absorb_captain_driven_signals() {  # <pending-rows> -> kept rows
   local rows=$1 sf sig f kept='' absorbed=''
   while IFS=$(printf '\t') read -r sf sig f; do
     [ -n "$sf" ] || continue
-    if fm_captain_driven "$STATE" "$(signal_id_of_file "$f")"; then
+    if fm_supervision_suspended "$STATE" "$(signal_id_of_file "$f")"; then
       printf '%s' "$sig" > "$sf"
       record_reported_pr "$f"
       case " $absorbed " in *" $f "*) ;; *) absorbed="$absorbed $f" ;; esac
@@ -892,7 +922,7 @@ heartbeat_scan_finds_actionable() {
     # A captain-driven task never counts as a miss: the per-wake path skipped it
     # deliberately, so treating it as one here would reintroduce through the
     # backstop exactly the wake the skip exists to prevent.
-    fm_captain_driven "$STATE" "$task" && continue
+    fm_supervision_suspended "$STATE" "$task" && continue
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
     return 0
@@ -1416,7 +1446,7 @@ EOF
             printf '%s' "$h" > "$sf"
             wake "stale: $w"
           fi
-        elif fm_captain_driven "$STATE" "$task"; then
+        elif fm_supervision_suspended "$STATE" "$task"; then
           # The captain has taken this task himself, which is a standing
           # statement that its quiet pane is not firstmate's to chase. Surfacing
           # it every cycle spends a wake on a task nobody is going to act on,
@@ -1436,9 +1466,26 @@ EOF
           # it: the captain ruled that nothing of PR 115 is removed, and the
           # parenthetical is what tells the two apart - his signed reason, or
           # the window he is sitting in.
-          handle_paused_stale "$w" "$task" "$h" \
-            "captain-exempt from monitoring ($FM_CAPTAIN_DRIVEN_REASON) - rechecked on a long cadence; confirm the exemption still holds" \
-            captain-exempt
+          #
+          # A VERIFIED UPSTREAM WAIT arrives here too, and its re-surface does
+          # one thing more: it re-runs the gate that granted it. That is the
+          # captain's "We keep hourly polling of these agents as we would for a
+          # captain controlled agent" - the polling has something to check,
+          # because a wait is a claim about GitHub and a worktree rather than
+          # about a person, so it can stop being true while nothing on screen
+          # changes. bin/fm-upstream-wait.sh drops a record whose gate no longer
+          # passes, and with the record gone this same branch stops absorbing
+          # the pane on the very next poll.
+          if [ "$FM_SUSPENDED_SOURCE" = upstream-wait ]; then
+            recheck_upstream_wait "$task"
+            handle_paused_stale "$w" "$task" "$h" \
+              "waiting on action from upstream ($FM_SUSPENDED_REASON) - rechecked on a long cadence, and the check re-runs with it" \
+              upstream-wait
+          else
+            handle_paused_stale "$w" "$task" "$h" \
+              "captain-exempt from monitoring ($FM_CAPTAIN_DRIVEN_REASON) - rechecked on a long cadence; confirm the exemption still holds" \
+              captain-exempt
+          fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
           # proof the crew is actually done: a crew's own status log gets no
