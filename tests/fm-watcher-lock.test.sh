@@ -1940,8 +1940,32 @@ arms_started_count_is() {  # <state> <n>
 
 # The one arm output carrying a wake, and how many lines it has. A pool member's
 # whole contract is that these are "the wake line" and "1".
+#
+# A file counts only once its wake line is COMPLETE - present AND terminated.
+# `grep` matches inside an unterminated last line while `wc -l`, which counts
+# newlines, still reads 0, so a reader that stopped at "the text is there" could
+# observe a file holding exactly the right line and count it as none. Seen on
+# 2026-09-24 (CI job 107653302999): `a pool wake printed 0 lines ... : dormant
+# arm 1: watcher exited, firstmate woken, watcher replenished from the pool, 1
+# dormant watchers lurking - signal: fm-task | done: the work is finished` -
+# the content asserted against, reported as zero lines.
+#
+# It is a race in the READER, not in the arm: the arm prints one whole line, and
+# a loaded box is simply capable of being read between its bytes. A faster box
+# never loses it, which is why it surfaced only when this file's shard changed
+# neighbours and not on any local run.
+#
+# `$(tail -c1 "$f")` strips a trailing newline, so it is empty exactly when the
+# last byte is one. That is the whole test for "terminated".
 wake_arm_out() {  # <dir>
-  grep -lF 'dormant watchers lurking' "$1"/arm-*.out 2>/dev/null | head -1
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -z "$(tail -c1 "$f")" ] || continue
+    printf '%s\n' "$f"
+    return 0
+  done < <(grep -lF 'dormant watchers lurking' "$1"/arm-*.out 2>/dev/null)
+  return 0
 }
 
 some_arm_woke() {  # <dir>
