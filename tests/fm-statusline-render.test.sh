@@ -459,12 +459,18 @@ mark_watch_live() {
   printf '%s\n' "$2" > "$1/.watch.lock/pid"
 }
 
+# The right margin bin/fm-statusline.sh holds back from COLUMNS, because Claude
+# Code draws the status line inside a padded footer box and truncates anything
+# wider. Measured on Claude Code 2.1.282, recorded in docs/configuration.md's
+# "Status-line composition" section.
+FM_STATUSLINE_TEST_MARGIN=4
+
 # expected_fleet_row <text> <strip> <strip width> <term width>: the same
 # right-align arithmetic bin/fm-statusline.sh's fm_statusline_compose_row uses,
 # so a case asserts the documented contract rather than a copy-pasted number.
 expected_fleet_row() {
   local text=$1 strip=$2 strip_w=$3 width=$4 pad
-  pad=$((width - ${#text} - strip_w))
+  pad=$((width - FM_STATUSLINE_TEST_MARGIN - ${#text} - strip_w))
   printf '%s%*s%s' "$text" "$pad" '' "$strip"
 }
 
@@ -575,6 +581,55 @@ test_watcher_strip_absent_pool() {
   pass "render: a home that has never joined the pool draws one hollow cell, the old-style single watcher"
 }
 
+# The truncation bug: the strip was right-aligned to COLUMNS itself, so the
+# rendered row was exactly COLUMNS wide and Claude Code's footer padding pushed
+# its last cells past the edge, where Ink replaced them with an ellipsis. These
+# two cases pin the visible width - the one thing the arithmetic above cannot
+# catch, since it mirrors whatever the script does.
+visible_width() {  # <rendered row>
+  local plain
+  plain=$(strip_ansi "$1")
+  printf '%s' "${#plain}"
+}
+
+test_watcher_strip_row_stops_short_of_the_terminal_width() {
+  local home pid rendered width
+  home="$TMP_ROOT/pool-margin/home"
+  mkdir -p "$home/state"
+  spawn_pool_member "$home/state" 1; pid=$SPAWN_PID
+  mark_watch_live "$home/state" "$pid"
+
+  # Scrubbed rather than inherited: this case measures the script's own default,
+  # and bin/fm-spawn.sh forwards status-line environment into worker panes.
+  rendered=$(unset FM_STATUSLINE_RIGHT_MARGIN; render_pool "$home" COLUMNS=120)
+  width=$(visible_width "$rendered")
+  printf 'measured visible width %s at COLUMNS=120, margin %s\n' "$width" "$FM_STATUSLINE_TEST_MARGIN"
+  [ "$width" -eq $((120 - FM_STATUSLINE_TEST_MARGIN)) ] ||
+    fail "the fleet row must stop short of COLUMNS by the measured right margin, or Claude Code truncates the strip"
+  pass "render: the fleet row's visible width stops short of the terminal width by the measured right margin"
+}
+
+test_watcher_strip_right_margin_override() {
+  local home pid rendered width
+  home="$TMP_ROOT/pool-margin-override/home"
+  mkdir -p "$home/state"
+  spawn_pool_member "$home/state" 1; pid=$SPAWN_PID
+  mark_watch_live "$home/state" "$pid"
+
+  rendered=$(render_pool "$home" COLUMNS=120 FM_STATUSLINE_RIGHT_MARGIN=11)
+  width=$(visible_width "$rendered")
+  printf 'measured visible width %s at COLUMNS=120 with an overridden margin of 11\n' "$width"
+  [ "$width" -eq 109 ] ||
+    fail "FM_STATUSLINE_RIGHT_MARGIN must set the width the row is right-aligned to"
+
+  rendered=$(render_pool "$home" COLUMNS=120 FM_STATUSLINE_RIGHT_MARGIN=notanumber)
+  width=$(visible_width "$rendered")
+  printf 'measured visible width %s at COLUMNS=120 with a non-numeric margin\n' "$width"
+  [ "$width" -eq $((120 - FM_STATUSLINE_TEST_MARGIN)) ] ||
+    fail "a non-numeric FM_STATUSLINE_RIGHT_MARGIN must fall back to the measured default, not break the row"
+  pass "render: FM_STATUSLINE_RIGHT_MARGIN overrides the margin, and a non-numeric value falls back to the default"
+}
+
 test_watcher_strip_narrow_width_drops_it() {
   local home slot pid live_pid rendered
   home="$TMP_ROOT/pool-narrow/home"
@@ -604,4 +659,6 @@ test_watcher_strip_one_live
 test_watcher_strip_live_plus_three_dormant
 test_watcher_strip_full
 test_watcher_strip_absent_pool
+test_watcher_strip_row_stops_short_of_the_terminal_width
+test_watcher_strip_right_margin_override
 test_watcher_strip_narrow_width_drops_it
