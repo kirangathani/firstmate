@@ -98,7 +98,11 @@
 # action_required in both enums, but the conclusion is the one observed.
 # statusCheckRollup is read for the zero-checks half because it is one field on
 # a call the gate already makes and it covers check-runs and commit statuses
-# together - both were empirically zero above when it was empty.
+# together - both were empirically zero above when it was empty. A reply that
+# does not carry the field at all is treated as UNKNOWN rather than as zero, so
+# such a PR stays on checks-green: reading an absent field as "no checks" would
+# hand the looser branch every PR GitHub answered incompletely about, which is
+# the same inference from silence this condition exists to refuse.
 #
 # A SCOUT task has no branch to push and no PR to be green, and the captain named
 # the one legitimate case: "a scouting agent who has submitted an issue and is
@@ -226,7 +230,15 @@ gh_pr_read() {  # <url> -> 0 and sets PR_STATE/PR_HEAD/PR_CHECKS
   # The rollup carries check-runs and commit statuses together, so its length is
   # the whole "has anything reported on this head" question in one field of a
   # call already being made.
-  PR_CHECKS=$(printf '%s' "$raw" | jq -r '[.statusCheckRollup[]?] | length' 2>/dev/null) || return 1
+  #
+  # ABSENT is not zero, and the difference decides which branch judges the PR.
+  # An answer that does not carry the field at all is GitHub not telling this
+  # home about the head, which is the same silence the approval-gated condition
+  # refuses on - so an empty PR_CHECKS keeps the PR on checks-green, the
+  # stricter condition it was always judged by. Only a rollup GitHub actually
+  # returned, and returned empty, means there is nothing on the head.
+  PR_CHECKS=$(printf '%s' "$raw" |
+    jq -r 'if has("statusCheckRollup") and .statusCheckRollup != null then ([.statusCheckRollup[]] | length) else "" end' 2>/dev/null) || return 1
   [ -n "$PR_STATE" ]
 }
 
@@ -328,7 +340,7 @@ gate_ship() {  # <id> <meta>
   # checks is never green, so checks-green's verdict is untouched for every PR
   # that has any. Which branch decided it is named in the evidence, so a reader
   # of a standing wait can tell the two grants apart.
-  if [ "${PR_CHECKS:-0}" -eq 0 ]; then
+  if [ "${PR_CHECKS:-}" = 0 ]; then
     if gate_approval_gated "$pr"; then
       GATE_EVIDENCE="pr=$pr head=$PR_HEAD approval-gated=$APPROVAL_GATED_RUNS runs"
     fi
@@ -340,7 +352,7 @@ gate_ship() {  # <id> <meta>
     # The count is in the refusal because this is also the line a recheck relays
     # when an approval-gated wait ends: the maintainer pressed the button, a run
     # started, and a check has appeared on the head that had none.
-    no "checks-green: $pr is not green with $PR_CHECKS check(s) now reported on its head, so this task is running through CI rather than waiting"
+    no "checks-green: $pr is not green${PR_CHECKS:+ with $PR_CHECKS check(s) now reported on its head}, so this task is running through CI rather than waiting"
   fi
 }
 

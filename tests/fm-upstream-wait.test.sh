@@ -311,6 +311,21 @@ assert_contains "$out" "checks-green" "the refusal did not come from checks-gree
 assert_not_contains "$out" "gate ok: approval-gated" "a PR with checks was judged on the approval-gated branch"
 pass "a PR that reports any checks is still judged by checks-green, so the new branch weakens nothing"
 
+# An answer that does not carry the rollup field AT ALL is GitHub not saying,
+# which is not the same as it saying zero. Reading absence as zero would hand
+# the looser branch every PR GitHub answered incompletely about, so such a PR
+# stays on checks-green - the condition it was always judged by.
+reset_task ship-norollup
+ship_meta ship-norollup "$PR_URL"
+crew_says ship-norollup "upstream-wait-ready: the maintainer has to merge it"
+jq -n --arg h "$WT_HEAD" '{state:"OPEN", headRefOid:$h}' > "$FM_FAKE_PR_JSON"
+runs_json 3 completed action_required
+out=$(FM_FAKE_GREEN=0 gate ship-norollup 2>&1); rc=$?
+expect_code 1 $rc "a PR GitHub reported no check rollup for was judged on the approval-gated branch"
+assert_contains "$out" "checks-green" "the refusal did not come from checks-green"
+assert_not_contains "$out" "gate ok: approval-gated" "an absent check rollup was read as zero checks"
+pass "a PR whose answer carries no check rollup at all stays on checks-green: an absent field is unknown, never zero"
+
 # The run starting is the wait ending, and the recheck has to drop the record
 # for it exactly as it drops one whose green lapsed.
 reset_task ship-released
