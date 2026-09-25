@@ -126,6 +126,18 @@ The last one is the captain's exclusion enforced rather than trusted.
 A pending check is not green, so a task running through CI cannot be declared waiting, which is exactly "SPECIFICALLY NOT INCLUDING a coding agent whose code is running through the CI process".
 It is the merge gate's own green reader rather than a second one, so this can never call green a PR `bin/fm-pr-merge.sh` would refuse, and the one excusable check keeps exactly the one excusal it already has.
 
+There is exactly one alternative to that last condition, and it exists because green could never be reached at all on the PR that exposed it.
+A PR opened from a fork by somebody who has not contributed to that repository before runs no workflow until a maintainer presses "Approve and run", so it reports zero checks, and zero checks is never green.
+Read against `https://github.com/kunchenguid/firstmate/pull/5562` on 2026-09-25, after its runs had sat on that button all day, GitHub said:
+
+- `gh pr view --json statusCheckRollup` returned `[]`, and both `commits/<sha>/check-runs` (`total_count` 0) and `commits/<sha>/status` (`state` pending, `total_count` 0) agreed there was nothing on the head.
+- `gh api repos/kunchenguid/firstmate/actions/runs?head_sha=<sha>` returned three runs, every one of them `"status":"completed","conclusion":"action_required"`.
+
+Note where the signal is: the run reads as completed and the awaiting-approval value is its CONCLUSION, not its status.
+So the `approval-gated` condition passes only when the PR reports zero checks AND GitHub itself reports workflow runs for that head with every one of them carrying `action_required` in either field.
+It replaces `checks-green` only for a PR reporting zero checks, so no PR that has any check gets a different verdict than before, and a queued or running run, no runs at all, a mixture, or a read this home is not permitted to make each refuse - a worker sitting on an unapproved PR and a worker whose CI has not started yet look identical from the outside, and the captain's rule is that a wait must be re-verifiable, so silence is never read as approval.
+The evidence the record carries names which branch granted it, `checks=<n>` or `approval-gated=<n> runs`, so a reader of a standing wait can tell the two apart.
+
 For a SCOUT task: the crewmate's answer, `data/<id>/report.md` existing, and the awaited action naming a GitHub issue or pull request that GitHub reports open.
 
 The scout branch exists because of the captain's own second question, "I don't think we will ever be waiting on the upstream until we have the complete PR right?".
@@ -193,6 +205,8 @@ Everything else is the gate resuming it because the wait ended.
 
 That was a real defect in the view and is fixed independently: the `GITHUB CI` cell now reports a failure as its verdict only once nothing is still running, so a red box always describes the head on screen (`docs/flow-tui.md`, "A failure is the CI cell's verdict only once nothing is still running").
 With that landed, the two cannot coincide: the gate refuses on a red check, and the recheck drops a record whose checks go red afterwards.
+An `approval-gated` wait ends the same way and through the same recheck: the maintainer presses the button, a check appears on a head that had none, the gate takes the `checks-green` branch instead and refuses, and the record is dropped naming both that the approval hold is over and how many checks now report on the head.
+A PR that closes drops it on `pr-open` exactly as any other wait does.
 
 The renderer refuses independently anyway, and the test is named after the invariant.
 "Unreachable" is a claim about a process, and the frame is its own claim: a record that survived a window it should not have, a hand-written document, or a recheck that could not reach GitHub all arrive at the renderer looking identical.

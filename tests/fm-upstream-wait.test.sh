@@ -53,8 +53,16 @@ case "${1:-}" in
     cat "$FM_FAKE_PR_JSON"
     ;;
   api)
-    [ -f "${FM_FAKE_ISSUE_STATE:-}" ] || exit 1
-    cat "$FM_FAKE_ISSUE_STATE"
+    case "${2:-}" in
+      *actions/runs*)
+        [ -f "${FM_FAKE_RUNS_JSON:-}" ] || exit 1
+        cat "$FM_FAKE_RUNS_JSON"
+        ;;
+      *)
+        [ -f "${FM_FAKE_ISSUE_STATE:-}" ] || exit 1
+        cat "$FM_FAKE_ISSUE_STATE"
+        ;;
+    esac
     ;;
   *) exit 1 ;;
 esac
@@ -69,6 +77,7 @@ chmod 755 "$BIN/gh" "$BIN/fm-pr-green.sh"
 export PATH="$BIN:$PATH"
 export FM_FAKE_PR_JSON="$TMP_ROOT/pr.json"
 export FM_FAKE_ISSUE_STATE="$TMP_ROOT/issue.json"
+export FM_FAKE_RUNS_JSON="$TMP_ROOT/runs.json"
 export FM_PR_GREEN_BIN="$BIN/fm-pr-green.sh"
 export FM_ACK_SECRET_FILE="$SECRET"
 export FM_HOME="$HOME_DIR"
@@ -76,8 +85,24 @@ export FM_STATE_OVERRIDE="$STATE"
 export FM_DATA_OVERRIDE="$DATA"
 export FM_CONFIG_OVERRIDE="$CONFIG"
 
-pr_json() {  # <state> <head>
-  jq -n --arg s "$1" --arg h "$2" '{state:$s, headRefOid:$h}' > "$FM_FAKE_PR_JSON"
+# <state> <head> [checks-on-head]. The default is a PR that HAS checks, so every
+# case below stays on the checks-green branch unless it deliberately asks for the
+# zero-check one. The rollup's shape is what `gh pr view --json statusCheckRollup`
+# returns: one entry per check-run or commit status on the head (captured empty,
+# `{"statusCheckRollup":[]}`, from PR 5562 on 2026-09-25).
+pr_json() {  # <state> <head> [n-checks]
+  jq -n --arg s "$1" --arg h "$2" --argjson n "${3:-12}" \
+    '{state:$s, headRefOid:$h, statusCheckRollup:[range($n) | {name:"check"}]}' > "$FM_FAKE_PR_JSON"
+}
+
+# <n-runs> <state> <conclusion>. The field names and values are GitHub's, read
+# from `gh api repos/kunchenguid/firstmate/actions/runs?head_sha=<sha>` on
+# 2026-09-25 against PR 5562, whose runs were sitting on the maintainer's
+# "Approve and run" button: status "completed", conclusion "action_required".
+runs_json() {  # <n> <status> <conclusion>
+  jq -n --argjson n "$1" --arg st "$2" --arg c "$3" \
+    '{total_count:$n, workflow_runs:[range($n) | {id:1, name:"CI", status:$st, conclusion:$c, event:"pull_request"}]}' \
+    > "$FM_FAKE_RUNS_JSON"
 }
 
 # A ship task with a real local copy, so the worktree conditions are asked of an
@@ -209,6 +234,106 @@ expect_code 1 $rc "a task failing several conditions passed"
 n=$(printf '%s\n' "$out" | grep -c '^gate FAIL: ')
 [ "$n" -ge 2 ] || fail "a refusal named only one failing condition when several failed"
 pass "a refusal names every condition that failed, not only the first"
+
+# --- the approval-gated branch, and every way it refuses ---------------------
+#
+# A first-contributor PR to an upstream repository runs NO workflow until a
+# maintainer presses "Approve and run", so it reports zero checks - and zero
+# checks is never green. Without this branch such a task could never be declared
+# waiting however long it sat there, which is the gap this closes. The captain's
+# rule is unchanged: GitHub itself has to say the runs are held, and silence is
+# never read as approval.
+
+reset_task ship-gated
+ship_meta ship-gated "$PR_URL"
+crew_says ship-gated "upstream-wait-ready: the maintainer has to approve the workflow runs on PR 1104"
+pr_json OPEN "$WT_HEAD" 0
+runs_json 3 completed action_required
+out=$(FM_FAKE_GREEN=0 gate ship-gated); rc=$?
+expect_code 0 $rc "a PR whose runs GitHub is holding for approval was refused"
+assert_contains "$out" "approval-gated" "the gate did not name the condition that passed"
+assert_contains "$out" "approval-gated=3" "the evidence did not name the branch that granted it"
+assert_not_contains "$out" "gate FAIL" "the approval-gated branch left a checks-green refusal behind"
+pass "a PR reporting zero checks because GitHub is holding its workflow runs for a maintainer's approval passes the gate on its own condition"
+
+# Silence is not approval. Zero checks with nothing readable behind them is
+# indistinguishable from CI that has not started, so it refuses.
+reset_task ship-silent
+ship_meta ship-silent "$PR_URL"
+crew_says ship-silent "upstream-wait-ready: the maintainer has to approve the workflow runs"
+find "$TMP_ROOT" -maxdepth 1 -name runs.json -delete
+out=$(FM_FAKE_GREEN=0 gate ship-silent 2>&1); rc=$?
+expect_code 1 $rc "a PR with zero checks and no readable run evidence was declared waiting"
+assert_contains "$out" "approval-gated" "the refusal did not name the condition"
+pass "zero checks with no readable workflow-run evidence is refused: silence is never read as awaiting approval"
+
+reset_task ship-noruns
+ship_meta ship-noruns "$PR_URL"
+crew_says ship-noruns "upstream-wait-ready: the maintainer has to approve the workflow runs"
+runs_json 0 completed success
+out=$(FM_FAKE_GREEN=0 gate ship-noruns 2>&1); rc=$?
+expect_code 1 $rc "a PR with zero checks and zero workflow runs was declared waiting"
+assert_contains "$out" "CI has not started" "the refusal did not say why zero runs is not a wait"
+pass "zero checks and zero workflow runs is refused: that is CI which has not started, not a hold for approval"
+
+# The captain's exclusion again, in the shape this branch could have let through:
+# a run that is queued or running is the agent's code going through CI.
+reset_task ship-queued
+ship_meta ship-queued "$PR_URL"
+crew_says ship-queued "upstream-wait-ready: the maintainer has to approve the workflow runs"
+runs_json 1 queued null
+out=$(FM_FAKE_GREEN=0 gate ship-queued 2>&1); rc=$?
+expect_code 1 $rc "a PR with a queued workflow run was declared waiting"
+assert_contains "$out" "still running through CI" "the refusal did not say the run had started"
+pass "zero checks with a queued or running workflow run is refused: its code is going through CI, not held for approval"
+
+# One held run and one not is not a hold either: something is running.
+reset_task ship-mixed
+ship_meta ship-mixed "$PR_URL"
+crew_says ship-mixed "upstream-wait-ready: the maintainer has to approve the workflow runs"
+jq -n '{total_count:2, workflow_runs:[{status:"completed", conclusion:"action_required"}, {status:"in_progress", conclusion:null}]}' \
+  > "$FM_FAKE_RUNS_JSON"
+out=$(FM_FAKE_GREEN=0 gate ship-mixed 2>&1); rc=$?
+expect_code 1 $rc "a PR with one held run and one running run was declared waiting"
+assert_contains "$out" "1 of 2 workflow runs" "the refusal did not count the runs that are not held"
+pass "a head where only some workflow runs are held for approval is refused: the rest are still running"
+
+# And a PR that HAS checks never reaches this branch, so checks-green's verdict
+# is exactly what it always was.
+reset_task ship-hasChecks
+ship_meta ship-hasChecks "$PR_URL"
+crew_says ship-hasChecks "upstream-wait-ready: the maintainer has to merge it"
+pr_json OPEN "$WT_HEAD" 4
+runs_json 3 completed action_required
+out=$(FM_FAKE_GREEN=0 gate ship-hasChecks 2>&1); rc=$?
+expect_code 1 $rc "a PR with red checks passed on the approval-gated branch"
+assert_contains "$out" "checks-green" "the refusal did not come from checks-green"
+assert_not_contains "$out" "gate ok: approval-gated" "a PR with checks was judged on the approval-gated branch"
+pass "a PR that reports any checks is still judged by checks-green, so the new branch weakens nothing"
+
+# The run starting is the wait ending, and the recheck has to drop the record
+# for it exactly as it drops one whose green lapsed.
+reset_task ship-released
+ship_meta ship-released "$PR_URL"
+crew_says ship-released "upstream-wait-ready: the maintainer has to approve the workflow runs"
+pr_json OPEN "$WT_HEAD" 0
+runs_json 3 completed action_required
+FM_FAKE_GREEN=0 "$MONITOR" --upstream-wait ship-released \
+  --reason "the maintainer has to approve the workflow runs" >/dev/null ||
+  fail "could not grant a wait over an approval-gated PR"
+rec=$(cat "$STATE/ship-released.upstream-wait")
+assert_contains "$rec" "approval-gated=" "the record's evidence did not name the branch that granted it"
+pass "a granted approval-gated wait records which branch verified it, so the two kinds of grant are told apart"
+
+# The maintainer presses the button: a check appears on the head.
+pr_json OPEN "$WT_HEAD" 1
+out=$(FM_FAKE_GREEN=0 "$GATE" --recheck ship-released); rc=$?
+expect_code 1 $rc "a recheck kept a wait whose workflow runs had been released"
+assert_contains "$out" "dropped ship-released" "the drop was not reported"
+assert_contains "$out" "that hold is over" "the drop did not say the approval hold had been released"
+assert_contains "$out" "check(s) now reported on its head" "the drop did not name the run that started"
+[ ! -f "$STATE/ship-released.upstream-wait" ] || fail "the record survived a check appearing on the head"
+pass "a check appearing on the head drops an approval-gated wait on the next recheck, so a running build and a standing wait cannot coexist"
 
 # --- the scout branch, which is the one legitimate no-PR case ----------------
 
