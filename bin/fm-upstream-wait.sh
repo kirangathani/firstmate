@@ -68,6 +68,41 @@
 #                This is the captain's "SPECIFICALLY NOT INCLUDING a coding agent
 #                whose code is running through the CI process": a pending check
 #                is not green, so a task mid-CI cannot be declared waiting.
+#   approval-gated  the ALTERNATIVE to checks-green, and the only one. A PR from
+#                a first-time contributor to an upstream repository runs no
+#                workflow at all until a maintainer presses "Approve and run",
+#                so it reports ZERO checks - and zero checks is never green, so
+#                checks-green alone can never declare that task waiting however
+#                long it sits there. This condition replaces checks-green, and
+#                ONLY when the PR reports zero checks, so no other PR's verdict
+#                moves. It passes only when GitHub ITSELF says the runs are held
+#                for approval; silence fails it, because "no checks and no
+#                explanation" is indistinguishable from CI that has not started.
+#
+# WHAT GITHUB ACTUALLY RETURNS for an approval-gated PR, read 2026-09-25 against
+# https://github.com/kunchenguid/firstmate/pull/5562 (gh 2.100.0), whose runs had
+# sat on the maintainer's "Approve and run" button all day:
+#   gh pr view 5562 --repo kunchenguid/firstmate --json statusCheckRollup
+#     -> {"statusCheckRollup":[]}                             (and state OPEN,
+#        isCrossRepository true, headRefOid b82269f1...)
+#   gh api repos/kunchenguid/firstmate/commits/<sha>/check-runs
+#     -> {"total_count":0,"check_runs":[]}
+#   gh api repos/kunchenguid/firstmate/commits/<sha>/status
+#     -> {"state":"pending","total_count":0,"statuses":[]}
+#   gh api repos/kunchenguid/firstmate/actions/runs?head_sha=<sha>
+#     -> total_count 3, every run {"status":"completed",
+#        "conclusion":"action_required","event":"pull_request"}
+# Note the shape: the awaiting-approval signal lives in the run's CONCLUSION and
+# the run reads as "completed", NOT as a status of action_required. This script
+# accepts either field carrying action_required, because GitHub documents
+# action_required in both enums, but the conclusion is the one observed.
+# statusCheckRollup is read for the zero-checks half because it is one field on
+# a call the gate already makes and it covers check-runs and commit statuses
+# together - both were empirically zero above when it was empty. A reply that
+# does not carry the field at all is treated as UNKNOWN rather than as zero, so
+# such a PR stays on checks-green: reading an absent field as "no checks" would
+# hand the looser branch every PR GitHub answered incompletely about, which is
+# the same inference from silence this condition exists to refuse.
 #
 # A SCOUT task has no branch to push and no PR to be green, and the captain named
 # the one legitimate case: "a scouting agent who has submitted an issue and is
@@ -104,7 +139,7 @@ GH_TIMEOUT=${FM_UPSTREAM_WAIT_GH_TIMEOUT:-25}
 # reads a second opinion.
 PR_GREEN_BIN=${FM_PR_GREEN_BIN:-$SCRIPT_DIR/fm-pr-green.sh}
 
-usage() { sed -n '2,83p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,114p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 MODE=
 TARGET=
@@ -181,16 +216,29 @@ gate_crew_said() {  # <id>
 # against the working directory's repository, which is never the task's.
 PR_STATE=
 PR_HEAD=
-gh_pr_read() {  # <url> -> 0 and sets PR_STATE/PR_HEAD
+PR_CHECKS=
+gh_pr_read() {  # <url> -> 0 and sets PR_STATE/PR_HEAD/PR_CHECKS
   local raw
-  PR_STATE=; PR_HEAD=
+  PR_STATE=; PR_HEAD=; PR_CHECKS=
   fm_pr_url_parse "$1" || return 1
   command -v gh >/dev/null 2>&1 || return 1
   raw=$(run_bounded "$GH_TIMEOUT" gh pr view "$FM_PR_NUMBER" \
-    --repo "$FM_PR_OWNER/$FM_PR_REPO" --json state,headRefOid 2>/dev/null) || return 1
+    --repo "$FM_PR_OWNER/$FM_PR_REPO" --json state,headRefOid,statusCheckRollup 2>/dev/null) || return 1
   [ -n "$raw" ] || return 1
   PR_STATE=$(printf '%s' "$raw" | jq -r '.state // ""' 2>/dev/null) || return 1
   PR_HEAD=$(printf '%s' "$raw" | jq -r '.headRefOid // ""' 2>/dev/null) || return 1
+  # The rollup carries check-runs and commit statuses together, so its length is
+  # the whole "has anything reported on this head" question in one field of a
+  # call already being made.
+  #
+  # ABSENT is not zero, and the difference decides which branch judges the PR.
+  # An answer that does not carry the field at all is GitHub not telling this
+  # home about the head, which is the same silence the approval-gated condition
+  # refuses on - so an empty PR_CHECKS keeps the PR on checks-green, the
+  # stricter condition it was always judged by. Only a rollup GitHub actually
+  # returned, and returned empty, means there is nothing on the head.
+  PR_CHECKS=$(printf '%s' "$raw" |
+    jq -r 'if has("statusCheckRollup") and .statusCheckRollup != null then ([.statusCheckRollup[]] | length) else "" end' 2>/dev/null) || return 1
   [ -n "$PR_STATE" ]
 }
 
@@ -202,6 +250,53 @@ issue_url_of() {  # <text>
 }
 
 GATE_EVIDENCE=
+
+# The alternative to checks-green, asked ONLY of a PR reporting zero checks.
+# GitHub's own word is the whole condition: a run for this head that it reports
+# as action_required is it saying "this is held for a maintainer's approval".
+# Every other answer - no runs at all, a run queued or running or finished, or a
+# read this home is not permitted to make - refuses, because the captain's rule
+# is that a wait has to be re-verifiable and silence re-verifies nothing.
+APPROVAL_GATED_RUNS=
+gate_approval_gated() {  # <pr-url>, with PR_HEAD already read -> 0 pass
+  local raw total seen gated
+  APPROVAL_GATED_RUNS=
+  if ! command -v gh >/dev/null 2>&1 || ! fm_pr_url_parse "$1"; then
+    no "approval-gated: $1 reports no checks at all, and this home cannot ask GitHub why, so nothing about it is verified"
+    return 1
+  fi
+  raw=$(run_bounded "$GH_TIMEOUT" gh api \
+    "repos/$FM_PR_OWNER/$FM_PR_REPO/actions/runs?head_sha=$PR_HEAD&per_page=100" 2>/dev/null) || raw=
+  total=$(printf '%s' "$raw" | jq -r '.total_count // empty' 2>/dev/null) || total=
+  if [ -z "$total" ]; then
+    no "approval-gated: $1 reports no checks at all, and GitHub would not tell this home the workflow runs for $PR_HEAD, so nothing says they are held for approval"
+    return 1
+  fi
+  seen=$(printf '%s' "$raw" | jq -r '[.workflow_runs[]?] | length' 2>/dev/null) || seen=0
+  if [ "$total" -eq 0 ]; then
+    no "approval-gated: $1 reports no checks at all and GitHub reports no workflow runs for $PR_HEAD either, so its CI has not started rather than being held for approval"
+    return 1
+  fi
+  if [ "$seen" -lt "$total" ]; then
+    no "approval-gated: GitHub reports $total workflow runs for $PR_HEAD but returned only $seen, so this home cannot say every one of them is held for approval"
+    return 1
+  fi
+  # action_required in EITHER field: the conclusion is what PR 5562 carried, the
+  # status is the other place GitHub documents the same value.
+  gated=$(printf '%s' "$raw" |
+    jq -r '[.workflow_runs[]? | select(.status == "action_required" or .conclusion == "action_required")] | length' 2>/dev/null) || gated=
+  if [ -z "$gated" ]; then
+    no "approval-gated: could not read the workflow run states for $PR_HEAD, so nothing about them is verified"
+    return 1
+  fi
+  if [ "$gated" -lt "$total" ]; then
+    no "approval-gated: $((total - gated)) of $total workflow runs for $PR_HEAD are not held for approval, so this task is still running through CI rather than waiting"
+    return 1
+  fi
+  APPROVAL_GATED_RUNS=$total
+  ok "approval-gated: $1 reports no checks at all because GitHub is holding all $total of its workflow runs for a maintainer's approval"
+  return 0
+}
 
 gate_ship() {  # <id> <meta>
   local id=$1 meta=$2 pr wt head green n
@@ -241,12 +336,23 @@ gate_ship() {  # <id> <meta>
     fi
   fi
 
-  if green=$(FM_HOME="$FM_HOME" "$PR_GREEN_BIN" "$id" "$pr" 2>/dev/null); then
+  # Zero checks is the ONLY thing that sends this to the other branch, and zero
+  # checks is never green, so checks-green's verdict is untouched for every PR
+  # that has any. Which branch decided it is named in the evidence, so a reader
+  # of a standing wait can tell the two grants apart.
+  if [ "${PR_CHECKS:-}" = 0 ]; then
+    if gate_approval_gated "$pr"; then
+      GATE_EVIDENCE="pr=$pr head=$PR_HEAD approval-gated=$APPROVAL_GATED_RUNS runs"
+    fi
+  elif green=$(FM_HOME="$FM_HOME" "$PR_GREEN_BIN" "$id" "$pr" 2>/dev/null); then
     n=$(printf '%s' "$green" | awk '{print $4}')
     ok "checks-green: $pr is green at $PR_HEAD (${n:-?} checks)"
     GATE_EVIDENCE="pr=$pr head=$PR_HEAD checks=${n:-?}"
   else
-    no "checks-green: $pr is not green, so this task is still running through CI rather than waiting"
+    # The count is in the refusal because this is also the line a recheck relays
+    # when an approval-gated wait ends: the maintainer pressed the button, a run
+    # started, and a check has appeared on the head that had none.
+    no "checks-green: $pr is not green${PR_CHECKS:+ with $PR_CHECKS check(s) now reported on its head}, so this task is running through CI rather than waiting"
   fi
 }
 
@@ -357,6 +463,15 @@ case "$MODE" in
       # the decision, never from a second run, which could disagree with it.
       find "$STATE" -maxdepth 1 -name "$id.upstream-wait" -delete 2>/dev/null || true
       printf 'UPSTREAM_WAIT: dropped %s - it is no longer purely waiting, so supervision resumes\n' "$id"
+      # A wait granted because GitHub was holding its runs for approval ends the
+      # moment a maintainer presses the button: a check appears on the head, the
+      # gate takes the checks-green branch instead, and that branch's refusal is
+      # relayed below. Named here so the drop reads as the release it is rather
+      # than as a PR that went red.
+      case "$FM_UPSTREAM_WAIT_EVIDENCE" in
+        *approval-gated=*)
+          printf 'UPSTREAM_WAIT: %s was waiting because GitHub held its workflow runs for a maintainer to approve; that hold is over - the line below says whether a run has started or the PR itself closed\n' "$id" ;;
+      esac
       printf '%s\n' "$gate_out" | grep '^gate FAIL: ' | while IFS= read -r l; do
         printf 'UPSTREAM_WAIT: %s\n' "$l"
       done
