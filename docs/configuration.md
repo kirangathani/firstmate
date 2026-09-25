@@ -139,10 +139,25 @@ How the setting reaches each location differs, because `config/` is gitignored a
 `bin/fm-statusline.sh` appends a strip of boxes to the right edge of the fleet-control line, drawn from `bin/fm-arm-pool-lib.sh`'s own on-disk dormant-arm-pool records rather than from any process scan.
 `[@]` marks the pool member currently holding the watcher singleton; `[#]` marks a waiting dormant arm; `[.]` marks an empty slot, up to the pool's target size (six).
 A home that has never joined the pool at all - the old-style single watcher, no `state/.arm-pool` directory - costs one stat and draws one cell instead of six.
-The strip is right-aligned to the terminal width, read from `$COLUMNS` (Claude Code sets it before running a `statusLine` command; its JSON payload carries no width field) or `tput cols` as a fallback for a hand run.
+The strip is right-aligned to the terminal width, read from `$COLUMNS` (Claude Code sets it before running a `statusLine` command; its JSON payload carries no width field) or `tput cols` as a fallback for a hand run, less a constant right margin.
 A width that is known but too narrow to fit the strip drops it rather than wrapping the row; a width that cannot be determined at all still shows the strip, placed right after the text with two spaces, because dropping it there would make the feature invisible in most non-interactive runs.
 Every cell is drawn in SGR 34 (plain blue), not the `sgr("94")` slot `bin/fm-flow-tui.mjs` also calls `blue` in code - that slot renders pink in the captain's own terminal theme per its "Pink, not red" ruling (`docs/flow-tui.md`), and nothing else in this repo documents which code renders blue for him.
 `tests/fm-statusline-render.test.sh` renders the strip end to end against a synthetic pool directory, asserting the exact output both with its ANSI codes and with them stripped.
+
+#### The right margin (FM_STATUSLINE_RIGHT_MARGIN)
+
+Claude Code draws the status line narrower than the terminal, so a row built to exactly `$COLUMNS` is always too wide and Ink replaces its last cells with an ellipsis.
+That is what made the strip render as `...[#][#][#][.][…` at every window size, reported by the captain on 2026-09-24 and 2026-09-25.
+`bin/fm-statusline.sh` therefore right-aligns to `$COLUMNS` minus a constant margin, defaulting to 4 and overridden by `FM_STATUSLINE_RIGHT_MARGIN` (a non-numeric value falls back to the default).
+The margin is charged by the footer box Claude Code mounts the status line inside: `paddingX` of 2 on each side.
+Its column gap of 1 and the right-hand notifications box are not charged while that box is empty, which it usually is - the derivation read off the binary predicted 5 for that reason, and the measurement below is what settles it at 4.
+
+Measured rather than read: on Claude Code 2.1.282 (the version the captain runs), a scratch directory whose `.claude/settings.json` pointed `statusLine` at a script printing rulers of a computed length was launched under `tmux new-session -d -x <width> -y 30`, and the drawn rows were read back with `tmux capture-pane -p`.
+At `-x 137` (the status line saw `COLUMNS=137`, `tput cols` 137) a 133-character row drew in full and a 134-character row was truncated to 133 plus an ellipsis; at `-x 100` a 96-character row drew in full and a 97-character row was truncated.
+Both put the drawable width at `COLUMNS - 4`, so the margin is 4 and not the 5 the binary read suggested.
+
+The right-hand notifications box can still take width when Claude Code puts something in it, and the strip's last cells are then truncated for as long as that notification is shown.
+That is accepted: it is transient, and widening the margin permanently to cover it would leave the strip visibly detached from the right edge the whole rest of the time.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -646,6 +661,7 @@ FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
 FM_STATUSLINE_BASE=     # the base status-line command bin/fm-statusline.sh composes above its fleet line; outranks config/statusline-base and the user-level fallback, "none" opts out entirely, and it is how fm-spawn.sh carries an explicit setting into a task worktree (see "Status-line composition" above)
+FM_STATUSLINE_RIGHT_MARGIN=4  # columns bin/fm-statusline.sh holds back from $COLUMNS when right-aligning the watcher-pool strip, because Claude Code draws the status line inside a padded footer box and truncates anything wider; the default is measured, not assumed (see "The right margin" above)
 FM_STATUSLINE_COMPOSING=  # set to 1 by bin/fm-statusline.sh across the base command it runs; when already set it skips base resolution, so a user-level status line naming that script cannot recurse (see "Status-line composition" above)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording

@@ -213,6 +213,20 @@ fm_statusline_pid_alive() {
   kill -0 "$1" 2>/dev/null
 }
 
+# Claude Code draws the status line NARROWER than the terminal: its footer Box
+# carries paddingX on both sides, so a line built to exactly COLUMNS is always
+# too wide and Ink's wrap:"truncate" eats the last cells of the strip, which is
+# the `...[#][#][.][…` the captain reported at every window size. The margin is
+# constant, so it is subtracted before right-aligning. MEASURED, not read off
+# the binary (docs/configuration.md "Status-line composition" records the
+# capture): 4 columns on Claude Code 2.1.282, at both 100 and 137 columns.
+# FM_STATUSLINE_RIGHT_MARGIN overrides it for a harness that draws differently;
+# a non-numeric value falls back to the default rather than breaking the row.
+FM_STATUSLINE_RIGHT_MARGIN_DEFAULT=4
+case "${FM_STATUSLINE_RIGHT_MARGIN:-}" in
+  ''|*[!0-9]*) FM_STATUSLINE_RIGHT_MARGIN=$FM_STATUSLINE_RIGHT_MARGIN_DEFAULT ;;
+esac
+
 # Terminal width: Claude Code sets COLUMNS in the environment before running a
 # statusLine command (its JSON payload carries no width field at all), so that
 # is the primary source; `tput cols` covers a hand run from an interactive
@@ -292,8 +306,9 @@ fm_statusline_watcher_strip() {
   printf '%s' "$out"
 }
 
-# Right-aligns the strip on <text> when the terminal width is known and it
-# fits; never wraps the row. Width known but too narrow: drop the strip and
+# Right-aligns the strip on <text>, FM_STATUSLINE_RIGHT_MARGIN columns short of
+# the terminal width, when that width is known and the row fits; never wraps the
+# row. Width known but too narrow: drop the strip and
 # keep the text. Width unknown (no COLUMNS, no tput - piped, no tty): the
 # enumerated fallback still shows the strip, placed right after the text with
 # two spaces, since this script has no way to tell whether that would wrap and
@@ -306,7 +321,7 @@ fm_statusline_compose_row() {  # <text> <strip>
     return 0
   fi
   if width=$(fm_statusline_term_width); then
-    pad=$((width - ${#text} - FM_STATUSLINE_STRIP_WIDTH))
+    pad=$((width - FM_STATUSLINE_RIGHT_MARGIN - ${#text} - FM_STATUSLINE_STRIP_WIDTH))
     if [ "$pad" -ge 1 ]; then
       printf '%s%*s%s\n' "$text" "$pad" '' "$strip"
     else
