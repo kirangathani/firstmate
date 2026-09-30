@@ -63,6 +63,11 @@
 #   (m) the printed listing is capped, and the cap is read from the script at
 #       runtime rather than hardcoded here, so a changed default cannot leave
 #       this asserting a number the code no longer uses.
+#
+# No-final-newline cases, the shape of the 2026-09-30 no-mistakes fork merge:
+#   (n) a no-EOL file identical on both sides passes a `-s ours` ancestry merge.
+#   (o) a no-EOL file both sides changed, resolved by keeping both, commits.
+#   (p) a no-EOL file whose genuinely new last line is dropped is still refused.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -379,6 +384,99 @@ shown=$(printf '%s\n' "$out" | grep -c '^      | ' || true)
 [ "$shown" -le "$CAP" ] \
   || fail "(m) the refusal printed $shown lost lines, above its own cap of $CAP"
 pass "(m) the printed listing is capped at the script's own limit and says so"
+
+# --- (n)-(p) a file with no final newline -----------------------------------
+# The shape of the 2026-09-30 no-mistakes fork ancestry merge: a JSON file that
+# ends without a newline. The scan once tagged each text with sed, which passes a
+# missing final newline through, so the file's last "}" fused with the next
+# text's first tag and was reported lost as "}T {" - and since the fused line
+# existed in no text at all, no resolution of that merge could pass.
+
+EOL_REPO="$TMP/eol-repo"
+mkdir -p "$EOL_REPO"
+git -C "$EOL_REPO" init -q -b main
+printf '{\n  "base": 1\n}' > "$EOL_REPO/data.json"
+git -C "$EOL_REPO" add data.json
+git -C "$EOL_REPO" commit -qm 'base: a JSON file with no final newline'
+EOL_BASE=$(git -C "$EOL_REPO" rev-parse HEAD)
+"$INSTALL" "$EOL_REPO" >/dev/null 2>&1 || fail "the commit-msg hook should install into the no-EOL fixture repo"
+
+# eol_side: a branch off the base that writes data.json with <content>.
+eol_side() {  # <branch> <content>
+  git -C "$EOL_REPO" checkout -q -B "$1" "$EOL_BASE"
+  printf '%s' "$2" > "$EOL_REPO/data.json"
+  git -C "$EOL_REPO" commit -qam "$1: rewrite data.json"
+}
+
+# eol_merge: merge <theirs> into <ours> without committing, write <resolution>
+# as data.json, and commit through the hook. Echoes the output, returns its code.
+eol_merge() {  # <ours> <theirs> <resolution>
+  local out rc=0
+  git -C "$EOL_REPO" merge --abort >/dev/null 2>&1 || true
+  git -C "$EOL_REPO" checkout -q "$1"
+  git -C "$EOL_REPO" merge --no-commit --no-ff "$2" >/dev/null 2>&1 || true
+  printf '%s' "$3" > "$EOL_REPO/data.json"
+  git -C "$EOL_REPO" add data.json
+  out=$(git -C "$EOL_REPO" commit -m "merge $2 into $1" 2>&1) || rc=$?
+  printf '%s\n' "$out"
+  return "$rc"
+}
+
+# (n) the reported shape: both sides carry the byte-identical no-EOL file, landed
+# with the same `git merge -s ours --no-ff` the fork's ancestry merge used.
+SAME='{
+  "base": 1,
+  "both": 2
+}'
+eol_side same-ours "$SAME"
+eol_side same-theirs "$SAME"
+git -C "$EOL_REPO" checkout -q same-ours
+out=$(git -C "$EOL_REPO" merge -s ours --no-ff --no-edit same-theirs 2>&1) \
+  || fail "(n) a no-EOL file identical on both sides must never be flagged, but the merge was refused:
+$out"
+pass "(n) a no-EOL file identical on both sides passes an ancestry merge"
+
+# (o) the tagging itself, on a path the scan actually reads: each side adds a
+# different key to the no-EOL file and the resolution keeps both, still with no
+# final newline. Before the fix this was refused for the fused "}T {" line.
+eol_side keep-ours '{
+  "base": 1,
+  "ours": 2
+}'
+eol_side keep-theirs '{
+  "base": 1,
+  "theirs": 3
+}'
+out=$(eol_merge keep-ours keep-theirs '{
+  "base": 1,
+  "ours": 2,
+  "theirs": 3
+}') || fail "(o) a kept-both resolution of a no-EOL file must commit, but it was refused:
+$out"
+pass "(o) a kept-both resolution of a no-EOL file commits"
+
+# (p) strictness is unchanged: the no-EOL file's genuinely new LAST line - the
+# very line that used to fuse - is dropped by the resolution and must be caught.
+eol_side drop-ours '{
+  "base": 1
+}
+"ours-tail"'
+eol_side drop-theirs '{
+  "base": 1
+}
+"theirs-tail"'
+out=$(eol_merge drop-ours drop-theirs '{
+  "base": 1
+}
+"ours-tail"') \
+  && fail "(p) dropping the other side's last line of a no-EOL file must be refused, but it committed:
+$out"
+assert_contains "$out" '"theirs-tail"' \
+  "(p) the refusal should quote the no-EOL file's lost last line"
+assert_not_contains "$out" 'T {' \
+  "(p) the refusal must not report a line fused across two texts"
+pass "(p) a no-EOL file whose last line is genuinely dropped is still refused"
+git -C "$EOL_REPO" merge --abort >/dev/null 2>&1 || true
 
 reset_branch
 rm -rf "$TMP/replay"
