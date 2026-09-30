@@ -51,6 +51,32 @@ The limit of that choice, stated rather than left implicit: this cannot distingu
 
 A local copy that does not resolve is noted, not refused. `bin/fm-assert-tests-kept.sh` runs two gates later in the same command and refuses outright when it cannot resolve the task's worktree, so a merge whose local copy is missing cannot proceed whatever this gate says. Refusing twice for one cause would only make an unrelated worktree problem surface as an attribution failure.
 
+### Commits already on the project's upstream are not scanned
+
+A fork that merges its upstream forward brings in upstream contributors' own commits, trailers included.
+Those are not ours, and rewriting them would diverge the fork from upstream history, so the gate does not scan them.
+The case that forced this: https://github.com/kirangathani/no-mistakes/pull/6 moved the fork onto upstream kunchenguid/no-mistakes v1.85.x and was refused for fourteen trailer lines, every one in a commit an upstream contributor authored and already on upstream's `main`; the captain merged it by hand.
+
+The upstream is the PR repository's GitHub fork parent, and its tip is the commit GitHub reports for that parent's default branch.
+Both come from one GraphQL read in `bin/fm-pr-merge.sh`, never from the local copy.
+A worker can edit the local copy's remotes, refs, and `url.*.insteadOf` rewrites, because every worktree shares the project's `.git/config`, so nothing the branch or its repository declares counts.
+When that tip is not already in the local copy, the gate fetches the parent's default branch by the API-reported URL, with no ref and no `FETCH_HEAD` written.
+The fetch only supplies objects: the exemption is keyed to the API-reported commit id, so whatever answers the fetch cannot substitute commits of its own.
+The gate then scans `base..head` minus everything reachable from that tip, and says how many commits it scanned out of how many.
+
+Everything else stays exactly as strict.
+The fork's own merge commit and every commit on top of it are scanned, and so is the PR description.
+A repository with no fork parent, a failed API read, a malformed answer, or a tip that cannot be fetched all scan every commit, as before.
+There is no override flag, and none for `yolo`.
+
+The exposure this adds, stated rather than left implicit:
+
+- **Attribution that upstream itself accepted lands on our default branch.** That is the point of the exemption, and it is the only content that passes through it.
+- **Anything that reaches upstream's default branch is exempt, whoever wrote it.** A commit of ours that upstream merges, trailer and all, is no longer scanned when the fork later merges upstream forward. Getting it there takes upstream's maintainers, not a worker.
+- **The upstream is the fork parent GitHub records for the PR's repository.** Whoever administers that repository chose it when forking; a worker cannot change it from a branch.
+- **Only the parent's default branch counts.** Merging an upstream release branch or tag that is not on that branch is scanned in full.
+- **`bin/fm-merge-local.sh` has no equivalent.** A local-only landing has no PR repository to ask GitHub about, so it still scans every commit.
+
 It runs before the kept-tests gate.
 That gate is the dominant cost of landing a PR, at roughly 20-35 minutes on firstmate itself, and a PR that will be refused for attribution should not spend that time first.
 `tests/fm-pr-merge.test.sh` proves the ordering on a branch that would fail both gates.

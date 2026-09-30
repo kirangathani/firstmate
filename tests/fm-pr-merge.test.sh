@@ -59,6 +59,12 @@
 #   (aa3) the gate refuses before the kept-tests gate spends its run, proven on a
 #         branch that would fail both
 #   (aa4) an unreadable body/commits query refuses as unverified
+#   (aa5) trailers only in commits already on the fork parent's default branch
+#         merge, including when the gate must fetch that tip itself
+#   (aa6) our own trailer on top of an upstream merge still refuses
+#   (aa7) a PR description with attribution still refuses despite an upstream
+#   (aa8) no fork parent (even with a local upstream remote), or an unfetchable
+#         parent tip, scans every commit as before
 #
 #   (z1) a red PR is refused with the failing check named, before gh-axi
 #   (z2) a pending PR is refused distinctly from a red one
@@ -217,6 +223,16 @@ SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case "\${1:-} \${2:-}" in
+  "api graphql")
+    # The attribution gate's upstream read: the PR repository's GitHub fork
+    # parent as "name<TAB>url<TAB>default-branch<TAB>tip-oid". The case's
+    # upstream.tsv when present; nothing otherwise, which is a repository with
+    # no parent and so no upstream exemption.
+    if [ -f '$case_dir/upstream.tsv' ]; then
+      cat '$case_dir/upstream.tsv'
+    fi
+    exit 0
+    ;;
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
@@ -2670,6 +2686,154 @@ test_unreadable_pr_body_refuses_unverified() {
   pass "fm-pr-merge refuses when the PR's description cannot be read at all"
 }
 
+# --- the attribution gate's upstream exemption -------------------------------
+#
+# A fork merging its upstream forward carries upstream contributors' own
+# trailers, which the fork must not rewrite. Commits reachable from the tip the
+# GitHub API reports for the PR repository's fork parent are not scanned; every
+# other commit and the PR description stay exactly as strict.
+
+# merge_upstream_with_attribution <case-dir>: stand up a real upstream repo that
+# shares the project's history, give it a commit carrying an AI trailer, merge
+# that into the case's branch with a clean merge message, then advance the
+# upstream past what the branch holds so the gate's own fetch is exercised.
+# Prints the upstream's final tip.
+merge_upstream_with_attribution() {
+  local case_dir=$1
+  git clone -q "$case_dir/project" "$case_dir/upstream"
+  printf 'upstream\n' > "$case_dir/upstream/UPSTREAM.md"
+  git -C "$case_dir/upstream" add -A
+  git -C "$case_dir/upstream" commit -q -m \
+    "$(printf 'feat: upstream work\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>')"
+  git -C "$case_dir/wt" fetch -q "$case_dir/upstream" main
+  git -C "$case_dir/wt" merge -q --no-ff -m 'Merge upstream forward' FETCH_HEAD
+  printf 'later\n' >> "$case_dir/upstream/UPSTREAM.md"
+  git -C "$case_dir/upstream" commit -q -am \
+    "$(printf 'fix: later upstream work\n\nClaude-Session: https://claude.ai/code/session_up')"
+  git -C "$case_dir/upstream" rev-parse HEAD
+}
+
+# write_upstream <case-dir> <oid> [url]: the fork parent the gh mock reports.
+write_upstream() {
+  printf 'upstream-owner/repo\t%s\tmain\t%s\n' "${3:-$1/upstream}" "$2" > "$1/upstream.tsv"
+}
+
+test_attribution_upstream_only_trailers_merge() {
+  local case_dir rc oid
+  case_dir=$(make_case attribution-upstream-only)
+  oid=$(merge_upstream_with_attribution "$case_dir")
+  write_upstream "$case_dir" "$oid"
+  add_gh_mocks "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/85 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "attribution-upstream-only: a PR whose only trailers are upstream's must merge"
+  assert_no_grep 'carries AI attribution' "$case_dir/stderr" \
+    "attribution-upstream-only: an upstream contributor's trailer was refused"
+  assert_grep 'scans 1 of 2 commits' "$case_dir/stderr" \
+    "attribution-upstream-only: the gate did not say how many commits it exempted"
+  assert_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attribution-upstream-only: gh-axi pr merge never ran"
+  pass "commits already on the fork parent's default branch are not scanned for attribution"
+}
+
+test_attribution_our_commit_on_an_upstream_merge_refuses() {
+  local case_dir rc oid
+  case_dir=$(make_case attribution-upstream-ours)
+  oid=$(merge_upstream_with_attribution "$case_dir")
+  commit_on_branch "$case_dir" \
+    "$(printf 'feat: ours\n\nCo-authored-by: Cursor <cursoragent@cursor.com>')"
+  write_upstream "$case_dir" "$oid"
+  add_gh_mocks "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/86 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attribution-upstream-ours: our own trailer on top of an upstream merge must refuse"
+  assert_grep 'Co-authored-by: Cursor' "$case_dir/stderr" \
+    "attribution-upstream-ours: the refusal did not name our own commit's trailer"
+  assert_no_grep 'Claude Opus 5' "$case_dir/stderr" \
+    "attribution-upstream-ours: the upstream commit was scanned despite the exemption"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attribution-upstream-ours: gh-axi pr merge ran despite our attribution"
+  pass "our own commit carrying attribution is refused even on top of an upstream merge"
+}
+
+test_attribution_pr_body_refuses_despite_upstream() {
+  local case_dir rc oid
+  case_dir=$(make_case attribution-upstream-body)
+  oid=$(merge_upstream_with_attribution "$case_dir")
+  write_upstream "$case_dir" "$oid"
+  write_pr_body "$case_dir" \
+    "$(printf 'Merge upstream.\n\nGenerated with Claude Code')"
+  add_gh_mocks "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/87 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attribution-upstream-body: a PR description with attribution must refuse"
+  assert_grep 'generated-footer:PR body' "$case_dir/stderr" \
+    "attribution-upstream-body: the refusal did not name the PR body"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attribution-upstream-body: gh-axi pr merge ran despite the description"
+  pass "the upstream exemption never covers the PR description"
+}
+
+test_attribution_undeterminable_upstream_scans_everything() {
+  local case_dir rc
+  case_dir=$(make_case attribution-upstream-unknown)
+  merge_upstream_with_attribution "$case_dir" >/dev/null
+  # What the branch itself can declare counts for nothing: a local upstream
+  # remote and its ref pointing at the upstream tip exempt no commit while
+  # GitHub reports no fork parent.
+  git -C "$case_dir/wt" remote add upstream "$case_dir/upstream"
+  git -C "$case_dir/wt" fetch -q upstream
+  add_gh_mocks "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/88 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attribution-upstream-unknown: no fork parent must scan every commit"
+  assert_grep 'Claude Opus 5' "$case_dir/stderr" \
+    "attribution-upstream-unknown: the upstream commit was not scanned"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "attribution-upstream-unknown: gh-axi pr merge ran"
+
+  # A parent the API names but whose tip cannot be obtained is the same case.
+  git -C "$case_dir/upstream" commit -q --allow-empty -m 'unreachable tip'
+  write_upstream "$case_dir" "$(git -C "$case_dir/upstream" rev-parse HEAD)" "$case_dir/no-such-upstream"
+  : > "$case_dir/gh-axi.log"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/88 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "attribution-upstream-unknown: an unfetchable upstream tip must scan every commit"
+  assert_grep 'could not be fetched' "$case_dir/stderr" \
+    "attribution-upstream-unknown: the unfetchable upstream was not reported"
+  assert_grep 'Claude Opus 5' "$case_dir/stderr" \
+    "attribution-upstream-unknown: the upstream commit was not scanned when its tip was unfetchable"
+  pass "an upstream that cannot be determined or fetched leaves the gate scanning every commit"
+}
+
 # --- merge-resolution gate (contract in docs/merge-resolution-gate.md) --------
 #
 # The point of these two is the WIRING, not the verdict: tests/fm-merge-resolution-gate.test.sh
@@ -2773,6 +2937,10 @@ test_attribution_in_a_commit_message_refuses
 test_attribution_in_the_pr_body_refuses
 test_attribution_runs_before_the_kept_tests_gate
 test_unreadable_pr_body_refuses_unverified
+test_attribution_upstream_only_trailers_merge
+test_attribution_our_commit_on_an_upstream_merge_refuses
+test_attribution_pr_body_refuses_despite_upstream
+test_attribution_undeterminable_upstream_scans_everything
 test_a_deleting_merge_resolution_refuses
 test_an_additive_merge_resolution_merges
 
