@@ -199,9 +199,24 @@ A local copy that does not resolve is noted rather than refused, the same reason
 
 ## Cost
 
-Two `git diff --name-only` calls per merge, at most four blob reads per path both sides changed, and one blob read per touched path for the relocation corpus.
-Only paths both sides changed can carry a resolution decision, so the per-path work is bounded by the conflict surface rather than by the size of the repository.
+Two `git diff --name-only` calls per merge, one batched blob-id lookup, one batched read of the resolution across every touched path for the relocation corpus, and four blob reads per path both sides changed whose blob differs somewhere among ours, theirs, and the resolution.
+A path with the same blob on both sides and in the resolution cannot have lost anything either side brought, so it is skipped unread.
+All of it feeds a single awk pass, so the cost is linear in the text read.
 Scanning all 73 merges in this repository's history takes well under a second each.
+
+Measured on 2026-09-30 against the no-mistakes fork's ancestry merge of upstream `bff2d06f8019` (376 and 347 paths changed on the two sides, 347 on both, a 6.5 MB relocation corpus), scanning the `-s ours` resolution:
+
+| version | wall time |
+| --- | --- |
+| before: the relocation corpus re-fed to awk once per path both sides changed | 4m24s |
+| corpus fed once, one awk pass for every path | 33s |
+| plus the identical-blob skip (328 of the 347 paths) and batched corpus read | 4.7s |
+
+All three versions report the same two genuine findings; the before version also reported the false positive below.
+
+A file that ends without a newline is tagged with awk, never sed, because sed passes the missing final newline through and fused that file's last line with the next text's first tag.
+The measured instance was the same merge: `benchmarks/issue-1125/recorded-excerpts-off.json`, byte-identical on both sides, reported as losing `}T {` and `}R ---`, lines that exist in no text, so no resolution of that merge could pass.
+`tests/fm-merge-resolution-gate.test.sh` cases (n)-(p) hold that up.
 
 ## Escalating, when it is genuinely the captain's call
 

@@ -62,11 +62,11 @@
 #     caller invents its own wording for the same decision.
 #
 # COST
-# Two `git diff --name-only` calls plus at most four blob reads per path BOTH
-# sides changed, and one blob read per path either side touched for the
-# relocation corpus. Only paths both sides changed can carry a resolution
-# decision, so the per-path work is bounded by the conflict surface rather than
-# by the size of the repository.
+# Two `git diff --name-only` calls, one batched id lookup, one batched read of
+# the relocation corpus, and four blob reads per path both sides changed whose
+# blob differs somewhere among ours, theirs, and the resolution; all of it feeds
+# ONE awk pass, so the cost is linear in the text read.
+# docs/merge-resolution-gate.md "Cost" owns the measurements.
 set -u
 
 # A path absent at that side reads as empty rather than as an error: add/add and
@@ -79,6 +79,11 @@ fm_additive__read_to() {
   elif [ -n "$rev" ]; then
     git -C "$repo" show "$rev:$path" > "$dest" 2>/dev/null || : > "$dest"
   fi
+}
+
+# The object name that reads <path> at <rev> through `git cat-file`.
+fm_additive__spec() {
+  if [ "$1" = index ]; then printf ':%s\n' "$2"; else printf '%s:%s\n' "$1" "$2"; fi
 }
 
 # With no merge base every path in the side counts as changed, which is the
@@ -141,15 +146,47 @@ fm_additive_scan() {
   fi
   LC_ALL=C sort -u "$tmp/ours.paths" "$tmp/theirs.paths" > "$tmp/touched.paths"
 
-  # Relocation corpus, built once: the resolution's text across every path the
-  # merge touched, so a line that moved to another file is not read as deleted.
-  : > "$tmp/reloc"
+  # A path whose blob is the same on both sides and in the resolution cannot
+  # have lost anything either side brought, so it is not read at all. That is
+  # most of an ancestry merge: 328 of the 347 paths both sides changed in the
+  # 2026-09-30 no-mistakes fork merge.
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    fm_additive__read_to "$repo" "$result" "$path" "$tmp/one"
-    cat "$tmp/one" >> "$tmp/reloc"
-    printf '\n' >> "$tmp/reloc"
-  done < "$tmp/touched.paths"
+    fm_additive__spec "$ours" "$path"
+    fm_additive__spec "$theirs" "$path"
+    fm_additive__spec "$result" "$path"
+  done < "$tmp/both.paths" \
+    | git -C "$repo" cat-file --batch-check > "$tmp/both.ids" 2>/dev/null \
+    || { rm -rf "$tmp"; return 2; }
+  : > "$tmp/judge.paths"
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    IFS=' ' read -r o_id _ <&3; IFS=' ' read -r t_id _ <&3; IFS=' ' read -r r_id _ <&3
+    # A missing object's line starts with the name it was asked for, and the
+    # three names always differ, so a missing side never reads as identical.
+    [ "$o_id" = "$t_id" ] && [ "$t_id" = "$r_id" ] && continue
+    printf '%s\n' "$path" >> "$tmp/judge.paths"
+  done < "$tmp/both.paths" 3< "$tmp/both.ids"
+  if [ ! -s "$tmp/judge.paths" ]; then
+    rm -rf "$tmp"
+    return 0
+  fi
+
+  # One tagged stream, one awk pass. The relocation corpus - the resolution's
+  # text across every path the merge touched, so a line that moved to another
+  # file is not read as deleted - goes in ONCE at the head, read by one batched
+  # git call, and each path to judge follows as an F header plus its four texts.
+  # Feeding the corpus again per path made the cost paths-times-corpus: 4m24s on
+  # a 347-path upstream merge (docs/merge-resolution-gate.md "Cost"). The batch's
+  # own "<oid> blob <size>" header lines land in the corpus too; no content line
+  # plausibly equals one, and --batch ends every blob with a newline.
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    fm_additive__spec "$result" "$path"
+  done < "$tmp/touched.paths" \
+    | git -C "$repo" cat-file --batch 2>/dev/null \
+    | awk '{ print "R\t" $0 }' > "$tmp/stream" \
+    || { rm -rf "$tmp"; return 2; }
 
   while IFS= read -r path; do
     [ -n "$path" ] || continue
@@ -159,34 +196,40 @@ fm_additive_scan() {
     fm_additive__read_to "$repo" "$base"   "$path" "$tmp/base"
     fm_additive__read_to "$repo" "$ours"   "$path" "$tmp/ours"
     fm_additive__read_to "$repo" "$theirs" "$path" "$tmp/theirs"
-
     {
-      sed 's/^/B\t/' "$tmp/base"
-      sed 's/^/O\t/' "$tmp/ours"
-      sed 's/^/T\t/' "$tmp/theirs"
-      sed 's/^/R\t/' "$tmp/reloc"
-      sed 's/^/P\t/' "$tmp/res"
-    } | fm_additive__awk > "$tmp/out"
+      printf 'F\t%s\n' "$path"
+      fm_additive__tag B "$tmp/base"
+      fm_additive__tag O "$tmp/ours"
+      fm_additive__tag T "$tmp/theirs"
+      fm_additive__tag P "$tmp/res"
+    } >> "$tmp/stream"
+  done < "$tmp/judge.paths"
 
-    if [ -s "$tmp/out" ]; then
-      found=1
-      # The path is carried on every finding line so a caller never has to track
-      # which path it was reading when the finding came out.
-      awk -F'\t' -v p="$path" '{ print "lost:" $1 ":" p ":" substr($0, index($0, "\t") + 1) }' "$tmp/out"
-    fi
-  done < "$tmp/both.paths"
+  fm_additive__awk < "$tmp/stream" > "$tmp/out" || { rm -rf "$tmp"; return 2; }
+  [ -s "$tmp/out" ] && found=1
+  cat "$tmp/out"
 
   rm -rf "$tmp"
   [ "$found" -eq 0 ]
+}
+
+# Tag every line of a file as "<tag>\t<content>". awk, not sed: sed passes a
+# missing final newline through, so a file ending without one fused its last line
+# with the next section's first tag - a no-EOL JSON file identical on both sides
+# was reported as losing "}T {". awk ends every record it prints.
+fm_additive__tag() {
+  awk -v t="$1" '{ print t "\t" $0 }' "$2"
 }
 
 # Tagged-stream awk core. Every line arrives as "<tag>\t<content>", so an empty
 # side contributes nothing and can never shift which input the reader thinks it
 # is on - the failure mode a positional FNR==1 counter has on an empty file, and
 # the reason this is not written as five awk file arguments.
-#   B base text   O ours text   T theirs text
-#   R relocation corpus (the resolution across every touched path)
-#   P this path's resolution
+#   R relocation corpus (the resolution across every touched path), first, once
+#   F the next path to judge; its B, O, T, P lines follow
+#   B base text   O ours text   T theirs text   P this path's resolution
+# Prints one `lost:<side>:<path>:<line>` per finding, grouped by path in stream
+# order and sorted within a path.
 fm_additive__awk() {
   awk -F'\t' '
     function norm(s) {
@@ -205,17 +248,7 @@ fm_additive__awk() {
       n = split(tolower(s), a, /[^a-z0-9_]+/)
       for (i = 1; i <= n; i++) if (a[i] != "") dest[a[i]] = 1
     }
-    {
-      tag = $1
-      line = substr($0, index($0, "\t") + 1)
-      n = norm(line)
-      if (tag == "B")      { if (n != "") B[n] = 1; addtoks(line, BT) }
-      else if (tag == "O") { if (n != "") O[n] = 1 }
-      else if (tag == "T") { if (n != "") T[n] = 1 }
-      else if (tag == "R") { if (n != "") R[n] = 1 }
-      else if (tag == "P") { addtoks(line, PT) }
-    }
-    END {
+    function judge(   k, req, nt, a, i, novel, survived) {
       for (k in O) if (!(k in B)) req[k] = "ours"
       for (k in T) if (!(k in B)) req[k] = (k in req) ? "both" : "theirs"
       for (k in req) {
@@ -229,8 +262,22 @@ fm_additive__awk() {
         }
         if (novel == 0) continue
         if (novel == survived) continue
-        print req[k] "\t" k
+        # The path number keeps paths in stream order through the sort below.
+        printf "%09d\tlost:%s:%s:%s\n", np, req[k], path, k
       }
+      split("", B); split("", O); split("", T); split("", BT); split("", PT)
     }
-  ' | LC_ALL=C sort
+    {
+      tag = $1
+      line = substr($0, index($0, "\t") + 1)
+      if (tag == "F") { if (np) judge(); np++; path = line; next }
+      n = norm(line)
+      if (tag == "B")      { if (n != "") B[n] = 1; addtoks(line, BT) }
+      else if (tag == "O") { if (n != "") O[n] = 1 }
+      else if (tag == "T") { if (n != "") T[n] = 1 }
+      else if (tag == "R") { if (n != "") R[n] = 1 }
+      else if (tag == "P") { addtoks(line, PT) }
+    }
+    END { if (np) judge() }
+  ' | LC_ALL=C sort | cut -f2-
 }
