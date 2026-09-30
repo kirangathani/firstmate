@@ -78,6 +78,9 @@
 # has questions open. It writes only to the pipeline's own state - the run's
 # answers.ndjson and the daemon's record - never to the project's files, so
 # firstmate running it does not cross the never-write-to-a-project boundary.
+# The one attach `answer` starts after the last open question is answered goes
+# through bin/fm-nm-attach.sh like every other (reattach_after_answer below), so
+# that owner stays the only route to `axi run`/`axi respond`.
 #
 # WHY IT RUNS FROM THE TASK WORKTREE. The fork's command resolves its repository
 # from the CWD: internal/cli/axi_answer.go calls openAxiDaemonEnv() with no
@@ -114,7 +117,8 @@
 #   fm-nm-questions.sh surface            sweep the fleet, print only NEW ones
 #   fm-nm-questions.sh answer <task-id> --question <id> --answer <text>
 #                                         [--by captain|firstmate] [--outcome change]
-#                                         records it, then answers the reviewer
+#                                         records it, answers the reviewer, then
+#                                         re-attaches the run once none is open
 #
 # Environment:
 #   FM_NM_QUESTIONS_DB             no-mistakes state database
@@ -587,6 +591,47 @@ EOF
     exit 1
   fi
   printf 'answered: review question %s on run %s, by the %s\n' "$qid" "$run" "$who"
+  reattach_after_answer "$id" "$run" "$qid" "$dir" "$wt"
+}
+
+# THE LAST ANSWER RE-ATTACHES THE RUN. A run parked on its reviewer's questions
+# cannot be released by the worker - `axi respond` refuses while any is open - so
+# the worker's last attach has already returned and nothing is attached. The
+# answer that closes the last open question is what resumes the reviewer, and
+# without a live attach its next park appends no status line and wakes nobody
+# (observed 2026-09-30, run 01M3RSE7V7Q8ME7B5GS5BRPT6C: caught only by the
+# stale-pane alarm ten minutes later). So this starts one through the one attach
+# owner, bin/fm-nm-attach.sh, from the task's own copy, where that owner's
+# branch check runs unweakened. Its refusal of a second live hold (exit 3) is the
+# idempotency, reported as "already attached" rather than as a failure. A
+# partially answered set starts nothing: the run is still parked on the rest.
+reattach_after_answer() {  # <task-id> <run-id> <answered-qid> <conv-dir> <worktree>
+  local id=$1 run=$2 qid=$3 dir=$4 wt=$5 remaining='' qline out rc=0
+  local retry="attach it from $wt with $SCRIPT_DIR/fm-nm-attach.sh $id"
+  # Re-read after delivery so a question asked meanwhile counts, and exclude the
+  # one just answered in case its answer line has not landed in the file yet.
+  if ! read_conversation "$dir"; then
+    printf 'error: the answer landed, but the conversation for run %s could not be re-read, so the run was NOT re-attached; once no question is open, %s\n' \
+      "$run" "$retry" >&2
+    return 1
+  fi
+  while IFS=$TAB read -r qline _rest; do
+    [ -n "$qline" ] && [ "$qline" != "$qid" ] && remaining="$remaining $qline"
+  done <<EOF
+$(open_entries)
+EOF
+  if [ -n "$remaining" ]; then
+    printf 'not re-attached: question(s)%s still open on run %s; the answer to the last one re-attaches it\n' "$remaining" "$run"
+    return 0
+  fi
+  out=$(cd "$wt" && FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-nm-attach.sh" "$id" 2>&1) || rc=$?
+  case "$rc" in
+    0) printf 're-attached: no question is open on run %s, so its next stop wakes firstmate\n%s\n' "$run" "$out" ;;
+    3) printf 're-attached: not needed, an attach is already live for run %s\n%s\n' "$run" "$out" ;;
+    *) printf 'error: the answer landed and the reviewer resumed, but the run was NOT re-attached (exit %s), so its next stop will wake nobody:\n%s\n' "$rc" "$out" >&2
+       printf 'error: fix the cause, then %s\n' "$retry" >&2
+       return 1 ;;
+  esac
   return 0
 }
 

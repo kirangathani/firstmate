@@ -407,6 +407,7 @@ Six firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`$NM_ATTACH_CMD $ID --respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - **A review QUESTION is not yours.** The reviewer can ask a question while it works; firstmate reads it, puts it to the captain, and answers the reviewer directly with its own command. You are not in that loop: nothing is relayed to you, you owe no \`resolved\` line for it, and you never run \`axi answer\` yourself.
   The run may therefore resume without you having done anything, which is normal. An answer settles only the question it answers.
+  After a hold returns parked on open reviewer questions, do nothing at that gate - firstmate answers them and its answer command re-attaches the run (bin/fm-nm-questions.sh owns that) - and never end the loop expecting a later return unless an attach is live.
 - Avoid \`--yes\`: it silently auto-resolves EVERY ask-user finding, including the warning and error ones the captain owns. The attach owner refuses it outright.
 - **Start, reattach and respond ONLY through the attach owner.** Never call \`no-mistakes axi run\` or \`axi respond\` yourself; a gate refuses those commands before they run.
   \`$NM_ATTACH_CMD $ID\` starts the run, or reattaches to it.
