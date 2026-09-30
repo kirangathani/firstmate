@@ -466,8 +466,7 @@ test_answer_refuses_an_authority_it_cannot_speak_for() {
 live_hold_pid() { sed -n '1p' "$STATE/t1.nm-attach" 2>/dev/null || true; }
 
 wait_for_attach_log() {  # <fixed string>
-  local i
-  for i in $(seq 1 50); do
+  for _ in $(seq 1 50); do
     grep -qF -- "$1" "$ATTACH_LOG" 2>/dev/null && return 0
     sleep 0.1
   done
@@ -477,10 +476,10 @@ wait_for_attach_log() {  # <fixed string>
 # A clean slate for each re-attach case: the previous case's hold has finished
 # writing, there is no record of it, and the hold log is empty.
 reset_attach() {
-  local pid i
+  local pid
   pid=$(live_hold_pid)
   if [ -n "$pid" ]; then
-    for i in $(seq 1 50); do
+    for _ in $(seq 1 50); do
       kill -0 "$pid" 2>/dev/null || break
       sleep 0.1
     done
