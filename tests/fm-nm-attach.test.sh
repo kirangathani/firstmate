@@ -441,6 +441,7 @@ test_refuses_a_second_live_attach() {
   pid=$(sed -n '1p' "$dir/home/state/$FIXTURE_TASK.nm-attach")
   out=$(run_attach "$dir" "$FIXTURE_TASK" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "a second attach was accepted while one was still live"
+  expect_code 3 "$rc" "the live-hold refusal did not exit 3, so a caller cannot tell it from a failure"
   assert_contains "$out" 'already running' "the refusal did not say a hold is already driving the run"
   assert_contains "$out" "$dir/tmp/nm-attach-" "the refusal did not point at the live log"
   kill "$pid" 2>/dev/null || true

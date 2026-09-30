@@ -34,7 +34,10 @@
 # bin/fm-nm-questions.sh so the captain's answer reaches the reviewer directly
 # rather than through the worker (captain's ruling, 2026-09-15). A worker never
 # runs it, and `axi respond` refuses `--action answer`, so a gate with questions
-# still open cannot be released from either side.
+# still open cannot be released from either side. Because of that, the answer
+# that closes the last open question resumes the reviewer with nothing attached,
+# so bin/fm-nm-questions.sh then calls THIS script from the task's worktree - the
+# one case firstmate starts an attach, through this owner and its checks.
 #
 # WHAT THE CALLER GETS. The attach runs in a detached process group with stdin
 # closed and both output streams in the task's own temp root. When it returns,
@@ -108,7 +111,8 @@
 #     bin/fm-fix-instructions-policy.mjs, the one owner of that decision. The
 #     PreToolUse gate can no longer see this command, so the floor is enforced
 #     here or nowhere.
-#   - a second attach while one is already alive for this task
+#   - a second attach while one is already alive for this task, with exit 3
+#     rather than 1, so a caller can tell "already attached" from a failure
 #   - a composed intent too large to reach the daemon (see below)
 #
 # ON A --local-skip TASK this is not the command to reach for: bin/fm-spawn.sh
@@ -365,7 +369,8 @@ if [ -f "$MARKER" ]; then
   LIVE_PID=$(sed -n '1p' "$MARKER" 2>/dev/null || true)
   LIVE_LOG=$(sed -n '2p' "$MARKER" 2>/dev/null || true)
   if [ -n "$LIVE_PID" ] && kill -0 "$LIVE_PID" 2>/dev/null; then
-    die "an attach for $ID is already running (pid $LIVE_PID); it will append its own status line when it returns. Watch it at ${LIVE_LOG:-<log path unrecorded>}"
+    echo "error: an attach for $ID is already running (pid $LIVE_PID); it will append its own status line when it returns. Watch it at ${LIVE_LOG:-<log path unrecorded>}" >&2
+    exit 3
   fi
   unlink "$MARKER" 2>/dev/null || true
 fi

@@ -38,8 +38,13 @@ QUESTIONS="$ROOT/bin/fm-nm-questions.sh"
 
 # The task's own isolated copy: the answer command resolves its repository from
 # the directory it runs in, so the reader must run it there and nowhere else.
+# It is a real git repository on the task's ship branch, because the answer that
+# closes the last open question re-attaches the run through bin/fm-nm-attach.sh,
+# which refuses anywhere but a worktree on fm/<task-id>.
 WT="$TMP_ROOT/wt"
-mkdir -p "$WT"
+fm_git_init_commit "$WT"
+git -C "$WT" checkout -qb fm/t1
+TASK_TMP="$TMP_ROOT/tasktmp"
 
 # A fake `no-mistakes` recording its argv AND its working directory, because
 # both are part of the contract: the answer must name the run this reader
@@ -47,8 +52,17 @@ mkdir -p "$WT"
 NM_LOG="$TMP_ROOT/nm-answer.log"
 NM_BIN_DIR="$TMP_ROOT/nmbin"
 mkdir -p "$NM_BIN_DIR"
+# Anything but `axi answer` is the re-attach's hold, which runs detached and may
+# outlive its test, so it logs to its own file rather than racing the next
+# test's truncation of the answer log. FM_TEST_NM_RUN_SLEEP keeps a hold live.
+ATTACH_LOG="$NM_LOG.attach"
 cat > "$NM_BIN_DIR/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+if [ "${2:-}" != answer ]; then
+  printf 'cwd=%s argv=%s\n' "$PWD" "$*" >> "$FM_TEST_NM_LOG.attach"
+  [ "${2:-}" = run ] && sleep "${FM_TEST_NM_RUN_SLEEP:-0}"
+  exit 0
+fi
 { printf 'cwd=%s\n' "$PWD"; printf 'argv=%s\n' "$*"; } >> "$FM_TEST_NM_LOG"
 [ -z "${FM_TEST_NM_FAIL:-}" ] || exit 1
 exit 0
@@ -70,6 +84,7 @@ run_q() {  # <args...>
   FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_NM_QUESTIONS_DB="$DB" FM_NM_QUESTIONS_EVIDENCE_ROOT="$EVIDENCE" \
     FM_NM_QUESTIONS_NM_BIN="$NM_BIN_DIR/no-mistakes" FM_TEST_NM_LOG="$NM_LOG" \
+    PATH="$NM_BIN_DIR:$PATH" FM_TASK_TMP_OVERRIDE="$TASK_TMP" \
     "$QUESTIONS" "$@" 2>&1
 }
 
@@ -78,6 +93,7 @@ run_q_code() {  # <args...> -> sets RC and OUT
   OUT=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_NM_QUESTIONS_DB="$DB" FM_NM_QUESTIONS_EVIDENCE_ROOT="$EVIDENCE" \
     FM_NM_QUESTIONS_NM_BIN="$NM_BIN_DIR/no-mistakes" FM_TEST_NM_LOG="$NM_LOG" \
+    PATH="$NM_BIN_DIR:$PATH" FM_TASK_TMP_OVERRIDE="$TASK_TMP" \
     "$QUESTIONS" "$@" 2>&1)
   RC=$?
   set -e
@@ -405,6 +421,7 @@ JSON
   OUT=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_NM_QUESTIONS_DB="$DB" FM_NM_QUESTIONS_EVIDENCE_ROOT="$EVIDENCE" \
     FM_NM_QUESTIONS_NM_BIN="$NM_BIN_DIR/no-mistakes" FM_TEST_NM_LOG="$NM_LOG" \
+    PATH="$NM_BIN_DIR:$PATH" FM_TASK_TMP_OVERRIDE="$TASK_TMP" \
     FM_TEST_NM_FAIL=1 "$QUESTIONS" answer t1 --question q9 --answer "Deliberate" 2>&1)
   RC=$?
   set -e
@@ -438,6 +455,123 @@ test_answer_refuses_an_authority_it_cannot_speak_for() {
   pass "only the captain or firstmate can be recorded as having answered"
 }
 
+# --- the re-attach after the last answer ------------------------------------
+
+# Observed 2026-09-30: a run parked on its reviewer's questions had no attach -
+# the worker cannot respond while questions are open - so when the answers
+# resumed the reviewer, its next park appended nothing and woke nobody. The
+# answer that closes the last open question therefore re-attaches the run itself.
+
+# The pid of the hold the last re-attach recorded, so a test can stop it.
+live_hold_pid() { sed -n '1p' "$STATE/t1.nm-attach" 2>/dev/null || true; }
+
+wait_for_attach_log() {  # <fixed string>
+  for _ in $(seq 1 50); do
+    grep -qF -- "$1" "$ATTACH_LOG" 2>/dev/null && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+# A clean slate for each re-attach case: the previous case's hold has finished
+# writing, there is no record of it, and the hold log is empty.
+reset_attach() {
+  local pid
+  pid=$(live_hold_pid)
+  if [ -n "$pid" ]; then
+    for _ in $(seq 1 50); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+  : > "$ATTACH_LOG"
+  unlink "$STATE/t1.nm-attach" 2>/dev/null || true
+}
+
+test_the_last_answer_re_attaches_from_the_task_worktree() {
+  write_questions <<'JSON'
+{"id":"q1","kind":"question","question":"Keep the legacy route?","options":["Keep","Remove"],"weight":"major"}
+JSON
+  : > "$CONV/answers.ndjson"
+  reset_attach
+  run_q_code answer t1 --question q1 --answer "Keep"
+  expect_code 0 "$RC" "answering the last open question did not succeed"
+  assert_contains "$OUT" "re-attached: no question is open on run R1" \
+    "the answer that closed the last question did not re-attach the run"
+  assert_contains "$OUT" "attached in the background" \
+    "the attach owner did not report starting a hold"
+  wait_for_attach_log "cwd=$WT argv=axi run --intent" \
+    || fail "the hold did not attach to the run from the task's own copy"
+  pass "the answer that closes the last open question re-attaches the run from the task worktree"
+}
+
+test_a_partial_answer_does_not_re_attach() {
+  write_questions <<'JSON'
+{"id":"q1","kind":"question","question":"Keep the legacy route?","options":["Keep","Remove"],"weight":"major"}
+{"id":"q2","kind":"question","question":"Is the bound deliberate?","options":["Deliberate","Raise it"],"weight":"major"}
+JSON
+  : > "$CONV/answers.ndjson"
+  reset_attach
+  run_q_code answer t1 --question q1 --answer "Keep"
+  expect_code 0 "$RC" "a partial answer failed"
+  assert_contains "$OUT" "not re-attached: question(s) q2 still open" \
+    "a partial answer did not say which question still holds the run"
+  assert_not_contains "$OUT" "attached in the background" "a partial answer started an attach"
+  [ ! -e "$STATE/t1.nm-attach" ] || fail "a partial answer left an attach record"
+  sleep 0.3
+  if grep -qF 'argv=axi run' "$ATTACH_LOG"; then
+    fail "a partial answer attached to a run still parked on questions"
+  fi
+  pass "an answer that leaves a question open starts no attach"
+}
+
+test_a_live_attach_is_not_doubled() {
+  write_questions <<'JSON'
+{"id":"q1","kind":"question","question":"Keep the legacy route?","options":["Keep","Remove"],"weight":"major"}
+JSON
+  : > "$CONV/answers.ndjson"
+  reset_attach
+  FM_TEST_NM_RUN_SLEEP=30 run_q_code answer t1 --question q1 --answer "Keep"
+  expect_code 0 "$RC" "the first re-attach failed"
+  local pid
+  pid=$(live_hold_pid)
+  { [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; } || fail "the first re-attach left no live hold"
+  wait_for_attach_log "argv=axi run" || fail "the first hold never attached"
+  # A question asked and answered while that hold is still live.
+  write_questions <<'JSON'
+{"id":"q1","kind":"question","question":"Keep the legacy route?","options":["Keep","Remove"],"weight":"major"}
+{"id":"q2","kind":"question","question":"Is the bound deliberate?","options":["Deliberate","Raise it"],"weight":"major"}
+JSON
+  printf '%s\n' '{"id":"q1","answer":"Keep","answered_by":"captain"}' > "$CONV/answers.ndjson"
+  run_q_code answer t1 --question q2 --answer "Deliberate"
+  expect_code 0 "$RC" "a re-attach refused as already live was reported as a failure"
+  assert_contains "$OUT" "re-attached: not needed, an attach is already live" \
+    "the answer did not report the hold that is already live"
+  [ "$(live_hold_pid)" = "$pid" ] || fail "a second hold replaced the live one"
+  [ "$(grep -c 'argv=axi run' "$ATTACH_LOG")" = 1 ] || fail "a second hold attached to the run"
+  kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+  pass "a re-attach while a hold is live starts no second hold"
+}
+
+test_a_failed_re_attach_is_surfaced() {
+  write_questions <<'JSON'
+{"id":"q1","kind":"question","question":"Keep the legacy route?","options":["Keep","Remove"],"weight":"major"}
+JSON
+  : > "$CONV/answers.ndjson"
+  reset_attach
+  # The attach owner refuses a copy that is not on fm/t1; that refusal must
+  # reach the answer's own output rather than vanish.
+  git -C "$WT" checkout -qb elsewhere
+  run_q_code answer t1 --question q1 --answer "Keep"
+  git -C "$WT" checkout -q fm/t1
+  expect_code 0 "$RC" "a delivered answer whose re-attach failed was reported as undelivered"
+  assert_contains "$OUT" "answered: review question q1" "the delivered answer was not reported"
+  assert_contains "$OUT" "the run was NOT re-attached" "the failed re-attach was swallowed"
+  assert_contains "$OUT" "not fm/t1" "the attach owner's own refusal was not passed through"
+  assert_contains "$OUT" "fm-nm-attach.sh t1" "the failure does not say how to attach it"
+  pass "a re-attach that fails is surfaced in the answer's own output"
+}
+
 test_open_question_carries_its_own_options
 test_retraction_closes_a_question
 test_a_later_line_supersedes_the_earlier_one
@@ -457,3 +591,7 @@ test_an_answer_with_a_quote_reaches_the_reviewer_verbatim
 test_a_failed_delivery_is_reported_and_not_called_success
 test_answer_refuses_a_question_that_is_not_open
 test_answer_refuses_an_authority_it_cannot_speak_for
+test_the_last_answer_re_attaches_from_the_task_worktree
+test_a_partial_answer_does_not_re_attach
+test_a_live_attach_is_not_doubled
+test_a_failed_re_attach_is_surfaced
