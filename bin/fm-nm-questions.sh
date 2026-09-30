@@ -605,6 +605,10 @@ EOF
 # branch check runs unweakened. Its refusal of a second live hold (exit 3) is the
 # idempotency, reported as "already attached" rather than as a failure. A
 # partially answered set starts nothing: the run is still parked on the rest.
+# A failed re-attach is printed as an `error:` line with the command to attach
+# by hand, but leaves the exit status at 0: that status means "the answer was
+# delivered", and re-running the answer cannot help because its question is
+# already closed.
 reattach_after_answer() {  # <task-id> <run-id> <answered-qid> <conv-dir> <worktree>
   local id=$1 run=$2 qid=$3 dir=$4 wt=$5 remaining='' qline out rc=0
   local retry="attach it from $wt with $SCRIPT_DIR/fm-nm-attach.sh $id"
@@ -613,7 +617,7 @@ reattach_after_answer() {  # <task-id> <run-id> <answered-qid> <conv-dir> <workt
   if ! read_conversation "$dir"; then
     printf 'error: the answer landed, but the conversation for run %s could not be re-read, so the run was NOT re-attached; once no question is open, %s\n' \
       "$run" "$retry" >&2
-    return 1
+    return 0
   fi
   while IFS=$TAB read -r qline _rest; do
     [ -n "$qline" ] && [ "$qline" != "$qid" ] && remaining="$remaining $qline"
@@ -630,7 +634,7 @@ EOF
     3) printf 're-attached: not needed, an attach is already live for run %s\n%s\n' "$run" "$out" ;;
     *) printf 'error: the answer landed and the reviewer resumed, but the run was NOT re-attached (exit %s), so its next stop will wake nobody:\n%s\n' "$rc" "$out" >&2
        printf 'error: fix the cause, then %s\n' "$retry" >&2
-       return 1 ;;
+       return 0 ;;
   esac
   return 0
 }

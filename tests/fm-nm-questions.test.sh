@@ -564,7 +564,7 @@ JSON
   git -C "$WT" checkout -qb elsewhere
   run_q_code answer t1 --question q1 --answer "Keep"
   git -C "$WT" checkout -q fm/t1
-  expect_code 1 "$RC" "a re-attach that failed was reported as success"
+  expect_code 0 "$RC" "a delivered answer whose re-attach failed was reported as undelivered"
   assert_contains "$OUT" "answered: review question q1" "the delivered answer was not reported"
   assert_contains "$OUT" "the run was NOT re-attached" "the failed re-attach was swallowed"
   assert_contains "$OUT" "not fm/t1" "the attach owner's own refusal was not passed through"
