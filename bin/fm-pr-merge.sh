@@ -852,7 +852,40 @@ if [ -n "$ATTR_WT" ] && git -C "$ATTR_WT" rev-parse --git-dir >/dev/null 2>&1; t
     echo "note: the PR head is not present in this local copy, so the attribution gate reads the local branch; it may lag the open PR (bin/fm-assert-tests-kept.sh degrades the same way for the same reason)" >&2
   fi
 
-  attr_shas=$(git -C "$ATTR_WT" rev-list "$attr_base..$attr_compare" 2>/dev/null) || {
+  # Commits already on the project's UPSTREAM are not scanned: a fork merging
+  # its upstream forward carries other people's trailers it must not rewrite.
+  # The upstream is the PR's own repository's GitHub fork parent, and its tip is
+  # the commit GitHub reports for that parent's default branch - both read from
+  # the API, never from the local copy, whose remotes, refs, and insteadOf
+  # rewrites a worker can edit. The fetch below only supplies objects: they are
+  # addressed by that API-reported id, so whatever answers the fetch cannot
+  # substitute its own commits. Anything undeterminable scans everything, as
+  # before. docs/attribution-gate.md owns the contract and its exposure.
+  attr_upstream_not=()
+  # shellcheck disable=SC2016  # a GraphQL query: $o and $r are its variables, not shell expansions.
+  attr_parent=$(gh api graphql \
+    -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){parent{nameWithOwner url defaultBranchRef{name target{oid}}}}}' \
+    -f o="$PR_OWNER" -f r="$PR_REPO" \
+    -q '.data.repository.parent // empty | [.nameWithOwner, .url, .defaultBranchRef.name, .defaultBranchRef.target.oid] | @tsv' \
+    2>/dev/null || true)
+  attr_up_name='' attr_up_url='' attr_up_branch='' attr_up_oid=''
+  [ -n "$attr_parent" ] && IFS=$'\t' read -r attr_up_name attr_up_url attr_up_branch attr_up_oid <<< "$attr_parent"
+  if [[ "$attr_up_oid" =~ ^[0-9a-f]{40}$ ]] && [ -n "$attr_up_url" ] && [ -n "$attr_up_branch" ]; then
+    if ! git -C "$ATTR_WT" cat-file -e "$attr_up_oid^{commit}" 2>/dev/null; then
+      git -C "$ATTR_WT" fetch --quiet --no-tags --no-write-fetch-head \
+        "$attr_up_url" "refs/heads/$attr_up_branch" >/dev/null 2>&1 || true
+    fi
+    if git -C "$ATTR_WT" cat-file -e "$attr_up_oid^{commit}" 2>/dev/null; then
+      attr_upstream_not=(--not "$attr_up_oid")
+      attr_up_count=$(git -C "$ATTR_WT" rev-list --count "$attr_base..$attr_compare" "^$attr_up_oid" 2>/dev/null || echo '?')
+      attr_all_count=$(git -C "$ATTR_WT" rev-list --count "$attr_base..$attr_compare" 2>/dev/null || echo '?')
+      echo "note: the attribution gate scans $attr_up_count of $attr_all_count commits; the rest are already on upstream $attr_up_name $attr_up_branch at ${attr_up_oid:0:12}" >&2
+    else
+      echo "note: upstream $attr_up_name $attr_up_branch at ${attr_up_oid:0:12} could not be fetched, so the attribution gate scans every commit" >&2
+    fi
+  fi
+
+  attr_shas=$(git -C "$ATTR_WT" rev-list "$attr_base..$attr_compare" "${attr_upstream_not[@]+"${attr_upstream_not[@]}"}" 2>/dev/null) || {
     echo "error: could not enumerate the commits $attr_base..$attr_compare would land; refusing to merge unverified" >&2
     exit 1
   }
