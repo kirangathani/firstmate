@@ -213,6 +213,7 @@ Measured on 2026-09-30 against the no-mistakes fork's ancestry merge of upstream
 | plus the identical-blob skip (328 of the 347 paths) and batched corpus read | 4.7s |
 
 All three versions report the same two genuine findings; the before version also reported the false positive below.
+Through the `commit-msg` hook itself, on the same merge left in progress with `--no-commit`, the before version took 6m15s and the final one 5.2s.
 
 A file that ends without a newline is tagged with awk, never sed, because sed passes the missing final newline through and fused that file's last line with the next text's first tag.
 The measured instance was the same merge: `benchmarks/issue-1125/recorded-excerpts-off.json`, byte-identical on both sides, reported as losing `}T {` and `}R ---`, lines that exist in no text, so no resolution of that merge could pass.
