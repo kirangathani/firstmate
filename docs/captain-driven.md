@@ -227,3 +227,18 @@ The `GITHUB CI` cell turns the same colour with `action needed from upstream` be
 The colour is lilac, `38;5;147`, and it is the one value in that view that is not a terminal palette slot.
 `docs/flow-tui.md`'s colour policy says why every other colour is one, and why this meaning could not be: the sixteen-colour slots are all carrying meanings already - failure, skipped and scouting share one, unreadable has one, identity has one, waiting on the captain has one - so a seventh meaning would have made one of them ambiguous.
 It is used by exactly two places drawing the same fact, so if it reads wrong against a theme there is one value to change.
+
+# Paused on the captain's order
+
+The captain, 2026-10-01: "when a worker you told to PAUSE pauses then it should not notify you"; "You DETERMINISTICALLY PAUSE WORKERS, DONT go and then VERIFY whether the pause has reached them".
+The same day a resume reached six of ten paused workers, because firstmate picked the list by hand.
+
+`bin/fm-fleet-pause.sh` is the one owner, and its header owns the command, the record, and the fixed instructions it sends.
+It enumerates every direct report from this home's own records, so neither a pause nor a resume is ever a hand-picked list.
+It writes `state/<id>.captain-pause` before it sends anything, and never peeks or waits for the instruction to land.
+
+`fm_supervision_suspended` treats the record as a third standing declaration, so every surface listed above goes quiet for a paused worker without a new check of its own.
+It differs from the other two in two ways.
+It is unsigned, because firstmate issues it on the captain's spoken order and requiring his key would make the order impossible to carry out.
+And its quiet pane gets no bounded recheck at all: the watcher skips it before capturing the pane, because the captain asked for no notification and the resume is what ends it.
+The session-start digest lists every paused worker on one `CAPTAIN_PAUSED:` line, which is what keeps an unsigned record from becoming a blind spot.

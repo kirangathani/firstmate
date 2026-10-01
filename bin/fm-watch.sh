@@ -61,6 +61,9 @@
 # stops driving; the first ordinary poll after that simply reads current state.
 # Its PR merge poll keeps running, because that poll is about the PR rather than
 # the pane and a merge the captain lands by hand still has to refresh the clone.
+# A task paused on the captain's order (state/<id>.captain-pause, minted by
+# bin/fm-fleet-pause.sh) is skipped by the signal and heartbeat paths the same
+# way, and its stale pane is skipped outright with no recheck at all.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -1392,6 +1395,11 @@ EOF
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}
+    # A worker paused on the captain's order raises no stale wake at all, not
+    # even the bounded recheck a captain-driven pane gets: he said a paused
+    # worker should not notify, and bin/fm-fleet-pause.sh's resume is what ends
+    # it. Skipped before the capture, so a paused pane costs nothing per poll.
+    fm_captain_paused "$STATE" "$task" && continue
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
