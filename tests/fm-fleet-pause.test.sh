@@ -189,6 +189,7 @@ test_status_and_session_start_list_paused_workers() {
   pass "status and the session-start digest both list every paused worker"
 }
 
+# shellcheck disable=SC2016 # The patterns are literal source text, not expansions.
 test_teardown_removes_the_record() {
   grep -F '"$STATE/$ID.captain-pause"' "$ROOT/bin/fm-teardown.sh" >/dev/null \
     || fail "teardown does not remove a task's pause record"

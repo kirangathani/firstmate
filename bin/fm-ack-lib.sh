@@ -699,8 +699,8 @@ fm_captain_paused() {  # <state-dir> <id>
   IFS= read -r rec < "$f" 2>/dev/null || true
   FM_CAPTAIN_PAUSE_AT=${rec%%$'\t'*}
   case "$FM_CAPTAIN_PAUSE_AT" in ''|*[!0-9]*) FM_CAPTAIN_PAUSE_AT= ;; esac
+  # shellcheck disable=SC2034 # Read by bin/fm-fleet-pause.sh.
   case "$rec" in
-    # shellcheck disable=SC2034 # Read by bin/fm-fleet-pause.sh.
     *$'\t'*) FM_CAPTAIN_PAUSE_PRIOR=${rec#*$'\t'} ;;
   esac
   return 0
