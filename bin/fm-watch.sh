@@ -162,6 +162,8 @@ HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 NM_STALL_INTERVAL=${FM_NM_STALL_INTERVAL:-600}  # seconds between stalled-validation sweeps
+RELEASE_WATCH_INTERVAL=${FM_RELEASE_WATCH_INTERVAL:-300}  # seconds between failed-release sweeps
+RELEASE_WATCH_TIMEOUT=${FM_RELEASE_WATCH_TIMEOUT:-60}    # seconds bounding one failed-release sweep
 # How many of a signal file's newly appended lines ride along in the wake. A
 # crewmate reports sparingly, so a handful is the whole of what it just said; the
 # cap exists only so a runaway writer cannot put an unbounded file into a queue
@@ -1237,6 +1239,30 @@ while :; do
         # One reason line, because the daemon's wake grammar is line-oriented.
         reason="check: $(printf '%s' "$nm_stall_out" | tr '\n' ' ')"
         fm_wake_append check nm-stall "$reason" || exit 1
+        wake "$reason"
+      fi
+    fi
+  fi
+
+  # Failed-release sweep: has an opted-in project's post-merge release workflow
+  # failed on its default branch. Nothing else in this loop looks at the default
+  # branch after a merge, and a merge made on GitHub never passes through
+  # firstmate at all. bin/fm-release-watch.sh owns the opt-in record, the
+  # predicate, the dedupe record and the wording; `--surface` follows the
+  # *.check.sh contract of printing a line only when firstmate should wake.
+  if [ "$(age_of "$STATE/.last-release-watch")" -ge "$RELEASE_WATCH_INTERVAL" ]; then
+    touch "$STATE/.last-release-watch"
+    if [ -x "$SCRIPT_DIR/fm-release-watch.sh" ]; then
+      if command -v fm_bounded_available >/dev/null 2>&1 && fm_bounded_available; then
+        release_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+          fm_bounded_run "$RELEASE_WATCH_TIMEOUT" "$SCRIPT_DIR/fm-release-watch.sh" --surface 2>/dev/null || true)
+      else
+        release_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+          "$SCRIPT_DIR/fm-release-watch.sh" --surface 2>/dev/null || true)
+      fi
+      if [ -n "$release_out" ]; then
+        reason="check: $(printf '%s' "$release_out" | tr '\n' ' ')"
+        fm_wake_append check release-watch "$reason" || exit 1
         wake "$reason"
       fi
     fi
