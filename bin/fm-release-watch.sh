@@ -37,9 +37,6 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=bin/fm-pr-lib.sh
-. "$SCRIPT_DIR/fm-pr-lib.sh"
-
 FM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -48,7 +45,10 @@ SEEN="$STATE/.release-watch-seen"
 SEEN_CAP=500
 
 [ "${1-}" = --surface ] || { echo "usage: fm-release-watch.sh --surface" >&2; exit 2; }
+# A home with no opt-in pays one stat per sweep and nothing else.
 [ -d "$CONFIG_DIR" ] || exit 0
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 command -v gh >/dev/null 2>&1 || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 
