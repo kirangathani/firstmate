@@ -949,6 +949,18 @@ for wait_rec in "$STATE"/*.upstream-wait; do
     echo "UPSTREAM_WAIT: $wait_id carries an upstream-wait record that does NOT verify against this home's key, so it is NOT waiting and still alarms - inspect $wait_rec"
   fi
 done
+# Workers paused on the captain's order, in ONE line, on the same terms: a pause
+# raises no notification at all, so a fresh session that missed it would read a
+# silent fleet as a healthy one. bin/fm-fleet-pause.sh owns the record.
+paused_ids=
+for pause_rec in "$STATE"/*.captain-pause; do
+  [ -e "$pause_rec" ] || continue
+  pause_id=${pause_rec##*/}
+  paused_ids="$paused_ids ${pause_id%.captain-pause}"
+done
+if [ -n "$paused_ids" ]; then
+  echo "CAPTAIN_PAUSED:$paused_ids - paused on the captain's order, so firstmate neither alarms on nor watches them (resume with bin/fm-fleet-pause.sh resume)"
+fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   secondmate_liveness_sweep

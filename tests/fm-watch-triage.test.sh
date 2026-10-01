@@ -1774,6 +1774,82 @@ test_supervision_resumes_when_the_captain_leaves() {
   pass "supervision resumes by itself once the captain leaves the window, with no command"
 }
 
+# --- a worker paused on the captain's order raises no wake at all ------------
+# The captain, 2026-10-01: "when a worker you told to PAUSE pauses then it
+# should not notify you". bin/fm-fleet-pause.sh owns the record; these hold the
+# watcher to it on every wake path, and to waking again once it is resumed.
+
+test_captain_paused_signal_and_turn_end_absorbed() {
+  local dir state fakebin out pid
+  dir=$(make_case captain-paused-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task" "kind=ship"
+  printf '%s\t%s\n' "$(date +%s)" "working: implementing" > "$state/task.captain-pause"
+  # A verb that would surface at once, plus a bare turn-end past its quiet window.
+  printf 'needs-decision: which shape?\n' > "$state/task.status"
+  : > "$state/task.turn-ended"
+  watch_bg "$state" "$fakebin" "$out" FM_TURN_END_QUIET_SECS=0
+  pid=$!
+  if ! wait_cycle "$pid" "$state" 30 2; then
+    reap "$pid"; fail "watcher exited for a paused worker's status append or turn-end: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a paused worker's signal printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a paused worker's signal enqueued a durable wake record"
+  [ -s "$state/.seen-task_status" ] || fail "the skipped signal did not advance its suppressor, so it would replay on resume"
+  reap "$pid"
+  pass "a worker paused on the captain's order wakes nobody on a status append or a turn-end"
+}
+
+test_captain_paused_stale_never_resurfaces() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case captain-paused-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="sess:fm-held"
+  printf 'idle prompt, paused' > "$capture_file"
+  fm_write_meta "$state/held.meta" "window=$window" "kind=ship"
+  printf 'working: implementing\n' > "$state/held.status"
+  sig=$(seen_sig "$state/held.status"); printf '%s' "$sig" > "$state/.seen-held_status"
+  printf '%s\t%s\n' "$(date +%s)" "working: implementing" > "$state/held.captain-pause"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, paused")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A zero recheck window: the exact setting that makes a captain-driven pane
+  # re-surface at once (test_captain_driven_stale_resurfaces_after_the_cadence),
+  # so only the pause skip can keep this one silent.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=0 FM_STALE_ESCALATE_SECS=0 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_cycle "$pid" "$state" 40 3; then
+    reap "$pid"; fail "watcher surfaced a paused worker's quiet pane: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a paused worker's quiet pane printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a paused worker's quiet pane enqueued a durable wake record"
+  reap "$pid"
+  pass "a paused worker's quiet pane raises no stale wake, not even the bounded recheck"
+}
+
+test_supervision_resumes_when_the_pause_is_lifted() {
+  local dir state fakebin out pid
+  dir=$(make_case captain-paused-resume); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task" "kind=ship"
+  printf 'working: implementing\n' > "$state/task.status"
+  printf '%s\t%s\n' "$(date +%s)" "working: implementing" > "$state/task.captain-pause"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_cycle "$pid" "$state" 30; then
+    reap "$pid"; fail "watcher exited while the worker was paused: $(cat "$out")"
+  fi
+  rm -f "$state/task.captain-pause"
+  printf 'done: PR https://example.test/pr/9\n' >> "$state/task.status"
+  wait_for_exit "$pid" 60 || { reap "$pid"; fail "supervision did not resume after the pause was lifted"; }
+  grep -F "signal: $state/task.status" "$out" >/dev/null \
+    || fail "the first append after the resume did not surface: $(cat "$out")"
+  pass "supervision resumes as soon as the pause record is gone"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1815,6 +1891,9 @@ test_captain_driven_signal_absorbed
 test_captain_driven_stale_pane_absorbed
 test_captain_driven_stale_resurfaces_after_the_cadence
 test_supervision_resumes_when_the_captain_leaves
+test_captain_paused_signal_and_turn_end_absorbed
+test_captain_paused_stale_never_resurfaces
+test_supervision_resumes_when_the_pause_is_lifted
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing

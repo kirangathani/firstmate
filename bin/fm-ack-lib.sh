@@ -665,10 +665,51 @@ fm_upstream_waiting() {  # <state-dir> <id>
   return 0
 }
 
-# 0 when supervision is suspended for <id> by EITHER standing declaration, which
+# --- the captain's fleet pause -----------------------------------------------
+#
+# The record lives at state/<id>.captain-pause, one line:
+#   <epoch>\t<the worker's last status line before the pause>
+# bin/fm-fleet-pause.sh owns minting and removing it; this file owns believing it.
+#
+# It is deliberately UNSIGNED, unlike the two declarations around it. The
+# captain's words, 2026-10-01: "when a worker you told to PAUSE pauses then it
+# should not notify you". Firstmate issues it on his spoken order, so requiring
+# his signing key would make the one command he asked for impossible to run. It
+# cannot widen anything a worker could reach either: suppression only ever stops
+# firstmate looking, and the session-start digest announces every record, so a
+# pause nobody ordered is a line the captain sees rather than a silent blind spot.
+
+fm_captain_pause_file() {  # <state-dir> <id>
+  printf '%s' "$1/$2.captain-pause"
+}
+
+# 0 iff <id> carries a captain-pause record. On success FM_CAPTAIN_PAUSE_AT holds
+# when it was paused and FM_CAPTAIN_PAUSE_PRIOR the worker's last status line
+# before it, which is what bin/fm-fleet-pause.sh's resume tells the worker back.
+FM_CAPTAIN_PAUSE_AT=
+# shellcheck disable=SC2034 # Read by bin/fm-fleet-pause.sh.
+FM_CAPTAIN_PAUSE_PRIOR=
+fm_captain_paused() {  # <state-dir> <id>
+  local f rec
+  FM_CAPTAIN_PAUSE_AT=
+  FM_CAPTAIN_PAUSE_PRIOR=
+  f=$(fm_captain_pause_file "$1" "$2")
+  [ -f "$f" ] || return 1
+  rec=
+  IFS= read -r rec < "$f" 2>/dev/null || true
+  FM_CAPTAIN_PAUSE_AT=${rec%%$'\t'*}
+  case "$FM_CAPTAIN_PAUSE_AT" in ''|*[!0-9]*) FM_CAPTAIN_PAUSE_AT= ;; esac
+  case "$rec" in
+    # shellcheck disable=SC2034 # Read by bin/fm-fleet-pause.sh.
+    *$'\t'*) FM_CAPTAIN_PAUSE_PRIOR=${rec#*$'\t'} ;;
+  esac
+  return 0
+}
+
+# 0 when supervision is suspended for <id> by ANY standing declaration, which
 # is the question every supervision surface actually asks: should this task wake
 # firstmate, be peeked at, or alarm. FM_SUSPENDED_SOURCE names which one -
-# `signed`, `attached` or `upstream-wait` - and FM_SUSPENDED_REASON says it in
+# `signed`, `attached`, `upstream-wait` or `captain-pause` - and FM_SUSPENDED_REASON says it in
 # the captain's own terms.
 #
 # One predicate rather than two tests at each call site, for the reason
@@ -693,6 +734,13 @@ fm_supervision_suspended() {  # <state-dir> <id>
     FM_SUSPENDED_SOURCE=upstream-wait
     # shellcheck disable=SC2034 # Read by bin/fm-monitor.sh and bin/fm-watch.sh.
     FM_SUSPENDED_REASON=$FM_UPSTREAM_WAIT_ACTION
+    return 0
+  fi
+  if fm_captain_paused "$1" "$2"; then
+    # shellcheck disable=SC2034 # Read by bin/fm-monitor.sh and bin/fm-watch.sh.
+    FM_SUSPENDED_SOURCE=captain-pause
+    # shellcheck disable=SC2034 # Read by bin/fm-monitor.sh and bin/fm-watch.sh.
+    FM_SUSPENDED_REASON="paused on the captain's order (resume with bin/fm-fleet-pause.sh resume)"
     return 0
   fi
   return 1
