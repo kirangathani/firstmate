@@ -194,6 +194,17 @@ It is a per-home file and is not inherited by secondmate homes.
 Changing `bin/fm-pr-poll.sh` changes the bytes every armed `state/<id>.check.sh` is compared against, so already-armed polls stop validating until `bin/fm-pr-check-migrate.sh` rebuilds them, which `bin/fm-bootstrap.sh` runs at the next session start.
 That is the designed self-healing path for a poll-template change, not a fault, and it reports `PR_CHECK_MIGRATION: canonical polls rebuilt and armed`.
 
+## Release-failure watch (data/release-workflows/<project>)
+
+`data/release-workflows/<project>` opts a project into having its post-merge release watched, and lists the workflow files that count as that release, one per line.
+`<project>` is the clone's directory name under `projects/`.
+For example, `printf 'deploy-production.yml\n' > "$FM_HOME/data/release-workflows/eln"`.
+The watcher then runs `bin/fm-release-watch.sh --surface` every `FM_RELEASE_WATCH_INTERVAL` seconds and wakes firstmate once per newly failed run on the project's default branch, naming the commit, the failed job and step, and the run link.
+It reads the branch's own runs, so a merge the captain makes directly on GitHub is covered exactly like one firstmate makes.
+That script's header owns the file format, the predicate, and the dedupe record.
+Like every watcher sweep, it runs only while a supervision cycle is live.
+Absent means the project's releases are not watched, and the file is not inherited by secondmate homes.
+
 ## The CI testing waiver secret (config/ci-waiver-secret)
 
 A repository's expensive CI jobs can be waived for one commit, but only by a keyed signature the captain issues, never by a marker string anyone can type into a PR body.
@@ -678,6 +689,8 @@ FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage and by the stalled-validation sweep
 FM_NM_STALL_SECS=10800  # seconds a no-mistakes step may go unchanged across observations before bin/fm-nm-stall.sh reports it as stopped advancing; `bin/fm-nm-stall.sh --threshold` prints the effective value and docs/turnend-guard.md owns the measurement behind the default
 FM_NM_STALL_INTERVAL=600   # seconds between the watcher's stalled-validation sweeps
+FM_RELEASE_WATCH_INTERVAL=300   # seconds between the watcher's failed-release sweeps (bin/fm-release-watch.sh)
+FM_RELEASE_WATCH_TIMEOUT=60     # seconds bounding one failed-release sweep
 FM_NM_STALL_READ_TIMEOUT=20   # seconds allowed per current-state read inside one stalled-validation sweep
 FM_NM_STALL_MAX_READS=4   # tasks read per stalled-validation sweep; the sweep rotates round-robin from a durable cursor, so a fleet larger than this budget is still covered across successive sweeps
 FM_NM_STALL_TIMEOUT=10  # seconds bounding the turn-end guard's read of the stalled-validation records; an expiry is reported, never treated as an all-clear
