@@ -1,0 +1,71 @@
+
+== the document itself: fm-flow-snapshot.sh over a disposable fleet home ==
+exit=0
+{"schema":"fm-flow-snapshot.v1","generated":"2026-09-21T14:13:20Z","generated_epoch":1790000000,"agents":["remote-one","ship-ctrl","ship-failedrun","ship-live","ship-ownerror","ship-rerun","scout-one"],"omitted":["gone-one"]}
+
+== pipeline agent: named steps behind the synthetic building step, and its run ==
+{"run":{"present":true,"id":"01LABRUN0000000000000000A1","status":"running","error":"","head":"aa11bb22"},"steps":["building:completed:null","intent:completed:22","review:completed:176257","test:completed:249567","ci:running:0"],"active":[{"step":"ci","active_for":"1h2m3s","active_ms":3723000}]}
+
+== GitHub check classes (gate decision q2: NEUTRAL counts as skipped) ==
+{"total":5,"passed":1,"failed":1,"pending":1,"skipped":2,"head":"aa11bb22","pr_state":"OPEN","verdicts":["Lint=SUCCESS->passed","Behavior tests=FAILURE->failed","Docs=->pending","Optional guard=SKIPPED->skipped","Advisory=NEUTRAL->skipped"]}
+
+== a re-run check whose new attempt has not started reads pending, not green ==
+{"total":1,"passed":0,"pending":1,"checks":[{"name":"Lint","status":"QUEUED","verdict":"pending"}]}
+
+== gate decision q1: a REMOTE worker, liveness never probed, is drawn as unknown ==
+{"id":"remote-one","endpoint_alive":"unknown","pipeline":true}
+endpoint_alive values on the whole wire: [true,"unknown"]
+
+== a dead window is named in omitted rather than dropped silently ==
+[{"id":"gone-one","kind":"ship","window":"fm:99","reason":"recorded window no longer exists"}]
+
+== a non-pipeline worker carries the fleet document's own state and no steps ==
+{"pipeline":false,"state":{"ok":true,"value":"unknown","source":"pane","detail":"harness state unavailable (unknown missing)","reason":""},"steps":[],"run":{"present":false,"id":"","status":"","error":"","head":""},"ci_reason":"this worker runs no pipeline, so no checks are read"}
+
+== a failed per-run read: the command's words in collection.reason, run.error empty ==
+{"collection":{"ok":false,"reason":"axi status failed (exit 1): error: repo not initialized"},"run":{"present":true,"id":"01LABRUN0000000000000000A4","status":"running","error":"","head":""},"steps":0}
+
+== a run that recorded its OWN failure: that text is run.error, collection is clean ==
+{"collection":{"ok":true,"reason":""},"run":{"present":true,"id":"01LABRUN0000000000000000A5","status":"failed","error":"step review failed: agent fix: exit status 1","head":"55443322"}}
+
+== one wedged worker does not blank the view ==
+{"valid":7,"wedged":["ship-failedrun"]}
+
+== a cell carrying raw control bytes still reaches the wire as valid JSON ==
+[{"step":"review","status":"running","active_for":"2m30s","active_ms":150000,"last_activity":"\trawbyte�here\r","agent_pid":"77","round":"1"}]
+
+== collection carries exactly ok and reason, so no record repeats the clock ==
+[{"id":"remote-one","collection_keys":["ok","reason"]},{"id":"ship-ctrl","collection_keys":["ok","reason"]},{"id":"ship-failedrun","collection_keys":["ok","reason"]},{"id":"ship-live","collection_keys":["ok","reason"]},{"id":"ship-ownerror","collection_keys":["ok","reason"]},{"id":"ship-rerun","collection_keys":["ok","reason"]},{"id":"scout-one","collection_keys":["ok","reason"]}]
+
+== the buffer-allocation failure path: run says absent and states no status ==
+{"run":{"present":false,"id":"","status":"","error":"","head":""},"collection":{"ok":false,"reason":"could not allocate a buffer for the run read"}}
+
+== --no-ci reaches GitHub not at all, and still resolves the local run ==
+{"run_id":"01LABRUN0000000000000000A1","ci":{"reason":"skipped","total":0}}
+no gh invocation recorded
+
+== and an ordinary run does call gh, so the line above is not vacuous ==
+pr view 101 --repo example/project --json statusCheckRollup,headRefOid,state
+pr view 102 --repo example/project --json statusCheckRollup,headRefOid,state
+
+== --task restricts the snapshot to one task ==
+{"agents":["ship-live"]}
+
+== gate decision q3: the deleted FM_FLOW_SNAPSHOT_NOW knob is inert ==
+{"generated":"2026-09-21T14:13:20Z","generated_epoch":1790000000}
+
+== a non-numeric epoch falls back to the real clock rather than a bad stamp ==
+{"generated":"2026-10-08T10:29:13Z","generated_epoch":1791455353}
+
+== usage errors ==
+--not-a-flag exit=2
+--json exit=2
+--task with no id exit=2
+
+== a fleet read that FAILS refuses rather than emitting an empty fleet ==
+exit=1  stdout bytes=0
+fm-flow-snapshot: fleet snapshot unavailable; refusing to emit an empty fleet
+
+== while a genuinely empty home is a real empty fleet, not a failure ==
+{"schema":"fm-flow-snapshot.v1","agents":0}
+exit=0

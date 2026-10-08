@@ -4,57 +4,97 @@ Output contract: one JSON object on stdout with schema `fm-flow-snapshot.v1`.
 This header owns that wire format, the flags, the environment knobs, and the
 exit codes.
 
-The command is read-only. It takes no session lock, drains no wakes, arms no
+The command is read-only: it takes no session lock, drains no wakes, arms no
 watcher, and writes nothing. Nothing in firstmate calls it; it exists to be
 run by hand.
 
 It layers over bin/fm-fleet-snapshot.sh, which stays the single owner of fleet
-state, and adds two things that document does not carry: the named pipeline
-step each agent is on, and its GitHub check rollup.
+state, and adds the named pipeline step each agent is on and its GitHub check
+rollup.
 
-An agent here is a task with a worker behind it, whatever its kind. A
-`state/<id>.meta` outlives the window it names, so membership is decided by
-`endpoint.exists`, bin/fm-fleet-snapshot.sh's own reading of
-fm_backend_target_exists. Only a recorded endpoint that PROVABLY no longer
-resolves is dropped, to `omitted`, named and counted rather than drawn.
-`endpoint.exists` null means liveness was never established rather than
-established as dead - which is every REMOTE worker, since that reader does
-not probe one - so those are drawn with `endpoint_alive: "unknown"`, the
-same three-way reading bin/fm-fleet-view.sh renders. Omitting them would
-make this view disagree with the rest of firstmate about who is running. Kind decides only what an agent CARRIES:
-a `pipeline:true` agent carries a no-mistakes run, its steps and its GitHub
-checks, and a `pipeline:false` agent - a scout, a second mate - carries the
-fleet document's own `current_state` instead. Pipeline agents are emitted
-first, so the wire order is the draw order.
+Top-level fields:
+  schema: stable schema id, `fm-flow-snapshot.v1`.
+  generated: UTC observation time, derived from generated_epoch.
+  generated_epoch: that same instant in epoch seconds, the document's only
+    clock.
+  fm_home: resolved operational home.
+  agents[]: one record per drawn agent, pipeline agents first.
+    id, branch, project, worktree, window: the task's identity and where it
+      runs, every one of them read from the fleet document.
+    kind: the fleet document's task kind. mode: its dispatch mode.
+    pipeline: whether this agent carries a no-mistakes run.
+    state: {ok,value,source,detail,reason} - the fleet document's own
+      current_state, carried by a `pipeline:false` agent. It is null for a
+      `pipeline:true` agent, whose journey is its steps instead.
+    endpoint_alive: true, or "unknown" when liveness was never established.
+      A provably dead endpoint is omitted rather than drawn, so false does
+      not appear here.
+    worker: {harness,model,effort}. A field the record does not state, or
+      states as the `default` the harness resolved, is null.
+    pr: {url,number}, both null when no pull request is recorded.
+    collection: {ok,reason} - whether this agent's pipeline read succeeded.
+      ok false means this agent's step list could not be established, so
+      steps and active_steps are empty; run may still carry the id and status
+      the overview attributed, when it was the per-run read that failed.
+    run: {present,id,status,error,head} - the no-mistakes run attributed to
+      this task's branch. error is the run's OWN recorded error and is empty
+      unless the read succeeded; a failed read's own first line is in
+      collection.reason instead.
+    steps[]: {step,status,findings,duration_ms}, the run's own steps behind
+      the synthetic `building` step described under the limits below.
+    active_steps[]: {step,status,active_for,active_ms,last_activity,
+      agent_pid,round}, one per step still running. active_for is the tool's
+      humanised elapsed and active_ms is that value in milliseconds.
+    ci: {collection:{ok,reason}, checks[], total, passed, failed, pending,
+      skipped, head, pr_state}. Each check is
+      {kind,workflow,name,started,status,conclusion,verdict}, where verdict
+      is one of passed, failed, pending or skipped and the four counts are
+      its tally. head is the commit those checks describe, and pr_state the
+      pull request's own OPEN, MERGED or CLOSED.
+  omitted[]: {id,kind,window,reason}, one per task whose recorded window no
+    longer exists. A record that could not be built is skipped with no entry
+    here, so agents[] plus omitted[] is not guaranteed to account for every
+    task in the fleet document.
+
+A numeric cell the running build did not declare is null, never zero: zero is
+a measured value here.
+
+An agent is a task with a worker behind it, whatever its kind, and membership
+is decided by the fleet document's `endpoint.exists`, because a
+`state/<id>.meta` outlives the window it names. Only a recorded endpoint that
+PROVABLY no longer resolves is dropped, to `omitted`; null is liveness never
+established - which is every REMOTE worker - and is drawn with
+`endpoint_alive: "unknown"`, the reading bin/fm-fleet-view.sh renders.
+
+Kind decides only what an agent CARRIES: a `pipeline:true` agent carries a
+no-mistakes run, its steps and its checks, and a `pipeline:false` agent - a
+scout, a second mate - carries the fleet document's own `current_state`
+instead. Pipeline agents are emitted first, so the wire order is the draw
+order.
 
 Run attribution goes through bin/fm-nm-run-lib.sh, the repository's single
-owner of which no-mistakes run belongs to a branch. A worker cannot forge that
-answer, which is why it is read here rather than self-reported.
+owner of which run belongs to a branch, so a worker cannot forge that answer.
 
 Limits, stated because a blank cell should never read as a measured zero:
 
   - Checks are read for GitHub pull requests only; a GitLab merge request or
-    a Gerrit change reports as not read. The read is a direct `gh pr view
-    --json statusCheckRollup` because fm_pr_github_read_record in
-    bin/fm-pr-lib.sh returns a PR's state and merged flag, not its rollup.
+    a Gerrit change reports as not read.
   - The building phase starts at the task record's modification time, which is
-    approximate: bin/fm-pr-check.sh rewrites that record when it notes the PR.
-    Once a run exists the phase reports completed with no duration, because no
-    machine record states when the run began.
+    approximate, and reports completed with no duration once a run exists,
+    because no machine record states when the run began.
   - A run whose pipeline executed outside the task's own copy of the
     repository, such as a scratch clone raising a PR elsewhere, does not
     resolve here, and that row reports its run as unestablished.
   - Crew state and endpoint liveness are whatever bin/fm-fleet-snapshot.sh
-    published, read at ITS observation time rather than at draw time. That
-    keeps one owner for each, at the cost of a state as old as the document.
+    published, read at ITS observation time rather than at draw time.
 
 Usage:
   fm-flow-snapshot.sh [--no-ci] [--task <id>]
 
   --no-ci       skip every GitHub read this command can reach, so the whole
-                snapshot is local. It suppresses the check read here and sets
-                FM_CREW_STATE_NO_FORGE for the fleet read, whose crew-state
-                reader would otherwise make a bounded forge call of its own
+                snapshot is local; it also sets FM_CREW_STATE_NO_FORGE for the
+                fleet read, whose crew-state reader would otherwise make a
+                bounded forge call of its own
   --task <id>   restrict the snapshot to one task, for a targeted refresh
 
 Environment knobs:
@@ -62,10 +102,10 @@ Environment knobs:
                                   status` read (default 10)
   FM_FLOW_SNAPSHOT_GH_TIMEOUT     seconds bounding one `gh pr view` (default
                                   20)
-  FM_FLOW_SNAPSHOT_NOW_EPOCH      override the clock, in epoch seconds. It is
-                                  the ONLY clock input: the ISO timestamp
-                                  beside it is derived from this, so both
-                                  always describe the same instant
+  FM_FLOW_SNAPSHOT_NOW_EPOCH      override the clock, in epoch seconds, and
+                                  the ONLY clock input: the ISO stamp is
+                                  derived from it, so one knob sets one
+                                  instant
 
 Exit codes: 0 snapshot emitted, 1 a dependency or the fleet read failed,
 2 usage error. A per-agent collection failure is NOT an error: it is reported

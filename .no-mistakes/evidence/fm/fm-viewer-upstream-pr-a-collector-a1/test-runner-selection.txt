@@ -1,0 +1,25 @@
+== bin/fm-test-run.sh --list --family snapshot-bearings ==
+tests/fm-bearings-board-render.test.sh
+tests/fm-bearings-snapshot.test.sh
+tests/fm-contributions.test.sh
+tests/fm-fleet-snapshot-view.test.sh
+tests/fm-flow-snapshot.test.sh
+tests/fm-home-summary-refresh.test.sh
+
+== bin/fm-test-run.sh --list --changed --base ac0811c (the branch's own diff) ==
+tests/fm-bearings-board-render.test.sh
+tests/fm-bearings-snapshot.test.sh
+tests/fm-contributions.test.sh
+tests/fm-fleet-snapshot-view.test.sh
+tests/fm-flow-snapshot.test.sh
+tests/fm-home-summary-refresh.test.sh
+tests/fm-agy-harness.test.sh
+tests/fm-arm-pretool-check.test.sh
+   ... (plus the families the other changed paths select)
+
+== a change to bin/fm-nm-run-lib.sh alone now also selects the collector's test ==
+   (driven with a transient uncommitted probe line, reverted in the same turn)
+   tests/fm-flow-snapshot.test.sh appears in that selection
+
+== bin/fm-test-run.sh --check-coverage ==
+FM_TEST_COVERAGE ok total=251 parallel=24 parallel_max_ms=665545 parallel_imbalance_ms=2 parallel_unhinted=0 serial=211 serial_shards=9 serial_unhinted=9 serial_max_ms=1074843 serial_budget_ms=1200000 herdr=16

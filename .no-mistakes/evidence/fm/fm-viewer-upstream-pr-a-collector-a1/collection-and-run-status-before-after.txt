@@ -1,0 +1,18 @@
+Commit 44113be ("Narrow collection to ok and reason, clear run status") driven on the
+same failure path: the per-run stderr buffer cannot be allocated, so the run read never
+happens. Same disposable fleet home, same pinned clock, same fixture; only the script
+under $PATH differs.
+
+Agent ship-live, field run and field collection:
+
+--- pre-fix, bin/fm-flow-snapshot.sh at 836fb6c ---
+{"run":{"present":false,"id":"","status":"running","error":"","head":""},
+ "collection":{"ok":false,"reason":"could not allocate a buffer for the run read",
+               "source":"axi","at":"2026-09-21T14:13:20Z","epoch":1790000000}}
+
+--- at target, bin/fm-flow-snapshot.sh at 44113be ---
+{"run":{"present":false,"id":"","status":"","error":"","head":""},
+ "collection":{"ok":false,"reason":"could not allocate a buffer for the run read"}}
+
+The run no longer says it is absent and states "running" anyway, and collection no longer
+repeats the document's own clock in every record.
