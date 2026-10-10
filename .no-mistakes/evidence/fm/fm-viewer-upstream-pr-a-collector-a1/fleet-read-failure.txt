@@ -1,0 +1,5 @@
+### adversarial: a fleet read that FAILS must refuse rather than emit an empty fleet
+(one task record the fleet read cannot open: chmod 000 state/unreadable.meta)
+exit=1 (expect 1)
+stderr: fm-flow-snapshot: fleet snapshot unavailable; refusing to emit an empty fleet
+stdout bytes: 0 (expect 0 - no empty-fleet document)

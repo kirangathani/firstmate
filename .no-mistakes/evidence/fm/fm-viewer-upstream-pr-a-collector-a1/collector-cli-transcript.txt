@@ -1,0 +1,38 @@
+bin/fm-flow-snapshot.sh driven over a disposable FM_HOME, a real tmux server on a
+private socket, and a disposable fake no-mistakes/gh. Collector, fleet read and
+tmux are the real ones.
+
+### 1. --no-ci: every GitHub read skipped, the local run still resolved
+exit=0
+gh invocations recorded: 0
+ci.collection.reason=skipped ci.total=0 run.id=01LABRUNAAAAAAAAAAAAAAAAA1 run.status=running
+
+### 2. an ordinary run DOES reach GitHub, so the above is not vacuous
+exit=0
+gh invocations recorded: 1
+  gh pr view 101 --repo example/project --json statusCheckRollup,headRefOid,state
+ship-live ci: total=6 passed=1 failed=1 pending=2 skipped=2 (SKIPPED + NEUTRAL both land in skipped) pr_state=OPEN
+
+### 3. a wedged worker does not blank the view
+  remote-one: collection.ok=true reason="no pipeline run for this branch" steps=1
+  ship-live: collection.ok=true reason="" steps=5
+  ship-wedged: collection.ok=false reason="the run list could not be read (exit 1)" steps=0
+  scout-live: collection.ok=true reason="this worker runs no pipeline" steps=0
+  document still emitted, exit 0, agents=4, omitted=["gone-one"]
+
+### 4. --task narrows the document to one agent
+exit=0
+agents=1 id=scout-live pipeline=false state.value=unknown collection.reason="this worker runs no pipeline"
+
+### 5. the clock knob sets BOTH stamps; the deleted FM_FLOW_SNAPSHOT_NOW is inert
+FM_FLOW_SNAPSHOT_NOW_EPOCH=1790000000 -> generated=2026-09-21T14:13:20Z generated_epoch=1790000000
+plus the removed FM_FLOW_SNAPSHOT_NOW=2000-01-01 -> generated=2026-09-21T14:13:20Z generated_epoch=1790000000
+a non-numeric epoch falls back to the real clock -> generated=2026-10-10T13:07:42Z
+
+### 6. usage errors and --help
+unknown flag exit=2 (expect 2)
+--task with no id exit=2 (expect 2)
+removed --json alias exit=2 (expect 2)
+--help exit=0 lines=118
+  first line: fm-flow-snapshot.sh - read-only per-agent pipeline snapshot.
+  last line:  one wedged worker must not blank the whole view.

@@ -1,0 +1,11 @@
+### the new portable-serial test is registered and packed on its declared duration
+
+shard membership (bin/fm-test-run.sh --list --lane portable-serial-<k>of9):
+  shard 5 of 9 contains tests/fm-flow-snapshot.test.sh
+
+WITH the declared hint (this branch, bin/fm-test-run.sh:750 tests/fm-flow-snapshot.test.sh 25251):
+  FM_TEST_COVERAGE ok total=251 parallel=24 parallel_max_ms=665545 parallel_imbalance_ms=2 parallel_unhinted=0 serial=211 serial_shards=9 serial_unhinted=8 serial_max_ms=1074843 serial_budget_ms=1200000 herdr=16
+
+WITHOUT it (same tree copied to a scratch dir, that one line deleted, so the
+runner falls back to PORTABLE_SERIAL_DEFAULT_WEIGHT_MS=45000):
+  FM_TEST_COVERAGE ok total=251 parallel=24 parallel_max_ms=665545 parallel_imbalance_ms=2 parallel_unhinted=0 serial=211 serial_shards=9 serial_unhinted=9 serial_max_ms=1074843 serial_budget_ms=1200000 herdr=16
