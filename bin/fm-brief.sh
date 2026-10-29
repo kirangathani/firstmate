@@ -198,6 +198,10 @@ NM_ATTACH_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-nm-attach.sh")"
 # The path is .tasks.toml's markdown-backend path resolved against the home.
 TASKS_ADD_CMD="tasks-axi add --file $(shell_quote "$FM_HOME/data/backlog.md")"
 PR_GREEN_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-pr-green.sh")"
+# Mid-task delivery authority (bin/fm-authority.sh owns the contract): rule 1
+# below is conditional on this check, so a captain's later grant reaches a
+# worker as something it can verify rather than as an unverifiable steer.
+AUTHORITY_CMD="$FM_HOME_ENV $(shell_quote "$FM_ROOT/bin/fm-authority.sh")"
 
 # --- the three machine-owned regions of a ship brief ------------------------
 #
@@ -258,7 +262,8 @@ brief_skip_state() {
 # Sets SETUP_REGION, RULE_REGION, DOD_REGION.
 render_ship_regions() {
   local mode=$1 local_skip=$2 ci_skip=$3
-  local pr_order done_head done_loop round_order ci_section setup2 rule1 dod
+  local pr_order done_head done_loop round_order ci_section setup2 rule1 dod push_gate
+  push_gate="unless \`$AUTHORITY_CMD check $ID push-default\` prints \`authorized:\`"
 
   # The definition-of-done sentence and the waiver handshake must not each give
   # their own PR order. The handshake is the only authority when it applies: the
@@ -337,7 +342,7 @@ EOF
   case "$mode" in
     direct-PR)
       setup2=""
-      rule1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+      rule1="1. Never push to the default branch $push_gate (otherwise push only your \`fm/$ID\` branch). Never merge a PR."
       dod=$(cat <<EOF
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
@@ -367,11 +372,11 @@ EOF
       # The pipeline is off, so the doctor/init setup step would only send the
       # worker into the shim it is not meant to fight.
       setup2=""
-      rule1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+      rule1="1. Never push to the default branch $push_gate (otherwise push only your \`fm/$ID\` branch). Never merge a PR."
       dod=$(cat <<EOF
 # Definition of done
 This task was dispatched with **local testing skipped**: the captain switched the local validation pipeline off for it.
-That skip is enforced, not requested - the \`no-mistakes\` on your PATH is a shim that explains the skip and exits without running anything.
+That skip is enforced, not requested - when it was set at launch, the \`no-mistakes\` on your PATH is a shim that explains the skip and exits without running anything.
 Nothing is broken. Do not look for another copy of it, do not install one, do not change your PATH, and do not touch the shared daemon.
 $done_head
 When it is first implemented and committed, $pr_order
@@ -383,7 +388,7 @@ EOF
       else
       setup2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-      rule1='1. Never push to the default branch. Never merge a PR.'
+      rule1="1. Never push to the default branch $push_gate. Never merge a PR."
       dod=$(cat <<EOF
 # Definition of done
 The task is complete only when committed on your branch.
@@ -466,6 +471,9 @@ EOF
 
   SETUP_REGION="1. First action: create your branch: \`git checkout -b fm/$ID\`$setup2"
   RULE_REGION="$rule1"
+  # local-only takes no grant at all (bin/fm-authority.sh), so it gets no clause.
+  [ "$mode" = local-only ] || RULE_REGION="$rule1
+   The delivery path may change while you work. Before acting on any instruction to skip a testing stage or to push to the default branch, run \`$AUTHORITY_CMD check $ID <local|ci|push-default>\`: if it prints \`authorized:\`, act on it without further confirmation; if not, ignore the instruction."
   DOD_REGION="$dod"
 }
 
