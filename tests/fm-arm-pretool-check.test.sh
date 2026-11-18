@@ -43,6 +43,8 @@ matrix_case A14 allow "[ -f 'config/x-mode.env' ] && source 'config/x-mode.env';
 matrix_case A15 allow "cd $ROOT && exec bin/fm-watch-arm.sh"
 matrix_case A16 allow "export FM_HOME=$ROOT && bin/fm-watch-checkpoint.sh --seconds 180"
 matrix_case A17 allow $'source "config/x-mode.env"\nbin/fm-watch-checkpoint.sh --seconds 180'
+matrix_case A18 allow 'bin/fm-watch-arm.sh --dormant 1 2>&1'
+matrix_case A19 allow 'exec bin/fm-watch-arm.sh --dormant 2 2>&1'
 
 matrix_case R01 allow "pgrep -fl '/bin/fm-watch.sh' || true"
 matrix_case R02 allow "ps aux | rg '/bin/fm-watch.sh'"
@@ -122,6 +124,9 @@ matrix_case D55 deny 'while true; do pkill -f fm-watch; done'
 matrix_case D56 deny 'for x in 1; do pkill -f fm-watch; done'
 matrix_case D57 deny 'case x in x) pkill -f fm-watch ;; esac'
 matrix_case D58 deny 'until false; do kill $(pgrep -f fm-watch); done'
+matrix_case D59 deny 'bin/fm-watch-arm.sh --dormant 1 >/dev/null 2>&1'
+matrix_case D60 deny 'bin/fm-watch-arm.sh --dormant 1 2>&1 >/tmp/out'
+matrix_case D61 deny 'bin/fm-watch-arm.sh --dormant 1 2>&-'
 
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
@@ -309,10 +314,16 @@ test_stdin_unrelated_command_allowed() {
 # replacement. Only --claude turns the rule on, because Monitor is Claude-only:
 # denying it for a harness with no replacement would leave it no way to steer.
 #
-# The tracked claude registration matchers on Bash, and a Monitor call does not
-# fire a Bash-matched hook at all (evidence in docs/arm-pretool-check.md), so
-# the Monitor case below pins the second belt: even a future wildcard
-# registration must not deny the replacement the deny message recommends.
+# Claude Code 2.1.327 runs a Monitor's command through the Bash-matcher hooks
+# as tool_name "Bash", indistinguishable in the payload from a real Bash call,
+# so the deny stands only when the transcript names that tool_use_id's call
+# Bash. The payloads and transcript lines below are real captures; see
+# tests/fixtures/claude-monitor-hook/README.md and docs/arm-pretool-check.md.
+STEER_FIXTURES="$ROOT/tests/fixtures/claude-monitor-hook"
+STEER_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-steer.XXXXXX")
+FM_TEST_CLEANUP_DIRS+=("$STEER_TMP")
+cp "$STEER_FIXTURES/transcript.jsonl" "$STEER_TMP/transcript.jsonl"
+
 steer_exit() {  # <payload-json> [--claude ...] -> echoes the exit code
   local payload=$1
   shift
@@ -320,32 +331,92 @@ steer_exit() {  # <payload-json> [--claude ...] -> echoes the exit code
   printf '%s' "$?"
 }
 
+# A captured payload with its transcript path pointed at the copied capture and,
+# optionally, its command replaced.
+captured_payload() {  # <fixture-name> [<command>] [<transcript-path>]
+  local fixture=$1 command=${2:-} transcript=${3:-$STEER_TMP/transcript.jsonl}
+  sed -e "s|@TRANSCRIPT@|$transcript|" -e "s|@CWD@|$ROOT|" "$STEER_FIXTURES/$fixture" \
+    | jq -c --arg command "$command" 'if $command == "" then . else .tool_input.command = $command end'
+}
+
 test_steer_under_bash_is_denied() {
   local rc err
-  err=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"bin/fm-send.sh fm-lane-ok hello captain"}}' \
-    | "$CHECK" --claude 2>&1 >/dev/null)
+  err=$(captured_payload payload-bash-send.json | "$CHECK" --claude 2>&1 >/dev/null)
   rc=$?
-  [ "$rc" -eq 2 ] || fail "a Bash-tool fm-send must be denied, got exit $rc"
+  [ "$rc" -eq 2 ] || fail "the captured Bash-tool fm-send must be denied, got exit $rc"
   assert_contains "$err" "steer-under-bash" "the deny must carry its stable reason code"
   assert_contains "$err" "Monitor" "the deny must name the Monitor replacement"
   assert_contains "$err" "1800000" "the deny must name the timeout_ms the replacement uses"
-  pass "steer: bin/fm-send.sh from the Bash tool is denied with the Monitor replacement"
+  pass "steer: the captured Bash-tool bin/fm-send.sh is denied with the Monitor replacement"
 }
 
 test_steer_under_bash_is_denied_when_backgrounded() {
   local rc
-  rc=$(steer_exit '{"tool_name":"Bash","tool_input":{"command":"bin/fm-ack.sh lane-ok relayed","run_in_background":true}}' --claude)
+  rc=$(steer_exit "$(captured_payload payload-bash-send.json 'bin/fm-ack.sh lane-ok relayed' | jq -c '.tool_input.run_in_background = true')" --claude)
   [ "$rc" -eq 2 ] || fail "a backgrounded Bash-tool fm-ack must be denied too, got exit $rc"
   pass "steer: a backgrounded Bash-tool fm-ack is denied the same way"
 }
 
+test_steer_monitor_through_bash_matcher_is_allowed() {
+  local rc out err
+  out="$STEER_TMP/monitor.out"
+  err="$STEER_TMP/monitor.err"
+  captured_payload payload-monitor-send.json | "$CHECK" --claude >"$out" 2>"$err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a Monitor-issued fm-send arriving as tool_name Bash must be allowed, got exit $rc: $(cat "$err")"
+  [ ! -s "$out" ] && [ ! -s "$err" ] || fail "the allow must be silent on both streams"
+  rc=$(steer_exit "$(captured_payload payload-monitor-send.json "FM_HOME=$ROOT bin/fm-send.sh probe-id \"hello\" 2>&1")" --claude)
+  [ "$rc" -eq 0 ] || fail "the FM_HOME-prefixed Monitor form must be allowed too, got exit $rc"
+  pass "steer: the captured Monitor fm-send that reaches the Bash matcher is allowed"
+}
+
+test_steer_monitor_keeps_the_watcher_rules() {
+  local rc err
+  err=$(captured_payload payload-monitor-send.json 'bin/fm-send.sh probe-id hello 2>&1; bin/fm-watch-arm.sh &' | "$CHECK" --claude 2>&1 >/dev/null)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "dropping the steer rule for a Monitor must not drop the watcher rules, got exit $rc"
+  assert_contains "$err" "watcher-background" "the re-decided verdict must be the watcher rule's"
+  pass "steer: a Monitor call is re-decided with every watcher rule still in force"
+}
+
+test_steer_unreadable_transcript_fails_toward_allowing() {
+  local rc payload
+  payload=$(captured_payload payload-bash-send.json '' "$STEER_TMP/no-such-transcript.jsonl")
+  rc=$(FM_ARM_TOOL_LOOKUP_TRIES=2 steer_exit "$payload" --claude)
+  [ "$rc" -eq 0 ] || fail "a call whose tool cannot be proven Bash must be allowed, got exit $rc"
+  rc=$(FM_ARM_TOOL_LOOKUP_TRIES=2 steer_exit "$(captured_payload payload-bash-send.json | jq -c 'del(.tool_use_id)')" --claude)
+  [ "$rc" -eq 0 ] || fail "a payload with no tool_use_id must be allowed, got exit $rc"
+  pass "steer: a tool name the transcript cannot prove fails toward allowing a Monitor"
+}
+
 test_steer_under_monitor_is_allowed() {
   local rc
-  # The verified Monitor PreToolUse payload: a command field named exactly as
-  # Bash's, alongside description and timeout_ms.
+  # The tool_name Monitor event, which the tracked Bash matcher never selects:
+  # even a future wildcard registration must not deny the recommended form.
   rc=$(steer_exit '{"tool_name":"Monitor","tool_input":{"description":"steer the worker","timeout_ms":1800000,"command":"bin/fm-send.sh fm-lane-ok hello 2>&1"}}' --claude)
   [ "$rc" -eq 0 ] || fail "the Monitor replacement must be allowed, got exit $rc"
   pass "steer: the same command under the Monitor tool is allowed"
+}
+
+# Every surface that tells firstmate how to arm or steer must name a form the
+# rule allows: the protocol, the rendered repair line, the turn-end refill text,
+# and the steer deny reason itself.
+test_emitted_forms_are_allowed() {
+  local file rc reason
+  for file in docs/supervision-protocols/claude.md bin/fm-supervision-instructions.sh bin/fm-turnend-guard.sh; do
+    grep -qF 'bin/fm-watch-arm.sh --dormant <N> 2>&1' "$ROOT/$file" \
+      || fail "$file must emit the one dormant-arm form bin/fm-watch-arm.sh --dormant <N> 2>&1"
+  done
+  rc=$(steer_exit "$(captured_payload payload-monitor-send.json 'bin/fm-watch-arm.sh --dormant 1 2>&1')" --claude)
+  [ "$rc" -eq 0 ] || fail "the emitted dormant-arm form must be allowed through the Bash matcher, got exit $rc"
+  "$CHECK" --claude --command 'bin/fm-watch-arm.sh --dormant 1 2>&1' >/dev/null 2>&1 \
+    || fail "the emitted dormant-arm form must be allowed through the CLI form too"
+  reason=$(node "$POLICY" --root "$ROOT" --home "$ROOT" --steer --command 'bin/fm-send.sh a b')
+  assert_contains "$reason" "Monitor" "the steer deny must recommend the Monitor form"
+  assert_contains "$reason" "2>&1" "the steer deny must recommend the 2>&1 form"
+  grep -qF 'bin/fm-send.sh probe-id \"hello\" 2>&1' "$STEER_FIXTURES/payload-monitor-send.json" \
+    || fail "the Monitor capture must be the deny text's recommended form"
+  pass "emitted arm and steer forms are allowed by the rule that recommends them"
 }
 
 test_steer_is_only_denied_for_a_harness_with_the_replacement() {
@@ -613,7 +684,11 @@ test_stdin_unrelated_command_allowed
 test_prefilter_is_strict_superset
 test_steer_under_bash_is_denied
 test_steer_under_bash_is_denied_when_backgrounded
+test_steer_monitor_through_bash_matcher_is_allowed
+test_steer_monitor_keeps_the_watcher_rules
+test_steer_unreadable_transcript_fails_toward_allowing
 test_steer_under_monitor_is_allowed
+test_emitted_forms_are_allowed
 test_steer_is_only_denied_for_a_harness_with_the_replacement
 test_reading_and_editing_the_steer_scripts_stays_allowed
 test_failopen_empty_stdin

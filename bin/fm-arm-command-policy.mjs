@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 const REASONS = {
   "watcher-background": "a protected watcher command cannot run in an asynchronous shell list or through nohup/disown",
   "watcher-pipeline": "a protected watcher command must not participate in a pipeline",
-  "watcher-redirection": "a protected watcher command must not use shell redirection",
+  "watcher-redirection": "a protected watcher command must not use shell redirection other than 2>&1",
   "watcher-bundled": "a protected watcher command must be the sole final command after approved setup nodes",
   "watcher-nested": "a protected watcher command must not run through a wrapper, substitution, or compound command",
   "broad-watcher-kill": "a broad process kill targeting the firstmate watcher is forbidden",
@@ -234,7 +234,7 @@ export class Lexer {
       }
       const redirection = this.readRedirection();
       if (redirection) {
-        const token = { type: "redir", value: redirection.value, inlineTarget: redirection.inlineTarget, fd: redirection.fd };
+        const token = { type: "redir", value: redirection.value, inlineTarget: redirection.inlineTarget, fd: redirection.fd, stderrToStdout: redirection.stderrToStdout };
         this.tokens.push(token);
         if (redirection.value === "<<" || redirection.value === "<<-") this.expectHeredoc = { token, stripTabs: redirection.value === "<<-" };
         continue;
@@ -314,7 +314,7 @@ export class Lexer {
     let normalized = match[0].replace(/^\d+/, "");
     if (inlineTarget) normalized = normalized.replace(/[0-9-]+$/, "");
     const fd = match[1] === undefined ? (match[2].startsWith("<") ? 0 : 1) : Number(match[1]);
-    return { value: normalized, inlineTarget, fd };
+    return { value: normalized, inlineTarget, fd, stderrToStdout: match[0] === "2>&1" };
   }
 
   readWord() {
@@ -736,8 +736,15 @@ function contextWithAssignments(context, words) {
   return { ...context, protectedVariables, watcherPatterns, watcherPids };
 }
 
+// The exact 2>&1 only merges stderr into the stdout the harness already reads,
+// so it can hide no wake line; it is the form the Claude supervision protocol
+// emits for every Monitor-issued arm. Every other redirection still counts.
+function isStderrMerge(token) {
+  return token.type === "redir" && token.stderrToStdout === true;
+}
+
 function nodeHasRedirection(tokens) {
-  return tokens.some((token) => token.type === "redir");
+  return tokens.some((token) => token.type === "redir" && !isStderrMerge(token));
 }
 
 function nodeHasUnsafeSubstitution(tokens) {
@@ -913,7 +920,7 @@ function setupKind(info, context) {
 
 function finalProtectedAllowed(info) {
   if (!info.protectedKind || info.protectedKind === "watch" || info.redirection || info.substitution) return false;
-  if (!ordinaryWordsOnly(info.tokens) || info.position.prefixAssignments > 0) return false;
+  if (!ordinaryWordsOnly(info.tokens.filter((token) => !isStderrMerge(token))) || info.position.prefixAssignments > 0) return false;
   const wrappers = info.position.wrappers;
   return wrappers.length === 0 || (wrappers.length === 1 && wrappers[0] === "exec");
 }
