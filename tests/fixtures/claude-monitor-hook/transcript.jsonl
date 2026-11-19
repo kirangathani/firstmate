@@ -1,0 +1,2 @@
+{"type":"assistant","version":"2.1.327","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_0122LfR1tWKvreRPDPtCaHML","name":"Monitor","input":{"description":"steer probe","timeout_ms":1800000,"command":"bin/fm-send.sh probe-id \"hello\" 2>&1"},"caller":{"type":"direct"}}]}}
+{"type":"assistant","version":"2.1.327","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01H6CH4UpKzuGVeBVZejQo4d","name":"Bash","input":{"command":"bin/fm-send.sh probe-id bash-hello"},"caller":{"type":"direct"}}]}}

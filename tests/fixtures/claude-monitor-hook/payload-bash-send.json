@@ -1,0 +1,1 @@
+{"session_id":"419d7bbc-56d8-41e8-960e-13362dcce9a6","transcript_path":"@TRANSCRIPT@","cwd":"@CWD@","prompt_id":"38932244-1ac6-4012-a973-64c053280bb9","permission_mode":"bypassPermissions","effort":{"level":"medium"},"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"bin/fm-send.sh probe-id bash-hello"},"tool_use_id":"toolu_01H6CH4UpKzuGVeBVZejQo4d"}

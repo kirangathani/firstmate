@@ -27,9 +27,14 @@
 # in an executed position, because a Monitor-issued one stays alive as a waiting
 # arm and a Bash-issued one cannot. Only the Claude registration passes it.
 # The rule is further scoped to a tool name that is empty or Bash, so a future
-# wildcard registration cannot deny the Monitor it recommends. Claude Code's
-# tracked registration uses the Bash matcher, which a Monitor call does not
-# match at all; docs/arm-pretool-check.md records that evidence.
+# wildcard registration cannot deny the Monitor it recommends.
+# That scoping is not enough: Claude Code 2.1.327 also runs a Monitor's command
+# through the Bash-matcher hooks as tool_name "Bash", with the Monitor's own
+# tool_use_id and a tool_input indistinguishable from a real Bash call.
+# So a steer deny is kept only when the session transcript names that
+# tool_use_id's call "Bash"; a Monitor, or a name that cannot be read within
+# the bounded wait, drops the steer rule and keeps every watcher rule.
+# docs/arm-pretool-check.md records the captured payloads.
 #
 # Exit/output contract:
 #   ALLOW - exit 0 and no output.
@@ -81,6 +86,8 @@ CMD=""
 CMD_SET=0
 BACKGROUND=""
 TOOL=""
+TOOL_USE_ID=""
+TRANSCRIPT=""
 CLAUDE_MODE=0
 
 usage() {
@@ -92,7 +99,8 @@ With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, or Claude/Codex tool_input.command), and the tool name from
 tool_name or toolName.
 --claude additionally denies bin/fm-send.sh and bin/fm-ack.sh in an executed
-position, for a tool name that is empty or Bash.
+position, for a tool name that is empty or Bash; on stdin, only when the
+transcript names that tool_use_id's call Bash rather than Monitor.
 Exits 0 to allow and 2 to deny.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
@@ -157,6 +165,10 @@ if [ "$CMD_SET" -eq 0 ]; then
   # shellcheck disable=SC2034
   BACKGROUND=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.background // .tool_input.background // false)' 2>/dev/null) || BACKGROUND=false
   TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || TOOL=""
+  if [ "$CLAUDE_MODE" -eq 1 ]; then
+    TOOL_USE_ID=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_use_id // empty)' 2>/dev/null) || TOOL_USE_ID=""
+    TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r '(.transcript_path // empty)' 2>/dev/null) || TRANSCRIPT=""
+  fi
 fi
 
 # The steer-under-bash rule applies only where the Monitor replacement exists.
@@ -228,6 +240,43 @@ POLICY_OUTPUT=$(node "$POLICY" "${POLICY_ARGS[@]}" 2>/dev/null) || exit 0
 [ -n "$POLICY_OUTPUT" ] || exit 0
 
 TAB=$(printf '\t')
+
+# The name of the call that owns this tool_use_id, as the session transcript
+# records it, or nothing. Claude Code flushes the assistant tool_use line while
+# PreToolUse hooks run (about 110ms in, measured 2026-11-18), so this polls for
+# a bounded FM_ARM_TOOL_LOOKUP_TRIES x 50ms. It runs only on a would-be steer
+# deny, so no other command pays for it.
+transcript_tool_name() {
+  local tries=${FM_ARM_TOOL_LOOKUP_TRIES:-60} i=0 name
+  case "$TOOL_USE_ID" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
+  case "$tries" in ''|*[!0-9]*) tries=60 ;; esac
+  [ -n "$TRANSCRIPT" ] || return 0
+  while [ "$i" -lt "$tries" ]; do
+    if [ -r "$TRANSCRIPT" ]; then
+      name=$(tail -c 4194304 "$TRANSCRIPT" 2>/dev/null | grep -F "\"$TOOL_USE_ID\"" \
+        | jq -rR --arg id "$TOOL_USE_ID" 'fromjson? | .message.content[]? | select(.type? == "tool_use" and .id? == $id) | .name // empty' 2>/dev/null \
+        | head -n 1)
+      [ -n "$name" ] && { printf '%s' "$name"; return 0; }
+    fi
+    sleep 0.05 2>/dev/null || return 0
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# A steer deny for a call that carries a tool_use_id stands only when the
+# transcript proves it is the Bash tool. Anything else - a Monitor's command
+# arriving through the Bash matcher, or a name that could not be read - is
+# re-decided without the steer rule. A payload with no tool_use_id is no shape
+# a Monitor has ever delivered, so its own tool_name stands.
+case "$POLICY_OUTPUT" in
+  "deny${TAB}steer-under-bash${TAB}"*)
+    if [ "$CMD_SET" -eq 0 ] && [ -n "$TOOL_USE_ID" ] && [ "$(transcript_tool_name)" != "Bash" ]; then
+      POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" 2>/dev/null) || exit 0
+      [ -n "$POLICY_OUTPUT" ] || exit 0
+    fi
+    ;;
+esac
 DECISION=${POLICY_OUTPUT%%"$TAB"*}
 [ "$DECISION" = "deny" ] || exit 0
 REST=${POLICY_OUTPUT#*"$TAB"}
