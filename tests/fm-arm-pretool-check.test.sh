@@ -347,7 +347,7 @@ test_steer_under_bash_is_denied() {
   assert_contains "$err" "steer-under-bash" "the deny must carry its stable reason code"
   assert_contains "$err" "Monitor" "the deny must name the Monitor replacement"
   assert_contains "$err" "1800000" "the deny must name the timeout_ms the replacement uses"
-  pass "steer: the captured Bash-tool bin/fm-send.sh is denied with the Monitor replacement"
+  pass "steer: bin/fm-send.sh from the Bash tool is denied with the Monitor replacement"
 }
 
 test_steer_under_bash_is_denied_when_backgrounded() {
