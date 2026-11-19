@@ -264,12 +264,14 @@ transcript_tool_name() {
   return 0
 }
 
-# A steer deny stands only for a call the transcript proves is the Bash tool.
-# Anything else - a Monitor's command arriving through the Bash matcher, or a
-# name that could not be read - is re-decided without the steer rule.
+# A steer deny for a call that carries a tool_use_id stands only when the
+# transcript proves it is the Bash tool. Anything else - a Monitor's command
+# arriving through the Bash matcher, or a name that could not be read - is
+# re-decided without the steer rule. A payload with no tool_use_id is no shape
+# a Monitor has ever delivered, so its own tool_name stands.
 case "$POLICY_OUTPUT" in
   "deny${TAB}steer-under-bash${TAB}"*)
-    if [ "$CMD_SET" -eq 0 ] && [ "$(transcript_tool_name)" != "Bash" ]; then
+    if [ "$CMD_SET" -eq 0 ] && [ -n "$TOOL_USE_ID" ] && [ "$(transcript_tool_name)" != "Bash" ]; then
       POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" 2>/dev/null) || exit 0
       [ -n "$POLICY_OUTPUT" ] || exit 0
     fi

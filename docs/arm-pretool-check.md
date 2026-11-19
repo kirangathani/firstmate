@@ -151,7 +151,8 @@ The rule is off unless the transport passes `--steer`, and `bin/fm-arm-pretool-c
 `--claude` is the harness signal, because Monitor is Claude-only: codex, grok, opencode, and pi have no replacement to point at, so denying there would wedge them with no escape.
 The tool-name half keeps a wildcard registration from denying a `tool_name` `Monitor` event.
 It is not enough on its own, because Claude Code 2.1.327 also runs every Monitor's command through the Bash-matcher hooks as `tool_name` `Bash`, with a payload no field of which tells it from a real Bash call (evidence below).
-So on stdin a would-be `steer-under-bash` deny stands only when the session transcript at `transcript_path` names the call with that `tool_use_id` `Bash`.
+So on stdin a would-be `steer-under-bash` deny for a payload carrying a `tool_use_id` stands only when the session transcript at `transcript_path` names the call with that id `Bash`.
+A payload with no `tool_use_id` is no shape a Monitor has ever delivered, so it is decided by its own tool name as before.
 A call named `Monitor`, or one whose name cannot be read within the bounded wait of `FM_ARM_TOOL_LOOKUP_TRIES` polls 50ms apart (default 60, so 3s), is re-decided without the steer rule, so a Monitor is never denied for want of proof and every watcher rule still applies to it.
 Only a would-be steer deny pays for that lookup; every other command is decided exactly as before.
 
@@ -295,7 +296,7 @@ Every native-path automatic marker was present and every deny sentinel remained 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
 Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
 The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
-It also pins the steer rule with the captured 2.1.327 payloads: a Bash-tool send or ack is denied foreground and backgrounded alike, a Monitor's send arriving as `tool_name` `Bash` is allowed and still re-decided under every watcher rule, a call the transcript cannot name is allowed, a `tool_name` `Monitor` payload is allowed, the rule stays off without `--claude`, and reading, grepping, and editing those two files stays allowed.
+It also pins the steer rule with the captured 2.1.327 payloads: a Bash-tool send or ack is denied foreground and backgrounded alike, a Monitor's send arriving as `tool_name` `Bash` is allowed and still re-decided under every watcher rule, a call the transcript cannot name is allowed, a payload with no call id is decided by its tool name, a `tool_name` `Monitor` payload is allowed, the rule stays off without `--claude`, and reading, grepping, and editing those two files stays allowed.
 It checks that the protocol, the rendered repair line, and the turn-end refill text all emit `bin/fm-watch-arm.sh --dormant <N> 2>&1`, and that this form and the steer deny's own recommended form are allowed.
 
 Run:

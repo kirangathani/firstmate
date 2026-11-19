@@ -384,9 +384,20 @@ test_steer_unreadable_transcript_fails_toward_allowing() {
   payload=$(captured_payload payload-bash-send.json '' "$STEER_TMP/no-such-transcript.jsonl")
   rc=$(FM_ARM_TOOL_LOOKUP_TRIES=2 steer_exit "$payload" --claude)
   [ "$rc" -eq 0 ] || fail "a call whose tool cannot be proven Bash must be allowed, got exit $rc"
-  rc=$(FM_ARM_TOOL_LOOKUP_TRIES=2 steer_exit "$(captured_payload payload-bash-send.json | jq -c 'del(.tool_use_id)')" --claude)
-  [ "$rc" -eq 0 ] || fail "a payload with no tool_use_id must be allowed, got exit $rc"
+  rc=$(FM_ARM_TOOL_LOOKUP_TRIES=2 steer_exit "$(captured_payload payload-bash-send.json '' "$STEER_TMP/no-such-transcript.jsonl" | jq -c 'del(.transcript_path)')" --claude)
+  [ "$rc" -eq 0 ] || fail "a call id with no transcript path must be allowed, got exit $rc"
   pass "steer: a tool name the transcript cannot prove fails toward allowing a Monitor"
+}
+
+test_steer_payload_without_call_id_keeps_its_tool_name() {
+  local rc
+  # No captured Monitor event lacks a tool_use_id, so a payload without one is
+  # decided by its own tool_name, as before the transcript lookup existed.
+  rc=$(FM_ARM_TOOL_LOOKUP_TRIES=2 steer_exit "$(captured_payload payload-bash-send.json | jq -c 'del(.tool_use_id)')" --claude)
+  [ "$rc" -eq 2 ] || fail "a Bash payload with no tool_use_id must still be denied, got exit $rc"
+  rc=$(steer_exit '{"tool_name":"Bash","tool_input":{"command":"bin/fm-send.sh fm-lane-ok hello captain"}}' --claude)
+  [ "$rc" -eq 2 ] || fail "a bare Bash payload must still be denied, got exit $rc"
+  pass "steer: a Bash payload with no call id is denied on its own tool name"
 }
 
 test_steer_under_monitor_is_allowed() {
@@ -687,6 +698,7 @@ test_steer_under_bash_is_denied_when_backgrounded
 test_steer_monitor_through_bash_matcher_is_allowed
 test_steer_monitor_keeps_the_watcher_rules
 test_steer_unreadable_transcript_fails_toward_allowing
+test_steer_payload_without_call_id_keeps_its_tool_name
 test_steer_under_monitor_is_allowed
 test_emitted_forms_are_allowed
 test_steer_is_only_denied_for_a_harness_with_the_replacement
