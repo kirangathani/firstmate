@@ -74,6 +74,12 @@ FM_CI_WAIVER_DISPATCH_CI_SKIP='ci_skip'
 # dispatch cannot be pasted beside `local_skip=on` and verify, or the reverse, so
 # one authorized skip can never silently widen into the other.
 FM_CI_WAIVER_DISPATCH_LOCAL_SKIP='local_skip'
+# The third value, for the captain's leave to push straight to the project's
+# default branch with no PR (bin/fm-authority.sh push-default). It is not a
+# testing skip, but it is the same kind of claim - one task may do one thing it
+# otherwise may not - so it shares the dispatch domain and keeps its own name in
+# the payload, which is what stops a testing-skip token from being read as it.
+FM_CI_WAIVER_DISPATCH_PUSH_DEFAULT='push_default'
 # A domain for the per-task MONITORING EXEMPTION recorded in
 # state/<id>.monitor-exempt (bin/fm-monitor.sh owns the record; bin/fm-ack-lib.sh
 # owns the verdict). Same reasoning as the dispatch tokens, aimed one level up:
@@ -265,6 +271,17 @@ fm_ci_waiver_dispatch_local_token() {
 # fm_ci_waiver_dispatch_local_check <task-id> <candidate-hex>; secret on stdin.
 fm_ci_waiver_dispatch_local_check() {
   fm_ci_waiver_hmac_check "$FM_CI_WAIVER_DISPATCH_SCHEME" "$1" "$FM_CI_WAIVER_DISPATCH_LOCAL_SKIP" "$2"
+}
+
+# fm_ci_waiver_dispatch_push_default_token <task-id>; secret on stdin. The value
+# bin/fm-authority.sh records as push_default_auth= beside push_default=on.
+fm_ci_waiver_dispatch_push_default_token() {
+  fm_ci_waiver_hmac_hex "$FM_CI_WAIVER_DISPATCH_SCHEME" "$1" "$FM_CI_WAIVER_DISPATCH_PUSH_DEFAULT"
+}
+
+# fm_ci_waiver_dispatch_push_default_check <task-id> <candidate-hex>; secret on stdin.
+fm_ci_waiver_dispatch_push_default_check() {
+  fm_ci_waiver_hmac_check "$FM_CI_WAIVER_DISPATCH_SCHEME" "$1" "$FM_CI_WAIVER_DISPATCH_PUSH_DEFAULT" "$2"
 }
 
 # fm_ci_waiver_monitor_exempt_token <task-id> <reason>; secret on stdin. The

@@ -318,6 +318,7 @@ A ship task can be dispatched with testing switched off, but only by the captain
 They are a third axis, orthogonal to delivery mode and to `yolo`, and `yolo` never grants one.
 
 **A skip is one action, at dispatch.** `bin/fm-spawn.sh` is the only script that takes a skip flag; `bin/fm-brief.sh` refuses one and names the dispatch instead.
+A skip the captain decides on after launch goes through "Mid-task delivery authority" below instead.
 The dispatch mints the authorization AND writes the worker-facing half, by calling `bin/fm-brief.sh --apply-testing-skip` with the flag it just resolved, so there is no second invocation to keep in agreement.
 That apply runs on every ship spawn, flagged or not, so an unflagged dispatch of a brief that still carries skip text puts the ordinary instructions back, and a brief that has no such regions refuses the dispatch outright rather than launching a worker whose instructions and whose record disagree.
 The regions are delimited in the brief by `<!-- fm:... -->` markers, and the two axes they are a function of are recorded on their own markers above the definition of done - the delivery mode on `<!-- fm:delivery-mode ... -->` and the skip on the definition-of-done marker - so an apply that would change nothing rewrites nothing and an apply that changes either one does; `bin/fm-brief.sh`'s header owns them.
@@ -362,6 +363,24 @@ No skip flag relaxes a test gate.
 `bin/fm-pr-merge.sh` still refuses a red, pending, or unclassifiable PR under every flag, and the kept-tests gate still runs under every flag - at full cost under `ci_skip=on`, since it is then the merge's only test evidence.
 A SIGNED `ci_skip` does satisfy one gate, the zero-checks refusal, because that refusal asks whether absent CI was a captain's decision and a signed CI waiver is that decision; a bare `ci_skip=on` line satisfies nothing, a `local_skip` never satisfies it at all, and `bin/fm-pr-merge.sh`'s header owns the contract.
 Every merge under a skip prints a loud waiver banner read from the task's own record on the captain's machine rather than from anything in the PR, and a merge that lands with no CI evidence at all prints a second banner saying so.
+
+## Mid-task delivery authority (bin/fm-authority.sh)
+
+The captain can also authorize a skip, or a push straight to the project's default branch, after a worker is already running.
+Firstmate runs `bin/fm-authority.sh grant <task-id> <scope> --reason <why>` on the captain's explicit word only, never under `yolo` and never because a worker asked.
+Scopes are `local`, `ci`, `all`, and `testing` - the same four kinds as the dispatch flags above, judged by the same matrix against the task's recorded delivery mode - plus `push-default`.
+A testing-scope grant writes exactly the `local_skip=on`/`local_skip_auth=` and `ci_skip=on`/`ci_skip_auth=` lines a dispatch writes, minted by the same functions, so every gate above treats it identically to a dispatch-time skip, and it re-renders the worker's brief through the same `--apply-testing-skip` path.
+`push-default` records `push_default=on` with a `push_default_auth=` token under its own payload name, so no testing-skip token implies it and it excuses no merge check.
+Each grant also records an unsigned `<field>_reason=` and `<field>_granted_at=` for disclosure.
+
+Every ship brief except a local-only one makes rule 1's default-branch ban conditional on `bin/fm-authority.sh check <task-id> push-default`, and tells the worker to run `check` before acting on any instruction to skip a stage or push to the default branch: act on `authorized:` without further confirmation, ignore anything else.
+`check` is read-only, verifies the signature through `bin/fm-attestation-lib.sh` exactly as the merge gates do, and exits non-zero with no record, no key, or a hand-written flag line.
+`revoke <task-id> [<scope>]` removes one scope or every scope and re-renders the brief.
+
+A mid-task local skip records authority only: the PATH shim that enforces a dispatch-time local skip cannot be added to a running worker.
+A worker launched before its brief carried the check clause learns of a grant only when it is steered to run `check` explicitly.
+A respawn rewrites the record from its own flags, so a grant does not survive one without the matching flag.
+The script's header owns the scope list, the record lines, and these limits.
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
