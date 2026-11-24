@@ -848,6 +848,71 @@ got=$(jq -r '.agents[] | select(.id=="shipped-a1") | .ci.collection.reason' "$BA
 [ -n "$got" ] || fail "an unread CI cell carried no reason"
 [ ! -s "$TMP_ROOT/gh-args.txt" ] || fail "an unparseable PR link still cost a gh query"
 pass "an unparseable PR link yields an unread CI cell with a reason and no query"
+# PR 138 was OPEN when gh pr view returned the fixture on 2026-11-24.
+# Replace its commit with one from this disposable repository for the ancestry check.
+R_HOME="$TMP_ROOT/reported-home"
+R_WT="$TMP_ROOT/reported-repo"
+R_ID=fm-steer-monitor-hook-m1
+R_URL=https://github.com/kirangathani/firstmate/pull/138
+R_META="$R_HOME/state/$R_ID.meta"
+R_STATUS="$R_HOME/state/$R_ID.status"
+mkdir -p "$R_HOME/state"
+fm_git_init_commit "$R_WT"
+git -C "$R_WT" checkout -qb "fm/$R_ID"
+git -C "$R_WT" remote add origin https://github.com/kirangathani/firstmate.git
+r_head=$(git -C "$R_WT" rev-parse HEAD)
+git -C "$R_WT" -c user.name=fixture -c user.email=fixture@example.invalid commit --allow-empty -qm 'local work after push'
+printf 'project=%s\nworktree=%s\nspawned_at=1795040879\n' "$R_WT" "$R_WT" > "$R_META"
+printf '[t=1795041479] done: PR %s open\n' "$R_URL" > "$R_STATUS"
+jq --arg id "$R_ID" --arg wt "$R_WT" --arg meta "$R_META" \
+  '.tasks[0] |= (.id=$id | .project=$wt | .paths.worktree.path=$wt | .paths.meta.path=$meta | .pr.url=null)' \
+  "$TMP_ROOT/repo-fleet.json" > "$R_HOME/fleet.json"
+jq --arg sha "$r_head" '.headRefOid=$sha' "$ROOT/tests/fixtures/flow-snapshot/gh-pr-138-open.json" > "$R_HOME/open.json"
+reported_read() {
+  local rollup=$1
+  shift
+  PATH="$FAKEBIN:$PATH" FM_HOME="$R_HOME" FM_STATE_OVERRIDE="$R_HOME/state" \
+    FM_TEST_ROLLUP="$rollup" FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
+    FM_FLOW_SNAPSHOT_FLEET_JSON="$R_HOME/fleet.json" "$SNAPSHOT" "$@" > "$R_HOME/out.json"
+}
+reported_read "$R_HOME/open.json"
+jq -e '.agents[0] | .pr.number == 138 and .pr.source == "github" and .ci.pr_state == "OPEN"
+  and .steps[0].status == "completed" and .steps[0].duration_ms == 600000' "$R_HOME/out.json" >/dev/null ||
+  fail "the unrecorded open PR on the task branch did not reach the row"
+pass "a reported open PR ends building when its head is an ancestor of the task branch"
+
+: > "$TMP_ROOT/gh-args.txt"
+reported_read "$R_HOME/open.json" --no-ci
+[ ! -s "$TMP_ROOT/gh-args.txt" ] && jq -e '.agents[0] | .pr.url == null and
+  .pr.reported.url != null and .steps[0].status == "unknown"' "$R_HOME/out.json" >/dev/null ||
+  fail "the offline refresh queried GitHub or claimed a reported PR was verified"
+pass "an offline refresh keeps reported delivery unverified without querying GitHub"
+
+# Each variant changes one of the identity checks, keeping the same PR URL.
+unrelated=$(git -C "$R_WT" -c user.name=fixture -c user.email=fixture@example.invalid commit-tree 'HEAD^{tree}' -m unrelated)
+for change in '.headRefName="fm/another"' '.headRepository.nameWithOwner="fork/firstmate"' \
+    '.createdAt="2020-01-01T00:00:00Z"' '.headRefOid=$other'; do
+  jq --arg other "$unrelated" "$change" "$R_HOME/open.json" > "$R_HOME/mismatch.json"
+  reported_read "$R_HOME/mismatch.json"
+  jq -e '.agents[0] | .pr.url == null and (.pr.reported.unverified | length > 0)' "$R_HOME/out.json" >/dev/null ||
+    fail "the reported PR passed the changed identity field $change"
+done
+pass "a different head branch, fork, earlier run or unrelated commit fails PR verification"
+
+git -C "$R_WT" checkout -qb recycled
+: > "$TMP_ROOT/gh-args.txt"
+reported_read "$R_HOME/open.json"
+[ ! -s "$TMP_ROOT/gh-args.txt" ] && jq -e '.agents[0].pr.url == null' "$R_HOME/out.json" >/dev/null ||
+  fail "a recycled worktree verified a PR for its previous task"
+pass "a recycled worktree cannot verify an earlier task branch still in the repository"
+
+git -C "$R_WT" checkout -q "fm/$R_ID"
+printf 'working: quoted a previous done: PR %s\n' "$R_URL" > "$R_STATUS"
+reported_read "$R_HOME/open.json"
+[ ! -s "$TMP_ROOT/gh-args.txt" ] && jq -e '.agents[0] | .pr.reported == null and .pr.url == null' "$R_HOME/out.json" >/dev/null ||
+  fail "a link embedded in status prose was treated as a delivery report"
+pass "a quoted delivery report in status prose does not trigger a GitHub read"
+
 # --- which LLM is doing the work --------------------------------------------
 #
 # Two different questions with two different machine records behind them, and
