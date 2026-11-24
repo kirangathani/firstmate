@@ -845,6 +845,54 @@ assert_not_contains "$nothing" "your word" "a PR with no evidence was offered fo
 assert_contains "$nothing" "0 ready to merge" "a PR with no evidence was counted ready to merge"
 pass "a PR whose only check was excused is not offered as ready"
 
+# --- a delivered direct-PR task with no checks -------------------------------
+#
+# PR 139, 2026-11-24: a direct-PR task with a signed CI skip, pushed with
+# [skip ci], so GitHub reported no checks. Its CI cell drew as not reached and
+# its pre-merge cell blank while the PR was open and the merge gate would take
+# it. The collector now states which of that gate's two authorities for an
+# empty rollup held (`ci.zero_checks_ok`), and the row reads it; with neither,
+# the gate refuses and the row must not offer the PR.
+zero_pr() {  # <zero-checks-ok> <pr-state>
+  agent_with "zc-$2" '[{"step":"building","status":"completed","findings":0,"duration_ms":null}]' "$(
+    ci_result 0 0 0 0 0 0 "$2" | jq --arg ok "$1" '. + {
+      mode:"direct-PR", skips:{local:false,ci:true},
+      run:{present:false,id:"",status:"",db_updated_epoch:0,db_age_seconds:null}
+    } | .ci.zero_checks_ok = $ok')"
+}
+waived=$(render "$(snap "[$(zero_pr "CI waived" OPEN)]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$waived" "no checks" "an open PR with no checks did not say so"
+assert_contains "$waived" "CI waived" "an open PR with no checks did not name its authority"
+assert_contains "$waived" "your word" "an open waived PR with no checks did not ask for the captain's word"
+assert_contains "$waived" "1 ready to merge" "an open waived PR with no checks was not counted ready"
+assert_not_contains "$waived" "running" "a delivered PR still drew a running phase"
+pass "an open PR with no checks under the gate's own authority asks for the captain's word"
+
+bare=$(render "$(snap "[$(zero_pr "" OPEN)]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$bare" "no checks" "an open PR with no checks and no authority did not say so"
+assert_not_contains "$bare" "your word" "a PR the zero-checks gate refuses was offered for merge"
+assert_contains "$bare" "0 ready to merge" "a PR the zero-checks gate refuses was counted ready"
+pass "an open PR with no checks and no authority for that is not offered as ready"
+
+landed=$(render "$(snap "[$(zero_pr "CI waived" MERGED)]")" | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "$landed" "merged" "a merged PR with no checks did not say it merged"
+assert_contains "$landed" "0 ready to merge" "a merged PR with no checks was counted ready"
+pass "a merged PR with no checks reports the merge and is not counted ready"
+
+# A recorded PR whose checks nobody read - `--no-ci`, or a failed read - is not
+# "not reached" on its pre-merge cell either: nobody knows whether it is open.
+zc_verdicts=$(node --input-type=module -e '
+  const m = await import(process.argv[1]);
+  const unread = JSON.parse(process.argv[2]);
+  const waived = JSON.parse(process.argv[3]);
+  process.stdout.write(`${m.premergeVerdict(unread)} ${m.ciVerdict(waived)} ${m.premergeVerdict(waived)}`);
+' "$TUI" "$(agent_with zc-unread "$(steps_all completed)" \
+    '{"pr":{"url":"https://github.com/kirangathani/firstmate/pull/139","number":139}}')" \
+  "$(zero_pr "CI waived" OPEN)" 2>/dev/null </dev/null)
+[ "$zc_verdicts" = "unknown no-checks ready" ] ||
+  fail "recorded-PR verdicts read as: $zc_verdicts"
+pass "a recorded PR whose checks were not read has an unknown pre-merge verdict"
+
 # --- every check class is named on every render ------------------------------
 #
 # The captain's standing rule, ruled three times in one session: every class

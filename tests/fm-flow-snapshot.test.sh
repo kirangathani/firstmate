@@ -702,6 +702,88 @@ got=$(PATH="$FAKEBIN:$PATH" FM_HOME="$ATT_HOME" \
   fail "the recorded testing skips did not reach the view: $got"
 pass "a task's recorded testing skips reach the view, and an unflagged task's do not"
 
+# --- a PR with no checks is absent CI by decision only on the gate's authority -
+#
+# PR 139, 2026-11-24: a direct-PR task with a signed CI skip pushed with
+# [skip ci], so GitHub reported no checks at all, and the view drew its CI cell
+# as not reached and its pre-merge cell blank over a PR that was open and that
+# bin/fm-pr-merge.sh's zero-checks gate would take. That gate names two
+# authorities for an empty rollup - the project's no-pr-ci marker and a SIGNED
+# CI skip - and `ci.zero_checks_ok` states which one held, asked through the same
+# owners. A bare ci_skip=on line is neither, so it must state nothing.
+ZC_HOME="$TMP_ROOT/home-zero-checks"
+mkdir -p "$ZC_HOME/state" "$ZC_HOME/data"
+printf 'window=fm:7\nworktree=/wt/7\nproject=/p/quiet\nkind=ship\nmode=direct-PR\nci_skip=on\n' \
+  > "$ZC_HOME/state/quiet-z1.meta"
+printf '{"statusCheckRollup":[],"headRefOid":"%s","state":"OPEN"}\n' \
+  2f631f4ae7779f4c4b82f136c65780f61f63a78e > "$TMP_ROOT/zero-rollup.json"
+jq -n --arg h "$ZC_HOME" '{tasks:[
+  {id:"quiet-z1",kind:"ship",mode:"direct-PR",project:"/p/quiet",
+   paths:{worktree:{path:"/wt/7"},meta:{path:($h+"/state/quiet-z1.meta"),present:true}},
+   endpoint:{target:"fm:7",exists:true},
+   pr:{url:"https://github.com/o/r/pull/139"}}
+]}' > "$TMP_ROOT/zero-fleet.json"
+zero_read() {
+  PATH="$FAKEBIN:$PATH" FM_HOME="$ZC_HOME" \
+    FM_TEST_ROLLUP="$TMP_ROOT/zero-rollup.json" \
+    FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
+    FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/zero-fleet.json" \
+    "$SNAPSHOT" --json 2>/dev/null |
+    jq -r '.agents[] | select(.id=="quiet-z1")
+      | "\(.ci.collection.ok)/\(.ci.total)/\(.ci.pr_state)/\(.ci.zero_checks_ok)"'
+}
+got=$(zero_read)
+[ "$got" = "true/0/OPEN/" ] ||
+  fail "an unsigned ci_skip line was taken as authority for a PR with no checks: $got"
+pass "a PR with no checks and only a bare ci_skip line states no authority for it"
+mkdir -p "$ZC_HOME/data/no-pr-ci"
+: > "$ZC_HOME/data/no-pr-ci/quiet"
+got=$(zero_read)
+[ "$got" = "true/0/OPEN/no PR CI" ] ||
+  fail "the captain's no-pr-ci marker was not stated for a PR with no checks: $got"
+pass "a PR with no checks states the project no-pr-ci marker as its authority"
+got=$(jq -r '.ci.zero_checks_ok' <<<"$(sed -n "s/^CI_EMPTY='\(.*\)'$/\1/p" "$SNAPSHOT")")
+[ "$got" = "" ] || fail "the unread CI object does not carry an empty zero_checks_ok: $got"
+pass "an unread CI object carries an empty zero-checks authority"
+
+# --- a recorded PR ends building even when its time is unusable --------------
+#
+# The PR is what ends the phase and the record's time only measures it, so a
+# recorded PR whose record is dated no later than dispatch - a rewrite the
+# start reading cannot see past - and one with no spawned_at record, whose
+# start then falls back to that same record's time, both end it, with no duration, rather than leaving `running` or `unknown`
+# beside a delivered PR.
+NT_HOME="$TMP_ROOT/home-no-time"
+mkdir -p "$NT_HOME/state"
+printf 'window=fm:8\nworktree=/wt/8\nproject=/p/late\nkind=ship\nmode=direct-PR\nspawned_at=1780000600\npr=https://github.com/o/r/pull/25\n' \
+  > "$NT_HOME/state/late-t1.meta"
+touch -d "@1780000000" "$NT_HOME/state/late-t1.meta"
+jq -n --arg h "$NT_HOME" '{tasks:[
+  {id:"late-t1",kind:"ship",mode:"direct-PR",project:"/p/late",
+   paths:{worktree:{path:"/wt/8"},meta:{path:($h+"/state/late-t1.meta"),present:true}},
+   endpoint:{target:"fm:8",exists:true},
+   pr:{url:"https://github.com/o/r/pull/25"}}
+]}' > "$TMP_ROOT/no-time-fleet.json"
+nt_read() {
+  PATH="$FAKEBIN:$PATH" FM_HOME="$NT_HOME" \
+    FM_FLOW_SNAPSHOT_DB="$TMP_ROOT/absent.sqlite" \
+    FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/no-time-fleet.json" \
+    FM_FLOW_SNAPSHOT_NOW_EPOCH=1780008000 \
+    "$SNAPSHOT" --json --no-ci 2>/dev/null |
+    jq -r '.agents[] | select(.id=="late-t1")
+      | "\([.steps[] | select(.step=="building")][0] | "\(.status)/\(.duration_ms)")|\([.active_steps[] | select(.step=="building")] | length)|\(.rework)"'
+}
+got=$(nt_read)
+[ "$got" = "completed/null|0|null" ] ||
+  fail "a recorded PR dated before dispatch left building open: $got"
+pass "a recorded PR dated no later than dispatch still ends building, with no duration"
+printf 'window=fm:8\nworktree=/wt/8\nproject=/p/late\nkind=ship\nmode=direct-PR\npr=https://github.com/o/r/pull/25\n' \
+  > "$NT_HOME/state/late-t1.meta"
+got=$(nt_read)
+[ "${got%%|*}" = "completed/null" ] ||
+  fail "a recorded PR with no spawned_at record left building open: $got"
+pass "a recorded PR with no spawned_at record still ends building"
+
 # --- the CI read must name the PR's OWN repository ---------------------------
 #
 # `gh pr view <n>` with no --repo resolves the repository from the process's

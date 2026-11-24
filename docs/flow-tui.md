@@ -47,6 +47,9 @@ So the command is handed in whole, and only ever by the operator:
   `tests/fm-flow.test.sh` asserts that equality rather than trusting it.
 - `--open-cmd <command>` is the same shape for the enter key.
 
+Refreshes never overlap, but a refresh key pressed while one is running is not dropped: that run started before the key, so its document can predate what the captain pressed refresh to see, and the key earns exactly one follow-up run once it returns.
+A timer tick during a run is still dropped, so a collector slower than `--refresh-ms` sets the real cadence.
+
 The no-outside-reads property the golden-frame tests rely on is unchanged by this.
 `render()` is a pure function of the snapshot plus the frame options; one-shot mode never shells out at all; and a run that shells out does so only to a command it was explicitly given, which no test passes.
 
@@ -507,6 +510,7 @@ Both are additive `v2` fields: a consumer that ignores them reads exactly the do
         "excused_authority": [
           "firstmate is registered as a direct-PR project, whose PRs are raised without the pipeline by design"
         ],
+        "zero_checks_ok": "",
         "head": "bb73f233e0c0d1a4a0f3d3a2f6d0b4c8e1a2b3c4",
         "pr_state": "OPEN",
         "superseded": null
@@ -564,6 +568,7 @@ Guarantees the renderer is entitled to rely on:
   For the branch's first run its start is the dispatch time `bin/fm-spawned-at-lib.sh` reads; for Run #N with N of two or more it is the moment Run #N-1 last wrote its record, its `updated_at`, so the earlier runs' time is never counted again.
   Its end is the run's own `created_at` from the run index, or - when there is no run - the moment the PR was recorded, described under "A task with no run still ends its building phase" below.
   It reports `completed` with that interval once either end exists, `running` with an `active_steps` entry while neither does, and `unknown` when no record yields a start - never `pending`, which would claim the worker has not begun.
+  A recorded PR with no run ends the phase even when no interval can be measured from it - no readable start, or a record dated no later than dispatch - and the step then reports `completed` with a `duration_ms` of `null`, because the PR is what ends the phase and the record's time only measures it.
   It reports `running` AGAIN, from the run's `updated_at` until now, when the branch's latest run ended `failed` or `cancelled` and the task's endpoint still resolves: that run handed the branch back (`branch_sync.state: custody_returned`), so the worker is in its own phase once more, and the run's steps keep their own statuses beside it.
   A gone worker builds nothing and keeps the completed interval.
   Its `active_for` is empty because that string is the tool's own humanising of a step it owns; `active_ms`, which is the only elapsed the renderer reads, is computed from the two epochs directly.
@@ -596,6 +601,8 @@ Guarantees the renderer is entitled to rely on:
   The key being ABSENT is a different fact and makes no claim either way: it comes from a document whose collector never asked the question, and the renderer then falls through to the checks rather than reporting a read that never happened as a failed one.
   The collector always writes the key, so only a hand-written document can carry an absent one: `bin/fm-flow-snapshot.sh` has exactly two constructors of the `ci` object, and `CI_EMPTY` bakes in `pr_state:""` for every unread reason while `ci_json` passes it explicitly.
   See "A merged or closed PR is not the captain's decision" below for what is drawn from it.
+- `ci.zero_checks_ok` names the authority that makes a PR reporting nothing that verified it - no checks at all, or only the excused one - absent CI by decision: `no PR CI` for the project's `data/no-pr-ci/<project>` marker, `CI waived` for this task's signed CI skip, and empty for neither.
+  They are the two authorities `bin/fm-pr-merge.sh`'s zero-checks gate accepts, asked in its order through the same owners (`fm_signed_ci_skip` for the signature), so a bare `ci_skip=on` line is never one; it is resolved only for such a PR, and `CI_EMPTY` carries it empty.
 - A task's PR reaches this document from `bin/fm-fleet-snapshot.sh`, which resolves it from the `pr=` in the task's own `state/<id>.meta` and from nothing else, and every cell of a row reads that one value - including the end of the `building` phase, which asks the resolved link rather than re-reading the record itself.
   A crewmate's status log is not a source: it is free prose, so grepping it for a PR link answered with the FIRST link it contained, which on a task that opens several PRs in sequence is the one that has already landed.
 - `ci.superseded` is `null` when the checks describe the head that will land, or the question was not asked - under `--no-ci`, with no run, with a run that has ended or not yet completed its `rebase`, or for a gone worker.
@@ -834,7 +841,9 @@ The pre-merge cell and the header's ready-to-merge count both read it, so a row 
 | present and empty, with every check green | `not read`, in the unknown colour | no | the collector looked and got nothing back, and an empty cell reads as "not reached", which is a different claim from "nobody could find out whether this is still open" |
 | absent, with every check green | amber `your word` | yes | no claim either way, from a document whose collector never asked, so the checks decide as they always did |
 | `OPEN`, with every check green on the head that will land | amber `your word` | yes | the only state that is a decision |
-| anything, with checks that are not a pass | empty, `pending` | no | unchanged |
+| `OPEN`, with no checks and a `ci.zero_checks_ok` authority | amber `your word` | yes | the merge gate takes it on that authority, so it is a decision like any green PR; seen 2026-11-24 on PR 139, a direct-PR task pushed with `[skip ci]` under a signed CI skip, drawn with an empty pre-merge cell while it was open |
+| a recorded PR whose checks were not read (`--no-ci`, or a failed read) | `not read`, in the unknown colour | no | nobody knows whether it is still open, and an empty cell would claim it was not reached |
+| anything, with checks that are not a pass | empty, `pending` | no | unchanged; the CI cell beside it states that wait |
 
 The PR's own lifecycle is asked FIRST, so a merged or closed PR carrying a red check still reports what happened to it rather than a verdict about checks nobody is acting on.
 The `GITHUB CI` cell beside it is unchanged in every case: the checks it reports are the checks that ran, and what moved is only whether anyone is being asked about them.
@@ -853,7 +862,9 @@ The captain's ruling, recorded here as the contract:
 | checks still running on the head that will land | white, with the runner | `N/N running` | unchanged, and it now holds whether or not one has already failed - see the section below |
 | every check passed on the head that will land | green - `PAINT.passed`, the runner band's own centre token | `N/N passed` | the colour is the verdict and nothing else |
 | passed, or running, on a head the live run will replace | yellow | the sentences below | never bright green, so nobody is tempted to merge a head that will not land |
-| not read, no PR, nothing ran | unchanged | | |
+| a recorded PR reporting no checks, or only the excused one, with a `ci.zero_checks_ok` authority | the skipped colour | `no checks` or `nothing ran`, with the authority beneath | absent by decision, which the merge gate accepts, so neither the unknown colour nor "not reached" |
+| the same with no authority | the unknown colour | `no checks` or `nothing ran` | the merge gate refuses it, so nothing is offered |
+| not read, no PR | unchanged | | |
 
 The tally line's parenthetical follows the same rule as the counts above it.
 `no PR` is a claim, and it is made only when the row knows: a task's PR reaches it either from firstmate's own record or from the pipeline run's own `pr:` field, so when the run could not be read at all neither has answered and the line says `PR unknown: could not read this task's pipeline`.

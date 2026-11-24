@@ -46,14 +46,14 @@ cat >"$TMP_ROOT/drive.py" <<'PY'
 """Run the viewer on a pty, send keys, return what reached the screen.
 
 argv: <snapshot-file> <tui> <marker-dir> <keys> -- <extra tui args...>
-`keys` is a comma-separated list of right/enter/quit.
+`keys` is a comma-separated list of right/left/down/enter/quit/refresh.
 """
 import os, pty, select, sys, time
 
 snap, tui, markers, keys = sys.argv[1:5]
 extra = sys.argv[6:] if len(sys.argv) > 5 else []
 KEY = {"right": b"\x1b[C", "left": b"\x1b[D", "down": b"\x1b[B",
-       "enter": b"\r", "quit": b"q"}
+       "enter": b"\r", "quit": b"q", "refresh": b"R"}
 
 pid, fd = pty.fork()
 if pid == 0:
@@ -276,3 +276,25 @@ assert_contains "$plain" "captain driving directly in the window" \
 assert_contains "$plain" "waiting on action from upstream" \
   "the upstream wait was swallowed by the captain-driving marker"
 pass "a row the captain is driving AND that is waiting on upstream shows both, because both are true"
+
+# --- a refresh key pressed while a refresh is running is not dropped ---------
+#
+# Refreshes never overlap, and the viewer used to drop a key that arrived during
+# one. That collector started before the key, so its document can predate what
+# the captain pressed refresh to see: on 2026-11-24 PR 139's record could land a
+# second after a refresh began and the key would bring back the frame without
+# it. A key during a refresh now earns exactly one follow-up run.
+#
+# The collector here counts its own runs and takes a second each, so the second
+# key below lands while the first run is still going. The marker appears only
+# when a second run starts, and the interval is far longer than the drive.
+RSNAP=$(snapshot "[$(ship gamma "$(jq -n --arg u "$PR_URL" '{url:$u,number:126}')")]")
+RDIR="$TMP_ROOT/refresh-runs"
+M="$TMP_ROOT/m8"
+mkdir -p "$RDIR"
+# shellcheck disable=SC2016
+RCMD=$(printf 'n=$(cat %s/count 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > %s/count; [ "$n" -lt 2 ] || : > %s/second; sleep 1; cat %s' \
+  "$RDIR" "$RDIR" "$M" "$RSNAP")
+out=$(drive "$RSNAP" "refresh,refresh" "$M" --refresh-cmd "$RCMD" --refresh-ms 600000)
+[ -f "$M/second" ] || fail "a refresh key pressed during a running refresh was dropped"
+pass "a refresh key pressed during a running refresh earns one follow-up refresh"
