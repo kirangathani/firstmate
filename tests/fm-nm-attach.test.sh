@@ -42,6 +42,8 @@ NM_STALL_FIXTURES="$ROOT/tests/fixtures/nm-stall"
 # The branch the four on-branch fixtures were captured on, so a case that serves
 # them has to be that task for the wrapper's own branch guard to accept them.
 FIXTURE_TASK=eln-drop-variables-w7
+MONITOR_TASK=add-davids-ideas-to-eln-2
+MONITOR_RUN=01M87EGJ1NM8Y488TV02342E9T
 
 # --- case builder -----------------------------------------------------------
 #
@@ -81,11 +83,17 @@ EOF
 printf '%s\n' "\$*" >> "$dir/invocations"
 if [ "\${1:-}" = axi ] && [ "\${2:-}" = status ]; then
   [ -n "$fixture" ] && cat "$fixture"
-  exit 0
+  exit "\$(cat "$dir/status.rc")"
 fi
+case "\${2:-}" in
+  run|respond) [ ! -f "$dir/\$2.stdout" ] || cat "$dir/\$2.stdout" ;;
+  *) exit 2 ;;
+esac
+[ ! -f "$dir/drive.stderr" ] || cat "$dir/drive.stderr" >&2
 sleep $sleep_secs
 exit $attach_rc
 EOF
+  echo 0 > "$dir/status.rc"
   chmod +x "$dir/bin/no-mistakes"
   printf '%s\n' "$dir"
 }
@@ -288,18 +296,127 @@ test_a_failed_run_replaces_the_key_with_a_blocker() {
   pass "attach: a failed run replaces the keyed decision with a blocker carrying the error"
 }
 
+test_monitoring_return() {
+  local mode dir line raw expected_lines capture failed=0
+  local -a args
+  for mode in run respond; do
+    args=()
+    expected_lines=1
+    if [ "$mode" = respond ]; then
+      args=(--respond --step document --action approve)
+      expected_lines=2
+    fi
+    dir=$(make_case "monitor-$mode" "$MONITOR_TASK" "$FIXTURES/axi-status-ci-monitoring.toon")
+    cp "$FIXTURES/axi-drive-checks-passed.toon" "$dir/$mode.stdout"
+    run_attach "$dir" "$MONITOR_TASK" "${args[@]}" >/dev/null || fail "attach refused in $mode"
+    await_status "$dir" "$MONITOR_TASK" 15 "$expected_lines" || fail "no return for $mode"
+    raw=$(status_raw_of "$dir" "$MONITOR_TASK")
+    printf '# axi %s\n%s\n' "$mode" "$raw"
+    [ "$(wc -l < "$dir/home/state/$MONITOR_TASK.status")" -eq "$expected_lines" ] || failed=1
+    while IFS= read -r line; do
+      [ -n "$(status_line_epoch "$line")" ] || failed=1
+    done <<< "$raw"
+    if [ "$mode" = respond ]; then
+      line=$(status_line_body "${raw%%$'\n'*}")
+      [[ "$line" = "resolved [key=nm-run]: responded to the gate for $MONITOR_TASK;"* ]] || failed=1
+    fi
+    for capture in "$dir"/tmp/nm-attach-*; do
+      cmp -s "$capture/drive.stdout" "$dir/$mode.stdout" || fail "$mode stdout was lost or mixed with status"
+      cmp -s "$capture/status.stdout" "$FIXTURES/axi-status-ci-monitoring.toon" || fail "$mode status capture differs"
+      [ "$(cat "$capture/drive.rc")" = 0 ] || fail "$mode lost the drive exit status"
+      grep -q 'attach returned rc=0' "$capture"/*.log || fail "$mode lost the logged exit status"
+    done
+    line=$(status_line_body "${raw##*$'\n'}")
+    [ "$line" = "resolved [key=nm-run]: run $MONITOR_RUN checks-passed" ] || failed=1
+  done
+  [ "$failed" = 0 ] || fail "a checks-passed drive on the monitored head must resolve exactly once at return"
+  pass "attach: run and respond each report the verified drive outcome once while CI monitors the open PR"
+}
+
+# Change one observation in the captured pair per case. The parked and failed
+# records use the existing fixture's fields on the incident run identity.
+test_monitoring_counterexamples() {
+  local label dir drive status line expected drive_rc drive_edit status_edit
+  for label in short-status short-drive both-short remote-advanced superseded-head superseded-run other-branch missing-branch \
+    malformed-head duplicate-id duplicate-outcome malformed-outcome nested stderr stale-log missing-drive drive-error \
+    no-status status-error parked failed; do
+    status="$TMP_ROOT/$label.toon"
+    cp "$FIXTURES/axi-status-ci-monitoring.toon" "$status"
+    drive_rc=0
+    [ "$label" != drive-error ] || drive_rc=1
+    dir=$(make_case "pair-$label" "$MONITOR_TASK" "$status" 0 "$drive_rc")
+    drive="$dir/run.stdout"
+    cp "$FIXTURES/axi-drive-checks-passed.toon" "$drive"
+    expected='blocked [key=nm-run]:'
+    drive_edit=""
+    status_edit=""
+    case "$label" in
+      short-status|short-drive|both-short)
+        if [ "$label" != short-drive ]; then status_edit='/^  head_sha:/d'; fi
+        if [ "$label" != short-status ]; then drive_edit='/^  head_sha:/d'; fi
+        if [ "$label" != both-short ]; then expected="resolved [key=nm-run]: run $MONITOR_RUN checks-passed"; fi ;;
+      remote-advanced) printf 'branch_sync:\n  state: remote_advanced\n' >> "$status" ;;
+      # The newer full SHA deliberately shares all eight display digits.
+      superseded-head) status_edit='s/94c870d9/94c870da/' ;;
+      superseded-run) status_edit="s/$MONITOR_RUN/01KZRQJJ2JX66ECFBTNPKPSKGH/" ;;
+      other-branch) drive_edit="s|fm/$MONITOR_TASK|fm/$FIXTURE_TASK|" ;;
+      missing-branch) status_edit='/^  branch:/d' ;;
+      malformed-head) drive_edit='s/^  head: .*/  head: dd/' ;;
+      duplicate-id) status_edit='/^  id:/p' ;;
+      duplicate-outcome) drive_edit='/^outcome:/p' ;;
+      malformed-outcome) drive_edit='s/^outcome: /outcome:/' ;;
+      nested) drive_edit='s/^outcome:/  outcome:/' ;;
+      stderr) mv "$drive" "$dir/drive.stderr" ;;
+      stale-log) mv "$drive" "$dir/tmp/nm-attach-previous.log" ;;
+      missing-drive) : > "$drive" ;;
+      drive-error) ;; # the stub returns a nonzero exit with otherwise valid stdout
+      no-status) : > "$status"
+        expected='blocked [key=nm-daemon]:' ;;
+      status-error) echo 1 > "$dir/status.rc"
+        expected='blocked [key=nm-daemon]:' ;;
+      parked|failed)
+        sed -e "s/$FIXTURE_TASK/$MONITOR_TASK/g" -e "s/01KZRQJJ2JX66ECFBTNPKPSKGH/$MONITOR_RUN/g" \
+          -e 's/a316b52d/dd73c639/g' "$FIXTURES/axi-status-$label.toon" > "$status"
+        if [ "$label" = parked ]; then
+          expected="needs-decision [key=nm-run]: run $MONITOR_RUN parked at review"
+        else
+          expected="blocked [key=nm-run]: run $MONITOR_RUN failed: step review failed"
+        fi ;;
+    esac
+    if [ -n "$drive_edit" ]; then
+      sed "$drive_edit" "$FIXTURES/axi-drive-checks-passed.toon" > "$drive"
+    fi
+    if [ -n "$status_edit" ]; then
+      sed "$status_edit" "$FIXTURES/axi-status-ci-monitoring.toon" > "$status"
+    fi
+    run_attach "$dir" "$MONITOR_TASK" >/dev/null || fail "attach refused for $label"
+    await_status "$dir" "$MONITOR_TASK" 15 || fail "no classification for $label"
+    line=$(status_of "$dir" "$MONITOR_TASK")
+    [[ "$line" = "$expected"* && "$line" != *$'\n'* ]] || fail "$label expected $expected, got $line"
+  done
+  pass "attach: matches full and abbreviated heads and rejects ambiguous, stale or superseded drive evidence"
+}
+
 test_an_elapsed_wait_is_a_declared_pause() {
-  local line
-  # The real capture of a run still live on its ci step: the shape an elapsed
-  # --wait returns on. This must NOT escalate - the daemon is still working.
-  line=$(classify_case elapsed "$NM_STALL_FIXTURES/axi-status-ci-wedged.toon" 1)
+  local line dir elapsed started
+  # Model a 1s deadline with a further second spent returning the result.
+  # emitAxiWaitElapsed at ed1a908 supplies the exact stdout error and exit 1.
+  dir=$(make_case elapsed "$FIXTURE_TASK" "$NM_STALL_FIXTURES/axi-status-ci-wedged.toon" 2 1)
+  echo 'error: wait of 1s elapsed while driving the run' > "$dir/run.stdout"
+  started=$(date +%s)
+  FM_NM_ATTACH_WAIT=1s run_attach "$dir" "$FIXTURE_TASK" >/dev/null || fail "elapsed attach refused"
+  await_status "$dir" "$FIXTURE_TASK" 15 || fail "no elapsed classification"
+  line=$(status_of "$dir" "$FIXTURE_TASK")
   [ "$(printf '%s\n' "$line" | wc -l)" = 1 ] || fail "more than one line: $line"
   case "$line" in
     "paused [key=nm-run]: "*) ;;
     *) fail "an elapsed wait on a live run must be a declared pause, got: $line" ;;
   esac
   assert_contains "$line" 'still running at ci' "the line did not name the status and the live step"
-  assert_contains "$line" 'after 3h' "the line did not say how long the hold waited"
+  [[ "$line" =~ after\ ([0-9]+)s\ \(wait\ limit\ 1s\) ]] || fail "missing elapsed time and bound: $line"
+  elapsed=${BASH_REMATCH[1]}
+  (( elapsed >= 2 && elapsed <= $(date +%s) - started )) || fail "reported time outside measured hold: $line"
+  printf '# timeout: %s\n' "$line"
   assert_contains "$line" 'reattach' "the line did not say what to do next"
   pass "attach: an elapsed wait on a live run is a declared pause naming the step"
 }
@@ -714,6 +831,8 @@ test_the_transport_denies_on_the_grok_payload() {
   pass "gate: denies through the grok stdin transport"
 }
 
+test_monitoring_return
+test_monitoring_counterexamples
 test_every_appended_line_is_stamped
 test_scripts_are_shellcheck_clean() {
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }

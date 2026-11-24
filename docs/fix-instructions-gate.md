@@ -228,7 +228,7 @@ Three guarantees are what make it worth having, and none of them is an instructi
 2. **It always uses a multi-hour wait.**
    `FM_NM_ATTACH_WAIT` defaults to `3h`, comfortably past a 25-35 minute run, so the hold returns on a real event rather than on the clock.
 3. **The hold's return becomes a wake, not a thing to notice.**
-   The same detached process re-reads `no-mistakes axi status` and appends exactly one line to `state/<task-id>.status`, so the run's next event reaches firstmate even if the worker is idle, compacted, or gone.
+   The same detached process compares the drive result with a fresh `no-mistakes axi status` and appends exactly one line to `state/<task-id>.status`, so the run's next event reaches firstmate even if the worker is idle, compacted, or gone.
 
 Verified 2026-09-15 against `no-mistakes version v1.70.1`:
 
@@ -248,9 +248,9 @@ Every line carries the same `[key=nm-run]` token, because a task has at most one
 | Situation | Line | Why that verb |
 | --- | --- | --- |
 | parked at a gate | `needs-decision [key=nm-run]: run <id> parked at <step> (<gate-status>) - respond through ...` | captain-relevant, and it OPENS the keyed decision so a park cannot rot silently |
-| run passed | `resolved [key=nm-run]: run <id> <passed\|checks-passed>` | CLOSES the key, since nothing is owed at the gate. Not captain-relevant by verb, which is correct: the watcher then asks `bin/fm-crew-state.sh` whether the crew is provably working, and a finished run is not, so the wake surfaces on the real state rather than on a hardcoded word |
+| run passed, or checks passed on the head still under CI monitoring | `resolved [key=nm-run]: run <id> <passed\|checks-passed>` | CLOSES the key, since nothing is owed at the gate. Not captain-relevant by verb, which is correct: the watcher then asks `bin/fm-crew-state.sh` whether the crew is provably working, and a finished run is not, so the wake surfaces on the real state rather than on a hardcoded word |
 | run failed or cancelled | `blocked [key=nm-run]: run <id> <outcome>: <error>` | captain-relevant, and `blocked` REPLACES the record under the same key: what firstmate owes moved from answering the gate to dealing with a dead run, which is one open decision, not two |
-| `--wait` elapsed, run still live | `paused [key=nm-run]: run <id> still <status> at <step> after <wait>; reattach with ...` | the library's exact declared-external-wait case: expected to clear on its own, so an idle pane is not escalated as a possible wedge |
+| `--wait` elapsed, run still live | `paused [key=nm-run]: run <id> still <status> at <step> after <elapsed>s (wait limit <wait>); reattach with ...` | the library's exact declared-external-wait case: expected to clear on its own, so an idle pane is not escalated as a possible wedge |
 | daemon did not answer | `blocked [key=nm-daemon]: daemon unreachable while attached to run <id>` | its own key, because a dead daemon is not this run's gate |
 | no run for this branch | `blocked [key=nm-run]: no run exists for fm/<id> after attaching (rc=<n>)` | the attach started nothing, and nothing will clear on its own |
 
