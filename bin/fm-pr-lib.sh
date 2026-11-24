@@ -149,8 +149,10 @@ fm_pr_url_parse() {
 # exactly rather than any link in the prose.
 fm_pr_reported_url() {
   local url
-  url=$(grep -oE 'done: PR https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*' "${1-}" 2>/dev/null | tail -1) || url=
-  printf '%s' "${url#done: PR }"
+  [ -r "${1-}" ] || return 0
+  url=$(sed -nE 's/^[[:space:]]*(\[t=[0-9]+\][[:space:]]*)?done:[[:space:]]+PR[[:space:]]+([^[:space:]]+).*/\2/p' "$1" | tail -1)
+  url=${url%[.,;]}  # Sentence punctuation after a URL is not part of it.
+  if fm_pr_url_parse "$url"; then printf '%s' "$url"; fi
 }
 
 # fm_pr_remote_parse <raw>: the sole GIT REMOTE ADDRESS parser, for what

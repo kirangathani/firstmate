@@ -347,7 +347,7 @@ toon_field() {  # <axi-status-output> <key>
     }'
 }
 
-CI_EMPTY='{"collection":{"ok":false,"reason":""},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"excused":0,"excused_authority":[],"zero_checks_ok":"","head":"","head_ref":"","created_epoch":0,"pr_state":"","superseded":null}'
+CI_EMPTY='{"collection":{"ok":false,"reason":""},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"excused":0,"excused_authority":[],"zero_checks_ok":"","head":"","head_ref":"","head_repo":"","created_epoch":0,"pr_state":"","superseded":null}'
 ci_unread() {  # <reason>
   printf '%s' "$CI_EMPTY" | jq --arg r "$1" '.collection.reason = $r'
 }
@@ -383,11 +383,9 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
   # amber asking for a decision the captain had already made and the header
   # counted it ready to merge - seen 2026-09-16 on PR 92, merged the night
   # before. A green check tally is not evidence that anything is still open.
-  # headRefName and createdAt ride it as well, for one caller: a PR the worker
-  # REPORTED but nothing has recorded yet is drawn only once this same read
-  # shows it is this task's own (verify_reported_pr below), so the
-  # verification costs no second call.
-  raw=$(run_bounded "$GH_TIMEOUT" gh pr view "$num" --repo "$owner/$repo" --json statusCheckRollup,headRefOid,headRefName,createdAt,state 2>/dev/null) || raw=
+  # A worker-reported PR needs its head repository, branch and creation time
+  # in the same response so verify_reported_pr can check ownership in one read.
+  raw=$(run_bounded "$GH_TIMEOUT" gh pr view "$num" --repo "$owner/$repo" --json statusCheckRollup,headRefOid,headRefName,headRepository,headRepositoryOwner,createdAt,state 2>/dev/null) || raw=
   if [ -z "$raw" ]; then
     ci_unread "gh read failed or timed out"
     return
@@ -493,9 +491,12 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
     fi
   fi
 
-  local head pr_state head_ref created_epoch
+  local head pr_state head_ref head_repo created_epoch
   head=$(printf '%s' "$raw" | jq -r '.headRefOid // ""' 2>/dev/null) || head=
   head_ref=$(printf '%s' "$raw" | jq -r '.headRefName // ""' 2>/dev/null) || head_ref=
+  head_repo=$(printf '%s' "$raw" | jq -r '.headRepository.nameWithOwner
+    // (if (.headRepositoryOwner.login // "") != "" and (.headRepository.name // "") != ""
+        then "\(.headRepositoryOwner.login)/\(.headRepository.name)" else "" end)' 2>/dev/null) || head_repo=
   created_epoch=$(printf '%s' "$raw" | jq -r '(.createdAt // "") | (fromdateiso8601? // 0)' 2>/dev/null) || created_epoch=0
   case "$created_epoch" in ''|*[!0-9]*) created_epoch=0 ;; esac
   # Empty when GitHub did not report it, which the renderer treats as a state it
@@ -507,6 +508,7 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
     --arg pr_state "$pr_state" \
     --arg zero_ok "$zero_ok" \
     --arg head_ref "$head_ref" \
+    --arg head_repo "$head_repo" \
     --argjson created_epoch "$created_epoch" \
     --argjson excuse "$excuse" \
     --argjson authority "$authority" '
@@ -525,6 +527,7 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
         zero_checks_ok: $zero_ok,
         head: $head,
         head_ref: $head_ref,
+        head_repo: $head_repo,
         created_epoch: $created_epoch,
         pr_state: $pr_state,
         superseded: null
@@ -549,15 +552,19 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
 #   - the link parses as a pull request link;
 #   - it is in the repository this task's own copy names as origin, decided
 #     both ways - an origin that is not GitHub verifies nothing;
-#   - GitHub reports its head branch as this task's own, fm/<id>;
+#   - GitHub reports its head branch as this task's own, fm/<id>, AND its head
+#     REPOSITORY as that same origin, so a fork's same-named branch - a PR from
+#     somebody else's copy of the repository - is never this task's;
 #   - GitHub reports it opened no earlier than this task was dispatched, so an
 #     older PR from an earlier task of the same id is never drawn as this one's;
-#   - its head commit is one this task's copy already holds, so it carries this
-#     task's work rather than some other push to the same branch name.
+#   - its head commit is ON this task's own branch: the local fm/<id> tip, or
+#     an ancestor of it, which also holds when the task has committed locally
+#     past what it pushed. Merely being in the object store proves nothing,
+#     because every worktree of a project shares one store.
 # Sets FM_REPORTED_CI on success and FM_REPORTED_WHY, the plain reason, on
 # failure. Under --no-ci it is never called: nothing is read from the network.
 verify_reported_pr() {  # <url> <task-id> <meta> <worktree>
-  local url=$1 id=$2 meta=$3 wt=$4 owner repo origin since ci ref created head
+  local url=$1 id=$2 meta=$3 wt=$4 owner repo origin since ci ref created head head_repo branch
   FM_REPORTED_CI=
   FM_REPORTED_WHY=
   if ! fm_pr_url_parse "$url"; then
@@ -572,16 +579,25 @@ verify_reported_pr() {  # <url> <task-id> <meta> <worktree>
     FM_REPORTED_WHY="this task's copy names no GitHub origin to match it against"
     return 1
   fi
-  if [ "$(fm_pr_github_slug_fold "$owner" "$repo")" \
-       != "$(fm_pr_github_slug_fold "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO")" ]; then
+  # Folded once, here: the GitHub read below runs other parsers, and this
+  # identity must not depend on what they leave behind in shared globals.
+  local origin_slug
+  origin_slug=$(fm_pr_github_slug_fold "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO")
+  if [ "$(fm_pr_github_slug_fold "$owner" "$repo")" != "$origin_slug" ]; then
     FM_REPORTED_WHY="it is in $owner/$repo, not this task's repository"
     return 1
   fi
-  since=$(fm_spawned_at "$STATE_DIR" "$id")
-  if [ -z "$since" ]; then
-    FM_REPORTED_WHY="this task's dispatch time is unknown"
+  branch=$(git -C "$wt" symbolic-ref --quiet HEAD 2>/dev/null || true)
+  if [ "$branch" != "refs/heads/fm/$id" ]; then
+    FM_REPORTED_WHY="the worktree is not on this task's branch fm/$id"
     return 1
   fi
+  # The display can estimate a duration from file times. A reused status log's
+  # age cannot establish which dispatch a PR belongs to.
+  since=$(fm_meta_get "$meta" spawned_at)
+  case "$since" in
+    ''|*[!0-9]*|0) FM_REPORTED_WHY="this task's dispatch time is unknown"; return 1 ;;
+  esac
   ci=$(ci_json "$url" "$id" "$meta")
   if [ "$(printf '%s' "$ci" | jq -r '.collection.ok')" != true ]; then
     FM_REPORTED_WHY="GitHub $(printf '%s' "$ci" | jq -r '.collection.reason')"
@@ -590,16 +606,21 @@ verify_reported_pr() {  # <url> <task-id> <meta> <worktree>
   ref=$(printf '%s' "$ci" | jq -r '.head_ref // ""')
   created=$(printf '%s' "$ci" | jq -r '.created_epoch // 0')
   head=$(printf '%s' "$ci" | jq -r '.head // ""')
+  head_repo=$(printf '%s' "$ci" | jq -r '.head_repo // ""')
   if [ "$ref" != "fm/$id" ]; then
     FM_REPORTED_WHY="its branch is ${ref:-not stated}, not fm/$id"
+    return 1
+  fi
+  if [ -z "$head_repo" ] || [ "$(fm_pr_github_slug_fold "${head_repo%%/*}" "${head_repo#*/}")" != "$origin_slug" ]; then
+    FM_REPORTED_WHY="its branch lives in ${head_repo:-an unstated repository}, not this task's"
     return 1
   fi
   if [ "${created:-0}" -lt "$since" ]; then
     FM_REPORTED_WHY="it was opened before this task was dispatched"
     return 1
   fi
-  if ! fm_pr_head_valid "$head" || ! git -C "$wt" cat-file -e "$head^{commit}" 2>/dev/null; then
-    FM_REPORTED_WHY="its head commit is not in this task's copy"
+  if ! fm_pr_head_valid "$head" || ! git -C "$wt" merge-base --is-ancestor "$head" "$branch" 2>/dev/null; then
+    FM_REPORTED_WHY="its head commit is not on this task's branch fm/$id"
     return 1
   fi
   FM_REPORTED_CI=$ci
