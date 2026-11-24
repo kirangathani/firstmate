@@ -139,6 +139,20 @@ fm_pr_url_parse() {
   FM_PR_NUMBER=$number
 }
 
+# fm_pr_reported_url <status-file>: the PR link a worker's LAST `done: PR <url>`
+# line names, printed, or nothing. The one reading of that line, shared by
+# bin/fm-watch.sh, which hands it to bin/fm-pr-check.sh to record, and by
+# bin/fm-flow-snapshot.sh, which may draw it only once GitHub verifies it
+# belongs to the task. It is a HINT about which PR to ask after, never the
+# recorded fact: the last line rather than the first, because a task opening
+# several PRs in sequence names the newest last, and the shape is matched
+# exactly rather than any link in the prose.
+fm_pr_reported_url() {
+  local url
+  url=$(grep -oE 'done: PR https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*' "${1-}" 2>/dev/null | tail -1) || url=
+  printf '%s' "${url#done: PR }"
+}
+
 # fm_pr_remote_parse <raw>: the sole GIT REMOTE ADDRESS parser, for what
 # `git remote get-url` prints. It accepts the scp-style git@host:owner/repo, the
 # ssh:// and https:// forms, an optional embedded credential, an optional port,

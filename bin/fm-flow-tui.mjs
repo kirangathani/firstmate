@@ -715,6 +715,13 @@ function skipOverride(agent, spec) {
     // as a marker rather than a stage of its own. It belongs here because it is
     // this box's own aftermath, and a column would have said the row grew a
     // stage the pipeline does not have.
+    //
+    // A PR the worker REPORTED that nothing could verify is neither: the
+    // collector carries it as `pr.reported` only when GitHub could not confirm
+    // it is this task's own, so the box says it was reported and not confirmed.
+    if (!agent.pr?.url && agent.pr?.reported) {
+      return { state: "unknown", timer: "reported", timer2: "unverified" };
+    }
     return {
       state: agent.pr?.url ? "done" : "pending",
       timer: "by hand",
@@ -769,7 +776,9 @@ function stepBox(agent, spec, anim) {
   else if (state === "live") timer = "running";
   else if (state === "done") timer = dur(st?.duration_ms);
   else if (state === "skipped") timer = "skipped";
-  else if (state === "unknown") timer = st ? "stale" : "?";
+  // A building phase the collector cannot call ended or not, because the
+  // worker reported a PR nothing could verify, is a question, not a stale run.
+  else if (state === "unknown") timer = st && !(spec.key === "building" && reportedOnly(agent)) ? "stale" : "?";
 
   // The second line says how long the word above it has been true. It is drawn
   // only for the two states that used to carry no time at all: a step that is
@@ -1049,6 +1058,8 @@ export function ciTally(agent) {
   // something that may be false.
   const why = agent.pr?.url
     ? `not read: ${ci?.collection?.reason || "no reason recorded"}`
+    : reportedOnly(agent)
+      ? `PR reported, not verified: ${agent.pr.reported.unverified || "no reason recorded"}`
     : agent.collection?.ok === false
       ? "PR unknown: could not read this task's pipeline"
       : "no PR";
@@ -1150,8 +1161,14 @@ function premergeBox(agent) {
 // with no PR recorded reads as a dash, never as empty space.
 export function prLabel(agent) {
   const n = agent?.pr?.number;
-  return n === null || n === undefined || n === "" ? "-" : `#${n}`;
+  if (n === null || n === undefined || n === "") return reportedOnly(agent) ? "?" : "-";
+  return `#${n}`;
 }
+
+// A PR the worker reported that the collector could not verify as this task's
+// own, and so is not this row's PR. Every cell that would otherwise say "no PR"
+// says "reported, not verified" instead, because both claims would be false.
+export const reportedOnly = (agent) => !agent?.pr?.url && !!agent?.pr?.reported?.url;
 
 const DEFAULT_OPEN_HINT = "enter: open this worker's window";
 const DEFAULT_OPEN_PR_HINT = "enter: open this PR in your browser";
@@ -1173,7 +1190,11 @@ export const opensPR = (agent, cell) => hasPipeline(agent) && isPRCell(cell);
 
 export function enterHint(agent, cell, hints = {}) {
   if (!opensPR(agent, cell)) return hints.window || DEFAULT_OPEN_HINT;
-  if (!agent?.pr?.url) return "enter: no PR recorded for this task yet";
+  if (!agent?.pr?.url) {
+    return reportedOnly(agent)
+      ? "enter: a PR was reported but is not verified yet"
+      : "enter: no PR recorded for this task yet";
+  }
   return hints.pr || DEFAULT_OPEN_PR_HINT;
 }
 
