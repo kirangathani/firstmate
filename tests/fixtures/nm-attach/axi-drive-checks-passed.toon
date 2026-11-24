@@ -1,0 +1,23 @@
+run:
+  id: "01M87EGJ1NM8Y488TV02342E9T"
+  branch: fm/add-davids-ideas-to-eln-2
+  status: running
+  head: dd73c639
+  head_sha: dd73c639fb44782e765d9013bf1156ca94c870d9
+  verification_plan: none
+  pr: "https://github.com/kirangathani/eln/pull/111"
+  findings: "1 awaiting, 3 info"
+  live_evidence: "agent: live-evidence agent drove scenarios in this run"
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,285
+    rebase,completed,0,5268
+    review,completed,2,2099550
+    test,completed,0,1466108
+    document,completed,2,335926
+    lint,completed,0,40591
+    push,completed,0,11277
+    pr,completed,0,68639
+    ci,running,0,0
+  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
+    ci,running,5m24s,5m24s,"0s ago: log: all CI checks passed - still monitoring until merged or closed","",starting
+outcome: checks-passed

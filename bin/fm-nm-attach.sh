@@ -72,7 +72,7 @@
 #       The run stopped and will not move until somebody responds. Captain-
 #       relevant, and it OPENS the keyed decision so it cannot rot silently.
 #   resolved [key=nm-run]: run <id> <passed|checks-passed>
-#       The run finished cleanly, so nothing is owed at the gate: `resolved`
+#       The run passed or its PR is ready for fm-pr-green.sh verification: `resolved`
 #       CLOSES the key. Not captain-relevant by verb, which is correct rather
 #       than a downgrade - the watcher then asks bin/fm-crew-state.sh whether the
 #       crew is provably working, and a finished run is not, so the wake
@@ -81,7 +81,7 @@
 #       Captain-relevant, and `blocked` REPLACES the record under the same key:
 #       what firstmate owes moved from "answer the gate" to "deal with the dead
 #       run", which is one open decision, not two.
-#   paused [key=nm-run]: run <id> still <status> at <step> after <wait>; reattach
+#   paused [key=nm-run]: run <id> still <status> at <step> after <elapsed>s (wait limit <wait>); reattach
 #       `--wait` elapsed with the run still live. That is the library's exact
 #       declared-external-wait case: expected to clear on its own, so the idle
 #       pane must not be escalated as a possible wedge.
@@ -190,7 +190,8 @@ esac
 if [ "$1" = --follow-internal ]; then
   shift
   ID=$1; STATE_DIR=$2; MARKER=$3; WAIT=$4; RESPOND=$5
-  shift 5
+  CAPTURE=$6
+  shift 6
 
   STATUS_FILE="$STATE_DIR/$ID.status"
   say() { printf '%s\n' "$*"; }
@@ -223,111 +224,41 @@ if [ "$1" = --follow-internal ]; then
   }
   trap on_follower_exit EXIT
 
-  # The hold. Never `--yes`; the caller already refused it, and it is not added
-  # back here.
-  ATTACH_RC=0
+  # Keep each command's stdout separate from stderr/progress and from every
+  # other attach. tee preserves the existing live diagnostic log. A failed tee
+  # triggers the EXIT trap; the CLI's own exit status comes from PIPESTATUS.
+  set +o pipefail
   if [ "$RESPOND" = respond ]; then
     shift
     say "attaching: no-mistakes axi respond $* --wait $WAIT"
-    no-mistakes axi respond "$@" --wait "$WAIT" || ATTACH_RC=$?
+    drive=(respond "$@")
   else
     say "attaching: no-mistakes axi run --intent <pinned> --wait $WAIT"
-    no-mistakes axi run --intent "$1" --wait "$WAIT" || ATTACH_RC=$?
+    drive=(run --intent "$1")
   fi
-  say "attach returned rc=$ATTACH_RC at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  SECONDS=0
+  no-mistakes axi "${drive[@]}" --wait "$WAIT" | tee "$CAPTURE/drive.stdout"
+  ATTACH_RC=${PIPESTATUS[0]} ELAPSED=$SECONDS
+  printf '%s\n' "$ATTACH_RC" > "$CAPTURE/drive.rc"
+  say "attach returned rc=$ATTACH_RC at $(date -u +%Y-%m-%dT%H:%M:%SZ) (elapsed ${ELAPSED}s, wait limit $WAIT)"
 
-  # Classify from the run record, not from the attach's own prose: the record is
-  # what the daemon actually holds, and an elapsed wait prints an `error:` line
-  # that is not a failure at all.
-  STATUS_RC=0
-  RUN_OUT=$(no-mistakes axi status 2>&1) || STATUS_RC=$?
   say '--- axi status ---'
-  say "$RUN_OUT"
-
-  field() { printf '%s\n' "$RUN_OUT" | sed -n "s/^[[:space:]]*$1:[[:space:]]*\(.*\)/\1/p" | head -1; }
-  unquote() {
-    local s=$1
-    s=${s#"${s%%[![:space:]]*}"}; s=${s%"${s##*[![:space:]]}"}
-    case "$s" in \"*\") s=${s#\"}; s=${s%\"} ;; esac
-    printf '%s' "$s"
-  }
-
-  RUN_ID=$(unquote "$(field id)")
-  RUN_STATUS=$(unquote "$(field status)")
-  OUTCOME=$(unquote "$(field outcome)")
-  RUN_ERROR=$(unquote "$(field error)")
-  RUN_BRANCH=$(unquote "$(field branch)")
-  [ -n "$RUN_ID" ] || RUN_ID=unknown
-
-  # `axi status` answers with THIS task's run under the key `run:`, and with
-  # another branch's run under `other_branch_run:` (v1.70.1:internal/cli/
-  # axi_query.go lines 84-88 pick the key, and add a leading `current_branch:`
-  # only in that foreign case). Both bodies carry the same `id:`/`status:`
-  # fields, so a record whose own `branch:` is not ours is discarded rather than
-  # reported as this task's run - reporting it would attribute another task's
-  # failure to this one.
-  if [ -n "$RUN_BRANCH" ] && [ "$RUN_BRANCH" != "fm/$ID" ]; then
-    say "discarding a record for $RUN_BRANCH; this task's branch is fm/$ID"
-    RUN_ID=unknown
-    RUN_STATUS=""
-    OUTCOME=""
-  fi
-
-  # steps[] rows are `<step>,<status>,<findings>,<duration_ms>` (verified against
-  # the installed CLI; tests/fixtures/nm-attach/ holds the captured records).
-  # step_in reports the first row whose status is one of the listed states.
-  step_in() {  # <state>...
-    local states=$1 state
-    shift
-    for state in "$@"; do states="$states\\|$state"; done
-    printf '%s\n' "$RUN_OUT" \
-      | sed -n "s/^[[:space:]]*\([A-Za-z][A-Za-z0-9_-]*\),[[:space:]]*\"\{0,1\}\($states\)\"\{0,1\}[[:space:]]*,.*/\1 \2/p" \
-      | head -1
-  }
-
-  GATE_ROW=$(step_in awaiting_approval fix_review)
-  GATE_STEP=${GATE_ROW%% *}
-  GATE_STATUS=${GATE_ROW##* }
-  if [ -z "$GATE_ROW" ] && { [ "$RUN_STATUS" = awaiting_approval ] || [ "$RUN_STATUS" = fix_review ]; }; then
-    # A record with no step table still names its gate in the scalar status.
-    GATE_STEP=$RUN_STATUS
-    GATE_STATUS=$RUN_STATUS
-  fi
-
-  ACTIVE_ROW=$(step_in running fixing ci awaiting_approval fix_review)
-  ACTIVE_STEP=${ACTIVE_ROW%% *}
-  [ -n "$ACTIVE_STEP" ] || ACTIVE_STEP=$RUN_STATUS
-  [ -n "$ACTIVE_STEP" ] || ACTIVE_STEP=unknown
-
-  # A daemon that did not answer at all is its own blocker: a non-zero exit, or a
-  # body carrying none of the four keys every `axi status` record opens with.
-  # Deliberately NOT "an empty run body", which a healthy running run can print
-  # (bin/fm-nm-db-lib.sh's header records that measurement), and deliberately not
-  # keyed on `current_branch:` alone, which an on-branch record does not carry.
-  if [ "$STATUS_RC" -ne 0 ] \
-    || ! printf '%s\n' "$RUN_OUT" | grep -qE '^[[:space:]]*(current_branch:|run:|other_branch_run:|runs\[)'; then
-    note "blocked [key=nm-daemon]: daemon unreachable while attached to run $RUN_ID"
-  elif [ "$RUN_ID" = unknown ]; then
-    # The daemon answered but holds no run for this branch, so the attach never
-    # started one. Blocked rather than paused: nothing is going to clear on its own.
-    note "blocked [key=nm-run]: no run exists for fm/$ID after attaching (rc=$ATTACH_RC); see the attach log"
-  elif [ -n "$OUTCOME" ]; then
-    case "$OUTCOME" in
-      passed|checks-passed) note "resolved [key=nm-run]: run $RUN_ID $OUTCOME" ;;
-      *) note "blocked [key=nm-run]: run $RUN_ID $OUTCOME: $RUN_ERROR" ;;
-    esac
-  elif [ -n "$GATE_STEP" ]; then
-    note "needs-decision [key=nm-run]: run $RUN_ID parked at $GATE_STEP ($GATE_STATUS) - respond through $SCRIPT_DIR/fm-nm-attach.sh $ID --respond"
-  else
-    case "$RUN_STATUS" in
-      # `completed` reaches here only from a record that carries no `outcome:` -
-      # the daemon-database rendering never writes one (bin/fm-nm-db-lib.sh) -
-      # and a finished run must not read as an external wait.
-      completed) note "resolved [key=nm-run]: run $RUN_ID completed" ;;
-      failed|cancelled) note "blocked [key=nm-run]: run $RUN_ID $RUN_STATUS: $RUN_ERROR" ;;
-      *) note "paused [key=nm-run]: run $RUN_ID still ${RUN_STATUS:-active} at $ACTIVE_STEP after $WAIT; reattach with $SCRIPT_DIR/fm-nm-attach.sh $ID" ;;
-    esac
-  fi
+  no-mistakes axi status | tee "$CAPTURE/status.stdout"
+  STATUS_RC=${PIPESTATUS[0]}
+  printf '%s\n' "$STATUS_RC" > "$CAPTURE/status.rc"
+  observation=$(awk -v task="$ID" -v drive_rc="$ATTACH_RC" -v status_rc="$STATUS_RC" \
+    -f "$SCRIPT_DIR/fm-nm-attach-result.awk" "$CAPTURE/drive.stdout" "$CAPTURE/status.stdout")
+  read -r event run value detail <<< "$observation"
+  case "$event" in
+    daemon) note "blocked [key=nm-daemon]: daemon unreachable while attached to run $run" ;;
+    absent) note "blocked [key=nm-run]: no run exists for fm/$ID after attaching (rc=$ATTACH_RC); see the attach log" ;;
+    ambiguous) note "blocked [key=nm-run]: ambiguous run status for fm/$ID; see the attach log" ;;
+    failed) note "blocked [key=nm-run]: run $run $value: $detail" ;;
+    gate) note "needs-decision [key=nm-run]: run $run parked at $value ($detail) - respond through $SCRIPT_DIR/fm-nm-attach.sh $ID --respond" ;;
+    passed) note "resolved [key=nm-run]: run $run $value" ;;
+    elapsed) note "paused [key=nm-run]: run $run still $value at $detail after ${ELAPSED}s (wait limit $WAIT); reattach with $SCRIPT_DIR/fm-nm-attach.sh $ID" ;;
+    *) note "blocked [key=nm-run]: no confirmed attach outcome for fm/$ID (rc=$ATTACH_RC, elapsed ${ELAPSED}s, wait limit $WAIT); see the attach log" ;;
+  esac
 
   say "classified; the EXIT trap clears the marker"
   exit 0
@@ -442,7 +373,8 @@ if [ -L "$TASK_TMP" ] || { [ -e "$TASK_TMP" ] && [ ! -O "$TASK_TMP" ]; }; then
   die "refusing to write this attach's log under $TASK_TMP: it is a symlink or is owned by another user"
 fi
 mkdir -p "$TASK_TMP"
-LOG="$TASK_TMP/nm-attach-$(date +%s).log"
+CAPTURE=$(mktemp -d "$TASK_TMP/nm-attach-XXXXXXXX")
+LOG="$CAPTURE/nm-attach-$(date +%s).log"
 
 # Sending the response is what answers a parked gate, so the keyed decision the
 # previous attach opened is closed here rather than when this hold returns - see
@@ -467,10 +399,10 @@ fi
 # so the ordinary case is unaffected; this is stated rather than engineered
 # around because the fleet this defends runs on Linux.
 if command -v setsid >/dev/null 2>&1; then
-  setsid "$0" --follow-internal "$ID" "$STATE" "$MARKER" "$WAIT" "$RESPOND" \
+  setsid "$0" --follow-internal "$ID" "$STATE" "$MARKER" "$WAIT" "$RESPOND" "$CAPTURE" \
     "${INTENT:-}" "$@" </dev/null >>"$LOG" 2>&1 &
 else
-  nohup "$0" --follow-internal "$ID" "$STATE" "$MARKER" "$WAIT" "$RESPOND" \
+  nohup "$0" --follow-internal "$ID" "$STATE" "$MARKER" "$WAIT" "$RESPOND" "$CAPTURE" \
     "${INTENT:-}" "$@" </dev/null >>"$LOG" 2>&1 &
 fi
 FOLLOWER_PID=$!
