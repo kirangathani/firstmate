@@ -1707,7 +1707,7 @@ export function render(snap, opts) {
         // cell, so this line says only that there are two rather than spelling
         // out cell names a row's own hint states more precisely.
         "up/down agent   left/right stage   enter open worker or PR   " +
-          "r refresh   q quit",
+          "r/R refresh   q quit",
       ),
   );
   if (flash) out.push(yellow(flash));
@@ -1892,7 +1892,7 @@ const KEY = {
   left: new Set(["h", "\x1b[D", "\x1bOD"]),
   quit: new Set(["q", "\x03", "\x04"]),
   open: new Set(["\r", "\n"]),
-  refresh: new Set(["r"]),
+  refresh: new Set(["r", "R"]),
   first: new Set(["g", "\x1b[H"]),
   last: new Set(["G", "\x1b[F"]),
 };

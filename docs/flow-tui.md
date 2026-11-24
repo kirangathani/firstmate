@@ -211,6 +211,8 @@ So the collector asks, per task, whether the recorded endpoint still resolves.
 
 The question is not answered here.
 `fm_backend_target_exists` in `bin/fm-backend.sh` already owns it for the whole fleet, `bin/fm-fleet-snapshot.sh` already calls it and publishes the answer as `endpoint.exists`, and this collector consumes that field.
+The collector reads that field from `bin/fm-fleet-snapshot.sh --flow-tasks-json`, a projection of only the task fields this view consumes, resolved by the same code as `--json` but without its per-record crew-state, status, and backlog reads.
+On a 21-record fleet those reads were about 90% of a refresh, and a scratch prototype of the projection took the collector from 7.9-11.0 s to 1.3-1.9 s (scout report `fm-flow-reload-latency`, 2026-11-24).
 A second implementation of "is this worker alive" is exactly the kind of thing that ends with two parts of firstmate disagreeing about the same window.
 
 The split, in one line: liveness filtering belongs to the view, and cleaning up leftover records does not.

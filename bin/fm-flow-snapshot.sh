@@ -13,7 +13,10 @@
 #
 # It layers over bin/fm-fleet-snapshot.sh, which stays the single owner of
 # fleet state, and adds two things that view does not carry: the named pipeline
-# step each agent is on, and its GitHub check rollup.
+# step each agent is on, and its GitHub check rollup. It reads that owner's
+# --flow-tasks-json projection rather than the full --json document, because
+# the full document's per-record crew-state and backlog reads cost about 90% of
+# a refresh and this view reads none of them.
 #
 # An agent in this document is a task with a LIVE worker behind it - EVERY live
 # worker, whatever its kind. A `state/<id>.meta` outlives the window it names -
@@ -65,8 +68,9 @@
 #                                 (default $HOME/.no-mistakes/state.sqlite).
 #                                 Tests point this at a fixture database.
 #   FM_FLOW_SNAPSHOT_FLEET_JSON   consume this file instead of running
-#                                 bin/fm-fleet-snapshot.sh. Tests use it to feed
-#                                 a recorded fleet document.
+#                                 bin/fm-fleet-snapshot.sh --flow-tasks-json.
+#                                 Tests use it to feed a recorded fleet
+#                                 document; a full --json document also works.
 #   FM_FLOW_SNAPSHOT_TRANSCRIPT_ROOT  override the Claude Code transcript root
 #                                 (default $HOME/.claude/projects), which is
 #                                 where the agents the pipeline launches record
@@ -100,7 +104,7 @@ ONLY_TASK=
 INCLUDE_DEAD=0
 
 usage() {
-  sed -n '2,82p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,86p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -1280,7 +1284,7 @@ if [ -n "${FM_FLOW_SNAPSHOT_FLEET_JSON:-}" ]; then
 else
   FLEET=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
-      "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>/dev/null
+      "$SCRIPT_DIR/fm-fleet-snapshot.sh" --flow-tasks-json 2>/dev/null
   ) || FLEET=
 fi
 
