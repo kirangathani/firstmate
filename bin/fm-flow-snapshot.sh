@@ -347,7 +347,7 @@ toon_field() {  # <axi-status-output> <key>
     }'
 }
 
-CI_EMPTY='{"collection":{"ok":false,"reason":""},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"excused":0,"excused_authority":[],"zero_checks_ok":"","head":"","pr_state":"","superseded":null}'
+CI_EMPTY='{"collection":{"ok":false,"reason":""},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"excused":0,"excused_authority":[],"zero_checks_ok":"","head":"","head_ref":"","head_repo":"","created_epoch":0,"pr_state":"","superseded":null}'
 ci_unread() {  # <reason>
   printf '%s' "$CI_EMPTY" | jq --arg r "$1" '.collection.reason = $r'
 }
@@ -383,7 +383,9 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
   # amber asking for a decision the captain had already made and the header
   # counted it ready to merge - seen 2026-09-16 on PR 92, merged the night
   # before. A green check tally is not evidence that anything is still open.
-  raw=$(run_bounded "$GH_TIMEOUT" gh pr view "$num" --repo "$owner/$repo" --json statusCheckRollup,headRefOid,state 2>/dev/null) || raw=
+  # A worker-reported PR needs its head repository, branch and creation time
+  # in the same response so verify_reported_pr can check ownership in one read.
+  raw=$(run_bounded "$GH_TIMEOUT" gh pr view "$num" --repo "$owner/$repo" --json statusCheckRollup,headRefOid,headRefName,headRepository,headRepositoryOwner,createdAt,state 2>/dev/null) || raw=
   if [ -z "$raw" ]; then
     ci_unread "gh read failed or timed out"
     return
@@ -489,8 +491,14 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
     fi
   fi
 
-  local head pr_state
+  local head pr_state head_ref head_repo created_epoch
   head=$(printf '%s' "$raw" | jq -r '.headRefOid // ""' 2>/dev/null) || head=
+  head_ref=$(printf '%s' "$raw" | jq -r '.headRefName // ""' 2>/dev/null) || head_ref=
+  head_repo=$(printf '%s' "$raw" | jq -r '.headRepository.nameWithOwner
+    // (if (.headRepositoryOwner.login // "") != "" and (.headRepository.name // "") != ""
+        then "\(.headRepositoryOwner.login)/\(.headRepository.name)" else "" end)' 2>/dev/null) || head_repo=
+  created_epoch=$(printf '%s' "$raw" | jq -r '(.createdAt // "") | (fromdateiso8601? // 0)' 2>/dev/null) || created_epoch=0
+  case "$created_epoch" in ''|*[!0-9]*) created_epoch=0 ;; esac
   # Empty when GitHub did not report it, which the renderer treats as a state it
   # could not read rather than as an open PR.
   pr_state=$(printf '%s' "$raw" | jq -r '.state // ""' 2>/dev/null) || pr_state=
@@ -499,6 +507,9 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
     --arg head "$head" \
     --arg pr_state "$pr_state" \
     --arg zero_ok "$zero_ok" \
+    --arg head_ref "$head_ref" \
+    --arg head_repo "$head_repo" \
+    --argjson created_epoch "$created_epoch" \
     --argjson excuse "$excuse" \
     --argjson authority "$authority" '
     map(if $excuse and .verdict == "failed" and .name == $attest
@@ -515,9 +526,104 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
         excused_authority: $authority,
         zero_checks_ok: $zero_ok,
         head: $head,
+        head_ref: $head_ref,
+        head_repo: $head_repo,
+        created_epoch: $created_epoch,
         pr_state: $pr_state,
         superseded: null
       }'
+}
+
+# Whether a PR the worker REPORTED, but that nothing has recorded yet, is this
+# task's own - and if so its CI document, from the same single read.
+#
+# The open-window case, seen 2026-11-24 on PR 139: the worker wrote
+# `done: PR <url>` at 20:20:41, the watcher that turns that line into the
+# recorded `pr=` (bin/fm-watch.sh -> bin/fm-pr-check.sh) never processed it,
+# and the record was first written at 20:23:56, after the 20:23:19 merge. The
+# row drew `building running` and push+PR not done for the whole of the time
+# the PR was open. bin/fm-pr-check.sh stays the ONE writer of the record and
+# nothing here writes; this only decides what a fresh frame may DRAW while the
+# record lags.
+#
+# The status line is a hint about which PR to ask after, read through its one
+# owner (fm_pr_reported_url), never evidence. GitHub is the evidence, and every
+# test below must pass or the PR stays unverified and is drawn as such:
+#   - the link parses as a pull request link;
+#   - it is in the repository this task's own copy names as origin, decided
+#     both ways - an origin that is not GitHub verifies nothing;
+#   - GitHub reports its head branch as this task's own, fm/<id>, AND its head
+#     REPOSITORY as that same origin, so a fork's same-named branch - a PR from
+#     somebody else's copy of the repository - is never this task's;
+#   - GitHub reports it opened no earlier than this task was dispatched, so an
+#     older PR from an earlier task of the same id is never drawn as this one's;
+#   - its head commit is ON this task's own branch: the local fm/<id> tip, or
+#     an ancestor of it, which also holds when the task has committed locally
+#     past what it pushed. Merely being in the object store proves nothing,
+#     because every worktree of a project shares one store.
+# Sets FM_REPORTED_CI on success and FM_REPORTED_WHY, the plain reason, on
+# failure. Under --no-ci it is never called: nothing is read from the network.
+verify_reported_pr() {  # <url> <task-id> <meta> <worktree>
+  local url=$1 id=$2 meta=$3 wt=$4 owner repo origin since ci ref created head head_repo branch
+  FM_REPORTED_CI=
+  FM_REPORTED_WHY=
+  if ! fm_pr_url_parse "$url"; then
+    FM_REPORTED_WHY="not a pull request link"
+    return 1
+  fi
+  owner=$FM_PR_OWNER
+  repo=$FM_PR_REPO
+  origin=
+  [ -z "$wt" ] || [ ! -d "$wt" ] || origin=$(git -C "$wt" remote get-url origin 2>/dev/null || true)
+  if [ -z "$origin" ] || ! fm_pr_remote_parse "$origin"; then
+    FM_REPORTED_WHY="this task's copy names no GitHub origin to match it against"
+    return 1
+  fi
+  # Folded once, here: the GitHub read below runs other parsers, and this
+  # identity must not depend on what they leave behind in shared globals.
+  local origin_slug
+  origin_slug=$(fm_pr_github_slug_fold "$FM_PR_REMOTE_OWNER" "$FM_PR_REMOTE_REPO")
+  if [ "$(fm_pr_github_slug_fold "$owner" "$repo")" != "$origin_slug" ]; then
+    FM_REPORTED_WHY="it is in $owner/$repo, not this task's repository"
+    return 1
+  fi
+  branch=$(git -C "$wt" symbolic-ref --quiet HEAD 2>/dev/null || true)
+  if [ "$branch" != "refs/heads/fm/$id" ]; then
+    FM_REPORTED_WHY="the worktree is not on this task's branch fm/$id"
+    return 1
+  fi
+  # The display can estimate a duration from file times. A reused status log's
+  # age cannot establish which dispatch a PR belongs to.
+  since=$(fm_meta_get "$meta" spawned_at)
+  case "$since" in
+    ''|*[!0-9]*|0) FM_REPORTED_WHY="this task's dispatch time is unknown"; return 1 ;;
+  esac
+  ci=$(ci_json "$url" "$id" "$meta")
+  if [ "$(printf '%s' "$ci" | jq -r '.collection.ok')" != true ]; then
+    FM_REPORTED_WHY="GitHub $(printf '%s' "$ci" | jq -r '.collection.reason')"
+    return 1
+  fi
+  ref=$(printf '%s' "$ci" | jq -r '.head_ref // ""')
+  created=$(printf '%s' "$ci" | jq -r '.created_epoch // 0')
+  head=$(printf '%s' "$ci" | jq -r '.head // ""')
+  head_repo=$(printf '%s' "$ci" | jq -r '.head_repo // ""')
+  if [ "$ref" != "fm/$id" ]; then
+    FM_REPORTED_WHY="its branch is ${ref:-not stated}, not fm/$id"
+    return 1
+  fi
+  if [ -z "$head_repo" ] || [ "$(fm_pr_github_slug_fold "${head_repo%%/*}" "${head_repo#*/}")" != "$origin_slug" ]; then
+    FM_REPORTED_WHY="its branch lives in ${head_repo:-an unstated repository}, not this task's"
+    return 1
+  fi
+  if [ "${created:-0}" -lt "$since" ]; then
+    FM_REPORTED_WHY="it was opened before this task was dispatched"
+    return 1
+  fi
+  if ! fm_pr_head_valid "$head" || ! git -C "$wt" merge-base --is-ancestor "$head" "$branch" 2>/dev/null; then
+    FM_REPORTED_WHY="its head commit is not on this task's branch fm/$id"
+    return 1
+  fi
+  FM_REPORTED_CI=$ci
 }
 
 # Whether the checks GitHub reports for `ci_head` describe a head that the live
@@ -978,6 +1084,29 @@ agent_json() {  # <task-json>
     fi
   fi
 
+  # Where this row's PR comes from: the record (or the run's own `pr:` field),
+  # GitHub after verifying the worker's report, or nowhere. A report that could
+  # not be verified - under --no-ci, or failing any test above - is carried as
+  # `pr.reported` with its reason and is never this row's PR.
+  local pr_source='' pr_created=0 ci_pre='' reported='' reported_why=''
+  [ -z "$pr_url" ] || pr_source=record
+  if [ -z "$pr_url" ]; then
+    reported=$(fm_pr_reported_url "$STATE_DIR/$id.status")
+    if [ -n "$reported" ]; then
+      if [ "$WANT_CI" != 1 ]; then
+        reported_why="GitHub is not read with --no-ci"
+      elif verify_reported_pr "$reported" "$id" "$meta" "$worktree"; then
+        pr_url=$reported
+        pr_source=github
+        ci_pre=$FM_REPORTED_CI
+        pr_created=$(printf '%s' "$ci_pre" | jq -r '.created_epoch // 0')
+        reported=
+      else
+        reported_why=$FM_REPORTED_WHY
+      fi
+    fi
+  fi
+
   # The worker's own implementation phase, which no pipeline record describes
   # because it happens before the pipeline exists. Both ends are machine
   # records: it starts at the dispatch time bin/fm-spawned-at-lib.sh reads, and
@@ -1022,7 +1151,14 @@ agent_json() {  # <task-json>
   local pr_at='' pr_delivered=0
   if [ "${run_created:-0}" -le 0 ] && [ -n "$pr_url" ]; then
     pr_delivered=1
-    pr_at=$(pr_recorded_at "$meta")
+    # A PR verified on GitHub has no record to date it, and GitHub's own
+    # opening time is exact; it is only ever read on the CI-bearing refresh,
+    # which is the only refresh that can verify it at all.
+    if [ "$pr_source" = github ]; then
+      pr_at=$pr_created
+    else
+      pr_at=$(pr_recorded_at "$meta")
+    fi
     if [ -n "$pr_at" ] && [ -n "$built_at" ] && [ "$pr_at" -gt "$built_at" ]; then
       build_end=$pr_at
     else
@@ -1051,6 +1187,10 @@ agent_json() {  # <task-json>
     build_active="{\"step\":\"building\",\"status\":\"running\",\"active_for\":\"\",\"active_ms\":$since,\"last_activity\":\"\",\"agent_pid\":\"\",\"round\":\"\"}"
   elif [ "$pr_delivered" = 1 ] && [ "$build_end" -le 0 ]; then
     build_step='{"step":"building","status":"completed","findings":0,"duration_ms":null}'
+  elif [ -n "$reported" ] && [ "${run_created:-0}" -le 0 ]; then
+    # The worker says it delivered and nothing could confirm it, so whether the
+    # phase has ended is not known: neither `running` nor done.
+    build_step='{"step":"building","status":"unknown","findings":0,"duration_ms":0}'
   elif [ -z "$built_at" ]; then
     build_step='{"step":"building","status":"unknown","findings":0,"duration_ms":0}'
   elif [ "$build_end" -gt 0 ]; then
@@ -1102,7 +1242,7 @@ agent_json() {  # <task-json>
 
   ci=$(ci_unread "skipped")
   if [ "$WANT_CI" = 1 ] && [ -n "$pr_url" ]; then
-    ci=$(ci_json "$pr_url" "$id" "$meta")
+    if [ -n "$ci_pre" ]; then ci=$ci_pre; else ci=$(ci_json "$pr_url" "$id" "$meta"); fi
     # Checks on a head the live run will replace. Claimed only on the evidence
     # for it: a GitHub head that was read and differs from the run's own, a run
     # still going on a worker still there, and a rebase step already completed -
@@ -1140,6 +1280,9 @@ agent_json() {  # <task-json>
     --arg kind "$kind" \
     --arg mode "$mode" \
     --arg pr_url "$pr_url" \
+    --arg pr_source "$pr_source" \
+    --arg reported "$reported" \
+    --arg reported_why "$reported_why" \
     --arg run_id "$run_id" \
     --arg run_status "$run_status" \
     --arg waiting_on "$waiting_on" \
@@ -1185,7 +1328,9 @@ agent_json() {  # <task-json>
         model:(if $w_model == "" then null else $w_model end),
         effort:(if $w_effort == "" then null else $w_effort end)
       },
-      pr:{url:(if $pr_url == "" then null else $pr_url end), number:$pr_num},
+      pr:{url:(if $pr_url == "" then null else $pr_url end), number:$pr_num,
+          source:(if $pr_source == "" then null else $pr_source end),
+          reported:(if $reported == "" then null else {url:$reported, unverified:$reported_why} end)},
       collection:{ok:$collect_ok, reason:$collect_reason, source:$collect_source,
                   at:$now_iso, epoch:$now_epoch},
       run:{

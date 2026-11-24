@@ -603,8 +603,12 @@ Guarantees the renderer is entitled to rely on:
   See "A merged or closed PR is not the captain's decision" below for what is drawn from it.
 - `ci.zero_checks_ok` names the authority that makes a PR reporting nothing that verified it - no checks at all, or only the excused one - absent CI by decision: `no PR CI` for the project's `data/no-pr-ci/<project>` marker, `CI waived` for this task's signed CI skip, and empty for neither.
   They are the two authorities `bin/fm-pr-merge.sh`'s zero-checks gate accepts, asked in its order through the same owners (`fm_signed_ci_skip` for the signature), so a bare `ci_skip=on` line is never one; it is resolved only for such a PR, and `CI_EMPTY` carries it empty.
-- A task's PR reaches this document from `bin/fm-fleet-snapshot.sh`, which resolves it from the `pr=` in the task's own `state/<id>.meta` and from nothing else, and every cell of a row reads that one value - including the end of the `building` phase, which asks the resolved link rather than re-reading the record itself.
-  A crewmate's status log is not a source: it is free prose, so grepping it for a PR link answered with the FIRST link it contained, which on a task that opens several PRs in sequence is the one that has already landed.
+- `pr.source` is `record` for a PR in the task metadata or pipeline run, and `github` when the snapshot independently verified a delivery report.
+  When both records lack a URL, the latest structured `done: PR <url>` report identifies a candidate for the bounded GitHub check.
+  The snapshot checks the head repository, branch, creation time and commit ancestry against the task's origin, checkout and recorded `spawned_at`.
+  An unverified candidate stays in `pr.reported` with its reason while `pr.url` and `pr.number` stay null.
+  `--no-ci` skips the GitHub read and shows the report as unverified.
+  The snapshot leaves registration to `bin/fm-pr-check.sh`.
 - `ci.superseded` is `null` when the checks describe the head that will land, or the question was not asked - under `--no-ci`, with no run, with a run that has ended or not yet completed its `rebase`, or for a gone worker.
   Otherwise it is `{ "main_moved": bool, "new_commits": bool, "reason": "" }`: whether the two heads sit on different bases against the default branch, and whether the branch's own content changed, read with `git merge-base` and `git patch-id` in the run's own worktree.
   When that comparison could not be made both booleans are `null` and `reason` says why; the renderer then states only what is certain.
@@ -689,12 +693,11 @@ Under `local_skip` the worker still implements the change by hand, and drawing t
 A `direct-PR` project never enters the pipeline at all, so `run_created` is `0` for every one of its tasks permanently and the end above never arrives.
 The captain saw the consequence on 2026-09-07: `building running 3h54m` on a task whose PR had been open for hours, with every pipeline cell drawn skipped beside it.
 
-The PR is the end of that phase, and `state/<id>.meta` is where the record of it is: `bin/fm-pr-check.sh` rewrites that file whole when it records `pr=`, so once the file names one, its modification time is when the PR was recorded.
-That is the same rewrite the start reading above works around, so the two are two halves of one fact about one file rather than two independent guesses.
-
-It is the record's time rather than GitHub's own `createdAt`.
-GitHub's is exact, but it is only read on the CI-bearing cadence, and a building cell that ended at one time on the slow refresh and at another on the fast one would move on screen for no reason the captain could see.
-A record naming no PR yields nothing and the phase stays open, so nothing is invented.
+A recorded or independently verified PR ends building.
+For a recorded PR the duration uses the modification time of the metadata containing `pr=`.
+For an independently verified report the duration uses GitHub's `createdAt`.
+A delivered PR with no usable interval still ends building.
+An unverified report leaves completion unknown.
 
 What happens after that PR is `rework`: answering review, which on a `direct-PR` project is the whole of the rest of the task's life.
 Ending `building` at the PR without saying so would draw a live worker as a row of finished boxes.

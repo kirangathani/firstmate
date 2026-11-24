@@ -784,9 +784,8 @@ signal_turn_end_is_overdue() {  # <file> ...
 record_reported_pr() {  # <status-file>
   local f=$1 id url meta out
   case "$f" in *.status) ;; *) return 0 ;; esac
-  url=$(grep -oE 'done: PR https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*' "$f" 2>/dev/null | tail -1)
+  url=$(fm_pr_reported_url "$f")
   [ -n "$url" ] || return 0
-  url=${url#done: PR }
   id=$(signal_id_of_file "$f")
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || return 0

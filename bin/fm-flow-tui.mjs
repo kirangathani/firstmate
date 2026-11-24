@@ -715,6 +715,13 @@ function skipOverride(agent, spec) {
     // as a marker rather than a stage of its own. It belongs here because it is
     // this box's own aftermath, and a column would have said the row grew a
     // stage the pipeline does not have.
+    //
+    // A PR the worker REPORTED that nothing could verify is neither: the
+    // collector carries it as `pr.reported` only when GitHub could not confirm
+    // it is this task's own, so the box says it was reported and not confirmed.
+    if (reportedOnly(agent)) {
+      return { state: "unknown", timer: "reported", timer2: "unverified" };
+    }
     return {
       state: agent.pr?.url ? "done" : "pending",
       timer: "by hand",
@@ -769,7 +776,9 @@ function stepBox(agent, spec, anim) {
   else if (state === "live") timer = "running";
   else if (state === "done") timer = dur(st?.duration_ms);
   else if (state === "skipped") timer = "skipped";
-  else if (state === "unknown") timer = st ? "stale" : "?";
+  // A building phase the collector cannot call ended or not, because the
+  // worker reported a PR nothing could verify, is a question, not a stale run.
+  else if (state === "unknown") timer = st && !(spec.key === "building" && reportedOnly(agent)) ? "stale" : "?";
 
   // The second line says how long the word above it has been true. It is drawn
   // only for the two states that used to carry no time at all: a step that is
@@ -830,7 +839,7 @@ function stepBox(agent, spec, anim) {
 // in the line above it.
 export function ciVerdict(agent) {
   const ci = agent.ci;
-  if (!ci || ci.collection?.ok === false) return agent.pr?.url ? "unread" : "none";
+  if (!ci || ci.collection?.ok === false) return agent.pr?.url || reportedOnly(agent) ? "unread" : "none";
   const { total = 0, failed = 0, pending = 0, excused = 0 } = ci;
   // A failure is this cell's VERDICT only once there is nothing left to hear
   // from. While checks on this same head are still running, the run has not
@@ -1041,17 +1050,18 @@ export function ciTally(agent) {
   // nobody looked - which the other branch states in full.
   //
   // "no PR" is a CLAIM, and it is only made from evidence. A task's PR reaches
-  // this row two ways: firstmate's own record of it, and the pipeline run's own
-  // `pr:` field. When that run could not be read at all, neither has answered,
-  // and the honest word is that nobody knows rather than that there is none.
+  // this row from the metadata, a run, or a verified delivery report. An
+  // unverified report or an unreadable run leaves its existence undecided.
   // The captain's 2026-09-15 ruling that these captions be plain English
   // applies to certainty too: say it does not know, rather than assert
   // something that may be false.
   const why = agent.pr?.url
     ? `not read: ${ci?.collection?.reason || "no reason recorded"}`
-    : agent.collection?.ok === false
-      ? "PR unknown: could not read this task's pipeline"
-      : "no PR";
+    : reportedOnly(agent)
+      ? `PR reported, not verified: ${agent.pr.reported.unverified || "no reason recorded"}`
+      : agent.collection?.ok === false
+        ? "PR unknown: could not read this task's pipeline"
+        : "no PR";
   return `CI checks:  ${counts}  (${why})`;
 }
 
@@ -1150,7 +1160,19 @@ function premergeBox(agent) {
 // with no PR recorded reads as a dash, never as empty space.
 export function prLabel(agent) {
   const n = agent?.pr?.number;
-  return n === null || n === undefined || n === "" ? "-" : `#${n}`;
+  if (n === null || n === undefined || n === "") return reportedOnly(agent) ? "?" : "-";
+  return `#${n}`;
+}
+
+// A PR the worker reported that the collector could not verify as this task's
+// own, and so is not this row's PR. Every cell that would otherwise say "no PR"
+// says "reported, not verified" instead, because both claims would be false.
+function reportedOnly(agent) {
+  return !agent?.pr?.url && !!agent?.pr?.reported?.url;
+}
+
+function missingPRMessage(agent) {
+  return reportedOnly(agent) ? "reported PR is unverified" : "no PR recorded for this task yet";
 }
 
 const DEFAULT_OPEN_HINT = "enter: open this worker's window";
@@ -1173,7 +1195,7 @@ export const opensPR = (agent, cell) => hasPipeline(agent) && isPRCell(cell);
 
 export function enterHint(agent, cell, hints = {}) {
   if (!opensPR(agent, cell)) return hints.window || DEFAULT_OPEN_HINT;
-  if (!agent?.pr?.url) return "enter: no PR recorded for this task yet";
+  if (!agent?.pr?.url) return `enter: ${missingPRMessage(agent)}`;
   return hints.pr || DEFAULT_OPEN_PR_HINT;
 }
 
@@ -2165,7 +2187,7 @@ function watch(snap0, cols0, rows0, opts) {
   // when it returns, by the same rule: what the command SAYS it did, never what
   // its exit code implies.
   const openPR = (a) => {
-    if (!a.pr?.url) { setFlash(`${a.id}: no PR recorded for this task yet`); return; }
+    if (!a.pr?.url) { setFlash(`${a.id}: ${missingPRMessage(a)}`); return; }
     if (!opts.openPrCmd) { setFlash(`no PR-open command wired up; the PR is ${a.pr.url}`); return; }
     setFlash(`opening ${a.pr.url}`);
     execFile(
