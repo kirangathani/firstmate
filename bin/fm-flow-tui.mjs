@@ -847,7 +847,10 @@ export function ciVerdict(agent) {
   // cell now says both: it keeps the runner band and the counter, and states
   // the failure in its own words on a row of its own.
   if (failed > 0) return pending > 0 ? "running-failed" : "failed";
-  if (total === 0) return "none";
+  // A rollup that was READ and holds nothing is a recorded PR with no checks,
+  // never "not reached": PR 139 shipped with [skip ci] under a signed CI skip
+  // and the cell drew dim beside a PR that was open (2026-11-24).
+  if (total === 0) return agent.pr?.url ? "no-checks" : "none";
   // An excused check is an authorized RED, not evidence that anything ran, so
   // bin/fm-pr-merge.sh subtracts it before asking whether this PR reported any
   // checks at all - and refuses a PR whose only entries were excused exactly
@@ -967,8 +970,18 @@ function ciBox(agent, anim) {
         model: failing ? PAINT.failed(b.model) : b.model,
       };
     }
+    case "no-checks":
     case "nothing-ran": {
-      const b = box("GITHUB CI", "unknown", CIW, { dashed: true, timer: "nothing ran" });
+      const word = ciVerdict(agent) === "no-checks" ? "no checks" : "nothing ran";
+      // Absent BY DECISION - the collector found one of the merge gate's own
+      // two authorities for an empty rollup - is the skipped colour with that
+      // authority beneath it. Without one the gate refuses, so it stays unknown.
+      const why = zeroChecksOk(agent);
+      if (why) {
+        const b = box("GITHUB CI", "skipped", CIW, { dashed: true, timer: word, timer2: why });
+        return { ...b, timer: PAINT.skipped(b.timer), timer2: PAINT.skipped(b.timer2) };
+      }
+      const b = box("GITHUB CI", "unknown", CIW, { dashed: true, timer: word });
       return { ...b, timer: magenta(b.timer) };
     }
     case "superseded": {
@@ -1074,12 +1087,27 @@ export function ciTally(agent) {
 // both always write the key, `CI_EMPTY` baking in `pr_state:""` for every
 // unread reason and `ci_json` passing it explicitly, so a collected document
 // can never carry an absent one.
+//
+// A recorded PR whose checks were not read at all - `--no-ci`, or a failed
+// read - is also `unknown`: nobody knows whether it is still open, and an empty
+// cell there claimed "not reached" about a PR that existed. A PR whose checks
+// are running, red or superseded stays `pending`, because the CI cell beside it
+// already states that wait.
+// A PR with no checks counts as a pass only on one of the merge gate's own two
+// authorities for an empty rollup (`ci.zero_checks_ok`), never on the bare
+// flag line, so a direct-PR task pushed with [skip ci] under a signed CI skip
+// asks for the captain's word like any green PR.
+export const zeroChecksOk = (agent) =>
+  typeof agent?.ci?.zero_checks_ok === "string" ? agent.ci.zero_checks_ok : "";
+
 export function premergeVerdict(agent) {
   const raw = agent?.ci?.pr_state;
   const state = String(raw ?? "").toUpperCase();
   if (state === "MERGED") return "merged";
   if (state === "CLOSED") return "closed";
-  if (ciVerdict(agent) !== "ready") return "pending";
+  const v = ciVerdict(agent);
+  const clear = v === "ready" || ((v === "no-checks" || v === "nothing-ran") && zeroChecksOk(agent) !== "");
+  if (!clear) return v === "unread" ? "unknown" : "pending";
   if (state === "OPEN") return "ready";
   return raw === undefined || raw === null ? "ready" : "unknown";
 }
@@ -2027,9 +2055,17 @@ function watch(snap0, cols0, rows0, opts) {
   // is handed in whole with --refresh-cmd. bin/fm-flow.sh builds the first
   // snapshot and that command from one array, so the two cannot diverge.
   // Without the flag the view stays honestly static and says so.
+  //
+  // Refreshes never overlap, but a KEYPRESS during one is not dropped: that
+  // collector started before the key, so its document can predate whatever the
+  // captain pressed refresh to see - a PR recorded a second after it began. The
+  // key earns exactly one follow-up run once the current one returns. A timer
+  // tick during one is still dropped, so a slow collector sets the cadence.
   let refreshing = false;
-  const refresh = () => {
-    if (!opts.refreshCmd || refreshing) return;
+  let refreshAgain = false;
+  const refresh = (byKey = false) => {
+    if (!opts.refreshCmd) return;
+    if (refreshing) { if (byKey) refreshAgain = true; return; }
     refreshing = true;
     execFile(
       "/bin/sh",
@@ -2037,6 +2073,7 @@ function watch(snap0, cols0, rows0, opts) {
       { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: 60000, killSignal: "SIGKILL" },
       (err, stdout, stderr) => {
         refreshing = false;
+        if (refreshAgain) { refreshAgain = false; refresh(); }
         if (err) { setFlash(`refresh failed: ${firstLine(stderr) || err.message}`); paint(); return; }
         const { snap: next, error } = parseSnapshot(stdout);
         if (error) { setFlash(`refresh failed: snapshot is ${error}`); paint(); return; }
@@ -2179,7 +2216,7 @@ function watch(snap0, cols0, rows0, opts) {
       else if (KEY.left.has(k)) cell = Math.max(-1, cell - 1);
       else if (KEY.first.has(k)) sel = 0;
       else if (KEY.last.has(k)) sel = Math.max(0, count() - 1);
-      else if (KEY.refresh.has(k)) refresh();
+      else if (KEY.refresh.has(k)) refresh(true);
       else if (KEY.open.has(k)) open();
     }
     paint();

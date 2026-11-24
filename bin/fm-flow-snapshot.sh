@@ -347,7 +347,7 @@ toon_field() {  # <axi-status-output> <key>
     }'
 }
 
-CI_EMPTY='{"collection":{"ok":false,"reason":""},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"excused":0,"excused_authority":[],"head":"","pr_state":"","superseded":null}'
+CI_EMPTY='{"collection":{"ok":false,"reason":""},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"excused":0,"excused_authority":[],"zero_checks_ok":"","head":"","pr_state":"","superseded":null}'
 ci_unread() {  # <reason>
   printf '%s' "$CI_EMPTY" | jq --arg r "$1" '.collection.reason = $r'
 }
@@ -467,6 +467,28 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
     fi
   fi
 
+  # Whether a PR that reports NOTHING that verified it - no checks at all, or
+  # only the excused one - is absent CI by decision rather than broken CI.
+  # bin/fm-pr-merge.sh's zero-checks gate accepts exactly two authorities for
+  # that, and this asks the same two in its order: the captain's per-project
+  # data/no-pr-ci/<project> marker, then this task's signed CI skip through
+  # fm_signed_ci_skip, the owner that gate itself calls - a bare ci_skip=on line
+  # is not one. Paid only for such a PR, so an ordinary PR never runs a signature
+  # check on a refresh timer. The value is the cell's own words, "" for neither.
+  # Seen 2026-11-24 on PR 139: a direct-PR task with a signed CI skip pushed
+  # with [skip ci], so GitHub reported no checks, and the view drew CI as not
+  # reached and pre-merge blank over a PR that was open and mergeable.
+  local zero_ok='' proj
+  if printf '%s' "$norm" | jq -e --argjson excuse "$excuse" --arg n "$FM_ATTESTATION_CHECK_NAME" \
+      'all(.[]; $excuse and .verdict == "failed" and .name == $n)' >/dev/null 2>&1; then
+    proj=$(grep '^project=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    if [ -n "$proj" ] && [ -e "$FM_HOME/data/no-pr-ci/$(basename "$proj")" ]; then
+      zero_ok="no PR CI"
+    elif FM_ATTESTATION_QUIET=1 fm_signed_ci_skip "$id" "$meta" "$CONFIG_DIR/ci-waiver-secret" 2>/dev/null; then
+      zero_ok="CI waived"
+    fi
+  fi
+
   local head pr_state
   head=$(printf '%s' "$raw" | jq -r '.headRefOid // ""' 2>/dev/null) || head=
   # Empty when GitHub did not report it, which the renderer treats as a state it
@@ -476,6 +498,7 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
     --arg attest "$FM_ATTESTATION_CHECK_NAME" \
     --arg head "$head" \
     --arg pr_state "$pr_state" \
+    --arg zero_ok "$zero_ok" \
     --argjson excuse "$excuse" \
     --argjson authority "$authority" '
     map(if $excuse and .verdict == "failed" and .name == $attest
@@ -490,6 +513,7 @@ ci_json() {  # <pr-url> <task-id> <meta-file>
         skipped: (map(select(.verdict == "skipped")) | length),
         excused: (map(select(.verdict == "excused")) | length),
         excused_authority: $authority,
+        zero_checks_ok: $zero_ok,
         head: $head,
         pr_state: $pr_state,
         superseded: null
@@ -989,9 +1013,15 @@ agent_json() {  # <task-json>
   # A task with no pipeline run of its own ends its building phase at the PR.
   # Every `direct-PR` task is in that position permanently, and a no-mistakes
   # task is in it only before its run exists, where there is no PR yet either.
+  # The PR is what ENDS the phase; the record's time only measures it. So a
+  # recorded PR ends it even when that time is unusable - no readable dispatch
+  # time, or a record rewritten no later than dispatch - and the cell then says
+  # done with no duration rather than `running` beside a delivered PR, or
+  # `unknown` about a phase whose end is a fact.
   local build_end=${run_created:-0}
-  local pr_at=''
+  local pr_at='' pr_delivered=0
   if [ "${run_created:-0}" -le 0 ] && [ -n "$pr_url" ]; then
+    pr_delivered=1
     pr_at=$(pr_recorded_at "$meta")
     if [ -n "$pr_at" ] && [ -n "$built_at" ] && [ "$pr_at" -gt "$built_at" ]; then
       build_end=$pr_at
@@ -1019,6 +1049,8 @@ agent_json() {  # <task-json>
     [ "$since" -ge 0 ] || since=0
     build_step='{"step":"building","status":"running","findings":0,"duration_ms":0}'
     build_active="{\"step\":\"building\",\"status\":\"running\",\"active_for\":\"\",\"active_ms\":$since,\"last_activity\":\"\",\"agent_pid\":\"\",\"round\":\"\"}"
+  elif [ "$pr_delivered" = 1 ] && [ "$build_end" -le 0 ]; then
+    build_step='{"step":"building","status":"completed","findings":0,"duration_ms":null}'
   elif [ -z "$built_at" ]; then
     build_step='{"step":"building","status":"unknown","findings":0,"duration_ms":0}'
   elif [ "$build_end" -gt 0 ]; then
