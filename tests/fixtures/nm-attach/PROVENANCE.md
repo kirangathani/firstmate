@@ -45,3 +45,10 @@ Every composed line is instead a byte-exact string the tool's own test suite ass
 
 Neither composed fixture carries a `help[...]:` block.
 The follower never reads one, and copying the tool's help text here would add bytes nothing asserts and that change with every release.
+
+## CI monitoring after checks passed
+
+[F] The 2026-11-24 ELN attach log `nm-attach-1795551164.log` from no-mistakes v1.85.2-11-ged1a908 records `outcome: checks-passed` on line 42 and `attach returned rc=0` on line 47.
+[F] `axi-drive-checks-passed.toon` preserves lines 17-36 and 40-42 of that response.
+[F] `axi-status-ci-monitoring.toon` independently preserves lines 51-70 and 74-75 from the subsequent status read, including `status: running` and `ci,running,0,0`.
+[F] The invocation was `axi respond --step document --action approve --wait 3h` and both drive verbs call `renderDriveResult` (ed1a908, internal/cli/axi_drive.go), so the tests replay the captured drive result through each verb.

@@ -42,6 +42,8 @@ NM_STALL_FIXTURES="$ROOT/tests/fixtures/nm-stall"
 # The branch the four on-branch fixtures were captured on, so a case that serves
 # them has to be that task for the wrapper's own branch guard to accept them.
 FIXTURE_TASK=eln-drop-variables-w7
+MONITOR_TASK=add-davids-ideas-to-eln-2
+MONITOR_RUN=01M87EGJ1NM8Y488TV02342E9T
 
 # --- case builder -----------------------------------------------------------
 #
@@ -81,11 +83,17 @@ EOF
 printf '%s\n' "\$*" >> "$dir/invocations"
 if [ "\${1:-}" = axi ] && [ "\${2:-}" = status ]; then
   [ -n "$fixture" ] && cat "$fixture"
-  exit 0
+  exit \$(cat "$dir/status.rc")
 fi
+case "\${2:-}" in
+  run|respond) [ ! -f "$dir/\$2.stdout" ] || cat "$dir/\$2.stdout" ;;
+  *) exit 2 ;;
+esac
+[ ! -f "$dir/drive.stderr" ] || cat "$dir/drive.stderr" >&2
 sleep $sleep_secs
 exit $attach_rc
 EOF
+  echo 0 > "$dir/status.rc"
   chmod +x "$dir/bin/no-mistakes"
   printf '%s\n' "$dir"
 }
@@ -286,6 +294,37 @@ test_a_failed_run_replaces_the_key_with_a_blocker() {
   assert_contains "$line" 'failed' "the line did not name the outcome"
   assert_contains "$line" 'step review failed' "the line did not carry the run's own error"
   pass "attach: a failed run replaces the keyed decision with a blocker carrying the error"
+}
+
+test_monitoring_return() {
+  local mode dir line raw expected_lines failed=0
+  local -a args
+  for mode in run respond; do
+    args=()
+    expected_lines=1
+    if [ "$mode" = respond ]; then
+      args=(--respond --step document --action approve)
+      expected_lines=2
+    fi
+    dir=$(make_case "monitor-$mode" "$MONITOR_TASK" "$FIXTURES/axi-status-ci-monitoring.toon")
+    cp "$FIXTURES/axi-drive-checks-passed.toon" "$dir/$mode.stdout"
+    run_attach "$dir" "$MONITOR_TASK" "${args[@]}" >/dev/null || fail "attach refused in $mode"
+    await_status "$dir" "$MONITOR_TASK" 15 "$expected_lines" || fail "no return for $mode"
+    raw=$(status_raw_of "$dir" "$MONITOR_TASK")
+    printf '# axi %s\n%s\n' "$mode" "$raw"
+    [ "$(wc -l < "$dir/home/state/$MONITOR_TASK.status")" -eq "$expected_lines" ] || failed=1
+    while IFS= read -r line; do
+      [ -n "$(status_line_epoch "$line")" ] || failed=1
+    done <<< "$raw"
+    if [ "$mode" = respond ]; then
+      line=$(status_line_body "${raw%%$'\n'*}")
+      [[ "$line" = "resolved [key=nm-run]: responded to the gate for $MONITOR_TASK;"* ]] || failed=1
+    fi
+    line=$(status_line_body "${raw##*$'\n'}")
+    [ "$line" = "resolved [key=nm-run]: run $MONITOR_RUN checks-passed" ] || failed=1
+  done
+  [ "$failed" = 0 ] || fail "a checks-passed drive on the monitored head must resolve exactly once at return"
+  pass "attach: run and respond each report the verified drive outcome once while CI monitors the open PR"
 }
 
 test_an_elapsed_wait_is_a_declared_pause() {
@@ -714,6 +753,7 @@ test_the_transport_denies_on_the_grok_payload() {
   pass "gate: denies through the grok stdin transport"
 }
 
+test_monitoring_return
 test_every_appended_line_is_stamped
 test_scripts_are_shellcheck_clean() {
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
