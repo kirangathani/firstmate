@@ -52,8 +52,8 @@
 #                          exact command that resolves it
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
-# A task the captain is driving is skipped by the signal and heartbeat paths
-# entirely (bin/fm-ack-lib.sh's fm_captain_driven), while its stale pane rides
+# A captain-driven task surfaces fresh open blockers through the signal path.
+# Its other signals and its heartbeat are absorbed, while its stale pane rides
 # the bounded re-surface cadence above rather than being skipped outright - the
 # captain's ruling, so that both routes to the verdict behave identically and a
 # task he has forgotten still gets its one recheck a window. Its skipped signals
@@ -118,15 +118,6 @@ fi
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
-# fm-ack-lib.sh owns fm_captain_driven: whether the captain is driving a worker
-# himself, by his own signed record or by sitting in its window. A task that is
-# his is not watched here at all - no signal wake on its status appends, no
-# stale wake on its quiet pane, no heartbeat mention - because a wake firstmate
-# is forbidden to act on is pure cost, and acting on one puts the captain's own
-# worker's question back to the captain (2026-09-17). Sourcing defines functions
-# only, and the predicate is free for a task with no exemption record.
-# shellcheck source=bin/fm-ack-lib.sh
-. "$SCRIPT_DIR/fm-ack-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -618,7 +609,8 @@ scan_signals() {
     [ -e "$f" ] || continue
     sig=$(stat_sig "$f") || continue
     sf="$STATE/.seen-$(basename "$f" | tr '.' '_')"
-    if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then
+    if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ] ||
+        { [[ $f == *.status ]] && [ -s "${f%.status}.captain-blockers" ] && ! afk_present; }; then
       printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
     fi
   done
@@ -684,40 +676,89 @@ signal_payload() {  # <seen-file> <status-file> <current sig>
   fi
 }
 
-# Drop every signal row belonging to a task the captain is driving, advancing
-# that row's suppression marker on the way out, and print the rows that remain.
-#
-# The marker is advanced rather than left alone deliberately. Leaving it would
-# hold every append the captain made while driving, and hand them all back as
-# one wake the moment he stopped - a replay of a conversation he already had.
-# Advancing it means the first ordinary poll after he stops simply reads current
-# state, and the heartbeat backstop remains the safety net for a task he left
-# genuinely needing something.
-#
-# The PR fact is still recorded as the row leaves, because it is the one thing
-# in this path that is about the PR rather than the pane. record_reported_pr is
-# otherwise reached only from the surfaced branch below, so skipping it here
-# would leave a worker the captain drove to a PR with the PREVIOUS PR on record
-# and its merge poll armed for a PR nobody is watching - the exact fault that
-# recorder was written to close - and a PR he merges himself still leaves the
-# clone to refresh.
-absorb_captain_driven_signals() {  # <pending-rows> -> kept rows
-  local rows=$1 sf sig f kept='' absorbed=''
-  while IFS=$(printf '\t') read -r sf sig f; do
-    [ -n "$sf" ] || continue
-    if fm_supervision_suspended "$STATE" "$(signal_id_of_file "$f")"; then
-      printf '%s' "$sig" > "$sf"
-      record_reported_pr "$f"
-      case " $absorbed " in *" $f "*) ;; *) absorbed="$absorbed $f" ;; esac
-    else
-      kept="${kept}${sf}$(printf '\t')${sig}$(printf '\t')${f}
-"
+# Fold the unread bytes through the signature this pass will acknowledge.
+# While away, retain just the open blocker lines: the daemon classifies the
+# last status line and could otherwise relay a later, captain-owned question.
+# Its first normal successor can deliver them even if nobody writes again.
+captain_blockers() {  # <seen-file> <sig> <status-file> <id> <all|deferred-only>
+  local sf=$1 size=${2%%:*} f=$3 id=$4 scope=$5 prev offset unread open key verb report payload
+  local deferred="${3%.status}.captain-blockers" retained='' away=0
+  local LC_ALL=C  # Signatures and substring lengths are byte counts.
+  afk_present && away=1
+  prev=$(cat "$sf" 2>/dev/null || true)
+  offset=${prev%%:*}
+  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
+  [ "$offset" -le "$size" ] || offset=0
+  unread=$(tail -c "+$((offset + 1))" "$f") || return 1
+  unread=${unread:0:size-offset}
+  open=$(set -o pipefail
+    {
+      if [ -s "$deferred" ]; then cat "$deferred" || exit 1; fi
+      printf '%s\n' "$unread"
+    } | status_open_decisions - --reports) || return 1
+  while IFS=$'\t' read -r key verb report; do
+    [ "$verb" = blocked ] || continue
+    # After control returns to ordinary supervision, its normal signal owns
+    # every new line. Only an earlier, still-open deferred request belongs here.
+    if [ "$scope" = deferred-only ]; then
+      case $'\n'"$unread"$'\n' in *$'\n'"$report"$'\n'*) continue ;; esac
     fi
-  done <<FMROWS
-$rows
-FMROWS
+    if [ "$away" = 1 ]; then
+      retained="$retained$report"$'\n'
+      continue
+    fi
+    payload="signal: $id | $report"
+    # The drain coalesces by kind and key. Independent requests from one
+    # worker must survive a single drain, even when queued in separate polls.
+    fm_wake_append signal "$id.status:$key" "$payload" || return 1
+    printf '%s' "$report" > "$(_hb_surfaced_path "$id")"
+    blocker_spoken="$blocker_spoken
+  $payload"
+  done <<< "$open"
+  if [ -n "$retained" ]; then
+    printf '%s' "$retained" > "$deferred.tmp" && mv -f "$deferred.tmp" "$deferred" || return 1
+  elif [ -e "$deferred" ]; then
+    rm -f "$deferred" || return 1
+  fi
+}
+
+# Partition this scan before the ordinary signal path examines whole status
+# files. Queue blockers before advancing their seen offsets. A signed upstream
+# wait or captain pause takes precedence over captain control.
+triage_suspended_signals() {  # <pending-rows> -> pending, blocker_files, blocker_spoken
+  local rows=$1 sf sig f id before suspended absorbed=''
+  pending=''
+  while IFS=$'\t' read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    id=$(signal_id_of_file "$f")
+    suspended=0
+    fm_supervision_suspended "$STATE" "$id" && suspended=1
+    before=${#blocker_spoken}
+    if [[ $f == *.status ]]; then
+      if [[ $FM_SUSPENDED_SOURCE == signed || $FM_SUSPENDED_SOURCE == attached ]] &&
+          ! fm_captain_paused "$STATE" "$id" && ! fm_upstream_waiting "$STATE" "$id"; then
+        captain_blockers "$sf" "$sig" "$f" "$id" all || return 1
+      elif [ -s "${f%.status}.captain-blockers" ]; then
+        if [ "$suspended" = 1 ]; then
+          rm -f "${f%.status}.captain-blockers" || return 1
+        else
+          captain_blockers "$sf" "$sig" "$f" "$id" deferred-only || return 1
+        fi
+      fi
+    fi
+    if [ "$before" -ne "${#blocker_spoken}" ]; then
+      blocker_files="$blocker_files $f"
+    elif [ "$suspended" = 1 ]; then
+      absorbed="$absorbed $f"
+    fi
+    if [ "$suspended" = 1 ]; then
+      printf '%s' "$sig" > "$sf" || return 1
+      record_reported_pr "$f"
+    elif [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then
+      pending="$pending$sf"$'\t'"$sig"$'\t'"$f"$'\n'
+    fi
+  done <<< "$rows"
   [ -z "$absorbed" ] || triage_log "absorbed captain-driven signal(s):$absorbed"
-  printf '%s' "$kept"
 }
 
 # A BARE turn-end: every file that changed in this batch is a turn-end marker, so
@@ -1307,13 +1348,14 @@ while :; do
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  blocker_files=''
+  blocker_spoken=''
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
-    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
-    # Everything the captain is driving leaves here, marker advanced. A batch
-    # that was ALL his ends the signal handling for this cycle without a wake.
-    pending=$(absorb_captain_driven_signals "$pending")
+    # No seen marker has advanced yet. The post-grace scan holds the final
+    # signature for each file, including appends made during the grace period.
+    triage_suspended_signals "$(scan_signals)" || exit 1
   fi
   if [ -n "$pending" ]; then
     files=""
@@ -1365,25 +1407,12 @@ EOF
       # below: once a marker moves to the current size there is no "since the
       # last look" left to read, so a second pass would report every crewmate as
       # having written nothing.
-      # $pending holds the pre-grace scan AND the post-grace rescan concatenated,
-      # so a file that changed once appears in it TWICE. The queue tolerates that
-      # (the drain dedupes on kind+key), but a repeated LINE does not: under a
-      # runner that turns each printed line into a notification, every crewmate's
-      # words would reach the supervisor twice on every wake. So the spoken lines
-      # are deduped by file here, the same way $files is deduped above.
       spoken=
-      spoken_seen=
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         payload=$(signal_payload "$sf" "$f" "$sig")
-        case " $spoken_seen " in
-          *" $f "*) ;;
-          *)
-            spoken_seen="$spoken_seen $f"
-            spoken="$spoken
+        spoken="$spoken
   $payload"
-            ;;
-        esac
         fm_wake_append signal "$(basename "$f")" "$payload" || exit 1
       done <<EOF
 $pending
@@ -1399,7 +1428,7 @@ EOF
       # The reason line keeps its exact existing shape as the FIRST line, because
       # the arm layer classifies a cycle by matching ^signal: on it. The words
       # follow it, indented, as further lines.
-      wake "$reason$spoken"
+      wake "$reason$blocker_files$spoken$blocker_spoken"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
@@ -1410,6 +1439,8 @@ EOF
       triage_log "absorbed $absorb_class $reason"
     fi
   fi
+
+  [ -z "$blocker_files" ] || wake "signal:$blocker_files$blocker_spoken"
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct

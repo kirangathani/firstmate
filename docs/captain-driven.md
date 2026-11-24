@@ -29,10 +29,13 @@ A task is captain-driven when either source says so, and the signed record wins 
 2. **Attached.** A tmux client is viewing the window recorded in `state/<id>.meta` and its last keystroke was inside `FM_CAPTAIN_DRIVEN_GRACE`.
    `bin/fm-captain-driven-lib.sh` owns that reading.
 
-While a task is captain-driven, all of the following go quiet for it, and each reads the one predicate rather than either source:
+The supervision paths share the captain-driven predicate.
 
-- `bin/fm-watch.sh` does not wake firstmate on its status appends, on a wedge escalation, or through the heartbeat backstop.
-  Those wakes never reach the durable queue, so none of them spends a waiting arm.
+- The watcher absorbs routine status appends, turn-ends, wedge escalations and heartbeat signals.
+  A fresh `blocked:` or `blocked [key=<slug>]:` report asks firstmate for help and reaches its terminal and durable queue with the task ID and the worker's words.
+  The watcher folds unread events after its grace period, so progress preserves an open blocker and a matching resolution cancels it before delivery.
+  Questions stay with the captain in the window.
+  An explicit captain pause or verified upstream wait suppresses blocker delivery even when the captain is also driving.
 - Its quiet pane is absorbed rather than surfaced, but on the bounded re-surface cadence a declared pause uses, so it wakes firstmate once per `FM_PAUSE_RESURFACE_SECS` and the wake says the task is the captain's.
   That is the captain's own ruling, and it is deliberately not "no wake at all": `bin/fm-watch.sh` gained that cadence for the signed record before this change, and one recheck a window is what keeps a task he has forgotten from rotting invisibly.
   Both routes to the verdict arrive at that same branch and share its wake wording, so a window he is sitting in and a record he signed behave identically; the parenthetical in the wake is what tells them apart.
@@ -40,7 +43,8 @@ While a task is captain-driven, all of the following go quiet for it, and each r
 - The stale-base sweep (`bin/fm-stale-base.sh`) leaves it out of its findings.
 - The stalled-validation sweep (`bin/fm-nm-stall.sh`) leaves it out of its findings, while still observing it, so its record is current the moment supervision resumes.
 
-The signal skip sits ahead of the away-mode branch, so a task the captain declared his stays his while `state/.afk` is set and the daemon owns triage, rather than being escalated the moment he steps away.
+While `state/.afk` is set, the watcher retains open captain-driven blocker reports in `state/<id>.captain-blockers` and leaves the worker's conversation in its window.
+The next normal pass checks those reports against later resolutions and delivers each surviving request, even if the captain has since left the window.
 The stale branch sits below it, as it did for the signed record before this change, so away mode still hands every stale pane to the daemon.
 
 Firstmate never peeks at it, steers it, acks it, or relays a dialog out of it.

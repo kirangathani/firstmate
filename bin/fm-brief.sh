@@ -718,7 +718,9 @@ Write findings into the report file as you go rather than composing it at the en
    \`echo "[t=\$(date +%s)] {state}: {one short line}" >> $STATUS_FILE\`
    The \`[t=...]\` stamp is the epoch second you reported at. It is what lets firstmate measure how long you waited for an answer, so keep it; a line without one is still understood, it just cannot be timed.
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
-   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
+   While the captain drives this worker, an open \`blocked:\` report asks firstmate for help.
+   Ordinary progress and questions stay in the window.
+   Report only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
@@ -788,7 +790,9 @@ $BRIEF_REGION_RULE_END
    \`echo "[t=\$(date +%s)] {state}: {one short line}" >> $STATUS_FILE\`
    The \`[t=...]\` stamp is the epoch second you reported at. It is what lets firstmate measure how long you waited for an answer, so keep it; a line without one is still understood, it just cannot be timed.
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
-   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
+   While the captain drives this worker, an open \`blocked:\` report asks firstmate for help.
+   Ordinary progress and questions stay in the window.
+   Report only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
