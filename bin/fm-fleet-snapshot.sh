@@ -56,6 +56,11 @@
 # reuses this file's one parser instead of writing a second reading of
 # data/backlog.md, without paying for the per-task crew-state and endpoint work
 # the full snapshot does.
+#
+# `--flow-tasks-json` prints `{tasks:[...]}` restricted to the task fields the
+# pipeline view (bin/fm-flow-snapshot.sh) reads, each resolved by the same code
+# and in the same shape as `--json`, without the crew-state, status, and backlog
+# reads that dominate a full snapshot's cost.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -143,6 +148,7 @@ usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
        fm-fleet-snapshot.sh --backlog-json
+       fm-fleet-snapshot.sh --flow-tasks-json
        fm-fleet-snapshot.sh --secondmate-home-summary
 
 Print a read-only structured snapshot of the firstmate fleet.
@@ -150,6 +156,11 @@ JSON is the stable machine-readable output contract.
 
 --backlog-json emits only the `backlog` object of that contract and performs no
 per-task read at all, for callers that need the canonical backlog parse alone.
+
+--flow-tasks-json emits {tasks:[...]} carrying only the task fields
+bin/fm-flow-snapshot.sh reads (id, kind, mode, project, harness, backend,
+pr, paths.meta, paths.worktree, endpoint), resolved exactly as --json resolves
+them, and skips the backlog parse and every crew-state and status read.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -174,6 +185,7 @@ OUTPUT_MODE=json
 case "${1:---json}" in
   --json) ;;
   --backlog-json) OUTPUT_MODE='backlog-json' ;;
+  --flow-tasks-json) OUTPUT_MODE='flow-tasks-json' ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
@@ -373,9 +385,80 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   ' < "$backlog"
 }
 
+# The endpoint half of a task row, shared by the full snapshot and the
+# --flow-tasks-json projection so the two can never disagree about liveness.
+# Sets the caller-visible endpoint_exists (true/false/null) and agent_alive.
+task_endpoint_read() {  # <meta> <id> <kind> <backend> <target>
+  local expected_label
+  endpoint_exists=null
+  # The exact-label check is applied only where the endpoint's label is
+  # pinned (fm_backend_expected_label_of_meta); an unpinned tmux record from
+  # before that spawn requirement reads through tmux's own resolution
+  # instead, so a drifted window name cannot report a live task as dead.
+  expected_label=$(fm_backend_expected_label_of_meta "$1" "$2")
+  if [ -n "$5" ]; then
+    if fm_backend_target_exists "$4" "$5" "$expected_label" >/dev/null 2>&1; then
+      endpoint_exists=true
+    else
+      endpoint_exists=false
+    fi
+  fi
+  agent_alive=not_checked
+  if [ "$3" = secondmate ] && [ -n "$5" ]; then
+    agent_alive=$(fm_backend_agent_alive "$4" "$5" "$expected_label" 2>/dev/null || printf unknown)
+  fi
+}
+
+# The --flow-tasks-json projection: only the task fields bin/fm-flow-snapshot.sh
+# reads, each resolved exactly as task_json_lines resolves it and in the same
+# shape, so the pipeline view sees the same values without paying for
+# bin/fm-crew-state.sh, the status fold, and the backlog parse on every record.
+# Those reads were about 90% of a refresh on a 21-record fleet whose dead
+# records the view hides anyway (docs/flow-tui.md). A field the view starts
+# reading must be added here too.
+flow_task_json_lines() {
+  local meta id kind backend target worktree meta_present worktree_present endpoint_exists agent_alive
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    kind=$(meta_value "$meta" kind)
+    [ -n "$kind" ] || kind=ship
+    worktree=$(meta_value "$meta" worktree)
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    task_endpoint_read "$meta" "$id" "$kind" "$backend" "$target"
+    meta_present=false
+    [ -e "$meta" ] && meta_present=true
+    worktree_present=false
+    [ -n "$worktree" ] && [ -e "$worktree" ] && worktree_present=true
+    jq -cn \
+      --arg id "$id" \
+      --arg kind "$kind" \
+      --arg harness "$(meta_value "$meta" harness)" \
+      --arg mode "$(meta_value "$meta" mode)" \
+      --arg project "$(meta_value "$meta" project)" \
+      --arg backend "$backend" \
+      --arg target "$target" \
+      --arg pr "$(meta_value "$meta" pr)" \
+      --arg meta "$meta" \
+      --arg worktree "$worktree" \
+      --arg agent_alive "$agent_alive" \
+      --argjson meta_present "$meta_present" \
+      --argjson worktree_present "$worktree_present" \
+      --argjson endpoint_exists "$endpoint_exists" \
+      '{
+        id:$id, kind:$kind, harness:$harness, mode:$mode, project:$project, backend:$backend,
+        paths:{meta:{path:$meta,present:$meta_present},
+               worktree:{path:($worktree | if . == "" then null else . end),present:$worktree_present}},
+        endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive},
+        pr:{url:($pr | if . == "" then null else . end),source:(if $pr == "" then "absent" else "meta" end)}
+      }'
+  done | jq -s '{tasks:sort_by(.id)}'
+}
+
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
-  local pr pr_source event_json current_json endpoint_exists expected_label agent_alive meta_json status_json report_json worktree_json home_json
+  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0
   local open_decisions_tsv open_decisions_json
 
@@ -460,23 +543,7 @@ task_json_lines() {
     pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
     blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 
-    endpoint_exists=null
-    # The exact-label check is applied only where the endpoint's label is
-    # pinned (fm_backend_expected_label_of_meta); an unpinned tmux record from
-    # before that spawn requirement reads through tmux's own resolution
-    # instead, so a drifted window name cannot report a live task as dead.
-    expected_label=$(fm_backend_expected_label_of_meta "$meta" "$id")
-    if [ -n "$target" ]; then
-      if fm_backend_target_exists "$backend" "$target" "$expected_label" >/dev/null 2>&1; then
-        endpoint_exists=true
-      else
-        endpoint_exists=false
-      fi
-    fi
-    agent_alive=not_checked
-    if [ "$kind" = secondmate ] && [ -n "$target" ]; then
-      agent_alive=$(fm_backend_agent_alive "$backend" "$target" "$expected_label" 2>/dev/null || printf unknown)
-    fi
+    task_endpoint_read "$meta" "$id" "$kind" "$backend" "$target"
 
     [ -f "$report_path" ] && report_present=1 || report_present=0
     meta_json=$(path_present_json "$meta")
@@ -1251,6 +1318,12 @@ scout_report_lines() {
     done \
     | jq -s 'sort_by(.id)'
 }
+
+# Emitted before the backlog parse and every per-task crew read.
+if [ "$OUTPUT_MODE" = flow-tasks-json ]; then
+  flow_task_json_lines || { echo "fm-fleet-snapshot: flow task projection failed" >&2; exit 1; }
+  exit 0
+fi
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 
