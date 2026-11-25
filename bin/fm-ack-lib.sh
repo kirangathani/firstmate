@@ -144,7 +144,7 @@
 #   The signed record wins when both hold, because it carries the captain's own
 #   stated reason and the automatic reading carries only an observation.
 #
-#   WHAT IT IS WORTH. It suppresses every alarm and every watcher wake for that
+#   WHAT IT IS WORTH. It suspends routine supervision for that
 #   task - AGENTS.md section 8 and docs/captain-driven.md own the full list -
 #   and nothing else. The task stays in this library's render class, in the
 #   backlog, in the fleet view, and in the session-start digest, labelled with

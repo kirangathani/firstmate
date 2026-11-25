@@ -1646,7 +1646,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
-# --- a task the captain is driving is not watched at all ---------------------
+# --- signals and stale panes for a task under captain control ----------------
 # 2026-09-17: the captain sat in a worker's window, the watcher fired a stale
 # wake on the quiet pane anyway, and firstmate put that worker's own question
 # back to the captain who was already answering it. docs/captain-driven.md owns
@@ -1680,6 +1680,143 @@ test_captain_driven_signal_absorbed() {
   reap "$pid"
   pass "a captain-driven task's status append wakes nobody and leaves nothing to replay"
 }
+
+# Incident from 2026-11-24, with the worker's original timestamp, decision key
+# and request. Use separate watcher processes and delay the drain until both
+# keys have fired: rearming must not replace the older request in the queue.
+test_captain_driven_blocker_delivery() {
+  local mode dir state id=walkthrough clients status incident unkeyed pid marker
+  local -a watcher_env
+  incident='[t=1795556895] blocked [key=nm-review-release]: Firstmate intervention needed to release this run.'
+  unkeyed='blocked: Please free the review slot.'
+  for mode in signed attached; do
+    dir=$(make_case "blocker-$mode"); state="$dir/state"; clients="$dir/clients"
+    status="$state/$id.status"; marker="$state/$id.turn-ended"
+    fm_write_meta "$state/$id.meta" "window=sess:fm-$id" 'kind=ship'
+    : > "$clients"
+    if [ "$mode" = signed ]; then
+      grant_exemption "$dir" "$id" "Captain requested direct control of this session."
+    else
+      write_client_row "$clients" "sess:fm-$id" "$(date +%s)"
+    fi
+    watcher_env=(FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" FM_FAKE_TMUX_CLIENTS="$clients"
+      FM_CAPTAIN_DRIVEN_GRACE=600 FM_POLL=0.2 FM_SIGNAL_GRACE=0.3)
+    touch "$state/.last-check"
+    watch_bg "$state" "$dir/fakebin" "$dir/first" "${watcher_env[@]}"
+    pid=$!
+    printf '%s\n' "$incident" 'blocked [key=old]: obsolete request' \
+      'resolved [key=old]: owner released it' 'needs-decision [key=choice]: private question' \
+      'working: private progress' >> "$status"
+    touch "$marker"
+    wait_for_exit "$pid" 60 || { reap "$pid"; fail "$mode watcher absorbed the open review blocker"; }
+    grep -Fx "  signal: $id | $incident" "$dir/first" >/dev/null || fail "$mode wake lost the worker report"
+
+    # This append lands with no watcher running. It opens an independent key
+    # while the first request is still open and its wake is still undrained.
+    printf '%s\n' "$unkeyed" 'blocked [key=access]: Grant access to the report.' >> "$status"
+    printf 'done: ordinary worker finished\n' > "$state/ordinary.status"
+    watch_bg "$state" "$dir/fakebin" "$dir/second" "${watcher_env[@]}"
+    pid=$!
+    wait_for_exit "$pid" 60 || { reap "$pid"; fail "$mode watcher missed an unkeyed blocker across restart"; }
+    grep -Fx "  signal: $id | $unkeyed" "$dir/second" >/dev/null || fail "$mode wake lost the unkeyed reason"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drained" || fail "could not drain $mode"
+    [ "$(grep -Fc "$id | $incident" "$dir/drained")" = 1 ] || fail "$mode drain lost or repeated the incident"
+    [ "$(grep -Fc "$id | $unkeyed" "$dir/drained")" = 1 ] || fail "$mode drain lost or repeated the second key"
+    [ "$(grep -Fc "$id | blocked [key=access]: Grant access to the report." "$dir/drained")" = 1 ] || fail "$mode merged independent keys"
+    grep -F 'signal: ordinary | done: ordinary worker finished' "$dir/second" >/dev/null || fail "$mode wake lost an ordinary signal"
+    grep -F 'signal: ordinary | done: ordinary worker finished' "$dir/drained" >/dev/null || fail "$mode drain lost an ordinary signal"
+    if grep -E 'obsolete request|private question|private progress|ended its turn' \
+        "$dir/first" "$dir/second" "$dir/drained" >/dev/null || grep -F "$incident" "$dir/second" >/dev/null; then
+      fail "$mode watcher relayed a resolved, private, or already delivered event"
+    fi
+
+    printf '%s\n' 'resolved: review slot available' 'working: private progress' >> "$status"
+    touch "$marker"
+    watch_bg "$state" "$dir/fakebin" "$dir/rearm" "${watcher_env[@]}"
+    pid=$!
+    wait_cycle "$pid" "$state" 50 || { reap "$pid"; fail "$mode rearm replayed a handled wake"; }
+    reap "$pid"
+    [ "$(cat "$state/.seen-${id}_status")" = "$(seen_sig "$status")" ] || fail "$mode rearm missed progress"
+    [ ! -s "$dir/rearm" ] && [ ! -s "$state/.wake-queue" ] || fail "$mode rearm queued a duplicate"
+  done
+  pass "signed and attached workers deliver only open blockers once across a turn-end, restart and rearm"
+}
+
+# The away daemon classifies the latest note. Keep the private question out of
+# that path and deliver the open request on return, including after a detach.
+test_captain_driven_blockers_after_away_mode() {
+  local dir state id=worker clients pid mode status
+  local -a watcher_env
+  for mode in signed detached; do
+    dir=$(make_case "blocker-away-$mode"); state="$dir/state"
+    clients="$dir/clients"; status="$state/$id.status"
+    fm_write_meta "$state/$id.meta" "window=sess:fm-$id" 'kind=ship'
+    : > "$clients"
+    if [ "$mode" = signed ]; then
+      grant_exemption "$dir" "$id" 'captain controls this worker'
+    else
+      write_client_row "$clients" "sess:fm-$id" "$(date +%s)"
+    fi
+    watcher_env=(FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" FM_FAKE_TMUX_CLIENTS="$clients"
+      FM_CAPTAIN_DRIVEN_GRACE=600 FM_POLL=0.2 FM_SIGNAL_GRACE=0.1)
+    # Hold the pane busy so the independent away-mode stale wake cannot fire.
+    printf 'Working...\n' > "$dir/pane"
+    watcher_env+=(FM_FAKE_TMUX_CAPTURE="$dir/pane" FM_BUSY_REGEX='Working')
+    # In away mode a due heartbeat itself fires. Keep it out of this fixture.
+    touch "$state/.afk" "$state/.last-check" "$state/.last-heartbeat"
+    printf '%s\n' 'blocked [key=open]: release run' 'blocked [key=old]: cancelled run' \
+      'needs-decision [key=private]: captain question' > "$status"
+    watch_bg "$state" "$dir/fakebin" "$dir/away" "${watcher_env[@]}"
+    pid=$!
+    wait_cycle "$pid" "$state" 45 || { reap "$pid"; fail "$mode fired in away mode"; }
+    printf '%s\n' 'resolved [key=old]: cancelled' 'working: private progress' >> "$status"
+    wait_cycle "$pid" "$state" 45 || { reap "$pid"; fail "$mode fired on a resolution in away mode"; }
+    reap "$pid"
+    [ "$(cat "$state/.seen-${id}_status")" = "$(seen_sig "$status")" ] || fail "away watcher missed the resolution"
+    [ ! -s "$dir/away" ] && [ ! -s "$state/.wake-queue" ] || fail "away watcher exposed captain activity"
+    rm "$state/.afk"
+    : > "$clients"
+    watch_bg "$state" "$dir/fakebin" "$dir/normal" "${watcher_env[@]}"
+    pid=$!
+    wait_for_exit "$pid" 60 || { reap "$pid"; fail "$mode lost an open blocker across return"; }
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain" || fail "$mode return drain failed"
+    [ "$(grep -Fc 'worker | blocked [key=open]: release run' "$dir/drain")" = 1 ] || fail "$mode lost deferred blocker"
+    grep -F 'worker | blocked [key=open]: release run' "$dir/normal" >/dev/null || fail "normal watcher lost worker words"
+    if grep -E 'cancelled|private|captain question' "$dir/drain" "$dir/normal" >/dev/null; then
+      fail "$mode relayed private or resolved activity"
+    fi
+    [ ! -e "$state/$id.captain-blockers" ] || fail "$mode kept an already delivered request"
+  done
+  pass "return from away mode delivers open captain-driven blockers and suppresses resolutions and private questions"
+}
+
+test_captain_driven_blocker_under_hold() (
+  local dir state id=held hold sig pid action='awaiting maintainer approval'
+  dir=$(make_case blocker-under-hold); state="$dir/state"
+  fm_write_meta "$state/$id.meta" "window=sess:fm-$id" 'kind=ship'
+  grant_exemption "$dir" "$id" "Captain requested direct control of this session."
+  # Exercise the production verifier using only this fixture's own secret.
+  # shellcheck source=bin/fm-ci-waiver-lib.sh
+  . "$ROOT/bin/fm-ci-waiver-lib.sh"
+  sig=$(fm_ci_waiver_upstream_wait_token "$id" "$action" < "$dir/config/ci-waiver-secret") || fail "fixture signing failed"
+  touch "$state/.last-check"
+  for hold in captain-pause upstream-wait; do
+    if [ "$hold" = captain-pause ]; then
+      touch "$state/$id.captain-pause"
+    else
+      printf '%s\t%s\t%s\n' "$(date +%s)" "$sig" "$action" > "$state/$id.upstream-wait"
+    fi
+    printf 'blocked: help during %s\n' "$hold" >> "$state/$id.status"
+    watch_bg "$state" "$dir/fakebin" "$dir/out" FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" FM_POLL=0.2 FM_SIGNAL_GRACE=0.1
+    pid=$!
+    wait_cycle "$pid" "$state" 50 || { reap "$pid"; fail "captain control outranked $hold"; }
+    reap "$pid"
+    [ "$(cat "$state/.seen-${id}_status")" = "$(seen_sig "$state/$id.status")" ] || fail "$hold was not processed"
+    [ ! -s "$state/.wake-queue" ] && [ ! -s "$dir/out" ] || fail "$hold leaked a blocker"
+    rm -f "$state/$id.$hold"
+  done
+  pass "explicit pauses and verified upstream waits suppress blockers even for a captain-driven worker"
+)
 
 test_captain_driven_stale_pane_absorbed() {
   local dir state fakebin out clients capture_file window key pane_hash sig pid
@@ -1888,6 +2025,9 @@ test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_captain_driven_signal_absorbed
+test_captain_driven_blocker_delivery
+test_captain_driven_blockers_after_away_mode
+test_captain_driven_blocker_under_hold
 test_captain_driven_stale_pane_absorbed
 test_captain_driven_stale_resurfaces_after_the_cadence
 test_supervision_resumes_when_the_captain_leaves

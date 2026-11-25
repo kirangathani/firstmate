@@ -288,14 +288,15 @@ EOF
 # the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
 # is the durable open-set the fleet snapshot and any point-in-time consumer must use
 # instead of trusting the last status line.
-status_open_decisions() {  # <status-file-or-dash>
+# With --reports the third field preserves the original worker line for delivery.
+status_open_decisions() {  # <status-file-or-dash> [--reports]
   local f=$1
   if [ "$f" = - ]; then
-    _fm_status_open_decisions_stream
+    _fm_status_open_decisions_stream "${2:-}"
     return 0
   fi
   [ -f "$f" ] || return 0
-  _fm_status_open_decisions_stream < "$f"
+  _fm_status_open_decisions_stream "${2:-}" < "$f"
 }
 
 # The fold itself, over stdin. Split out so a caller that has ALREADY read the
@@ -328,7 +329,11 @@ _fm_status_open_decisions_stream() {
     key=$(_fm_decision_key "$line") || continue
     case "$verb" in
       needs-decision|blocked)
-        note=$(status_line_note "$line")
+        if [ "${1:-}" = --reports ]; then
+          note=$line
+        else
+          note=$(status_line_note "$line")
+        fi
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
