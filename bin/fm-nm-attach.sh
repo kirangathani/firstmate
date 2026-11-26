@@ -46,10 +46,35 @@
 # if the worker is idle, compacted, or gone. That status line - not the worker
 # noticing - is the notification.
 #
+# THAT NOTIFICATION REACHES NOBODY WHILE THE CAPTAIN DRIVES THE TASK. The
+# watcher keeps a captain-driven task's `needs-decision` lines with the captain
+# (docs/captain-driven.md), and nothing here signals the worker's own tool, so a
+# parked gate on such a task is a record nobody reads. Measured 2026-11-25: a
+# worker under a signed record wrote six warning-severity review decisions to
+# its status log, said it had sent them to firstmate, and the captain first saw
+# them as a question 2 h 53 min later, when he asked. `--await` is how that
+# worker receives its own returns, and the launch says so under captain control.
+#
 # Usage:
 #   fm-nm-attach.sh <task-id>
 #   fm-nm-attach.sh <task-id> --respond <axi respond args...>
+#   fm-nm-attach.sh <task-id> --await [--max <seconds>]
 #   fm-nm-attach.sh --help
+#
+# THE AWAIT. `--await` attaches to nothing and needs no worktree: it waits for
+# this task's live hold to return, then prints the line the hold recorded
+# (`received: ...`), the `no-mistakes axi status` the hold read when it returned,
+# and where each decision goes. That routing comes from bin/fm-ack-lib.sh's
+# fm_captain_driven, the one predicate the watcher asks too, so the worker and
+# the watcher cannot disagree about who will read a `needs-decision` line.
+# It prints only what the pipeline has already published, so it can never show a
+# finding before the reviewer has reported it.
+#   exit 0  a hold returned and its result is printed above
+#   exit 2  no hold is live; the latest recorded result is printed instead
+#   exit 3  --max elapsed with the hold still live; run --await again
+# Run it as a background task where the worker's tool reports a background
+# task's exit, otherwise in the foreground with --max, so the tool regains
+# control between checks and can still take the captain's messages.
 #
 # Run it from inside the task worktree, exactly where the raw command runs. It
 # refuses when the working directory is not a git worktree on branch
@@ -178,7 +203,7 @@ die() { echo "error: $*" >&2; exit 1; }
 
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
-  "") die "usage: fm-nm-attach.sh <task-id> [--respond <axi respond args...>]" ;;
+  "") die "usage: fm-nm-attach.sh <task-id> [--respond <axi respond args...> | --await [--max <seconds>]]" ;;
 esac
 
 # --- the detached half ------------------------------------------------------
@@ -269,11 +294,25 @@ fi
 ID=$1
 shift
 RESPOND=run
+AWAIT_MAX=
 if [ "$#" -gt 0 ]; then
-  [ "$1" = --respond ] || die "unknown argument: $1 (expected --respond)"
-  shift
-  [ "$#" -gt 0 ] || die "--respond needs the axi respond arguments that follow it"
-  RESPOND=respond
+  case "$1" in
+    --respond)
+      shift
+      [ "$#" -gt 0 ] || die "--respond needs the axi respond arguments that follow it"
+      RESPOND=respond
+      ;;
+    --await)
+      shift
+      RESPOND=await
+      if [ "$#" -gt 0 ]; then
+        [ "$1" = --max ] && [ "$#" = 2 ] || die "--await takes only --max <seconds>"
+        case "$2" in ''|*[!0-9]*) die "--max needs a whole number of seconds, got: $2" ;; esac
+        AWAIT_MAX=$2
+      fi
+      ;;
+    *) die "unknown argument: $1 (expected --respond or --await)" ;;
+  esac
 fi
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -281,8 +320,81 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 WAIT="${FM_NM_ATTACH_WAIT:-3h}"
 BRANCH="fm/$ID"
+MARKER="$STATE/$ID.nm-attach"
+TASK_TMP="${FM_TASK_TMP_OVERRIDE:-/tmp/fm-$ID}"
 
 [ -d "$STATE" ] || die "no state directory at $STATE; is FM_HOME right for task $ID?"
+
+# Who will read a `needs-decision` line from this task, from the one predicate
+# the watcher asks (see THAT NOTIFICATION REACHES NOBODY above).
+# shellcheck source=bin/fm-ack-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-ack-lib.sh"
+captain_control() { fm_captain_driven "$STATE" "$ID"; }
+
+# A predictable path under a world-writable sticky directory: -e and -O both
+# follow a link, so -L is asked first. Launch and await refuse the same way.
+task_tmp_unsafe() {
+  [ -L "$TASK_TMP" ] || { [ -e "$TASK_TMP" ] && [ ! -O "$TASK_TMP" ]; }
+}
+
+# A recorded pid is a live hold only while it runs: kill -0 also succeeds on a
+# zombie nobody has reaped yet, and an await must not wait on one forever.
+hold_alive() {  # <pid>
+  [ -n "$1" ] && kill -0 "$1" 2>/dev/null || return 1
+  case "$(ps -o stat= -p "$1" 2>/dev/null)" in Z*) return 1 ;; esac
+}
+
+# --- the await --------------------------------------------------------------
+if [ "$RESPOND" = await ]; then
+  STATUS_FILE="$STATE/$ID.status"
+  pid=$(sed -n '1p' "$MARKER" 2>/dev/null || true)
+  log=$(sed -n '2p' "$MARKER" 2>/dev/null || true)
+  rc=0
+  if hold_alive "$pid"; then
+    waited=0
+    while hold_alive "$pid"; do
+      if [ -n "$AWAIT_MAX" ] && [ "$waited" -ge "$AWAIT_MAX" ]; then
+        echo "still running: the attach for $ID (pid $pid) has not returned after ${AWAIT_MAX}s; run $0 $ID --await again"
+        exit 3
+      fi
+      sleep 1
+      waited=$((waited + 1))
+    done
+    capture=${log%/*}
+  else
+    echo "no attach is live for $ID; this is the latest result it recorded, not a new one"
+    rc=2
+    capture=
+    if ! task_tmp_unsafe; then
+      # shellcheck disable=SC2012 # mktemp names are [A-Za-z0-9], so ls -t is safe here.
+      capture=$(ls -td "$TASK_TMP"/nm-attach-*/ 2>/dev/null | head -1)
+      capture=${capture%/}
+    fi
+  fi
+  # Only a hold writes these keys, one hold at a time, so the last such line is
+  # the one the hold that just ended recorded.
+  line=$(grep -E '\[key=nm-(run|daemon)\]' "$STATUS_FILE" 2>/dev/null | tail -1 || true)
+  echo "received: ${line:-<no attach result is recorded for $ID>}"
+  if [ -n "$capture" ] && [ -f "$capture/status.stdout" ] && ! task_tmp_unsafe; then
+    echo "--- the pipeline's own status when the hold returned ($capture/status.stdout) ---"
+    cat "$capture/status.stdout"
+    echo "--- end of status ---"
+  fi
+  case "$(status_line_body "$line")" in
+    "needs-decision [key=nm-run]:"*)
+      if captain_control; then
+        echo "The captain is driving this task ($FM_CAPTAIN_DRIVEN_REASON), so firstmate's monitoring does not relay a needs-decision line from it: the status log is a record nobody reads."
+        echo "Put every ask-user finding above of severity warning or error, and any security-shaped one, to the captain in this window now; then append needs-decision [key=<slug>]: asked the captain in this window - <question> as the record, and resolved [key=<slug>] once he answers."
+      else
+        echo "Escalate every ask-user finding above of severity warning or error, and any security-shaped one, to firstmate with a keyed needs-decision line (rule 6), and stop."
+      fi
+      echo "Answer info and suggestion findings yourself as your brief says. A question the reviewer itself asked is not a finding: firstmate answers those through bin/fm-nm-questions.sh."
+      ;;
+    '') ;;
+    *) echo "Act on the received line as your brief's re-attach loop says." ;;
+  esac
+  exit "$rc"
+fi
 
 # cwd scoping. Both `axi run` and `axi status` answer for the worktree they are
 # called in, so the wrong cwd drives another task's run.
@@ -295,7 +407,6 @@ CWD_BRANCH=$(git -C "$CWD_TOP" symbolic-ref --quiet --short HEAD 2>/dev/null || 
 # Idempotency. The marker holds the follower's pid and its log path; a pid that
 # is still alive means a hold is already driving this run, and a second one would
 # race it and double the status lines.
-MARKER="$STATE/$ID.nm-attach"
 if [ -f "$MARKER" ]; then
   LIVE_PID=$(sed -n '1p' "$MARKER" 2>/dev/null || true)
   LIVE_LOG=$(sed -n '2p' "$MARKER" 2>/dev/null || true)
@@ -365,11 +476,9 @@ if [ "$RESPOND" = respond ]; then
 fi
 
 # The log goes in the task's own temp root, which fm-spawn creates and
-# fm-teardown removes. It is a predictable path under a world-writable sticky
-# directory, so the same symlink/ownership refusal fm-spawn.sh applies before
-# writing there applies here: -e and -O both follow a link, so -L is asked first.
-TASK_TMP="${FM_TASK_TMP_OVERRIDE:-/tmp/fm-$ID}"
-if [ -L "$TASK_TMP" ] || { [ -e "$TASK_TMP" ] && [ ! -O "$TASK_TMP" ]; }; then
+# fm-teardown removes, under the same symlink/ownership refusal fm-spawn.sh
+# applies before writing there (task_tmp_unsafe above).
+if task_tmp_unsafe; then
   die "refusing to write this attach's log under $TASK_TMP: it is a symlink or is owned by another user"
 fi
 mkdir -p "$TASK_TMP"
@@ -414,4 +523,8 @@ FOLLOWER_PID=$!
 printf '%s\n%s\n' "$FOLLOWER_PID" "$LOG" > "$MARKER"
 
 echo "attached in the background (pid $FOLLOWER_PID), --wait $WAIT: $LOG"
-echo "Returning now on purpose. The hold appends one line to $STATE/$ID.status when the run reaches a gate, an outcome, or the wait; that line is what wakes firstmate. Do not poll this - read $LOG or 'no-mistakes axi status' if you want a look."
+if captain_control; then
+  echo "Returning now on purpose. The hold appends one line to $STATE/$ID.status when the run reaches a gate, an outcome, or the wait, but the captain is driving this task, so firstmate's monitoring does not relay it: that line is a record nobody reads. Run $0 $ID --await now and keep it running until it returns; it prints the result to you."
+else
+  echo "Returning now on purpose. The hold appends one line to $STATE/$ID.status when the run reaches a gate, an outcome, or the wait; that line is what wakes firstmate. Do not poll this - read $LOG or 'no-mistakes axi status' if you want a look."
+fi

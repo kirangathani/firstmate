@@ -342,6 +342,7 @@ Put each one to the captain as the multiple choice the reviewer itself wrote, th
 An answer settles only the question it answers.
 
 An ask-user finding of severity `info` or `suggestion` is answered by the worker itself under the generated brief's rule, so only `warning` and `error` findings, plus anything security-shaped at any severity, return as `needs-decision`; firstmate decides those only when the configured authority permits, otherwise escalates to the captain.
+While the captain drives a worker, it receives its own hold's return and puts those findings to him in its own window instead, keeping the keyed line only as a record (`docs/captain-driven.md`).
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to keep driving each returned hold until completion or a genuinely new escalation.
 A recorded decision amends that task's pinned intent, so a gate round that produced any decision changing the branch ends with a fresh run scored against the decided goal rather than a separate end-of-run check that each decision survived, while a decision recorded as changing nothing is listed and owes no run.
