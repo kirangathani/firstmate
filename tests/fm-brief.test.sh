@@ -820,6 +820,38 @@ test_the_brief_keeps_the_worker_out_of_the_answer_loop() {
   pass "fm-brief.sh: the ship brief keeps the worker out of the review-answer loop"
 }
 
+# The 2026-11-25 incident: a worker the captain was driving followed the brief's
+# "escalate to firstmate (rule 6)" for five warning-severity review findings and
+# one security-related info finding. The
+# watcher keeps a captain-driven task's needs-decision lines with the captain,
+# so the escalation reached nobody for 2 h 53 min. The brief must route those
+# decisions to the window, tell the worker how it receives the hold's return,
+# and keep a reviewer's live question distinct from a final finding.
+test_captain_driven_review_decisions_go_to_the_window() {
+  local home id brief
+  home="$TMP_ROOT/captain-window-home"
+  mkdir -p "$home/data"
+  id="brief-captain-window-a1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_no_grep "escalate to firstmate (rule 6) and stop" "$brief" \
+    "the ship brief still sends every warning or error finding to firstmate, the destination that drops it under captain control"
+  assert_grep "to the captain in this window while he drives this worker, otherwise to firstmate" "$brief" \
+    "the ship brief does not route warning or error findings to the captain's window"
+  assert_grep "firstmate does not receive that line: put the decision to him in this window instead" "$brief" \
+    "rule 6 does not tell a captain-driven worker where its decisions actually go"
+  assert_grep "A status line is a record, never proof that anyone read it." "$brief" \
+    "rule 6 lets the worker report a recorded line as delivered"
+  assert_grep "fm-nm-attach.sh' $id --await" "$brief" \
+    "the ship brief does not tell a captain-driven worker how it receives the hold's return"
+  assert_grep "it is not a finding: findings arrive only when the review pass ends" "$brief" \
+    "the ship brief does not separate a reviewer's live question from a final finding"
+  assert_grep "those rows are firstmate's to ask and answer, never yours to route as ask-user findings" "$brief" \
+    "the ship brief lets the worker route a reviewer question's question-<id> row as its own finding"
+  pass "fm-brief.sh: under captain control review decisions go to the window, with a received result and a keyed record"
+}
+
 test_skip_matrix_has_exactly_one_owner
 test_script_parses
 test_help_includes_entire_header
@@ -923,6 +955,7 @@ test_waived_brief_states_one_push_order_for_later_rounds() {
 }
 
 test_the_brief_keeps_the_worker_out_of_the_answer_loop
+test_captain_driven_review_decisions_go_to_the_window
 test_pr_briefs_define_done_as_pushed_and_verified
 test_local_only_brief_still_stops_at_committed
 test_waived_brief_states_one_push_order_for_later_rounds
