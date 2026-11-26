@@ -821,7 +821,8 @@ test_the_brief_keeps_the_worker_out_of_the_answer_loop() {
 }
 
 # The 2026-11-25 incident: a worker the captain was driving followed the brief's
-# "escalate to firstmate (rule 6)" for six warning-severity review findings. The
+# "escalate to firstmate (rule 6)" for five warning-severity review findings and
+# one security-related info finding. The
 # watcher keeps a captain-driven task's needs-decision lines with the captain,
 # so the escalation reached nobody for 2 h 53 min. The brief must route those
 # decisions to the window, tell the worker how it receives the hold's return,
@@ -846,6 +847,8 @@ test_captain_driven_review_decisions_go_to_the_window() {
     "the ship brief does not tell a captain-driven worker how it receives the hold's return"
   assert_grep "it is not a finding: findings arrive only when the review pass ends" "$brief" \
     "the ship brief does not separate a reviewer's live question from a final finding"
+  assert_grep "those rows are firstmate's to ask and answer, never yours to route as ask-user findings" "$brief" \
+    "the ship brief lets the worker route a reviewer question's question-<id> row as its own finding"
   pass "fm-brief.sh: under captain control review decisions go to the window, with a received result and a keyed record"
 }
 

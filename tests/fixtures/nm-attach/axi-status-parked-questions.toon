@@ -1,0 +1,28 @@
+run:
+  id: "01KZRQJJ2JX66ECFBTNPKPSKGH"
+  branch: fm/eln-drop-variables-w7
+  status: running
+  head: a316b52d
+  pr: "https://github.com/kirangathani/eln/pull/19"
+  findings: 5 awaiting
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,12
+    rebase,completed,0,2596
+    review,awaiting_approval,5,183573
+    test,pending,0,0
+    document,pending,0,0
+    lint,pending,0,0
+    push,pending,0,0
+    pr,pending,0,0
+    ci,pending,0,0
+gate:
+  step: review
+  status: awaiting_approval
+  summary: 5 blocking issues
+  note: Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed.
+  findings[5]{id,severity,file,action,description}:
+    review-1,warning,main.go,ask-user,"calls os.Exit, leaks fd"
+    review-2,info,README.md,ask-user,"documents a flag the command no longer accepts"
+    review-3,warning,main.go,auto-fix,"unchecked error from Close"
+    question-q1,warning,internal/api/router.go,ask-user,"Review question awaiting an answer: Should the legacy /v1 route keep answering after this change?\nOptions: Keep answering | Remove it | Keep behind a flag\nAnswer it with: no-mistakes axi answer --question q1 --answer \"<one of the options>\""
+    review-questions-omitted,warning,,ask-user,"1 further review question(s) are open and have no row of their own. Omitted question ids: q2"

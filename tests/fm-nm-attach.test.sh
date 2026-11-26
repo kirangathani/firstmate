@@ -749,7 +749,7 @@ test_await_hands_a_captain_driven_worker_its_parked_review() {
     "the await did not show the worker the published ask-user finding"
   assert_contains "$out" 'to the captain in this window now' \
     "the await did not route the warning to the captain's window"
-  assert_not_contains "$out" 'to firstmate with a keyed needs-decision line' \
+  assert_not_contains "$out" 'to firstmate with keyed needs-decision lines' \
     "the await sent a captain-driven worker's decision to firstmate, the destination that drops it"
   assert_contains "$(status_of "$dir" "$FIXTURE_TASK")" 'needs-decision [key=nm-run]' \
     "the hold no longer records the parked gate as the durable audit line"
@@ -764,7 +764,7 @@ test_await_routes_an_ordinary_worker_to_firstmate() {
     "the ordinary launch no longer says the status line is what wakes firstmate"
   assert_not_contains "$out" '--await' "the ordinary launch changed: it now asks for the await"
   out=$(run_await "$dir" "$FIXTURE_TASK") || fail "the await failed in ordinary mode: $out"
-  assert_contains "$out" 'to firstmate with a keyed needs-decision line (rule 6)' \
+  assert_contains "$out" 'to firstmate with keyed needs-decision lines (rule 6)' \
     "the await did not route an ordinary worker's warning to firstmate"
   assert_not_contains "$out" 'in this window now' "the await sent an ordinary worker to a captain who is not there"
   pass "await: an ordinary worker is routed to firstmate and its launch text is unchanged"
@@ -779,9 +779,71 @@ test_await_with_no_live_hold_reports_the_latest_result() {
   out=$(run_await "$dir" "$FIXTURE_TASK") || rc=$?
   expect_code 2 "$rc" "an await with no live hold did not say so through its exit code"
   assert_contains "$out" 'no attach is live' "the await did not say no hold was live"
-  assert_contains "$out" 'not a new one' "the await let an old result read as a new return"
+  assert_contains "$out" 'evidence only' "the await let an old result read as a new return"
   assert_contains "$out" 'review-1,warning,main.go,ask-user' "the await did not show the latest recorded result"
+  assert_not_contains "$out" 'Escalate these' "the await turned an old result into a new escalation"
   pass "await: with no live hold it reports the latest recorded result and exits 2"
+}
+
+# Walking the captain path: once he has answered, a second await must not put
+# the same decision to him again. A hold already received, and the record of a
+# hold that is no longer live, are evidence; only a fresh return is a question.
+# And the result and the findings it came from must be the same hold's.
+test_a_second_await_after_the_answer_does_not_ask_again() {
+  local dir status out rc=0
+  status="$TMP_ROOT/await-again.status.toon"
+  cp "$FIXTURES/axi-status-parked.toon" "$status"
+  dir=$(make_case await-again "$FIXTURE_TASK" "$status" 2)
+  grant_captain_control "$dir" "$FIXTURE_TASK"
+  run_attach "$dir" "$FIXTURE_TASK" >/dev/null || fail "attach refused"
+  run_await "$dir" "$FIXTURE_TASK" > "$dir/first.out" &
+  local first=$!
+  out=$(run_await "$dir" "$FIXTURE_TASK") || fail "the second await on the same hold failed"
+  wait "$first" || fail "the first await on the same hold failed"
+  out="$out
+$(cat "$dir/first.out")"
+  [ "$(printf '%s\n' "$out" | grep -c 'to the captain in this window now')" = 1 ] \
+    || fail "two awaits on one hold put the same decision to the captain other than exactly once"
+  assert_contains "$out" 'evidence, not a new question' "the await that lost the claim did not say its copy is evidence"
+
+  # The captain answers; the worker responds, and that hold's run has passed.
+  cp "$NM_STALL_FIXTURES/axi-status-ci-advanced.toon" "$status"
+  run_attach "$dir" "$FIXTURE_TASK" --respond --step review --action approve >/dev/null \
+    || fail "the respond after the captain's answer was refused"
+  out=$(run_await "$dir" "$FIXTURE_TASK") || fail "the await on the respond's hold failed"
+  assert_contains "$out" 'resolved [key=nm-run]: run' "the await did not hand over the respond's own return"
+  assert_contains "$out" 'outcome: passed' "the result and the status it came from were not the same hold's"
+  assert_not_contains "$out" 'review-1,warning' "the await paired the new return with the old hold's findings"
+  assert_not_contains "$out" 'in this window now' "the await asked an answered decision again"
+
+  out=$(run_await "$dir" "$FIXTURE_TASK") || rc=$?
+  expect_code 2 "$rc" "a further await with no live hold did not say so"
+  assert_not_contains "$out" 'in this window now' "a further await asked an answered decision again"
+  assert_contains "$out" 'outcome: passed' "a further await did not show the latest hold's own record"
+  pass "await: one hold is asked once, and a later await never asks an answered decision again"
+}
+
+# The installed `no-mistakes axi answer --help` says a reviewer's live question
+# also appears among the gate's findings as `question-<id>`. Routed as an
+# ordinary ask-user warning it would be asked twice, by the worker in the window
+# and by firstmate through bin/fm-nm-questions.sh, with two owners answering.
+test_await_keeps_reviewer_questions_with_their_one_owner() {
+  local dir out human
+  dir=$(make_case await-questions "$FIXTURE_TASK" "$FIXTURES/axi-status-parked-questions.toon" 2)
+  grant_captain_control "$dir" "$FIXTURE_TASK"
+  run_attach "$dir" "$FIXTURE_TASK" >/dev/null || fail "attach refused"
+  out=$(run_await "$dir" "$FIXTURE_TASK") || fail "the await failed on a gate with reviewer questions"
+  human=$(printf '%s\n' "$out" | grep 'to the captain in this window now' || true)
+  assert_contains "$human" 'review-1' "the ask-user warning was not routed to the captain"
+  assert_not_contains "$human" 'question-q1' "the worker was told to ask a reviewer question firstmate also asks"
+  assert_not_contains "$human" 'review-questions-omitted' "the worker was told to ask the omitted questions itself"
+  assert_not_contains "$human" 'review-3' "an auto-fix finding was routed to the captain"
+  assert_not_contains "$human" 'review-2' "an info finding the worker answers was routed to the captain"
+  assert_contains "$out" 'live questions, not findings for you to route or answer: question-q1 review-questions-omitted' \
+    "the await did not hand the reviewer's questions to their one owner"
+  assert_contains "$out" 'Yours to answer under your brief, unless one is security-shaped: review-2' \
+    "the await did not leave the info finding with the worker"
+  pass "await: a reviewer's live questions stay with firstmate's question owner, and findings are routed by severity"
 }
 
 test_await_bound_reports_a_hold_still_running() {
@@ -978,6 +1040,8 @@ test_await_hands_a_captain_driven_worker_its_parked_review
 test_await_routes_an_ordinary_worker_to_firstmate
 test_await_with_no_live_hold_reports_the_latest_result
 test_await_bound_reports_a_hold_still_running
+test_a_second_await_after_the_answer_does_not_ask_again
+test_await_keeps_reviewer_questions_with_their_one_owner
 test_await_rejects_anything_but_max
 test_the_gate_denies_every_raw_attach_form
 test_the_gate_leaves_the_read_only_subcommands_alone

@@ -52,3 +52,18 @@ The follower never reads one, and copying the tool's help text here would add by
 [F] `axi-drive-checks-passed.toon` preserves lines 17-36 and 40-42 of that response.
 [F] `axi-status-ci-monitoring.toon` independently preserves lines 51-70 and 74-75 from the subsequent status read, including `status: running` and `ci,running,0,0`.
 [F] The invocation was `axi respond --step document --action approve --wait 3h` and both drive verbs call `renderDriveResult` (ed1a908, internal/cli/axi_drive.go), so the tests replay the captured drive result through each verb.
+
+## Reviewer questions among a review gate's findings
+
+`axi-status-parked-questions.toon` is `axi-status-parked.toon` with its gate's findings table replaced, for `bin/fm-nm-attach.sh --await`'s routing tests.
+It is composed because a gate carrying reviewer questions has never been recorded on this machine: `review_questions` in `~/.no-mistakes/state.sqlite` has no row newer than 2026-10-01, and every run since then has had `review.conversation` off.
+
+| Composed part | Source |
+| --- | --- |
+| the header `  findings[N]{id,severity,file,action,description}:` under `gate:`, with rows indented four spaces | [F] a real v1.85.2-11-ged1a908 review gate, line 60 of an ELN attach capture from 2026-11-26; its content is private and is not copied here |
+| a live question's row id `question-<id>`, severity `warning`, action `ask-user` | [F] `ed1a908:internal/pipeline/steps/review_questions.go` line 416 (`return "question-" + questionID`), lines 501 and 505 |
+| the row `review-questions-omitted`, severity `warning`, action `ask-user` | [F] the same file, line 525 |
+| that these questions appear among the gate's findings at all | [F] `no-mistakes axi answer --help` on v1.85.2-11-ged1a908: "Questions appear in `no-mistakes axi status` as the review gate's `question-<id>` findings" |
+
+The description column and the `review-1`/`review-2`/`review-3` rows are placeholders.
+The routing under test reads only the id, severity and action columns.

@@ -65,7 +65,7 @@ The review-question sweep (`bin/fm-nm-questions.sh`) also keeps running, for the
 ## Review results while the captain drives
 
 The worker's review hold reports by appending one `needs-decision [key=nm-run]` line, and the watcher keeps a captain-driven task's decisions with the captain, so that line reaches nobody.
-On 2026-11-25 a worker under the signed record wrote six warning-severity review decisions to its status log and said it had sent them to firstmate.
+On 2026-11-25 a worker under the signed record wrote five warning-severity review findings and one security-related info finding to its status log as decisions, and said it had sent them to firstmate.
 The captain first saw them as a question 2 h 53 min later, when he asked.
 So the worker receives its own holds' returns through `bin/fm-nm-attach.sh <id> --await`, whose header owns its output and exit codes, and the attach says so whenever it starts under captain control.
 The worker then puts every warning, error or security-shaped ask-user finding to the captain in its own window, and still answers info and suggestion findings itself.
@@ -80,6 +80,8 @@ Four stages are distinct, and only the last reaches a person:
 A line in the status log is never evidence that anyone read it.
 A reviewer's live question is a different thing from a finding.
 It exists only where the project's trusted default branch sets `review.conversation: true`, which the no-mistakes fork leaves off by default, and the sweep above still relays it to firstmate.
+It also appears among the gate's findings as a `question-<id>` row, with a `review-questions-omitted` row naming any the gate had no room for, and the await leaves those rows with that one owner so nobody asks or answers a question twice.
+The first await to see a returned hold claims it, so a decision is put to the captain once; any later read of that hold, or of a hold no longer live, prints the record as evidence only.
 Findings exist only once the reviewer publishes them at the end of its pass, so nothing here can show one earlier.
 
 ## The tmux reading, and the evidence for it
