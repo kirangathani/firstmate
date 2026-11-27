@@ -149,7 +149,12 @@ A nested execution counts: `bash -c 'bin/fm-send.sh a b'`, a substitution, and a
 
 The rule is off unless the transport passes `--steer`, and `bin/fm-arm-pretool-check.sh` turns that on only when BOTH hold: the adapter passed `--claude`, and the payload's tool name is empty or `Bash`.
 `--claude` is the harness signal, because Monitor is Claude-only: codex, grok, opencode, and pi have no replacement to point at, so denying there would wedge them with no escape.
-The tool-name half is a guard against a future wildcard hook registration denying the very Monitor the message recommends; it is not load-bearing today, for the reason the evidence below records.
+The tool-name half keeps a wildcard registration from denying a `tool_name` `Monitor` event.
+It is not enough on its own, because Claude Code 2.1.327 also runs every Monitor's command through the Bash-matcher hooks as `tool_name` `Bash`, with a payload no field of which tells it from a real Bash call (evidence below).
+So on stdin a would-be `steer-under-bash` deny for a payload carrying a `tool_use_id` stands only when the session transcript at `transcript_path` names the call with that id `Bash`.
+A payload with no `tool_use_id` is no shape a Monitor has ever delivered, so it is decided by its own tool name as before.
+A call named `Monitor`, or one whose name cannot be read within the bounded wait of `FM_ARM_TOOL_LOOKUP_TRIES` polls 50ms apart (default 60, so 3s), is re-decided without the steer rule, so a Monitor is never denied for want of proof and every watcher rule still applies to it.
+Only a would-be steer deny pays for that lookup; every other command is decided exactly as before.
 
 Scripts inside `bin/` that steer a worker must get their own exit code back rather than becoming an arm, so they set `FM_ARM_POOL_NO_REFILL=1`, which `bin/fm-arm-pool-lib.sh` owns.
 They are unaffected by this hook: it sees only the model's own tool calls.
@@ -160,8 +165,29 @@ Claude Code 2.1.274, a scratch project with two PreToolUse hooks - one `"matcher
 
 - A Monitor call DOES fire PreToolUse, with `"tool_name":"Monitor"` and `"tool_input":{"description":...,"timeout_ms":60000,"command":"..."}`, whose command field has the same name as Bash's.
 - The `Bash` matcher did NOT fire for it: only the no-matcher hook logged the Monitor event, while the Bash call logged twice.
-- So with the tracked `Bash`-matcher registration in `.claude/settings.json`, the deny-under-Bash rule is the whole mechanism, and Monitor is untouched because the matcher never selects it.
+- So on 2.1.274, with the tracked `Bash`-matcher registration in `.claude/settings.json`, Monitor was untouched because the matcher never selected it; the 2026-11-18 evidence below shows that no longer holds.
 - `ToolSearch` also fires PreToolUse, with tool name `ToolSearch`.
+
+### Evidence: a Monitor's command reaches the Bash matcher, 2026-11-18
+
+The earlier finding stopped holding by Claude Code 2.1.327: a primary firstmate session had Monitor-issued `bin/fm-send.sh <id> "<msg>" 2>&1` calls denied with `steer-under-bash`, and Monitor-issued `bin/fm-watch-arm.sh --dormant 1 2>&1` arms denied with `watcher-redirection`.
+
+Reproduced in scratch projects under a task scratchpad, never this repo's live settings, with `claude -p "$PROMPT" --dangerously-skip-permissions --output-format text </dev/null`.
+The first project registered a payload logger under `"matcher": "Bash"` and a second with no matcher, and the prompt issued one Monitor (`echo MONITOR_PROBE 2>&1`) and one Bash call (`echo BASH_PROBE`).
+
+- The Monitor call fired TWO PreToolUse events sharing one `tool_use_id`.
+- The first, seen only by the no-matcher hook: `"tool_name":"Monitor","tool_input":{"description":"probe","timeout_ms":60000,"command":"echo MONITOR_PROBE 2>&1"}`.
+- The second, seen only by the `Bash`-matcher hook: `"tool_name":"Bash","tool_input":{"command":"echo MONITOR_PROBE 2>&1","description":"probe"}`.
+- The real Bash call: `"tool_name":"Bash","tool_input":{"command":"echo BASH_PROBE","description":"Print probe string"}`, seen by both hooks.
+- Every event carried the same top-level keys: `session_id`, `transcript_path`, `cwd`, `prompt_id`, `permission_mode`, `effort`, `hook_event_name`, `tool_name`, `tool_input`, `tool_use_id`, and the hook environments were identical, so nothing in the Bash-matched payload distinguishes the two.
+- A `"matcher": "Monitor"` hook cannot mark the id first: logged with timestamps, the `Bash`-matched event for the Monitor started 4ms BEFORE the `Monitor`-matched one.
+- The session transcript does distinguish them: its assistant line holds `{"type":"tool_use","id":"<tool_use_id>","name":"Monitor",...}` or `"name":"Bash"`, and a hook polling for that line found it 112-113ms after it started, for the Monitor and the Bash call alike.
+
+The fix was then verified end to end in a scratch project holding this branch's `bin/fm-arm-pretool-check.sh` and `bin/fm-arm-command-policy.mjs`, the tracked `--claude` Bash-matcher registration, and dummy `bin/fm-send.sh` and `bin/fm-watch-arm.sh` that only append to a sentinel.
+A Monitor running `bin/fm-send.sh probe-id "hello" 2>&1` ran, a Bash call running `bin/fm-send.sh probe-id bash-hello` was denied with `steer-under-bash`, a Monitor running `bin/fm-watch-arm.sh --dormant 1 2>&1` ran, and a Monitor running `FM_HOME=<scratch> bin/fm-send.sh probe-id prefixed 2>&1` ran; the sentinels held exactly the three allowed calls.
+The payloads and transcript lines of that run are the fixtures in `tests/fixtures/claude-monitor-hook/`.
+
+The `2>&1` deny was the same cause from the other side: the protocol emits `bin/fm-watch-arm.sh --dormant <N> 2>&1` because Monitor delivers only stdout lines as notifications, and the redirection rule now exempts exactly `2>&1`, which merges stderr into that stream and can hide nothing.
 
 ## Stable reason codes
 
@@ -171,13 +197,13 @@ Every semantic deny includes one stable code in square brackets before its prose
 | --- | --- |
 | `watcher-background` | A protected execution is in an asynchronous list or uses `nohup` or `disown`. |
 | `watcher-pipeline` | A protected execution participates in any pipeline. |
-| `watcher-redirection` | A protected execution uses shell redirection. |
+| `watcher-redirection` | A protected execution uses shell redirection other than the exact `2>&1`, which only merges stderr into the stdout the harness reads and is the form the Claude protocol emits for a Monitor-issued arm. |
 | `watcher-bundled` | The outer command list is not the blessed setup-plus-final tree. |
 | `watcher-nested` | A wrapper, group, substitution, nested shell, `eval`, or constructed dynamic payload executes the protected command. |
 | `broad-watcher-kill` | An actual broad process kill targets the watcher. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |
 | `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh` or `bin/fm-watch-checkpoint.sh`. |
-| `steer-under-bash` | `bin/fm-send.sh` or `bin/fm-ack.sh` is executed from the Bash tool; it must be issued as its own Monitor instead. Raised only when the transport passes `--steer`. |
+| `steer-under-bash` | `bin/fm-send.sh` or `bin/fm-ack.sh` is executed from the Bash tool; it must be issued as its own Monitor instead. Raised only when the transport passes `--steer`, and on Claude stdin kept only when the transcript names the call `Bash`. |
 
 Reason codes are the stable contract for tests and adapters.
 Prose may improve without changing adapter behavior.
@@ -270,7 +296,8 @@ Every native-path automatic marker was present and every deny sentinel remained 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
 Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
 The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
-It also pins the steer rule: a Bash-tool send or ack is denied foreground and backgrounded alike, the same command under a Monitor payload is allowed, the rule stays off without `--claude`, and reading, grepping, and editing those two files stays allowed.
+It also pins the steer rule with the captured 2.1.327 payloads: a Bash-tool send or ack is denied foreground and backgrounded alike, a Monitor's send arriving as `tool_name` `Bash` is allowed and still re-decided under every watcher rule, a call the transcript cannot name is allowed, a payload with no call id is decided by its tool name, a `tool_name` `Monitor` payload is allowed, the rule stays off without `--claude`, and reading, grepping, and editing those two files stays allowed.
+It checks that the protocol, the rendered repair line, and the turn-end refill text all emit `bin/fm-watch-arm.sh --dormant <N> 2>&1`, and that this form and the steer deny's own recommended form are allowed.
 
 Run:
 
