@@ -39,6 +39,7 @@
 #
 # fm_signed_ci_skip <task-id> <meta-file> <secret-file>
 # fm_signed_local_skip <task-id> <meta-file> <secret-file>
+# fm_signed_push_default <task-id> <meta-file> <secret-file>
 #   0 iff the task's record carries that axis's skip flag AND a signature this
 #   home's own key reproduces for this task id. These two are the entry points
 #   every caller uses, and they exist so that no caller ever assembles the
@@ -167,6 +168,15 @@ fm_signed_local_skip() {  # <task-id> <meta-file> <secret-file>
   [ "$FM_TESTING_SKIP_LOCAL" = on ] || return 1
   fm_signed_testing_skip "$1" "$2" "$3" \
     local_skip_auth fm_ci_waiver_dispatch_local_check "captain-authorized local-pipeline skip"
+}
+
+# The captain's leave to push straight to the default branch, granted mid-task
+# by bin/fm-authority.sh. Not a testing skip and excuses no check: it lives here
+# only so its flag-plus-signature pairing has the same single owner as theirs.
+fm_signed_push_default() {  # <task-id> <meta-file> <secret-file>
+  grep -qx 'push_default=on' "$2" 2>/dev/null || return 1
+  fm_signed_testing_skip "$1" "$2" "$3" \
+    push_default_auth fm_ci_waiver_dispatch_push_default_check "captain-authorized push to the default branch"
 }
 
 fm_attestation_authority() {  # <task-id> <meta-file> <config-dir> <fm-home> <bin-dir>
